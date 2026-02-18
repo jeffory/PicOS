@@ -1,0 +1,6 @@
+{
+  "name": "Key Test",
+  "description": "Shows last key pressed — for debugging input",
+  "version": "1.0",
+  "author": "PicOS"
+}

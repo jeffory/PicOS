@@ -1,0 +1,6 @@
+{
+    "name": "System Test",
+    "description": "Tests all exposed system APIs: battery, time, USB power, logging, filesystem, reboot",
+    "version": "1.0",
+    "author": "PicOS"
+}
