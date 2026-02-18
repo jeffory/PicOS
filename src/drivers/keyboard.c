@@ -16,11 +16,11 @@
 
 // The STM32 uses a STOP-based protocol (not repeated-start):
 //   1. Write register address as a complete transaction (nostop=false)
-//   2. Wait KBD_REG_DELAY_MS for the STM32 to prepare its response
+//   2. Wait for the STM32 to prepare its response
 //   3. Read in a separate transaction
-// pelrun/uf2loader (the reference implementation) uses sleep_ms(16).
-// Using the same value here for reliable operation.
-#define KBD_REG_DELAY_MS   16
+// pelrun/uf2loader used sleep_ms(16), but that's too slow for 60fps apps.
+// Testing shows 1ms is reliable and gives us ~60 FPS.
+#define KBD_REG_DELAY_MS   1
 #define KBD_I2C_TIMEOUT_US 50000
 
 // ── Internal state ────────────────────────────────────────────────────────────

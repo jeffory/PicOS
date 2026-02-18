@@ -208,7 +208,7 @@ static void lcd_set_window(uint16_t x0, uint16_t y0, uint16_t x1, uint16_t y1) {
 void display_init(void) {
     mutex_init(&s_spi_mutex);
 
-    // Configure SPI1 at 25 MHz (confirmed working in Rust reference project)
+    // Configure SPI1 at 62 MHz for 60 FPS (ST7789 max rated speed)
     spi_init(LCD_SPI_PORT, LCD_SPI_BAUD);
     spi_set_format(LCD_SPI_PORT, 8, SPI_CPOL_0, SPI_CPHA_0, SPI_MSB_FIRST);
     gpio_set_function(LCD_PIN_MOSI, GPIO_FUNC_SPI);
@@ -398,10 +398,15 @@ void display_flush(void) {
     lcd_cs_low();
     lcd_dc_data();
 
-    // Blocking SPI write — bypasses DMA to rule it out as a variable.
-    // spi_write_blocking() also drains the TX FIFO and waits for BSY to clear,
-    // so CS is deasserted only after the last byte has been fully clocked out.
-    spi_write_blocking(LCD_SPI_PORT, (const uint8_t *)s_framebuffer, FB_SIZE);
+    // DMA transfer: non-blocking, CPU-free framebuffer → SPI
+    dma_channel_set_read_addr(s_dma_chan, s_framebuffer, false);
+    dma_channel_set_trans_count(s_dma_chan, FB_SIZE, true);  // start transfer
+
+    // Wait for DMA completion
+    dma_channel_wait_for_finish_blocking(s_dma_chan);
+
+    // Ensure SPI shift register is fully drained before deasserting CS
+    while (spi_is_busy(LCD_SPI_PORT)) tight_loop_contents();
 
     lcd_cs_high();
     mutex_exit(&s_spi_mutex);
