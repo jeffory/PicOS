@@ -178,7 +178,15 @@ static int l_sys_getTimeMs(lua_State *L) {
 }
 
 static int l_sys_getBattery(lua_State *L) {
-    lua_pushinteger(L, kbd_get_battery_percent());
+    // Battery reads are slow I2C round-trips — cache for 5 seconds.
+    static int      s_cached = -1;
+    static uint32_t s_last_ms = 0;
+    uint32_t now = (uint32_t)to_ms_since_boot(get_absolute_time());
+    if (s_last_ms == 0 || now - s_last_ms >= 5000) {
+        s_cached  = kbd_get_battery_percent();
+        s_last_ms = now;
+    }
+    lua_pushinteger(L, s_cached);
     return 1;
 }
 

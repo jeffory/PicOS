@@ -167,6 +167,7 @@ void kbd_poll(void) {
 
         if (state == KEY_STATE_IDLE) break;   // FIFO empty
 
+#ifdef KBD_DEBUG
         const char *state_str = state == KEY_STATE_PRESSED  ? "PRESS"   :
                                 state == KEY_STATE_HOLD     ? "HOLD"    :
                                 state == KEY_STATE_RELEASED ? "RELEASE" : "?";
@@ -174,6 +175,7 @@ void kbd_poll(void) {
             printf("[KBD] %s 0x%02X ('%c')\n", state_str, keycode, keycode);
         else
             printf("[KBD] %s 0x%02X\n", state_str, keycode);
+#endif
 
         bool press   = (state == KEY_STATE_PRESSED || state == KEY_STATE_HOLD);
         bool release = (state == KEY_STATE_RELEASED);

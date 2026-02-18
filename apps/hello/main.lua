@@ -19,7 +19,7 @@ local ACC  = disp.CYAN
 -- ── Main loop ─────────────────────────────────────────────────────────────────
 -- Your app owns the screen until it returns (exits to launcher).
 -- Call input.update() once per frame to read key state.
--- Call pc.sys.sleep() to cap frame rate and yield CPU.
+-- No sleep needed — display_flush() at 100 MHz SPI naturally limits to ~40-50 fps.
 
 while true do
     perf.beginFrame()  -- Start FPS timing
@@ -70,9 +70,8 @@ while true do
     local by = 100
     disp.fillRect(bx, by, 20, 20, ACC)
 
-    disp.flush()
+    disp.flush()   -- DMA flush at 100 MHz SPI takes ~16 ms — no extra sleep needed
 
-    perf.endFrame()  -- End FPS timing
+    perf.endFrame()
     frame = frame + 1
-    pc.sys.sleep(16)    -- ~60 FPS cap
 end

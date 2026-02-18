@@ -20,7 +20,7 @@
 #define LCD_PIN_RST     15      // GP15 / Reset
 #define LCD_WIDTH       320
 #define LCD_HEIGHT      320
-#define LCD_SPI_BAUD    (62 * 1000 * 1000)   // 62 MHz (ST7789 max rated speed)
+#define LCD_SPI_BAUD    (100 * 1000 * 1000)  // 100 MHz — achievable at 200 MHz sysclk (÷2)
 
 // --- SD Card: FatFS, SPI0 ---------------------------------------------------
 #define SD_SPI_PORT     spi0
@@ -36,7 +36,8 @@
 #define KBD_PIN_SDA      6      // GP6 / I2C1 SDA
 #define KBD_PIN_SCL      7      // GP7 / I2C1 SCL
 #define KBD_I2C_ADDR    0x1F   // STM32 keyboard controller default address
-#define KBD_I2C_BAUD    (10 * 1000)   // 10 kHz — matches pelrun/uf2loader (known working)
+#define KBD_I2C_BAUD    (100 * 1000)  // 100 kHz standard I2C — 10× faster than 10 kHz
+                                      // Revert to (10 * 1000) if keyboard reliability regresses
 
 // STM32 register map (from clockworkpi/PicoCalc picocalc_keyboard firmware)
 // Read protocol:  send reg address (1 byte, nostop=false i.e. STOP), wait, then read N bytes
