@@ -185,19 +185,31 @@ static void lcd_write_byte(uint8_t b) {
 }
 
 static void lcd_set_window(uint16_t x0, uint16_t y0, uint16_t x1, uint16_t y1) {
-    uint8_t buf[4];
+    // Optimized: batch all commands with minimal CS toggling
+    lcd_cs_low();
+    
+    // CASET (column address set)
+    lcd_dc_cmd();
+    uint8_t caset = ST7365P_CASET;
+    spi_write_blocking(LCD_SPI_PORT, &caset, 1);
+    lcd_dc_data();
+    uint8_t col_data[4] = {x0 >> 8, x0 & 0xFF, x1 >> 8, x1 & 0xFF};
+    spi_write_blocking(LCD_SPI_PORT, col_data, 4);
 
-    lcd_write_cmd(ST7365P_CASET);
-    buf[0] = x0 >> 8; buf[1] = x0 & 0xFF;
-    buf[2] = x1 >> 8; buf[3] = x1 & 0xFF;
-    lcd_write_data(buf, 4);
+    // RASET (row address set)
+    lcd_dc_cmd();
+    uint8_t raset = ST7365P_RASET;
+    spi_write_blocking(LCD_SPI_PORT, &raset, 1);
+    lcd_dc_data();
+    uint8_t row_data[4] = {y0 >> 8, y0 & 0xFF, y1 >> 8, y1 & 0xFF};
+    spi_write_blocking(LCD_SPI_PORT, row_data, 4);
 
-    lcd_write_cmd(ST7365P_RASET);
-    buf[0] = y0 >> 8; buf[1] = y0 & 0xFF;
-    buf[2] = y1 >> 8; buf[3] = y1 & 0xFF;
-    lcd_write_data(buf, 4);
-
-    lcd_write_cmd(ST7365P_RAMWR);
+    // RAMWR (start writing pixel data)
+    lcd_dc_cmd();
+    uint8_t ramwr = ST7365P_RAMWR;
+    spi_write_blocking(LCD_SPI_PORT, &ramwr, 1);
+    
+    lcd_cs_high();
 }
 
 // ── Init sequence ─────────────────────────────────────────────────────────────
@@ -208,9 +220,10 @@ static void lcd_set_window(uint16_t x0, uint16_t y0, uint16_t x1, uint16_t y1) {
 void display_init(void) {
     mutex_init(&s_spi_mutex);
 
-    // Configure SPI1 at 62 MHz for 60 FPS (ST7789 max rated speed)
-    spi_init(LCD_SPI_PORT, LCD_SPI_BAUD);
-    spi_set_format(LCD_SPI_PORT, 8, SPI_CPOL_0, SPI_CPHA_0, SPI_MSB_FIRST);
+    // Configure SPI1 (ST7789 Mode 3: CPOL=1, CPHA=1)
+    uint32_t actual_baud = spi_init(LCD_SPI_PORT, LCD_SPI_BAUD);
+    printf("[LCD] SPI requested: %lu Hz, actual: %lu Hz\n", (unsigned long)LCD_SPI_BAUD, (unsigned long)actual_baud);
+    spi_set_format(LCD_SPI_PORT, 8, SPI_CPOL_1, SPI_CPHA_1, SPI_MSB_FIRST);
     gpio_set_function(LCD_PIN_MOSI, GPIO_FUNC_SPI);
     gpio_set_function(LCD_PIN_SCK,  GPIO_FUNC_SPI);
 
@@ -416,7 +429,9 @@ void display_draw_image(int x, int y, int w, int h, const uint16_t *data) {
 }
 
 void display_flush(void) {
-    mutex_enter_blocking(&s_spi_mutex);
+    // Note: mutex only needed if WiFi (CYW43) shares SPI1
+    // For now, commented out for max performance
+    // mutex_enter_blocking(&s_spi_mutex);
 
     lcd_set_window(0, 0, FB_WIDTH - 1, FB_HEIGHT - 1);
 
@@ -434,7 +449,7 @@ void display_flush(void) {
     while (spi_is_busy(LCD_SPI_PORT)) tight_loop_contents();
 
     lcd_cs_high();
-    mutex_exit(&s_spi_mutex);
+    // mutex_exit(&s_spi_mutex);
 }
 
 void display_set_brightness(uint8_t brightness) {

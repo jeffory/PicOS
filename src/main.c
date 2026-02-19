@@ -118,6 +118,15 @@ int main(void) {
     // out to test at the default 125 MHz — it isolates whether the overclock
     // is affecting I2C timing.
     set_sys_clock_khz(200000, true);
+    
+    // Configure peripheral clock to 125 MHz (enables 62.5 MHz SPI for LCD)
+    // clk_peri drives UART, SPI, I2C, PWM — ST7789 rated max is 62.5 MHz
+    clock_configure(clk_peri,
+        0,                               // No glitchless mux
+        CLOCKS_CLK_PERI_CTRL_AUXSRC_VALUE_CLKSRC_PLL_SYS,  // Source: PLL_SYS (200MHz)
+        200 * MHZ,                       // Input frequency
+        125 * MHZ);                      // Output: 125 MHz → SPI can reach 62.5 MHz
+    
     stdio_init_all();
 
     // Wait up to 3 s for a USB serial host to connect so early printf output
