@@ -39,14 +39,15 @@ bool clock_get_time(int *h, int *m, int *s) {
 
     uint32_t epoch = clock_get_epoch();
 
-    // Apply integer tz_offset from config (hours, may be negative).
-    int tz = 0;
+    // Apply tz_offset from config (integer minutes, may be negative).
+    // e.g. "330" = UTC+5:30, "-300" = UTC-5.
+    int tz_min = 0;
     const char *tz_str = config_get("tz_offset");
-    if (tz_str && tz_str[0]) tz = (int)strtol(tz_str, NULL, 10);
+    if (tz_str && tz_str[0]) tz_min = (int)strtol(tz_str, NULL, 10);
 
     // Adjust epoch by tz offset (signed arithmetic; cast to int32 is safe for
     // reasonable UTC offsets and epoch values in the next few decades).
-    int32_t local = (int32_t)epoch + tz * 3600;
+    int32_t local = (int32_t)epoch + tz_min * 60;
     if (local < 0) local = 0;
 
     uint32_t day_sec = (uint32_t)local % 86400u;

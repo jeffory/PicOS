@@ -816,12 +816,20 @@ void lua_bridge_show_error(lua_State *L, const char *context) {
         display_draw_text(4, 4 + row * 9, line, COLOR_WHITE, COLOR_BLACK);
     }
 
-    display_draw_text(4, FB_HEIGHT - 12, "Press any key", COLOR_GRAY, COLOR_BLACK);
+    display_draw_text(4, FB_HEIGHT - 12, "Press Esc to continue", COLOR_GRAY, COLOR_BLACK);
     display_flush();
 
-    // Wait for a key press before returning
-    while (!kbd_get_buttons()) {
+    // Drain any keys already held when the error occurred
+    do {
         kbd_poll();
+        sleep_ms(16);
+    } while (kbd_get_buttons());
+
+    // Wait specifically for Esc before returning
+    while (true) {
+        kbd_poll();
+        uint32_t btns = kbd_get_buttons();
+        if (btns & BTN_ESC) break;
         sleep_ms(16);
     }
     lua_pop(L, 1);

@@ -1,5 +1,6 @@
 #include "system_menu.h"
 #include "text_input.h"
+#include "tz_picker.h"
 #include "config.h"
 #include "os.h"
 #include "../drivers/display.h"
@@ -46,6 +47,7 @@ typedef enum {
     ITEM_BRIGHTNESS,
     ITEM_BATTERY,
     ITEM_WIFI,
+    ITEM_TIMEZONE,
     ITEM_REBOOT,
     ITEM_EXIT,
 } item_type_t;
@@ -212,6 +214,14 @@ static void draw_panel(const flat_item_t *items, int count, int sel,
                     }
                 }
                 break;
+            case ITEM_TIMEZONE: {
+                const char *tz = config_get("tz_offset");
+                if (tz && tz[0])
+                    snprintf(label, sizeof(label), "Timezone: %s min", tz);
+                else
+                    snprintf(label, sizeof(label), "Timezone: UTC");
+                break;
+            }
             case ITEM_REBOOT:
                 snprintf(label, sizeof(label), "Reboot");
                 fg = selected ? COLOR_WHITE : COLOR_RED;
@@ -263,7 +273,7 @@ void system_menu_clear_items(void) {
 void system_menu_show(lua_State *L) {
     // Build flat item list: app items first, then built-ins.
     // ITEM_EXIT is omitted when called from the launcher (L == NULL).
-    flat_item_t items[SYSMENU_MAX_APP_ITEMS + 5];
+    flat_item_t items[SYSMENU_MAX_APP_ITEMS + 6];
     int count = 0;
 
     for (int i = 0; i < s_app_item_count; i++) {
@@ -274,6 +284,7 @@ void system_menu_show(lua_State *L) {
     items[count++] = (flat_item_t){ ITEM_BRIGHTNESS, 0 };
     items[count++] = (flat_item_t){ ITEM_BATTERY,    0 };
     items[count++] = (flat_item_t){ ITEM_WIFI,       0 };
+    items[count++] = (flat_item_t){ ITEM_TIMEZONE,   0 };
     items[count++] = (flat_item_t){ ITEM_REBOOT,     0 };
     if (L != NULL)
         items[count++] = (flat_item_t){ ITEM_EXIT,   0 };
@@ -351,6 +362,10 @@ void system_menu_show(lua_State *L) {
                         }
                         need_redraw = true;
                     }
+                    break;
+                case ITEM_TIMEZONE:
+                    tz_picker_show();
+                    need_redraw = true;
                     break;
                 case ITEM_REBOOT:
                     watchdog_enable(1, true);
