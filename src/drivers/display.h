@@ -63,3 +63,8 @@ void display_flush(void);
 
 // Brightness via backlight PWM (0-255)
 void display_set_brightness(uint8_t brightness);
+
+// Halve the luminance of every pixel in the framebuffer in-place.
+// Used by the system menu to create a translucent darkened overlay effect.
+// Call before drawing the menu panel, then call display_flush().
+void display_darken(void);

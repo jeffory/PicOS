@@ -458,6 +458,17 @@ void display_set_brightness(uint8_t brightness) {
     (void)brightness;
 }
 
+void display_darken(void) {
+    // Halve each byte of the framebuffer independently using 32-bit words.
+    // The mask 0x7F7F7F7F prevents carry from one byte's LSB into the next.
+    // Minor cross-channel colour shift at channel boundaries is imperceptible
+    // in a menu overlay context.
+    uint32_t *p = (uint32_t *)s_framebuffer;
+    size_t n = (FB_WIDTH * FB_HEIGHT * 2) / 4;
+    for (size_t i = 0; i < n; i++)
+        p[i] = (p[i] >> 1) & 0x7F7F7F7FU;
+}
+
 // ── SPI bus lock (called by WiFi driver to pause LCD DMA) ────────────────────
 // WiFi driver should call these around any CYW43 SPI operations.
 

@@ -7,6 +7,7 @@
 #include "lualib.h"
 #include "lauxlib.h"
 #include "lua_bridge.h"
+#include "system_menu.h"
 
 #include "pico/stdlib.h"
 
@@ -125,7 +126,7 @@ static void draw_header(void) {
 static void draw_footer(void) {
     display_fill_rect(0, FB_HEIGHT - 18, FB_WIDTH, 18, C_HEADER_BG);
     display_fill_rect(0, FB_HEIGHT - 18, FB_WIDTH, 1, C_BORDER);
-    display_draw_text(8, FB_HEIGHT - 13, "Enter:Launch  Esc:Exit app  Sym:Menu", C_TEXT_DIM, C_HEADER_BG);
+    display_draw_text(8, FB_HEIGHT - 13, "Enter:Launch  Esc:Exit app  F10:Menu", C_TEXT_DIM, C_HEADER_BG);
 }
 
 static void draw_launcher(void) {
@@ -222,6 +223,10 @@ static bool run_app(int idx) {
             lua_pop(L, 1);  // discard sentinel
         }
     }
+
+    // Clean up C-side menu items before closing the Lua state.
+    // Lua-side registry refs are freed automatically by lua_close().
+    system_menu_clear_items();
 
     lua_close(L);
     return true;

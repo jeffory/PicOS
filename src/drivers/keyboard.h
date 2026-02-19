@@ -24,7 +24,6 @@
 #define KEY_ESC    0xB1
 #define KEY_BKSPC  0x08   // ASCII backspace
 #define KEY_TAB    0x09   // ASCII tab
-#define KEY_MENU   0xA4   // Sym/Fn key — used as system menu trigger (no physical F-keys on PicoCalc)
 #define KEY_NONE   0x00   // No key / idle
 
 // Modifier key codes (sent as separate events when CFG_REPORT_MODS is set)
@@ -33,6 +32,18 @@
 #define KEY_MOD_SHR  0xA3   // Right Shift
 #define KEY_MOD_SYM  0xA4   // Symbol / Fn
 #define KEY_MOD_CTRL 0xA5
+
+// Function keys
+#define KEY_F1     0x81
+#define KEY_F2     0x82
+#define KEY_F3     0x83
+#define KEY_F4     0x84
+#define KEY_F5     0x85
+#define KEY_F6     0x86
+#define KEY_F7     0x87
+#define KEY_F8     0x88
+#define KEY_F9     0x89
+#define KEY_F10    0x90
 
 // Init I2C1 and keyboard polling
 void kbd_init(void);
@@ -66,3 +77,8 @@ int kbd_get_battery_percent(void);
 
 // Set LCD backlight brightness 0-255 via STM32
 void kbd_set_backlight(uint8_t brightness);
+
+// Returns true (once) when F10 (the system menu key) was pressed since last call.
+// The press is consumed and will not appear in kbd_get_buttons() — the OS
+// intercepts BTN_MENU before apps can see it.
+bool kbd_consume_menu_press(void);

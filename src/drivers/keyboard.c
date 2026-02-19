@@ -25,10 +25,11 @@
 
 // ── Internal state ────────────────────────────────────────────────────────────
 
-static uint32_t s_buttons_prev = 0;
-static uint32_t s_buttons_curr = 0;
-static char     s_last_char    = 0;
-static uint8_t  s_last_raw_key = 0;  // raw keycode of last press this frame (0 = none)
+static uint32_t s_buttons_prev  = 0;
+static uint32_t s_buttons_curr  = 0;
+static char     s_last_char     = 0;
+static uint8_t  s_last_raw_key  = 0;  // raw keycode of last press this frame (0 = none)
+static bool     s_menu_pressed  = false; // set on BTN_MENU rising edge; cleared by kbd_consume_menu_press()
 
 // ── I2C helpers ───────────────────────────────────────────────────────────────
 
@@ -188,7 +189,16 @@ void kbd_poll(void) {
             case KEY_RIGHT: btn_flag = BTN_RIGHT; break;
             case KEY_ENTER: btn_flag = BTN_ENTER;  break;
             case KEY_ESC:   btn_flag = BTN_ESC;    break;
-            case KEY_MENU:  btn_flag = BTN_MENU;  break;
+            case KEY_F1:    btn_flag = BTN_F1;    break;
+            case KEY_F2:    btn_flag = BTN_F2;    break;
+            case KEY_F3:    btn_flag = BTN_F3;    break;
+            case KEY_F4:    btn_flag = BTN_F4;    break;
+            case KEY_F5:    btn_flag = BTN_F5;    break;
+            case KEY_F6:    btn_flag = BTN_F6;    break;
+            case KEY_F7:    btn_flag = BTN_F7;    break;
+            case KEY_F8:    btn_flag = BTN_F8;    break;
+            case KEY_F9:    btn_flag = BTN_F9;    break;
+            case KEY_F10:   btn_flag = BTN_MENU;  break;
             default: break;
         }
 
@@ -205,6 +215,11 @@ void kbd_poll(void) {
                 s_last_char = (char)KEY_BKSPC;
         }
     }
+
+    // Intercept BTN_MENU: detect rising edge, flag it for the OS, hide from apps.
+    if ((s_buttons_curr & BTN_MENU) && !(s_buttons_prev & BTN_MENU))
+        s_menu_pressed = true;
+    s_buttons_curr &= ~BTN_MENU;
 }
 
 char kbd_get_char(void) {
@@ -235,4 +250,10 @@ int kbd_get_battery_percent(void) {
 
 void kbd_set_backlight(uint8_t brightness) {
     i2c_write_reg(KBD_REG_BL, brightness);
+}
+
+bool kbd_consume_menu_press(void) {
+    bool val = s_menu_pressed;
+    s_menu_pressed = false;
+    return val;
 }

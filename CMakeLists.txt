@@ -97,6 +97,7 @@ add_executable(picocalc_os
     src/main.c
     src/os/launcher.c
     src/os/lua_bridge.c
+    src/os/system_menu.c
     src/drivers/display.c
     src/drivers/keyboard.c
     src/drivers/sdcard.c

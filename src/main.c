@@ -8,6 +8,7 @@
 
 #include "os/os.h"
 #include "os/launcher.h"
+#include "os/system_menu.h"
 #include "hardware.h"
 #include "drivers/display.h"
 #include "drivers/keyboard.h"
@@ -64,13 +65,13 @@ static void sys_log(const char *fmt, ...) {
 }
 
 static picocalc_sys_t s_sys_impl = {
-    .getTimeMs        = sys_getTimeMs,
-    .reboot           = sys_reboot,
+    .getTimeMs         = sys_getTimeMs,
+    .reboot            = sys_reboot,
     .getBatteryPercent = kbd_get_battery_percent,
-    .isUSBPowered     = sys_isUSBPowered,
-    .addMenuItem      = NULL,   // TODO: system_menu.c
-    .clearMenuItems   = NULL,
-    .log              = sys_log,
+    .isUSBPowered      = sys_isUSBPowered,
+    .addMenuItem       = system_menu_add_item,
+    .clearMenuItems    = system_menu_clear_items,
+    .log               = sys_log,
 };
 
 // ── Boot splash ───────────────────────────────────────────────────────────────
@@ -173,6 +174,8 @@ int main(void) {
 
     // Launch Core 1 background tasks
     multicore_launch_core1(core1_entry);
+
+    system_menu_init();
 
     draw_splash("Loading...");
     sleep_ms(300);   // Brief pause so the splash is visible

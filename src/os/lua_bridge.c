@@ -1,5 +1,6 @@
 #include "lua_bridge.h"
 #include "../os/os.h"
+#include "../os/system_menu.h"
 #include "../drivers/display.h"
 #include "../drivers/keyboard.h"
 
@@ -198,7 +199,17 @@ static int l_sys_log(lua_State *L) {
 
 static int l_sys_sleep(lua_State *L) {
     int ms = (int)luaL_checkinteger(L, 1);
-    sleep_ms(ms);
+    // Do NOT call kbd_poll() here — it would drain the STM32 FIFO and consume
+    // character/button events that the app expects to read via input.update().
+    // The Lua instruction hook (fires every 256 opcodes) handles menu detection
+    // immediately after sleep returns.
+    uint32_t end_ms = (uint32_t)to_ms_since_boot(get_absolute_time()) + (uint32_t)ms;
+    while (true) {
+        uint32_t now = to_ms_since_boot(get_absolute_time());
+        if (now >= end_ms) break;
+        uint32_t remaining = end_ms - now;
+        sleep_ms(remaining < 10 ? remaining : 10);
+    }
     return 0;
 }
 
@@ -224,14 +235,61 @@ static int l_sys_exit(lua_State *L) {
     return luaL_error(L, "__picocalc_exit__");
 }
 
+// ── picocalc.sys.addMenuItem / clearMenuItems ─────────────────────────────────
+// Lua-registered callbacks are stored here as Lua registry references.
+// A C trampoline is passed to system_menu_add_item() so that calling the
+// menu item invokes the original Lua function.
+
+typedef struct {
+    lua_State *L;
+    int        ref;   // LUA_REGISTRYINDEX reference to the Lua function
+} lua_callback_t;
+
+static lua_callback_t s_lua_callbacks[SYSMENU_MAX_APP_ITEMS];
+static int            s_lua_callback_count = 0;
+
+static void lua_menu_trampoline(void *user) {
+    lua_callback_t *cb = (lua_callback_t *)user;
+    lua_rawgeti(cb->L, LUA_REGISTRYINDEX, cb->ref);
+    lua_call(cb->L, 0, 0);  // propagates errors (including sys.exit() sentinel)
+}
+
+static int l_sys_addMenuItem(lua_State *L) {
+    const char *label = luaL_checkstring(L, 1);
+    luaL_checktype(L, 2, LUA_TFUNCTION);
+
+    if (s_lua_callback_count >= SYSMENU_MAX_APP_ITEMS)
+        return luaL_error(L, "too many menu items (max %d)", SYSMENU_MAX_APP_ITEMS);
+
+    lua_pushvalue(L, 2);
+    int ref = luaL_ref(L, LUA_REGISTRYINDEX);
+
+    lua_callback_t *cb = &s_lua_callbacks[s_lua_callback_count++];
+    cb->L   = L;
+    cb->ref = ref;
+
+    system_menu_add_item(label, lua_menu_trampoline, cb);
+    return 0;
+}
+
+static int l_sys_clearMenuItems(lua_State *L) {
+    for (int i = 0; i < s_lua_callback_count; i++)
+        luaL_unref(L, LUA_REGISTRYINDEX, s_lua_callbacks[i].ref);
+    s_lua_callback_count = 0;
+    system_menu_clear_items();
+    return 0;
+}
+
 static const luaL_Reg l_sys_lib[] = {
-    {"getTimeMs",     l_sys_getTimeMs},
-    {"getBattery",    l_sys_getBattery},
-    {"log",           l_sys_log},
-    {"sleep",         l_sys_sleep},
-    {"exit",          l_sys_exit},
-    {"reboot",        l_sys_reboot},
-    {"isUSBPowered",  l_sys_isUSBPowered},
+    {"getTimeMs",      l_sys_getTimeMs},
+    {"getBattery",     l_sys_getBattery},
+    {"log",            l_sys_log},
+    {"sleep",          l_sys_sleep},
+    {"exit",           l_sys_exit},
+    {"reboot",         l_sys_reboot},
+    {"isUSBPowered",   l_sys_isUSBPowered},
+    {"addMenuItem",    l_sys_addMenuItem},
+    {"clearMenuItems", l_sys_clearMenuItems},
     {NULL, NULL}
 };
 
@@ -419,7 +477,18 @@ static void register_subtable(lua_State *L, const char *name,
     lua_setfield(L, -2, name);
 }
 
+// Instruction-count hook: fires every 256 Lua opcodes to check for the
+// menu button without requiring apps to poll it themselves.
+static void menu_lua_hook(lua_State *L, lua_Debug *ar) {
+    (void)ar;
+    if (kbd_consume_menu_press()) system_menu_show(L);
+}
+
 void lua_bridge_register(lua_State *L) {
+    // Reset per-app menu state before registering a new app
+    s_lua_callback_count = 0;
+    system_menu_clear_items();
+
     // Open standard Lua libs (but not io/os/package for sandboxing)
     luaL_requiref(L, "_G",     luaopen_base,   1); lua_pop(L, 1);
     luaL_requiref(L, "table",  luaopen_table,  1); lua_pop(L, 1);
@@ -444,6 +513,15 @@ void lua_bridge_register(lua_State *L) {
     lua_pushinteger(L, BTN_ENTER); lua_setfield(L, -2, "BTN_ENTER");
     lua_pushinteger(L, BTN_ESC);   lua_setfield(L, -2, "BTN_ESC");
     lua_pushinteger(L, BTN_MENU);  lua_setfield(L, -2, "BTN_MENU");
+    lua_pushinteger(L, BTN_F1);    lua_setfield(L, -2, "BTN_F1");
+    lua_pushinteger(L, BTN_F2);    lua_setfield(L, -2, "BTN_F2");
+    lua_pushinteger(L, BTN_F3);    lua_setfield(L, -2, "BTN_F3");
+    lua_pushinteger(L, BTN_F4);    lua_setfield(L, -2, "BTN_F4");
+    lua_pushinteger(L, BTN_F5);    lua_setfield(L, -2, "BTN_F5");
+    lua_pushinteger(L, BTN_F6);    lua_setfield(L, -2, "BTN_F6");
+    lua_pushinteger(L, BTN_F7);    lua_setfield(L, -2, "BTN_F7");
+    lua_pushinteger(L, BTN_F8);    lua_setfield(L, -2, "BTN_F8");
+    lua_pushinteger(L, BTN_F9);    lua_setfield(L, -2, "BTN_F9");
     lua_pop(L, 1);  // pop input subtable
 
     // Push colour constants into picocalc.display
@@ -460,6 +538,11 @@ void lua_bridge_register(lua_State *L) {
 
     // Set as global
     lua_setglobal(L, "picocalc");
+
+    // Install instruction-count hook for menu button interception.
+    // Fires every 256 Lua opcodes (~100µs-1ms) to catch menu button presses
+    // even during tight loops, without requiring apps to poll input.
+    lua_sethook(L, menu_lua_hook, LUA_MASKCOUNT, 256);
 }
 
 void lua_bridge_show_error(lua_State *L, const char *context) {

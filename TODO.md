@@ -76,17 +76,18 @@ Must use `display_spi_lock()` / `display_spi_unlock()` around all CYW43 SPI acce
 
 ---
 
-## System menu overlay — not implemented
+## System menu overlay — implemented
 
-The Menu/Sym key (`BTN_MENU`) should pause the running app and show an OS-level overlay.
+The Menu/Sym key (`BTN_MENU`) pauses the running app and shows an OS-level overlay.
 
-- [ ] Create `src/os/system_menu.c` / `system_menu.h`
-- [ ] Intercept `BTN_MENU` in the app run loop (needs a C-level hook since Lua can't be interrupted)
-- [ ] Draw a translucent overlay over the current framebuffer
-- [ ] Built-in items: **Brightness**, **Battery**, **WiFi status**, **Reboot**, **Exit app**
-- [ ] `addMenuItem(label, callback, user)` / `clearMenuItems()` for app-registered items
-- [ ] Wire `g_api.sys.addMenuItem` and `clearMenuItems` in `main.c` (currently NULL)
-- [ ] Expose `picocalc.sys.addMenuItem(label, fn)` to Lua
+- [x] Create `src/os/system_menu.c` / `system_menu.h`
+- [x] Intercept `BTN_MENU` via Lua instruction-count hook (fires every 256 opcodes) + `kbd_consume_menu_press()` edge-detect in `keyboard.c`
+- [x] Draw a translucent overlay via `display_darken()` + menu panel
+- [x] Built-in items: **Brightness** (L/R/Enter adjust), **Battery** (colour-coded %), **WiFi** (stub), **Reboot**, **Exit app**
+- [x] `system_menu_add_item()` / `system_menu_clear_items()` for app-registered items
+- [x] Wire `g_api.sys.addMenuItem` and `clearMenuItems` in `main.c`
+- [x] Expose `picocalc.sys.addMenuItem(label, fn)` and `clearMenuItems()` to Lua
+- [x] Menu button also works during `sys.sleep()` (10ms polling loop)
 
 ---
 
@@ -103,7 +104,6 @@ The Menu/Sym key (`BTN_MENU`) should pause the running app and show an OS-level 
 
 Run the **Key Test** app (`/apps/keytest`) and check what raw hex codes appear for each key.
 
-- [ ] **Sym key as BTN_MENU** — verify that pressing Sym produces keycode `0xA4` in the event log; if nothing appears, the STM32 firmware has `CFG_REPORT_MODS` disabled and we need a different key
 - [ ] **F1–F10 keys** — note the hex codes from the Key Test log and add `KEY_F1`–`KEY_F10` constants to `keyboard.h`, `BTN_F1`–`BTN_F10` to `os.h`, and wire them in `kbd_poll()`
 - [ ] Once F-key codes are known, expose `picocalc.input.BTN_F1` … `BTN_F10` constants to Lua
 
@@ -111,7 +111,6 @@ Run the **Key Test** app (`/apps/keytest`) and check what raw hex codes appear f
 
 ## System — miscellaneous
 
-- [ ] **Restore 200 MHz overclock** — `set_sys_clock_khz(200000, true)` is commented out in `main.c` pending keyboard reliability confirmation; re-enable once keyboard is stable
 - [ ] **Core 1 background tasks** — `core1_entry()` in `main.c` is an idle spin loop; candidates: audio mixing, WiFi polling, display DMA coordination
 - [ ] **Shared config** — read/write `/system/config.json` for persisted settings (WiFi credentials, brightness, etc.)
 - [ ] **`sys.isUSBPowered()` implementation** — currently a stub; on RP2350 Pico, VBUS is detectable via GP24
@@ -121,6 +120,5 @@ Run the **Key Test** app (`/apps/keytest`) and check what raw hex codes appear f
 
 ## Code quality / housekeeping
 
-- [ ] Remove verbose `[KBD]` init logging from `keyboard.c` once keyboard is confirmed stable (or gate it behind a `#define KBD_DEBUG`)
 - [ ] `g_api.fs.listDir` callback signature mismatch — `picocalc_fs_t.listDir` in `os.h` has a different signature than `sdcard_list_dir()` in `sdcard.h`; reconcile them (Lua bridge calls `sdcard_list_dir()` directly and is unaffected)
 - [ ] App sandboxing: `picocalc.sys.exit()` uses a string sentinel (`__picocalc_exit__`) — could be hardened with a Lua registry light userdata instead
