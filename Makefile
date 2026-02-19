@@ -1,7 +1,7 @@
 # PicOS Makefile
 # Automated setup, build, and deployment for ClockworkPi PicoCalc
 
-.PHONY: help setup build clean flash rebuild check-env
+.PHONY: help setup build clean flash rebuild check-env test-lua
 
 # ── Configuration ─────────────────────────────────────────────────────────────
 
@@ -26,6 +26,7 @@ help:
 	@echo "Targets:"
 	@echo "  make setup     - Download dependencies (Lua, FatFS) and check environment"
 	@echo "  make build     - Build the firmware (creates build/picocalc_os.uf2)"
+	@echo "  make test-lua  - Test Lua app syntax before deployment"
 	@echo "  make clean     - Remove build directory"
 	@echo "  make rebuild   - Clean and rebuild from scratch"
 	@echo "  make flash     - Show instructions for flashing the device"
@@ -172,3 +173,14 @@ flash:
 		[ "$$confirm" = "y" ] && cp $(BUILD_DIR)/picocalc_os.uf2 /media/$$USER/RPI-RP2/ && \
 		echo "✓ Firmware copied! Device will reboot."; \
 	fi
+
+# ── Lua App Testing ───────────────────────────────────────────────────────────
+
+test-lua:
+	@if ! command -v lua >/dev/null 2>&1; then \
+		echo "ERROR: 'lua' interpreter not found in PATH"; \
+		echo "       Install: sudo dnf install lua  # or apt/brew"; \
+		exit 1; \
+	fi
+	@echo "Testing Lua app syntax..."
+	@lua tools/test_lua_apps.lua

@@ -98,7 +98,44 @@ Output: `build/picocalc_os.uf2` — drag-and-drop to Pico in BOOTSEL mode.
 - `make clean` — Remove build directory
 - `make rebuild` — Clean and rebuild
 - `make flash` — Show flashing instructions (auto-detects RPI-RP2 on Linux)
+- `make test-lua` — Test all Lua apps for syntax errors before deployment
 - `make help` — Show all targets
+
+---
+
+## Testing Lua Apps
+
+Before flashing firmware, validate all Lua app syntax:
+
+```bash
+make test-lua
+```
+
+The test tool (`tools/test_lua_apps.lua`) checks:
+- **Syntax correctness** — missing `end`, unmatched quotes, invalid operators
+- **API compatibility** — validates against mock `picocalc` API
+- **All apps** in `apps/` directory
+
+Example output:
+```
+=== PicOS Lua App Syntax Checker ===
+
+[✓] apps/hello/main.lua
+[✓] apps/snake/main.lua
+[✗] apps/editor/main.lua
+  apps/editor/main.lua:42: ')' expected near 'end'
+
+=== Summary ===
+Passed: 2
+Failed: 1
+```
+
+Catches common errors before deployment:
+- Missing button constants (`BTN_CTRL`, `BTN_BACKSPACE`)
+- Unclosed functions, loops, or conditionals
+- String/syntax errors
+
+**Note:** `make build` automatically runs tests. To skip: `make build -o test-lua`
 
 ---
 
