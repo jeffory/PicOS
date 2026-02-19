@@ -1,4 +1,5 @@
 {
+    "id": "com.picos.snake",
     "name": "Snake",
     "description": "Classic snake game",
     "version": "1.0",

@@ -1,4 +1,5 @@
 {
+    "id": "com.picos.systest",
     "name": "System Test",
     "description": "Tests exposed system APIs",
     "version": "1.0",

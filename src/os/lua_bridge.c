@@ -299,10 +299,55 @@ static const luaL_Reg l_sys_lib[] = {
 // Thin wrapper over sdcard_ functions, exposed to Lua
 
 #include "../drivers/sdcard.h"
+#include "file_browser.h"
+
+// ── Filesystem sandbox ────────────────────────────────────────────────────────
+// Apps are allowed to access only two trees:
+//   /apps/<dirname>/  — read-only (their own app bundle)
+//   /data/<dirname>/  — read + write (their own data directory)
+//
+// <dirname> is derived from the APP_DIR global set by launcher.c, e.g.
+//   APP_DIR = "/apps/editor"  → dirname = "editor"
+//
+// Relative paths and any path containing ".." are always rejected.
+
+static bool fs_sandbox_check(lua_State *L, const char *path, bool write) {
+    if (!path || path[0] != '/')  return false;  // require absolute paths
+    if (strstr(path, ".."))       return false;  // reject traversal
+
+    lua_getglobal(L, "APP_DIR");
+    const char *app_dir = lua_tostring(L, -1);
+    lua_pop(L, 1);
+    if (!app_dir) return false;
+
+    // Extract the directory name component from "/apps/<dirname>"
+    const char *dirname = strrchr(app_dir, '/');
+    if (!dirname || dirname[1] == '\0') return false;
+    dirname++;   // skip the '/'
+
+    // /data/<dirname> prefix (no trailing slash — also matches the dir itself)
+    char data_prefix[128];
+    int dp_len = snprintf(data_prefix, sizeof(data_prefix), "/data/%s", dirname);
+    bool in_data = (strncmp(path, data_prefix, dp_len) == 0 &&
+                    (path[dp_len] == '\0' || path[dp_len] == '/'));
+
+    if (write) return in_data;
+
+    // For reads also allow /apps/<dirname>/...
+    char app_prefix[128];
+    int ap_len = snprintf(app_prefix, sizeof(app_prefix), "/apps/%s/", dirname);
+    bool in_app = (strncmp(path, app_prefix, ap_len) == 0);
+
+    return in_data || in_app;
+}
 
 static int l_fs_open(lua_State *L) {
     const char *path = luaL_checkstring(L, 1);
     const char *mode = luaL_optstring(L, 2, "r");
+    bool needs_write = (strchr(mode, 'w') != NULL ||
+                        strchr(mode, 'a') != NULL ||
+                        strchr(mode, '+') != NULL);
+    if (!fs_sandbox_check(L, path, needs_write)) { lua_pushnil(L); return 1; }
     sdfile_t f = sdcard_fopen(path, mode);
     if (!f) { lua_pushnil(L); return 1; }
     lua_pushlightuserdata(L, f);
@@ -337,12 +382,15 @@ static int l_fs_close(lua_State *L) {
 }
 
 static int l_fs_exists(lua_State *L) {
-    lua_pushboolean(L, sdcard_fexists(luaL_checkstring(L, 1)));
+    const char *path = luaL_checkstring(L, 1);
+    if (!fs_sandbox_check(L, path, false)) { lua_pushboolean(L, false); return 1; }
+    lua_pushboolean(L, sdcard_fexists(path));
     return 1;
 }
 
 static int l_fs_readFile(lua_State *L) {
     const char *path = luaL_checkstring(L, 1);
+    if (!fs_sandbox_check(L, path, false)) { lua_pushnil(L); return 1; }
     int len = 0;
     char *buf = sdcard_read_file(path, &len);
     if (!buf) { lua_pushnil(L); return 1; }
@@ -352,7 +400,9 @@ static int l_fs_readFile(lua_State *L) {
 }
 
 static int l_fs_size(lua_State *L) {
-    lua_pushinteger(L, sdcard_fsize(luaL_checkstring(L, 1)));
+    const char *path = luaL_checkstring(L, 1);
+    if (!fs_sandbox_check(L, path, false)) { lua_pushinteger(L, -1); return 1; }
+    lua_pushinteger(L, sdcard_fsize(path));
     return 1;
 }
 
@@ -373,8 +423,79 @@ static void listdir_cb(const sdcard_entry_t *e, void *user) {
 static int l_fs_listDir(lua_State *L) {
     const char *path = luaL_checkstring(L, 1);
     lua_newtable(L);
+    if (!fs_sandbox_check(L, path, false)) return 1;  // return empty table
     listdir_ctx_t ctx = { L, lua_gettop(L), 0 };
     sdcard_list_dir(path, listdir_cb, &ctx);
+    return 1;
+}
+
+static int l_fs_mkdir(lua_State *L) {
+    const char *path = luaL_checkstring(L, 1);
+    if (!fs_sandbox_check(L, path, true)) { lua_pushboolean(L, false); return 1; }
+    lua_pushboolean(L, sdcard_mkdir(path));
+    return 1;
+}
+
+// Convenience: return the path /data/<dirname>/<name>, auto-creating the
+// data directory if it does not already exist.
+// Usage: local path = picocalc.fs.appPath("save.json")
+static int l_fs_appPath(lua_State *L) {
+    const char *name = luaL_checkstring(L, 1);
+
+    lua_getglobal(L, "APP_DIR");
+    const char *app_dir = lua_tostring(L, -1);
+    lua_pop(L, 1);
+    if (!app_dir) { lua_pushnil(L); return 1; }
+
+    const char *dirname = strrchr(app_dir, '/');
+    if (!dirname || dirname[1] == '\0') { lua_pushnil(L); return 1; }
+    dirname++;   // skip '/'
+
+    // Auto-create /data/<dirname>/ on first call
+    char data_dir[128];
+    snprintf(data_dir, sizeof(data_dir), "/data/%s", dirname);
+    sdcard_mkdir(data_dir);
+
+    char full_path[192];
+    snprintf(full_path, sizeof(full_path), "/data/%s/%s", dirname, name);
+    lua_pushstring(L, full_path);
+    return 1;
+}
+
+// Open a file-browser panel overlay.
+// Optional arg: start directory (defaults to the app's /data/<dirname>/ dir).
+// Returns the selected file path as a string, or nil if cancelled.
+static int l_fs_browse(lua_State *L) {
+    const char *start_path;
+    static char default_path[128];
+
+    if (lua_isnoneornil(L, 1)) {
+        lua_getglobal(L, "APP_DIR");
+        const char *app_dir = lua_tostring(L, -1);
+        lua_pop(L, 1);
+        if (app_dir) {
+            const char *dirname = strrchr(app_dir, '/');
+            if (dirname && dirname[1] != '\0') {
+                dirname++;
+                snprintf(default_path, sizeof(default_path), "/data/%s", dirname);
+                sdcard_mkdir(default_path);
+                start_path = default_path;
+            } else {
+                start_path = "/data";
+            }
+        } else {
+            start_path = "/data";
+        }
+    } else {
+        start_path = luaL_checkstring(L, 1);
+    }
+
+    char selected[192];
+    if (file_browser_show(start_path, selected, sizeof(selected))) {
+        lua_pushstring(L, selected);
+    } else {
+        lua_pushnil(L);
+    }
     return 1;
 }
 
@@ -387,6 +508,9 @@ static const luaL_Reg l_fs_lib[] = {
     {"readFile", l_fs_readFile},
     {"size",     l_fs_size},
     {"listDir",  l_fs_listDir},
+    {"mkdir",    l_fs_mkdir},
+    {"appPath",  l_fs_appPath},
+    {"browse",   l_fs_browse},
     {NULL, NULL}
 };
 

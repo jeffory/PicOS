@@ -20,6 +20,7 @@
 #define MAX_APPS 32
 
 typedef struct {
+    char id[64];           // Reverse DNS app ID (e.g., "com.picos.editor")
     char name[64];         // Display name from app.json
     char path[128];        // Full path to app directory on SD card
     char description[128]; // Short description from app.json
@@ -60,12 +61,14 @@ static void on_app_dir(const sdcard_entry_t *entry, void *user) {
     app_entry_t *app = &s_apps[s_app_count];
     snprintf(app->path, sizeof(app->path), "/apps/%s", entry->name);
 
-    // Try to load app.json for display name / description
+    // Try to load app.json for display name / description / id
     char json_path[160];
     snprintf(json_path, sizeof(json_path), "/apps/%s/app.json", entry->name);
     int json_len = 0;
     char *json = sdcard_read_file(json_path, &json_len);
     if (json) {
+        if (!json_get_string(json, "id",          app->id,          sizeof(app->id)))
+            snprintf(app->id, sizeof(app->id), "local.%s", entry->name);
         if (!json_get_string(json, "name",        app->name,        sizeof(app->name)))
             strncpy(app->name, entry->name, sizeof(app->name));
         if (!json_get_string(json, "description", app->description, sizeof(app->description)))
@@ -74,6 +77,7 @@ static void on_app_dir(const sdcard_entry_t *entry, void *user) {
             strncpy(app->version, "1.0", sizeof(app->version));
         free(json);
     } else {
+        snprintf(app->id, sizeof(app->id), "local.%s", entry->name);
         strncpy(app->name, entry->name, sizeof(app->name));
         app->description[0] = '\0';
         strncpy(app->version, "?", sizeof(app->version));
@@ -197,6 +201,8 @@ static bool run_app(int idx) {
     lua_setglobal(L, "APP_DIR");
     lua_pushstring(L, s_apps[idx].name);
     lua_setglobal(L, "APP_NAME");
+    lua_pushstring(L, s_apps[idx].id);
+    lua_setglobal(L, "APP_ID");
 
     // Load and execute the app
     display_clear(C_BG);

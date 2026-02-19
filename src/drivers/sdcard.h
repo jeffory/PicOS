@@ -35,6 +35,9 @@ void     sdcard_fclose(sdfile_t f);
 bool     sdcard_fexists(const char *path);
 int      sdcard_fsize(const char *path);   // Returns -1 on error
 
+// Create a directory (and parent directories if needed)
+bool     sdcard_mkdir(const char *path);
+
 // ── Directory listing ─────────────────────────────────────────────────────────
 
 typedef struct {

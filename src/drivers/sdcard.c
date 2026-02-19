@@ -133,6 +133,13 @@ int sdcard_fsize(const char *path) {
     return (int)fi.fsize;
 }
 
+bool sdcard_mkdir(const char *path) {
+    if (!s_mounted) return false;
+    // f_mkdir returns FR_OK if successful or FR_EXIST if already exists
+    FRESULT res = f_mkdir(path);
+    return (res == FR_OK || res == FR_EXIST);
+}
+
 int sdcard_list_dir(const char *path,
                     void (*callback)(const sdcard_entry_t *entry, void *user),
                     void *user) {

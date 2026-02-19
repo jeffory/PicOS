@@ -24,6 +24,7 @@ These variables are automatically set when your app is launched:
 |----------|------|-------------|
 | `APP_DIR` | string | Absolute path to your app's directory (e.g., `"/apps/hello"`) |
 | `APP_NAME` | string | Name of your app as defined in `app.json` |
+| `APP_ID` | string | Reverse-DNS app identifier from `app.json` (e.g., `"com.picos.hello"`) |
 
 ---
 
@@ -560,6 +561,23 @@ Lists the contents of a directory.
 local entries = picocalc.fs.listDir("/apps")
 for _, e in ipairs(entries) do
     print(e.name, e.is_dir, e.size)
+end
+```
+
+---
+
+#### `picocalc.fs.mkdir(path)`
+Creates a directory at the specified path.
+
+- **Parameters:**
+  - `path` (string): Absolute directory path to create
+- **Returns:** (boolean) `true` if successful or directory already exists, `false` on error
+
+```lua
+-- Create app data directory
+local data_dir = "/data/" .. APP_ID
+if picocalc.fs.mkdir(data_dir) then
+    print("Data directory ready")
 end
 ```
 

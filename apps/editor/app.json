@@ -1,0 +1,7 @@
+{
+  "id": "com.picos.editor",
+  "name": "Text Editor",
+  "description": "Nano-like text editor for PicOS",
+  "version": "1.0.0",
+  "author": "PicOS"
+}

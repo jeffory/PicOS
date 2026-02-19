@@ -21,7 +21,7 @@ These are fully implemented in C but missing from `lua_bridge.c`. All are quick 
 |---|---|---|
 | `fs.size(path)` | **[done]** | `l_fs_size` wrapper added to `l_fs_lib` |
 | `fs.listDir(path)` | **[done]** | Returns `{ {name, is_dir, size}, ... }` table via `listdir_cb` callback |
-| `fs.appPath(name)` | **[missing]** | Convenience: prepend `/data/APP_NAME/` to a filename; auto-create the directory |
+| `fs.appPath(name)` | **[done]** | Returns `/data/<dirname>/<name>`; auto-creates the data directory |
 
 ### `picocalc.display`
 
@@ -117,6 +117,13 @@ Run the **Key Test** app (`/apps/keytest`) and check what raw hex codes appear f
 - [x] **Shared config** — `src/os/config.h` / `config.c`; reads/writes `/system/config.json`; flat key/value JSON; exposed as `picocalc.config.{get,set,save,load}()`
 - [ ] **`sys.isUSBPowered()` implementation** — currently a stub; on RP2350 Pico, VBUS is detectable via GP24
 - [ ] **SD card hot-swap** — `sdcard_remount()` exists; launcher rescans on app exit, but in-app remount notification is unhandled
+
+---
+
+## System — Filesystem handling
+
+- [x] Restrict files opened to either their own app directory or their own data directory
+- [x] Add a file browser in similar styling to the system menu
 
 ---
 
