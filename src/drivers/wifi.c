@@ -16,6 +16,7 @@
 static bool          s_available = false;
 static wifi_status_t s_status    = WIFI_STATUS_DISCONNECTED;
 static char          s_ssid[64]  = {0};
+static char          s_pass[64]  = {0};
 static char          s_ip[20]    = {0};
 
 static struct mg_mgr s_mgr;
@@ -102,11 +103,19 @@ void wifi_connect(const char *ssid, const char *password) {
 
     strncpy(s_ssid, ssid, sizeof(s_ssid) - 1);
     s_ssid[sizeof(s_ssid) - 1] = '\0';
+    
+    if (password) {
+        strncpy(s_pass, password, sizeof(s_pass) - 1);
+        s_pass[sizeof(s_pass) - 1] = '\0';
+    } else {
+        s_pass[0] = '\0';
+    }
+
     s_status = WIFI_STATUS_CONNECTING;
     s_ip[0]  = '\0';
 
     s_driver_data.wifi.ssid = s_ssid;
-    s_driver_data.wifi.pass = (char *) password;
+    s_driver_data.wifi.pass = s_pass;
     
     printf("WiFi: connecting to '%s'...\n", s_ssid);
     

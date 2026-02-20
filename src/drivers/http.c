@@ -30,12 +30,21 @@ static void conn_fail(http_conn_t *c, const char *fmt, ...) {
 }
 
 static void rx_write(http_conn_t *c, const uint8_t *data, uint32_t len) {
-    for (uint32_t i = 0; i < len; i++) {
-        if (c->rx_count >= c->rx_cap) break;
-        c->rx_buf[c->rx_head] = data[i];
-        c->rx_head = (c->rx_head + 1) % c->rx_cap;
-        c->rx_count++;
+    uint32_t space = c->rx_cap - c->rx_count;
+    if (len > space) len = space;
+    if (len == 0) return;
+
+    uint32_t till_end = c->rx_cap - c->rx_head;
+    if (len <= till_end) {
+        memcpy(&c->rx_buf[c->rx_head], data, len);
+        c->rx_head += len;
+        if (c->rx_head == c->rx_cap) c->rx_head = 0;
+    } else {
+        memcpy(&c->rx_buf[c->rx_head], data, till_end);
+        memcpy(c->rx_buf, data + till_end, len - till_end);
+        c->rx_head = len - till_end;
     }
+    c->rx_count += len;
 }
 
 // ── Mongoose Event Handler ───────────────────────────────────────────────────
@@ -195,7 +204,9 @@ static bool start_request(http_conn_t *c, const char *method, const char *path,
 
     strncpy(c->method, method, sizeof(c->method)-1);
     strncpy(c->path, path, sizeof(c->path)-1);
+    free(c->extra_hdrs);
     c->extra_hdrs = extra_hdr ? strdup(extra_hdr) : NULL;
+    free(c->tx_buf);
     c->tx_buf = body ? strdup(body) : NULL;
     c->tx_len = (uint32_t)body_len;
 
@@ -232,9 +243,16 @@ bool http_post(http_conn_t *c, const char *path, const char *extra_hdr, const ch
 uint32_t http_read(http_conn_t *c, uint8_t *out, uint32_t len) {
     if (!c || !out || len == 0 || c->rx_count == 0) return 0;
     uint32_t n = (len < c->rx_count) ? len : c->rx_count;
-    for (uint32_t i = 0; i < n; i++) {
-        out[i] = c->rx_buf[c->rx_tail];
-        c->rx_tail = (c->rx_tail + 1) % c->rx_cap;
+
+    uint32_t till_end = c->rx_cap - c->rx_tail;
+    if (n <= till_end) {
+        memcpy(out, &c->rx_buf[c->rx_tail], n);
+        c->rx_tail += n;
+        if (c->rx_tail == c->rx_cap) c->rx_tail = 0;
+    } else {
+        memcpy(out, &c->rx_buf[c->rx_tail], till_end);
+        memcpy(out + till_end, c->rx_buf, n - till_end);
+        c->rx_tail = n - till_end;
     }
     c->rx_count -= n;
     return n;

@@ -29,6 +29,12 @@ These are fully implemented in C but missing from `lua_bridge.c`. All are quick 
 |---|---|---|
 | `display.textWidth(str)` | **[done]** | `l_display_textWidth` wrapper added to `l_display_lib` |
 
+### `picocalc.network`
+
+| Function | Status | Notes |
+|---|---|---|
+| `http.new(..., usessl=true)` | **[done]** | HTTPS support enabled via patched `altcp_tls_mbedtls_compat.c` for MbedTLS 3.x compatibility. |
+
 ---
 
 ## `g_api` struct not fully wired in `main.c`
@@ -116,7 +122,7 @@ Run the **Key Test** app (`/apps/keytest`) and check what raw hex codes appear f
 - [ ] **Core 1 background tasks** — `core1_entry()` in `main.c` is an idle spin loop; candidates: audio mixing, WiFi polling, display DMA coordination
 - [x] **Shared config** — `src/os/config.h` / `config.c`; reads/writes `/system/config.json`; flat key/value JSON; exposed as `picocalc.config.{get,set,save,load}()`
 - [ ] **`sys.isUSBPowered()` implementation** — currently a stub; on RP2350 Pico, VBUS is detectable via GP24
-- [ ] **SD card hot-swap** — `sdcard_remount()` exists; launcher rescans on app exit, but in-app remount notification is unhandled
+- [x] **SD card hot-swap** — `sdcard_remount()` exists; launcher rescans on app exit; manual "Remount SD" added to system menu.
 
 ---
 
