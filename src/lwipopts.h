@@ -18,6 +18,9 @@
 #define MEM_ALIGNMENT               4
 #define MEM_SIZE                    4000
 
+// Increase timer pool to prevent "MEMP_SYS_TIMEOUT is empty" panics
+#define MEMP_NUM_SYS_TIMEOUT        12
+
 // Buffer pools
 #define MEMP_NUM_TCP_SEG            16
 #define MEMP_NUM_ARP_QUEUE          5
@@ -53,6 +56,11 @@
 
 // Checksum algorithm (3 = optimised for 32-bit ARM)
 #define LWIP_CHKSUM_ALGORITHM       3
+
+// TLS support via mbedTLS
+#define LWIP_ALTCP                  1
+#define LWIP_ALTCP_TLS              1
+#define LWIP_ALTCP_TLS_MBEDTLS      1
 
 // Disable stats to save flash/RAM
 #define MEM_STATS                   0

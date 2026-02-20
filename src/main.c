@@ -159,8 +159,21 @@ int main(void) {
     display_init();
     draw_splash("Initialising keyboard...");
 
-    kbd_init();
-    kbd_set_backlight(128);
+    bool kbd_ok = kbd_init();
+    if (kbd_ok) {
+        kbd_set_backlight(128);
+    } else {
+        // Keyboard failed - STM32 didn't respond
+        display_clear(COLOR_BLACK);
+        display_draw_text(8, 8,  "Keyboard Controller Error!", COLOR_RED,   COLOR_BLACK);
+        display_draw_text(8, 20, "STM32 (I2C 0x%02X) NACK.",    COLOR_WHITE, COLOR_BLACK);
+        display_draw_text(8, 36, "The bus may be stuck.",       COLOR_GRAY,  COLOR_BLACK);
+        display_draw_text(8, 48, "Try power cycling device.",   COLOR_GRAY,  COLOR_BLACK);
+        display_flush();
+        // We can't wait for a keypress if the keyboard is dead, 
+        // but we'll wait a few seconds so the user can see the error.
+        sleep_ms(5000);
+    }
 
     draw_splash("Mounting SD card...");
     bool sd_ok = sdcard_init();

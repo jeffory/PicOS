@@ -48,8 +48,8 @@
 #define KEY_F9     0x89
 #define KEY_F10    0x90
 
-// Init I2C1 and keyboard polling
-void kbd_init(void);
+// Init I2C1 and keyboard polling. Returns true if STM32 responded.
+bool kbd_init(void);
 
 // Poll the keyboard controller. Must be called once per frame.
 // Populates the internal key state used by all other functions.

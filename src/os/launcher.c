@@ -9,6 +9,7 @@
 #include "lauxlib.h"
 #include "lua_bridge.h"
 #include "system_menu.h"
+#include "screenshot.h"
 #include "clock.h"
 
 #include "pico/stdlib.h"
@@ -102,6 +103,12 @@ static void scan_apps(void) {
 
 static int s_selected = 0;
 static int s_scroll   = 0;
+
+void launcher_refresh_apps(void) {
+    scan_apps();
+    s_selected = 0;
+    s_scroll = 0;
+}
 
 // Colour theme (easily remapped)
 #define C_BG         COLOR_BLACK
@@ -271,6 +278,8 @@ void launcher_run(void) {
             system_menu_show(NULL);
             dirty = true;
         }
+        if (kbd_consume_screenshot_press()) screenshot_save();
+        if (screenshot_check_scheduled())   screenshot_save();
 
         uint32_t pressed = kbd_get_buttons_pressed();
 

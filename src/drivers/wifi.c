@@ -12,6 +12,14 @@
 #include "lwip/netif.h"
 #include "lwip/ip4_addr.h"
 #include "lwip/apps/sntp.h"
+#include "mbedtls/platform_time.h"
+
+// mbedTLS 3.x requires mbedtls_ms_time() when MBEDTLS_HAVE_TIME is defined.
+// The Pico SDK does not provide one, so we supply it here using the Pico's
+// hardware microsecond counter.
+mbedtls_ms_time_t mbedtls_ms_time(void) {
+    return (mbedtls_ms_time_t)(time_us_64() / 1000);
+}
 #endif
 
 // ── State ─────────────────────────────────────────────────────────────────────

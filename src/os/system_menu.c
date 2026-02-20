@@ -4,9 +4,11 @@
 #include "screenshot.h"
 #include "config.h"
 #include "os.h"
+#include "launcher.h"
 #include "../drivers/display.h"
 #include "../drivers/keyboard.h"
 #include "../drivers/wifi.h"
+#include "../drivers/sdcard.h"
 
 #include "lua.h"
 #include "lauxlib.h"
@@ -49,6 +51,7 @@ typedef enum {
     ITEM_BATTERY,
     ITEM_WIFI,
     ITEM_TIMEZONE,
+    ITEM_REMOUNT_SD,
     ITEM_SCREENSHOT,
     ITEM_REBOOT,
     ITEM_EXIT,
@@ -224,6 +227,9 @@ static void draw_panel(const flat_item_t *items, int count, int sel,
                     snprintf(label, sizeof(label), "Timezone: UTC");
                 break;
             }
+            case ITEM_REMOUNT_SD:
+                snprintf(label, sizeof(label), "Remount SD Card");
+                break;
             case ITEM_SCREENSHOT:
                 snprintf(label, sizeof(label), "Screenshot");
                 break;
@@ -290,6 +296,7 @@ void system_menu_show(lua_State *L) {
     items[count++] = (flat_item_t){ ITEM_BATTERY,     0 };
     items[count++] = (flat_item_t){ ITEM_WIFI,        0 };
     items[count++] = (flat_item_t){ ITEM_TIMEZONE,    0 };
+    items[count++] = (flat_item_t){ ITEM_REMOUNT_SD,  0 };
     items[count++] = (flat_item_t){ ITEM_SCREENSHOT,  0 };
     items[count++] = (flat_item_t){ ITEM_REBOOT,      0 };
     if (L != NULL)
@@ -373,8 +380,28 @@ void system_menu_show(lua_State *L) {
                     tz_picker_show();
                     need_redraw = true;
                     break;
+                case ITEM_REMOUNT_SD: {
+                    display_fill_rect(panel_x + 10, panel_y + panel_h / 2 - 10, PANEL_W - 20, 30, C_TITLE_BG);
+                    display_draw_text(panel_x + 15, panel_y + panel_h / 2 - 5, "Remounting SD...", COLOR_WHITE, C_TITLE_BG);
+                    display_flush();
+
+                    if (sdcard_remount()) {
+                        display_fill_rect(panel_x + 10, panel_y + panel_h / 2 - 10, PANEL_W - 20, 30, COLOR_GREEN);
+                        display_draw_text(panel_x + 15, panel_y + panel_h / 2 - 5, "SD Remounted!", COLOR_BLACK, COLOR_GREEN);
+                        display_flush();
+                        sleep_ms(800);
+                        if (L == NULL) launcher_refresh_apps();
+                    } else {
+                        display_fill_rect(panel_x + 10, panel_y + panel_h / 2 - 10, PANEL_W - 20, 30, COLOR_RED);
+                        display_draw_text(panel_x + 15, panel_y + panel_h / 2 - 5, "Remount Failed!", COLOR_WHITE, COLOR_RED);
+                        display_flush();
+                        sleep_ms(1500);
+                    }
+                    need_redraw = true;
+                    break;
+                }
                 case ITEM_SCREENSHOT:
-                    screenshot_save();
+                    screenshot_schedule(250);
                     running = false;
                     break;
                 case ITEM_REBOOT:

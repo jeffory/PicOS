@@ -3,9 +3,27 @@
 #include "../drivers/sdcard.h"
 
 #include "pico/stdlib.h"
+#include "pico/time.h"
 
 #include <stdio.h>
 #include <string.h>
+
+// ── Deferred screenshot state ─────────────────────────────────────────────────
+
+static uint32_t s_screenshot_at_ms = 0;
+
+void screenshot_schedule(uint32_t delay_ms) {
+    s_screenshot_at_ms = (uint32_t)to_ms_since_boot(get_absolute_time()) + delay_ms;
+}
+
+bool screenshot_check_scheduled(void) {
+    if (!s_screenshot_at_ms) return false;
+    if ((uint32_t)to_ms_since_boot(get_absolute_time()) >= s_screenshot_at_ms) {
+        s_screenshot_at_ms = 0;
+        return true;
+    }
+    return false;
+}
 
 // BMP file layout constants
 #define BMP_WIDTH      320

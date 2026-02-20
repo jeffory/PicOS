@@ -56,7 +56,7 @@ static bool i2c_write_reg(uint8_t reg, uint8_t val) {
 
 // ── Public API ────────────────────────────────────────────────────────────────
 
-void kbd_init(void) {
+bool kbd_init(void) {
     // ── Step 1: Unconditional bus clear ───────────────────────────────────────
     // Pulse SCL 9 times with SDA as a floating input (pulled high).
     // This clocks through any partial byte the STM32 may be stuck in from
@@ -150,6 +150,8 @@ void kbd_init(void) {
     } else {
         printf("[KBD] FAILED — STM32 never responded in 5s\n");
     }
+
+    return ok;
 }
 
 void kbd_poll(void) {

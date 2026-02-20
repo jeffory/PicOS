@@ -15,6 +15,10 @@
 #include <stdbool.h>
 #include <stddef.h>
 
+#ifdef WIFI_ENABLED
+#include "lwip/altcp.h"
+#endif
+
 // ── Limits ────────────────────────────────────────────────────────────────────
 
 #define HTTP_MAX_CONNECTIONS   4      // Simultaneous connections
@@ -56,6 +60,7 @@ typedef struct {
     // Configuration (set by lua_bridge before issuing a request)
     char     server[HTTP_SERVER_MAX];
     uint16_t port;
+    bool     use_ssl;
     bool     keep_alive;
     int32_t  range_from;         // -1 = not set
     int32_t  range_to;           // -1 = not set
@@ -101,7 +106,7 @@ typedef struct {
     void *lua_ud;
 
 #ifdef WIFI_ENABLED
-    struct tcp_pcb *pcb;
+    struct altcp_pcb *pcb;
 #endif
 } http_conn_t;
 

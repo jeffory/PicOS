@@ -21,6 +21,8 @@
 #include <stdlib.h>
 #include <string.h>
 
+static void http_lua_fire_pending(lua_State *L);
+
 // ── Colour helpers ────────────────────────────────────────────────────────────
 // Lua passes colours as RGB565 integers (or we provide helper constructors)
 
@@ -76,9 +78,17 @@ static int l_display_drawText(lua_State *L) {
     return 1;
 }
 
+// Set by menu_lua_hook when a screenshot is requested.  Cleared and fired
+// inside l_display_flush so the capture always happens on a complete frame.
+static bool s_screenshot_pending = false;
+
 static int l_display_flush(lua_State *L) {
     (void)L;
     display_flush();
+    if (s_screenshot_pending) {
+        s_screenshot_pending = false;
+        screenshot_save();
+    }
     return 0;
 }
 
@@ -212,6 +222,12 @@ static int l_sys_sleep(lua_State *L) {
     while (true) {
         uint32_t now = to_ms_since_boot(get_absolute_time());
         if (now >= end_ms) break;
+
+        // Poll WiFi and fire HTTP callbacks while sleeping so async requests
+        // can progress even if the app is just waiting.
+        wifi_poll();
+        http_lua_fire_pending(L);
+
         uint32_t remaining = end_ms - now;
         sleep_ms(remaining < 10 ? remaining : 10);
     }
@@ -418,6 +434,19 @@ static int l_fs_readFile(lua_State *L) {
     return 1;
 }
 
+static int l_fs_seek(lua_State *L) {
+    sdfile_t f = lua_touserdata(L, 1);
+    uint32_t offset = (uint32_t)luaL_checkinteger(L, 2);
+    lua_pushboolean(L, sdcard_fseek(f, offset));
+    return 1;
+}
+
+static int l_fs_tell(lua_State *L) {
+    sdfile_t f = lua_touserdata(L, 1);
+    lua_pushinteger(L, (lua_Integer)sdcard_ftell(f));
+    return 1;
+}
+
 static int l_fs_size(lua_State *L) {
     const char *path = luaL_checkstring(L, 1);
     if (!fs_sandbox_check(L, path, false)) { lua_pushinteger(L, -1); return 1; }
@@ -523,6 +552,8 @@ static const luaL_Reg l_fs_lib[] = {
     {"read",     l_fs_read},
     {"write",    l_fs_write},
     {"close",    l_fs_close},
+    {"seek",     l_fs_seek},
+    {"tell",     l_fs_tell},
     {"exists",   l_fs_exists},
     {"readFile", l_fs_readFile},
     {"size",     l_fs_size},
@@ -720,13 +751,7 @@ static int l_http_new(lua_State *L) {
     const char *server = luaL_checkstring(L, 1);
     bool use_ssl = lua_gettop(L) >= 3 && lua_toboolean(L, 3);
 
-    if (use_ssl) {
-        lua_pushnil(L);
-        lua_pushstring(L, "SSL not supported on PicOS");
-        return 2;
-    }
-
-    lua_Integer port = luaL_optinteger(L, 2, 80);
+    lua_Integer port = luaL_optinteger(L, 2, use_ssl ? 443 : 80);
 
     http_conn_t *conn = http_alloc();
     if (!conn) {
@@ -737,6 +762,7 @@ static int l_http_new(lua_State *L) {
 
     strncpy(conn->server, server, HTTP_SERVER_MAX - 1);
     conn->port = (uint16_t)port;
+    conn->use_ssl = use_ssl;
 
     http_ud_t *ud = (http_ud_t *)lua_newuserdata(L, sizeof(http_ud_t));
     ud->conn        = conn;
@@ -1138,8 +1164,11 @@ static void menu_lua_hook(lua_State *L, lua_Debug *ar) {
     (void)ar;
     wifi_poll();
     http_lua_fire_pending(L);   // fire any queued HTTP Lua callbacks
-    if (kbd_consume_menu_press())       system_menu_show(L);
-    if (kbd_consume_screenshot_press()) screenshot_save();
+    if (kbd_consume_menu_press()) system_menu_show(L);
+    // Both screenshot triggers set s_screenshot_pending so the capture fires
+    // inside l_display_flush — always on a fully-drawn, flushed frame.
+    if (kbd_consume_screenshot_press()) s_screenshot_pending = true;
+    if (screenshot_check_scheduled())   s_screenshot_pending = true;
 }
 
 void lua_bridge_register(lua_State *L) {

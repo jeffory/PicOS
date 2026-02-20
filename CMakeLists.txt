@@ -136,8 +136,15 @@ target_link_libraries(picocalc_os
 if(PICO_BOARD STREQUAL "pimoroni_pico_plus2_w_rp2350" OR
    PICO_BOARD STREQUAL "pico_w" OR
    PICO_BOARD STREQUAL "pico2_w")
-    target_link_libraries(picocalc_os pico_cyw43_arch_lwip_poll pico_lwip_sntp)
-    target_compile_definitions(picocalc_os PRIVATE WIFI_ENABLED=1)
+    target_link_libraries(picocalc_os 
+        pico_cyw43_arch_lwip_poll
+        pico_lwip_sntp
+        pico_lwip_mbedtls
+        pico_mbedtls
+    )
+    target_compile_definitions(picocalc_os PRIVATE 
+        WIFI_ENABLED=1
+    )
     message(STATUS "WiFi enabled for board: ${PICO_BOARD}")
 else()
     message(STATUS "WiFi disabled for board: ${PICO_BOARD}")
@@ -145,7 +152,7 @@ endif()
 
 # Enable USB serial for stdio (printf goes to USB-C serial — handy for debug)
 pico_enable_stdio_usb(picocalc_os 1)
-pico_enable_stdio_uart(picocalc_os 0)
+pico_enable_stdio_uart(picocalc_os 1)
 
 # Generate UF2, map, and disassembly
 pico_add_extra_outputs(picocalc_os)
@@ -163,6 +170,7 @@ target_compile_options(picocalc_os PRIVATE
 # On standard Pico 2 the attribute is silently ignored and FB goes in SRAM.
 target_compile_definitions(picocalc_os PRIVATE
     PICO_RP2350=1
+    PICO_STACK_SIZE=4096  # Reduced to 4KB to fit in SCRATCH_X/Y
 )
 
 # ── Print firmware size after build ───────────────────────────────────────────
