@@ -98,6 +98,7 @@ add_executable(picocalc_os
     src/os/launcher.c
     src/os/lua_bridge.c
     src/os/system_menu.c
+    src/os/screenshot.c
     src/os/text_input.c
     src/os/file_browser.c
     src/os/config.c
@@ -107,6 +108,7 @@ add_executable(picocalc_os
     src/drivers/keyboard.c
     src/drivers/sdcard.c
     src/drivers/wifi.c
+    src/drivers/http.c
 )
 
 target_include_directories(picocalc_os PRIVATE

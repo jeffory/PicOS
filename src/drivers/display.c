@@ -467,6 +467,8 @@ void display_darken(void) {
         p[i] = (p[i] >> 1) & 0x7F7F7F7FU;
 }
 
+const uint16_t *display_get_framebuffer(void) { return s_framebuffer; }
+
 // ── SPI bus lock (called by WiFi driver to pause LCD DMA) ────────────────────
 // WiFi driver should call these around any CYW43 SPI operations.
 

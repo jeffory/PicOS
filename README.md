@@ -1,4 +1,4 @@
-# PicoOS
+# PicOS
 
 An app platform for the ClockworkPi PicoCalc, built around a resident Lua runtime. Apps live on the SD card as directories containing `main.lua` and `app.json`. The OS owns all hardware; apps access everything through the `picocalc` Lua API.
 

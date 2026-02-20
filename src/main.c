@@ -15,6 +15,7 @@
 #include "drivers/keyboard.h"
 #include "drivers/sdcard.h"
 #include "drivers/wifi.h"
+#include "drivers/http.h"
 #include "splash_logo.h"
 
 // ── OS API implementation stubs (wiring the function pointer table) ───────────
@@ -190,6 +191,7 @@ int main(void) {
     // Initialise WiFi hardware (auto-connects if credentials are in config)
     draw_splash("Initialising WiFi...");
     wifi_init();
+    http_init();
 
     // Launch Core 1 background tasks
     multicore_launch_core1(core1_entry);

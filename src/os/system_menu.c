@@ -1,6 +1,7 @@
 #include "system_menu.h"
 #include "text_input.h"
 #include "tz_picker.h"
+#include "screenshot.h"
 #include "config.h"
 #include "os.h"
 #include "../drivers/display.h"
@@ -48,6 +49,7 @@ typedef enum {
     ITEM_BATTERY,
     ITEM_WIFI,
     ITEM_TIMEZONE,
+    ITEM_SCREENSHOT,
     ITEM_REBOOT,
     ITEM_EXIT,
 } item_type_t;
@@ -222,6 +224,9 @@ static void draw_panel(const flat_item_t *items, int count, int sel,
                     snprintf(label, sizeof(label), "Timezone: UTC");
                 break;
             }
+            case ITEM_SCREENSHOT:
+                snprintf(label, sizeof(label), "Screenshot");
+                break;
             case ITEM_REBOOT:
                 snprintf(label, sizeof(label), "Reboot");
                 fg = selected ? COLOR_WHITE : COLOR_RED;
@@ -273,7 +278,7 @@ void system_menu_clear_items(void) {
 void system_menu_show(lua_State *L) {
     // Build flat item list: app items first, then built-ins.
     // ITEM_EXIT is omitted when called from the launcher (L == NULL).
-    flat_item_t items[SYSMENU_MAX_APP_ITEMS + 6];
+    flat_item_t items[SYSMENU_MAX_APP_ITEMS + 7];
     int count = 0;
 
     for (int i = 0; i < s_app_item_count; i++) {
@@ -281,11 +286,12 @@ void system_menu_show(lua_State *L) {
         items[count].app_idx = i;
         count++;
     }
-    items[count++] = (flat_item_t){ ITEM_BRIGHTNESS, 0 };
-    items[count++] = (flat_item_t){ ITEM_BATTERY,    0 };
-    items[count++] = (flat_item_t){ ITEM_WIFI,       0 };
-    items[count++] = (flat_item_t){ ITEM_TIMEZONE,   0 };
-    items[count++] = (flat_item_t){ ITEM_REBOOT,     0 };
+    items[count++] = (flat_item_t){ ITEM_BRIGHTNESS,  0 };
+    items[count++] = (flat_item_t){ ITEM_BATTERY,     0 };
+    items[count++] = (flat_item_t){ ITEM_WIFI,        0 };
+    items[count++] = (flat_item_t){ ITEM_TIMEZONE,    0 };
+    items[count++] = (flat_item_t){ ITEM_SCREENSHOT,  0 };
+    items[count++] = (flat_item_t){ ITEM_REBOOT,      0 };
     if (L != NULL)
         items[count++] = (flat_item_t){ ITEM_EXIT,   0 };
 
@@ -366,6 +372,10 @@ void system_menu_show(lua_State *L) {
                 case ITEM_TIMEZONE:
                     tz_picker_show();
                     need_redraw = true;
+                    break;
+                case ITEM_SCREENSHOT:
+                    screenshot_save();
+                    running = false;
                     break;
                 case ITEM_REBOOT:
                     watchdog_enable(1, true);

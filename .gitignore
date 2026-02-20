@@ -9,3 +9,5 @@ third_party/fatfs/ffsystem.c
 third_party/fatfs/ffunicode.c
 third_party/fatfs/diskio.h
 .vscode/
+SDK.md
+review.md

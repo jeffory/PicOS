@@ -33,6 +33,9 @@
 #define KEY_MOD_SYM  0xA4   // Symbol / Fn
 #define KEY_MOD_CTRL 0xA5
 
+// Special system keys
+#define KEY_BRK    0xD0   // Break key — intercepted by OS for screenshots
+
 // Function keys
 #define KEY_F1     0x81
 #define KEY_F2     0x82
@@ -82,3 +85,7 @@ void kbd_set_backlight(uint8_t brightness);
 // The press is consumed and will not appear in kbd_get_buttons() — the OS
 // intercepts BTN_MENU before apps can see it.
 bool kbd_consume_menu_press(void);
+
+// Returns true (once) when the Brk key (0xD0) was pressed since last call.
+// Brk is intercepted by the OS for screenshots and is never visible to apps.
+bool kbd_consume_screenshot_press(void);

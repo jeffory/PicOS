@@ -29,7 +29,8 @@ static uint32_t s_buttons_prev  = 0;
 static uint32_t s_buttons_curr  = 0;
 static char     s_last_char     = 0;
 static uint8_t  s_last_raw_key  = 0;  // raw keycode of last press this frame (0 = none)
-static bool     s_menu_pressed  = false; // set on BTN_MENU rising edge; cleared by kbd_consume_menu_press()
+static bool     s_menu_pressed       = false; // set on BTN_MENU rising edge; cleared by kbd_consume_menu_press()
+static bool     s_screenshot_pressed = false; // set on KEY_BRK press; cleared by kbd_consume_screenshot_press()
 
 // ── I2C helpers ───────────────────────────────────────────────────────────────
 
@@ -227,6 +228,10 @@ void kbd_poll(void) {
     if ((s_buttons_curr & BTN_MENU) && !(s_buttons_prev & BTN_MENU))
         s_menu_pressed = true;
     s_buttons_curr &= ~BTN_MENU;
+
+    // Intercept KEY_BRK (0xD0): flag for screenshot, never reaches apps.
+    if (s_last_raw_key == KEY_BRK)
+        s_screenshot_pressed = true;
 }
 
 char kbd_get_char(void) {
@@ -262,5 +267,11 @@ void kbd_set_backlight(uint8_t brightness) {
 bool kbd_consume_menu_press(void) {
     bool val = s_menu_pressed;
     s_menu_pressed = false;
+    return val;
+}
+
+bool kbd_consume_screenshot_press(void) {
+    bool val = s_screenshot_pressed;
+    s_screenshot_pressed = false;
     return val;
 }

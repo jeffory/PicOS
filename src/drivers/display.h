@@ -69,6 +69,10 @@ void display_set_brightness(uint8_t brightness);
 // Call before drawing the menu panel, then call display_flush().
 void display_darken(void);
 
+// Returns a read-only pointer to the raw framebuffer (320×320 RGB565, big-endian).
+// Pixels are byte-swapped relative to the RGB565() macro — un-swap before use.
+const uint16_t *display_get_framebuffer(void);
+
 // SPI bus arbitration — the WiFi (CYW43) and LCD share SPI1.
 // The WiFi driver must hold this lock for the duration of any CYW43 SPI
 // operation to prevent bus conflicts with LCD DMA transfers.
