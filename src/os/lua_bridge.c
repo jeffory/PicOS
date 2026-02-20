@@ -622,7 +622,6 @@ static const luaL_Reg l_wifi_lib[] = {
 
 #define HTTP_MT "picocalc.network.http"  // metatable registry key
 
-// Lua userdata that wraps one http_conn_t slot from the C pool.
 typedef struct {
     http_conn_t *conn;    // NULL once closed/GC'd
     int cb_request;       // LUA_NOREF or registry ref
@@ -630,6 +629,8 @@ typedef struct {
     int cb_complete;
     int cb_closed;
 } http_ud_t;
+
+static void http_ud_unref_all(lua_State *L, http_ud_t *ud);
 
 // ── HTTP callback dispatcher (called from menu_lua_hook) ──────────────────────
 
@@ -662,6 +663,12 @@ static void http_lua_fire_pending(lua_State *L) {
         if ((pend & (HTTP_CB_CLOSED | HTTP_CB_FAILED)) && ud->cb_closed != LUA_NOREF) {
             lua_rawgeti(L, LUA_REGISTRYINDEX, ud->cb_closed);
             if (lua_pcall(L, 0, 0, 0) != LUA_OK) lua_pop(L, 1);
+        }
+
+        // If connection is closed or failed, unref all callbacks to break
+        // potential closure cycles (callbacks capturing the 'conn' object).
+        if (pend & (HTTP_CB_CLOSED | HTTP_CB_FAILED)) {
+            http_ud_unref_all(L, ud);
         }
     }
 }
@@ -1019,11 +1026,17 @@ static int l_network_setEnabled(lua_State *L) {
 // picocalc.network.getStatus() -> kStatus* constant
 static int l_network_getStatus(lua_State *L) {
     if (!wifi_is_available()) { lua_pushinteger(L, 2); return 1; } // kStatusNotAvailable
-    switch (wifi_get_status()) {
-        case WIFI_STATUS_CONNECTED: lua_pushinteger(L, 1); break; // kStatusConnected
-        case WIFI_STATUS_FAILED:    lua_pushinteger(L, 2); break; // kStatusNotAvailable
-        default:                    lua_pushinteger(L, 0); break; // kStatusNotConnected
+    wifi_status_t st = wifi_get_status();
+    int ret = 0;
+    switch (st) {
+        case WIFI_STATUS_CONNECTED: ret = 1; break; // kStatusConnected
+        case WIFI_STATUS_CONNECTING: ret = 0; break; // kStatusNotConnected
+        case WIFI_STATUS_FAILED:    ret = 2; break; // kStatusNotAvailable
+        default:                    ret = 0; break; // kStatusNotConnected
     }
+    // Only log on changes or occasionally if needed, but for now log always to catch the issue
+    // printf("[LUA] network.getStatus() -> %d (wifi_st=%d)\n", ret, (int)st);
+    lua_pushinteger(L, ret);
     return 1;
 }
 
@@ -1171,6 +1184,13 @@ static void menu_lua_hook(lua_State *L, lua_Debug *ar) {
     if (screenshot_check_scheduled())   s_screenshot_pending = true;
 }
 
+static void on_http_slot_free(void *lua_ud) {
+    if (lua_ud) {
+        http_ud_t *ud = (http_ud_t *)lua_ud;
+        ud->conn = NULL;
+    }
+}
+
 void lua_bridge_register(lua_State *L) {
     // Reset per-app menu state before registering a new app
     s_lua_callback_count = 0;
@@ -1178,7 +1198,7 @@ void lua_bridge_register(lua_State *L) {
 
     // Close any HTTP connections leaked by the previous app.
     // Normally __gc handles this, but http_close_all() is a safety net.
-    http_close_all();
+    http_close_all(on_http_slot_free);
 
     // Open standard Lua libs (but not io/os/package for sandboxing)
     luaL_requiref(L, "_G",     luaopen_base,   1); lua_pop(L, 1);

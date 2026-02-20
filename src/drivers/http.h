@@ -16,12 +16,12 @@
 #include <stddef.h>
 
 #ifdef WIFI_ENABLED
-#include "lwip/altcp.h"
+// No-op for now, Mongoose handles its own includes
 #endif
 
 // ── Limits ────────────────────────────────────────────────────────────────────
 
-#define HTTP_MAX_CONNECTIONS   4      // Simultaneous connections
+#define HTTP_MAX_CONNECTIONS   8      // Simultaneous connections
 #define HTTP_RECV_BUF_DEFAULT  4096   // Default receive ring buffer
 #define HTTP_RECV_BUF_MAX      32768  // Max allowed by setReadBufferSize
 #define HTTP_HEADER_BUF_MAX    2048   // Raw response header block
@@ -59,6 +59,9 @@ typedef struct {
 
     // Configuration (set by lua_bridge before issuing a request)
     char     server[HTTP_SERVER_MAX];
+    char     path[256];
+    char     method[8];
+    char    *extra_hdrs;
     uint16_t port;
     bool     use_ssl;
     bool     keep_alive;
@@ -105,9 +108,8 @@ typedef struct {
     // Opaque pointer back to Lua userdata (set by lua_bridge.c)
     void *lua_ud;
 
-#ifdef WIFI_ENABLED
-    struct altcp_pcb *pcb;
-#endif
+    // Internal mongoose connection pointer
+    void *pcb;
 } http_conn_t;
 
 // ── Public API ────────────────────────────────────────────────────────────────
@@ -117,7 +119,8 @@ void http_init(void);
 
 // Close all active connections (clears lua_ud pointers). Call before
 // launching a new Lua app so stale callbacks cannot fire.
-void http_close_all(void);
+// on_free is called for each active connection to allow Lua-side cleanup.
+void http_close_all(void (*on_free)(void *lua_ud));
 
 // Allocate a connection from the static pool. Returns NULL if pool is full.
 // Caller must set conn->server, conn->port before issuing a request.
@@ -155,3 +158,6 @@ http_conn_t *http_get_conn(int idx);
 
 // Atomically read and clear the pending callback bitmask.
 uint8_t http_take_pending(http_conn_t *c);
+
+// Poll Mongoose for network events.
+void http_poll(void);

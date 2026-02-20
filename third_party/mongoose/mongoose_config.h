@@ -1,0 +1,9 @@
+#pragma once
+
+#define MG_ARCH MG_ARCH_PICOSDK
+#define MG_ENABLE_MBEDTLS 1
+#define MG_TLS MG_TLS_MBED
+#define MG_ENABLE_TCPIP 1
+#define MG_ENABLE_DRIVER_PICO_W 1
+#define MG_ENABLE_SOCKET 0
+#define MG_IO_SIZE 4096

@@ -1,26 +1,15 @@
 #include "wifi.h"
 #include "display.h"
+#include "http.h"
 #include "../os/config.h"
+#include "../os/clock.h"
 
 #include "pico/stdlib.h"
+#include "mongoose.h"
 
 #include <string.h>
 #include <stdio.h>
-
-#ifdef WIFI_ENABLED
-#include "pico/cyw43_arch.h"
-#include "lwip/netif.h"
-#include "lwip/ip4_addr.h"
-#include "lwip/apps/sntp.h"
-#include "mbedtls/platform_time.h"
-
-// mbedTLS 3.x requires mbedtls_ms_time() when MBEDTLS_HAVE_TIME is defined.
-// The Pico SDK does not provide one, so we supply it here using the Pico's
-// hardware microsecond counter.
-mbedtls_ms_time_t mbedtls_ms_time(void) {
-    return (mbedtls_ms_time_t)(time_us_64() / 1000);
-}
-#endif
+#include <time.h>
 
 // ── State ─────────────────────────────────────────────────────────────────────
 
@@ -29,35 +18,71 @@ static wifi_status_t s_status    = WIFI_STATUS_DISCONNECTED;
 static char          s_ssid[64]  = {0};
 static char          s_ip[20]    = {0};
 
+static struct mg_mgr s_mgr;
+static struct mg_tcpip_if s_ifp;
+static struct mg_tcpip_driver_pico_w_data s_driver_data;
+
+// ── SNTP ──────────────────────────────────────────────────────────────────────
+
+static void sntp_cb(struct mg_connection *c, int ev, void *ev_data) {
+    if (ev == MG_EV_SNTP_TIME) {
+        int64_t *t = (int64_t *) ev_data;
+        printf("WiFi: SNTP sync OK, time: %lld\n", *t);
+        clock_sntp_set((unsigned)(*t / 1000));
+        c->is_closing = 1;
+    } else if (ev == MG_EV_CLOSE) {
+        // SNTP closed
+    }
+}
+
+static void start_sntp(void) {
+    printf("WiFi: Starting SNTP sync...\n");
+    mg_sntp_connect(&s_mgr, "udp://pool.ntp.org:123", sntp_cb, NULL);
+}
+
 // ── Internal helpers ──────────────────────────────────────────────────────────
 
-#ifdef WIFI_ENABLED
-// Map CYW43 link state to our wifi_status_t.
-static wifi_status_t cyw43_link_to_status(int link) {
-    if (link == CYW43_LINK_UP)                     return WIFI_STATUS_CONNECTED;
-    if (link == CYW43_LINK_JOIN || link == CYW43_LINK_NOIP) return WIFI_STATUS_CONNECTING;
-    if (link < 0)                                  return WIFI_STATUS_FAILED;
-    return WIFI_STATUS_DISCONNECTED;
+static void tcpip_cb(struct mg_tcpip_if *ifp, int ev, void *ev_data) {
+    if (ev == MG_TCPIP_EV_ST_CHG) {
+        uint8_t state = *(uint8_t *) ev_data;
+        if (state == MG_TCPIP_STATE_READY) {
+            s_status = WIFI_STATUS_CONNECTED;
+            mg_snprintf(s_ip, sizeof(s_ip), "%M", mg_print_ip, &ifp->ip);
+            printf("WiFi: connected  IP=%s\n", s_ip);
+            start_sntp();
+        } else if (state == MG_TCPIP_STATE_DOWN) {
+            if (s_status == WIFI_STATUS_CONNECTED) {
+                s_status = WIFI_STATUS_DISCONNECTED;
+                s_ip[0] = '\0';
+                printf("WiFi: disconnected\n");
+            }
+        }
+    } else if (ev == MG_TCPIP_EV_WIFI_CONNECT_ERR) {
+        s_status = WIFI_STATUS_FAILED;
+        printf("WiFi: connect failed (err=%d)\n", *(int *)ev_data);
+    }
 }
-#endif
 
 // ── Public API ─────────────────────────────────────────────────────────────────
 
 void wifi_init(void) {
-#ifdef WIFI_ENABLED
+    mg_mgr_init(&s_mgr);
+    
+    memset(&s_ifp, 0, sizeof(s_ifp));
+    memset(&s_driver_data, 0, sizeof(s_driver_data));
+    
+    s_ifp.driver = &mg_tcpip_driver_pico_w;
+    s_ifp.driver_data = &s_driver_data;
+    s_ifp.pfn = tcpip_cb;
+    s_ifp.recv_queue.size = 4096;
+    
     display_spi_lock();
-    int err = cyw43_arch_init();
-    if (err == 0) {
-        cyw43_arch_enable_sta_mode();
-        s_available = true;
-    }
+    mg_tcpip_init(&s_mgr, &s_ifp);
+    s_ifp.pfn = tcpip_cb; // Ensure our callback is set
     display_spi_unlock();
-
-    if (!s_available) {
-        printf("WiFi: cyw43_arch_init failed (%d) — no WiFi hardware\n", err);
-        return;
-    }
-    printf("WiFi: CYW43 ready\n");
+    
+    s_available = true; 
+    printf("WiFi: Mongoose TCPIP ready\n");
 
     // Auto-connect if credentials are stored in /system/config.json.
     const char *ssid = config_get("wifi_ssid");
@@ -66,10 +91,6 @@ void wifi_init(void) {
         printf("WiFi: auto-connecting to '%s'\n", ssid);
         wifi_connect(ssid, pass ? pass : "");
     }
-#else
-    s_available = false;
-    printf("WiFi: not compiled in (WIFI_ENABLED not set)\n");
-#endif
 }
 
 bool wifi_is_available(void) {
@@ -84,30 +105,22 @@ void wifi_connect(const char *ssid, const char *password) {
     s_status = WIFI_STATUS_CONNECTING;
     s_ip[0]  = '\0';
 
-#ifdef WIFI_ENABLED
+    s_driver_data.wifi.ssid = s_ssid;
+    s_driver_data.wifi.pass = (char *) password;
+    
+    printf("WiFi: connecting to '%s'...\n", s_ssid);
+    
     display_spi_lock();
-    // WPA2_MIXED_PSK handles WPA and WPA2 networks.
-    int err = cyw43_arch_wifi_connect_async(s_ssid, password,
-                                            CYW43_AUTH_WPA2_MIXED_PSK);
+    mg_wifi_connect(&s_driver_data.wifi);
     display_spi_unlock();
-
-    if (err != 0) {
-        s_status = WIFI_STATUS_FAILED;
-        printf("WiFi: connect_async failed (%d)\n", err);
-    } else {
-        printf("WiFi: connecting to '%s'\n", s_ssid);
-    }
-#endif
 }
 
 void wifi_disconnect(void) {
     if (!s_available) return;
-
-#ifdef WIFI_ENABLED
+    
     display_spi_lock();
-    cyw43_wifi_leave(&cyw43_state, CYW43_ITF_STA);
+    mg_wifi_disconnect();
     display_spi_unlock();
-#endif
 
     s_status = WIFI_STATUS_DISCONNECTED;
     s_ssid[0] = '\0';
@@ -116,11 +129,13 @@ void wifi_disconnect(void) {
 }
 
 wifi_status_t wifi_get_status(void) {
+    if (s_ifp.state == MG_TCPIP_STATE_READY) return WIFI_STATUS_CONNECTED;
     return s_status;
 }
 
 const char *wifi_get_ip(void) {
-    if (s_status != WIFI_STATUS_CONNECTED) return NULL;
+    if (wifi_get_status() != WIFI_STATUS_CONNECTED) return NULL;
+    mg_snprintf(s_ip, sizeof(s_ip), "%M", mg_print_ip, &s_ifp.ip);
     return s_ip[0] ? s_ip : NULL;
 }
 
@@ -131,37 +146,26 @@ const char *wifi_get_ssid(void) {
 void wifi_poll(void) {
     if (!s_available) return;
 
-#ifdef WIFI_ENABLED
     display_spi_lock();
-    cyw43_arch_poll();
-
-    // Only update status when actively connecting or connected.
-    if (s_status == WIFI_STATUS_CONNECTING || s_status == WIFI_STATUS_CONNECTED) {
-        int link = cyw43_tcpip_link_status(&cyw43_state, CYW43_ITF_STA);
-        wifi_status_t new_status = cyw43_link_to_status(link);
-
-        if (new_status != s_status) {
-            s_status = new_status;
-
-            if (s_status == WIFI_STATUS_CONNECTED) {
-                // Capture IP address from lwip netif
-                if (netif_default) {
-                    ip4addr_ntoa_r(netif_ip4_addr(netif_default),
-                                   s_ip, sizeof(s_ip));
-                }
-                printf("WiFi: connected  IP=%s\n", s_ip);
-                sntp_init();
-            } else if (s_status == WIFI_STATUS_FAILED) {
-                printf("WiFi: connect failed (link=%d)\n", link);
-                sntp_stop();
-            } else if (s_status == WIFI_STATUS_DISCONNECTED) {
-                s_ip[0] = '\0';
-                printf("WiFi: link lost\n");
-                sntp_stop();
-            }
-        }
-    }
-
+    mg_mgr_poll(&s_mgr, 0);
     display_spi_unlock();
-#endif
+}
+
+// Access to manager for HTTP
+struct mg_mgr *wifi_get_mgr(void) {
+    return &s_mgr;
+}
+
+// mbedtls/time support
+#include "mbedtls/platform_time.h"
+
+mbedtls_ms_time_t mbedtls_platform_ms_time(void) {
+    return (mbedtls_ms_time_t) (time_us_64() / 1000);
+}
+
+// Override time() for mbedtls certificate validation
+time_t time(time_t *t) {
+    time_t now = (time_t) clock_get_epoch();
+    if (t) *t = now;
+    return now;
 }

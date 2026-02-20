@@ -109,12 +109,14 @@ add_executable(picocalc_os
     src/drivers/sdcard.c
     src/drivers/wifi.c
     src/drivers/http.c
+    third_party/mongoose/mongoose.c
 )
 
 target_include_directories(picocalc_os PRIVATE
     src/
     src/os/
     src/drivers/
+    third_party/mongoose/
 )
 
 target_link_libraries(picocalc_os
@@ -131,21 +133,22 @@ target_link_libraries(picocalc_os
 )
 
 # ── WiFi support (Pico W / Pimoroni Pico Plus 2W boards) ─────────────────────
-# pico_cyw43_arch_lwip_poll uses cooperative (non-threaded) lwip polling;
-# our Lua instruction hook calls wifi_poll() every ~256 opcodes.
 if(PICO_BOARD STREQUAL "pimoroni_pico_plus2_w_rp2350" OR
    PICO_BOARD STREQUAL "pico_w" OR
    PICO_BOARD STREQUAL "pico2_w")
     target_link_libraries(picocalc_os 
-        pico_cyw43_arch_lwip_poll
-        pico_lwip_sntp
-        pico_lwip_mbedtls
+        pico_cyw43_arch_none
         pico_mbedtls
+        pico_rand
     )
     target_compile_definitions(picocalc_os PRIVATE 
         WIFI_ENABLED=1
+        MG_ENABLE_TCPIP=1
+        MG_ENABLE_DRIVER_PICO_W=1
+        MG_ENABLE_TCPIP_DRIVER_INIT=0
+        CYW43_LWIP=0
     )
-    message(STATUS "WiFi enabled for board: ${PICO_BOARD}")
+    message(STATUS "WiFi enabled for board: ${PICO_BOARD} (Mongoose TCPIP)")
 else()
     message(STATUS "WiFi disabled for board: ${PICO_BOARD}")
 endif()
@@ -171,6 +174,7 @@ target_compile_options(picocalc_os PRIVATE
 target_compile_definitions(picocalc_os PRIVATE
     PICO_RP2350=1
     PICO_STACK_SIZE=4096  # Reduced to 4KB to fit in SCRATCH_X/Y
+    MG_ENABLE_MBEDTLS=1
 )
 
 # ── Print firmware size after build ───────────────────────────────────────────
