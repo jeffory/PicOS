@@ -75,9 +75,9 @@ while true do
     disp.clear(BG)
 
     -- Header
-    disp.fillRect(0, 0, 320, 22, disp.rgb(20, 20, 60))
-    disp.drawText(8, 6, "Key Test", ACC, disp.rgb(20, 20, 60))
-    disp.drawText(196, 6, "Esc = exit", DIM, disp.rgb(20, 20, 60))
+    pc.ui.drawHeader("Key Test")
+    
+    pc.ui.drawFooter("Esc = exit", nil)
 
     -- Last raw keycode (large, prominent)
     disp.drawText(8, 28, "Last key:", DIM, BG)

@@ -134,9 +134,8 @@ while true do
     end
     
     -- Draw title and mode
-    disp.drawText(4, 4, "3D Hexagon Test", disp.WHITE, disp.BLACK)
     local modeText = mode == 1 and "AUTO" or "MANUAL"
-    disp.drawText(4, 16, "Mode: " .. modeText, disp.GREEN, disp.BLACK)
+    pc.ui.drawHeader("3D Hexagon Test - " .. modeText)
     
     -- Show help for 3 seconds
     if showHelp then
@@ -150,11 +149,12 @@ while true do
                 disp.drawText(4, y + 10, "F1/F2: Rotate Z", disp.GRAY, disp.BLACK)
                 disp.drawText(4, y + 20, "ENTER: Auto mode", disp.GRAY, disp.BLACK)
             end
-            disp.drawText(4, 300, "ESC: Exit", disp.GRAY, disp.BLACK)
         else
             showHelp = false
         end
     end
+    
+    pc.ui.drawFooter("ENTER: Toggle Mode", "ESC: Exit")
     
     -- FPS counter (top right)
     perf.drawFPS(250, 4)

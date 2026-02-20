@@ -226,8 +226,7 @@ local function draw_auto_mode()
     disp.clear(BG)
     
     -- Header
-    disp.drawText(4, 4, "System Test Suite", TITLE, BG)
-    disp.drawLine(4, 18, 316, 18, DIM)
+    pc.ui.drawHeader("System Test Suite")
     
     -- Test results
     draw_test_results()
@@ -252,8 +251,7 @@ local function draw_auto_mode()
     y = y + 10
     
     -- Instructions (compact)
-    y = y + 8
-    disp.drawText(4, y, "ENTER:Rerun MENU:Reboot ESC:Exit", disp.YELLOW, BG)
+    pc.ui.drawFooter("ENTER:Rerun ESC:Exit", nil)
 end
 
 local function draw_reboot_mode()

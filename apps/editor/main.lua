@@ -18,9 +18,9 @@ local COLS = math.floor(SCREEN_W / CHAR_W)  -- ~53 chars
 local ROWS = math.floor(SCREEN_H / CHAR_H)  -- 40 lines
 
 -- Layout
-local STATUS_ROWS  = 1
-local COMMAND_ROWS = 1
-local TEXT_ROWS    = ROWS - STATUS_ROWS - COMMAND_ROWS  -- 38 lines
+local STATUS_ROWS  = 0
+local COMMAND_ROWS = 0
+local TEXT_ROWS    = math.floor((SCREEN_H - 28 - 18) / CHAR_H)  -- Account for 28px header, 18px footer
 local LINE_NUM_WIDTH = 5  -- "1234 " = 5 chars for line numbers
 local COLS_FULL    = COLS
 local COLS_WITH_SCROLLBAR = COLS_FULL - 1  -- Reserve space for scrollbar
@@ -189,8 +189,8 @@ end
 local function prompt_filename(prompt_text)
     local result = ""
     while true do
-        local y_base = (STATUS_ROWS + TEXT_ROWS) * CHAR_H
-        disp.fillRect(0, y_base, SCREEN_W, COMMAND_ROWS * CHAR_H, CMD_BG)
+        local y_base = SCREEN_H - 18 - COMMAND_ROWS * CHAR_H - CHAR_H * 3
+        disp.fillRect(0, y_base, SCREEN_W, CHAR_H * 3, CMD_BG)
         disp.drawText(2, y_base,              prompt_text,             CMD_FG,  CMD_BG)
         disp.drawText(2, y_base + CHAR_H,     result .. "_",           TEXT_FG, CMD_BG)
         disp.drawText(2, y_base + CHAR_H * 2, "Enter:confirm  Esc:cancel", CMD_FG, CMD_BG)
@@ -255,6 +255,8 @@ local function load_large_file(path)
         local chunk = fs.read(handle, 512)
         if not chunk then break end
 
+        sys.sleep(0)  -- Yield to OS to keep keyboard/networking alive
+
         local pos = 1
         while pos <= #chunk do
             local nl = chunk:find('\n', pos, true)
@@ -318,6 +320,8 @@ local function load_file(path)
     while true do
         local chunk = fs.read(handle, 512)
         if not chunk or #chunk == 0 then break end
+
+        sys.sleep(0)  -- Yield to OS to keep keyboard/networking alive
 
         local start = 1
         for i = 1, #chunk do
@@ -521,8 +525,6 @@ end
 -- ── Drawing ───────────────────────────────────────────────────────────────────
 
 local function draw_status_bar()
-    disp.fillRect(0, 0, SCREEN_W, CHAR_H, STATUS_BG)
-
     local fn = filename or "[Untitled]"
     local suffix
     if large_file then
@@ -532,15 +534,11 @@ local function draw_status_bar()
     else
         suffix = ""
     end
-    disp.drawText(2, 0, fn .. suffix, STATUS_FG, STATUS_BG)
-
-    local pos   = string.format("L%d/%d", cursor_y, total_lines())
-    local pos_x = SCREEN_W - (#pos * CHAR_W) - 2
-    disp.drawText(pos_x, 0, pos, STATUS_FG, STATUS_BG)
+    pc.ui.drawHeader(fn .. suffix)
 end
 
 local function draw_text_area()
-    local y_offset = STATUS_ROWS * CHAR_H
+    local y_offset = 28
     local tl = total_lines()
     local visible_cols = (tl > TEXT_ROWS) and COLS_WITH_SCROLLBAR or COLS_FULL
     local text_x = 0  -- X offset for text (after line numbers if enabled)
@@ -635,7 +633,7 @@ local function draw_scrollbar()
     local tl = total_lines()
     if tl <= TEXT_ROWS then return end
 
-    local y_offset   = STATUS_ROWS * CHAR_H
+    local y_offset   = 28
     local scrollbar_h = TEXT_ROWS * CHAR_H
     disp.fillRect(SCROLLBAR_X, y_offset, SCROLLBAR_WIDTH, scrollbar_h, SCROLLBAR_C)
 
@@ -647,15 +645,14 @@ local function draw_scrollbar()
 end
 
 local function draw_command_bar()
-    local y_base = (STATUS_ROWS + TEXT_ROWS) * CHAR_H
-    disp.fillRect(0, y_base, SCREEN_W, COMMAND_ROWS * CHAR_H, CMD_BG)
+    local pos = string.format("L%d/%d", cursor_y, total_lines())
 
     if message ~= "" and sys.getTimeMs() - message_time < 3000 then
-        disp.drawText(2, y_base, message, MODIFIED, CMD_BG)
+        pc.ui.drawFooter(message, pos)
     elseif large_file then
-        disp.drawText(2, y_base, "Read-only  F1:Help", CMD_FG, CMD_BG)
+        pc.ui.drawFooter("Read-only  F1:Help", pos)
     else
-        disp.drawText(2, y_base, "F1: Help", CMD_FG, CMD_BG)
+        pc.ui.drawFooter("F1: Help", pos)
     end
 end
 

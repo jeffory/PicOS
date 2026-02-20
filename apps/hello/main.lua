@@ -37,9 +37,8 @@ while true do
     disp.clear(BG)
 
     -- Title
-    disp.drawText(8, 8, "Hello, PicoCalc!", ACC, BG)
-    disp.drawLine(8, 18, 312, 18, DIM)
-    
+    pc.ui.drawHeader("Hello, PicoCalc!")
+
     -- FPS display (built-in, easy!)
     perf.drawFPS()  -- defaults to top-right corner (250, 8)
     -- Or customize: perf.drawFPS(10, 30)
@@ -51,19 +50,13 @@ while true do
         disp.drawText(100, 140, "* Hello World *", FG, BG)
     end
 
-    -- Battery readout
+    -- Battery & Time (for the footer)
     local bat = pc.sys.getBattery()
-    if bat >= 0 then
-        disp.drawText(8, 300, "Battery: " .. bat .. "%", DIM, BG)
-    end
-
-    -- Time
+    local bat_str = (bat >= 0) and ("Bat: " .. bat .. "%  ") or ""
     local ms = pc.sys.getTimeMs()
     local secs = math.floor(ms / 1000)
-    disp.drawText(8, 310, "Uptime: " .. secs .. "s", DIM, BG)
-
-    -- Instructions
-    disp.drawText(8, 290, "Press Esc to exit", DIM, BG)
+    
+    pc.ui.drawFooter("Press Esc to exit", bat_str .. "Uptime: " .. secs .. "s")
 
     -- Draw a bouncing box based on frame
     local bx = 8 + math.floor(math.abs(math.sin(frame / 60 * math.pi)) * 260)
