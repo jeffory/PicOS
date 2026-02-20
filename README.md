@@ -2,8 +2,8 @@
 
 An app platform for the ClockworkPi PicoCalc, built around a resident Lua runtime. Apps live on the SD card as directories containing `main.lua` and `app.json`. The OS owns all hardware; apps access everything through the `picocalc` Lua API.
 
-**Target hardware:** Pimoroni Pico Plus 2 W in PicoCalc v2.0 mainboard  
-*(Standard Pico 2 works too — just without PSRAM for the framebuffer and no WiFi)*
+**Target hardware:** Pimoroni Pico Plus 2 W in PicoCalc v2.0 mainboard
+Other hardware support is untested currently.
 
 ---
 
@@ -30,7 +30,7 @@ SD Card (hot-swappable)
 The `picocalc` Lua global is your entire interface to the hardware:
 
 ```lua
-local pd = picocalc
+local pc = picocalc
 
 -- Display
 pc.display.clear(pc.display.BLACK)
@@ -55,8 +55,7 @@ local data = pc.fs.readFile("/data/mygame/save.json")
 ---
 
 ## Hardware Pin Reference
-
-All pins are defined in `src/hardware.h`. Verify against `clockwork_Mainboard_V2.0_Schematic.pdf`.
+All pins are defined in `src/hardware.h`. Verify against [clockwork_Mainboard_V2.0_Schematic.pdf](https://github.com/clockworkpi/PicoCalc/blob/master/clockwork_Mainboard_V2.0_Schematic.pdf).
 
 | Peripheral | Interface | Pins |
 |---|---|---|
@@ -105,7 +104,7 @@ Output: `build/picocalc_os.uf2` — drag-and-drop to Pico in BOOTSEL mode.
 
 ## Testing Lua Apps
 
-Before flashing firmware, validate all Lua app syntax:
+Before copying apps to the SD Card, it's recommended to validate them first:
 
 ```bash
 make test-lua
@@ -222,7 +221,7 @@ Every app is a directory in `/apps/` containing at minimum:
 
 **`main.lua`**
 ```lua
-local pd = picocalc
+local pc = picocalc
 
 -- Your app runs in a plain while loop
 -- Return (or fall off the end) to go back to the launcher
