@@ -131,3 +131,7 @@ Run the **Key Test** app (`/apps/keytest`) and check what raw hex codes appear f
 
 - [ ] `g_api.fs.listDir` callback signature mismatch — `picocalc_fs_t.listDir` in `os.h` has a different signature than `sdcard_list_dir()` in `sdcard.h`; reconcile them (Lua bridge calls `sdcard_list_dir()` directly and is unaffected)
 - [ ] App sandboxing: `picocalc.sys.exit()` uses a string sentinel (`__picocalc_exit__`) — could be hardened with a Lua registry light userdata instead
+
+## Quality of life
+
+- [ ] Remember the position of the selected app/scrolling position when exiting an application

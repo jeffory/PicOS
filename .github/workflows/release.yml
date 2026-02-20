@@ -1,0 +1,56 @@
+name: Build Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install ARM toolchain
+        run: |
+          sudo apt-get update -q
+          sudo apt-get install -y cmake gcc-arm-none-eabi libnewlib-arm-none-eabi libstdc++-arm-none-eabi-newlib
+
+      - name: Fetch third-party dependencies
+        run: |
+          # Lua 5.4.7
+          mkdir -p third_party/lua-5.4
+          curl -fL https://www.lua.org/ftp/lua-5.4.7.tar.gz \
+            | tar -xz --strip-components=1 -C third_party/lua-5.4/
+
+          # FatFS R0.15 — extracts upstream sources only.
+          # ffconf.h and port/diskio_spi.c are project-specific and already
+          # present from the checkout step.
+          curl -fL https://elm-chan.org/fsw/ff/arc/ff15.zip -o /tmp/ff15.zip
+          unzip -j /tmp/ff15.zip \
+            'source/ff.c' 'source/ff.h' 'source/diskio.h' \
+            'source/ffsystem.c' 'source/ffunicode.c' \
+            -d third_party/fatfs/
+
+      - name: Clone Pico SDK
+        run: |
+          git clone --depth 1 --branch 2.2.0 https://github.com/raspberrypi/pico-sdk.git $HOME/pico-sdk
+          cd $HOME/pico-sdk && git submodule update --init --depth 1
+
+      - name: Configure
+        run: |
+          mkdir build
+          cmake -S . -B build \
+            -DPICO_SDK_PATH=$HOME/pico-sdk \
+            -DPICO_BOARD=pimoroni_pico_plus2_w_rp2350 \
+            -DCMAKE_BUILD_TYPE=Release
+
+      - name: Build
+        run: cmake --build build --parallel
+
+      - name: Upload UF2 to release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: build/picocalc_os.uf2
