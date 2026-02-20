@@ -122,6 +122,16 @@ void sdcard_fclose(sdfile_t f) {
     free(f);
 }
 
+bool sdcard_fseek(sdfile_t f, uint32_t offset) {
+    if (!f) return false;
+    return f_lseek((FIL *)f, (FSIZE_t)offset) == FR_OK;
+}
+
+uint32_t sdcard_ftell(sdfile_t f) {
+    if (!f) return 0;
+    return (uint32_t)f_tell((FIL *)f);
+}
+
 bool sdcard_fexists(const char *path) {
     FILINFO fi;
     return f_stat(path, &fi) == FR_OK;

@@ -34,6 +34,8 @@ int      sdcard_fwrite(sdfile_t f, const void *buf, int len);
 void     sdcard_fclose(sdfile_t f);
 bool     sdcard_fexists(const char *path);
 int      sdcard_fsize(const char *path);   // Returns -1 on error
+bool     sdcard_fseek(sdfile_t f, uint32_t offset);
+uint32_t sdcard_ftell(sdfile_t f);
 
 // Create a directory (and parent directories if needed)
 bool     sdcard_mkdir(const char *path);
