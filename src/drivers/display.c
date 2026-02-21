@@ -603,19 +603,27 @@ void display_darken(void) {
     s_dma_active = false;
   }
 
-  // With double buffering, s_framebuffer is the back buffer.  The front buffer
-  // (index 1 - s_back_buffer_idx) holds the content last sent to the display.
-  // Copy it into the back buffer with each byte halved so that overlay callers
-  // draw on top of the live (darkened) screen content rather than a stale
-  // frame.
-  const uint32_t *front =
-      (const uint32_t *)s_framebuffers[1 - s_back_buffer_idx];
-  uint32_t *back = (uint32_t *)s_framebuffer;
-  size_t n = (FB_WIDTH * FB_HEIGHT * 2) / 4;
-  for (size_t i = 0; i < n; i++)
-    back[i] = (front[i] >> 1) & 0x7F7F7F7FU;
+  // With double buffering, we want to create a stable, darkened snapshot of the
+  // currently visible screen (the front buffer) and place it into BOTH buffers.
+  // This ensures that when an overlay app (like the system menu) redraws and
+  // flushes, it doesn't alternate between a darkened and a bright background.
+  uint16_t *front = s_framebuffers[1 - s_back_buffer_idx];
+  uint16_t *back = s_framebuffers[s_back_buffer_idx];
+  size_t n = (FB_WIDTH * FB_HEIGHT);
+
+  for (size_t i = 0; i < n; i++) {
+    uint16_t p = front[i];
+    uint16_t native = (p >> 8) | (p << 8); // unswap
+    native = (native >> 1) &
+             0xFBEF; // darken (clear bits that shift across channels)
+    uint16_t darkened = (native >> 8) | (native << 8); // reswap
+    front[i] = darkened;
+    back[i] = darkened;
+  }
 }
 
 const uint16_t *display_get_framebuffer(void) { return s_framebuffer; }
 
-// (No longer needed since we have a dedicated PIO now)
+const uint16_t *display_get_front_buffer(void) {
+  return s_framebuffers[1 - s_back_buffer_idx];
+}

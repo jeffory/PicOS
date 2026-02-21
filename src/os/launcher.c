@@ -304,6 +304,10 @@ void launcher_run(void) {
       dirty = true;
     }
 
+    if (ui_needs_header_redraw()) {
+      dirty = true;
+    }
+
     if (dirty)
       draw_launcher();
 

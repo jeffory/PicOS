@@ -19,7 +19,7 @@
 #include "os/lua_psram_alloc.h"
 #include "os/os.h"
 #include "os/system_menu.h"
-#include "splash_logo.h"
+#include "os/ui.h"
 
 // ── OS API implementation stubs (wiring the function pointer table)
 // ─────────── Full implementations live in each driver. This wires them all
@@ -91,34 +91,6 @@ static picocalc_wifi_t s_wifi_impl = {
     .isAvailable = wifi_is_available,
 };
 
-// ── Boot splash
-// ───────────────────────────────────────────────────────────────
-
-static void draw_splash(const char *status) {
-  display_clear(COLOR_BLACK);
-
-#if LOGO_W > 0 && LOGO_H > 0
-  // ── Logo ──────────────────────────────────────────────────────────────────
-  int lx = (FB_WIDTH - LOGO_W) / 2;
-  int ly = (FB_HEIGHT - LOGO_H) / 2 - 16;
-  display_draw_image(lx, ly, LOGO_W, LOGO_H, logo_data);
-
-  // ── Status text below logo ─────────────────────────────────────────────
-  int sx = (FB_WIDTH - display_text_width(status)) / 2;
-  display_draw_text(sx, ly + LOGO_H + 12, status, COLOR_GRAY, COLOR_BLACK);
-#else
-  // ── No logo: centred title + status ───────────────────────────────────────
-  const char *title = "PicOS";
-  int tx = (FB_WIDTH - display_text_width(title)) / 2;
-  display_draw_text(tx, FB_HEIGHT / 2 - 8, title, COLOR_WHITE, COLOR_BLACK);
-
-  int sx = (FB_WIDTH - display_text_width(status)) / 2;
-  display_draw_text(sx, FB_HEIGHT / 2 + 8, status, COLOR_GRAY, COLOR_BLACK);
-#endif
-
-  display_flush();
-}
-
 // ── Core 1 entry — periodic tasks (future: audio mixing, WiFi polling)
 // ────────
 
@@ -174,7 +146,7 @@ int main(void) {
 
   // Initialise display first so we can show progress
   display_init();
-  draw_splash("Initialising keyboard...");
+  ui_draw_splash("Initialising keyboard...", NULL);
 
   bool kbd_ok = kbd_init();
   if (kbd_ok) {
@@ -195,7 +167,7 @@ int main(void) {
     sleep_ms(5000);
   }
 
-  draw_splash("Mounting SD card...");
+  ui_draw_splash("Mounting SD card...", NULL);
   bool sd_ok = sdcard_init();
 
   if (!sd_ok) {
@@ -228,7 +200,7 @@ int main(void) {
   lua_psram_alloc_init();
 
   // Initialise WiFi hardware (auto-connects if credentials are in config)
-  draw_splash("Initialising WiFi...");
+  ui_draw_splash("Initialising WiFi...", NULL);
   wifi_init();
   http_init();
 
@@ -237,7 +209,7 @@ int main(void) {
 
   system_menu_init();
 
-  draw_splash("Loading...");
+  ui_draw_splash("Loading...", NULL);
   sleep_ms(300); // Brief pause so the splash is visible
 
   // Hand off to the launcher — this never returns

@@ -83,3 +83,4 @@ void display_darken(void);
 // big-endian). Pixels are byte-swapped relative to the RGB565() macro — un-swap
 // before use.
 const uint16_t *display_get_framebuffer(void);
+const uint16_t *display_get_front_buffer(void);

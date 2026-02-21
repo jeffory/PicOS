@@ -129,6 +129,15 @@ add_executable(picocalc_os
     src/main.c
     src/os/launcher.c
     src/os/lua_bridge.c
+    src/os/lua_bridge_display.c
+    src/os/lua_bridge_input.c
+    src/os/lua_bridge_sys.c
+    src/os/lua_bridge_fs.c
+    src/os/lua_bridge_network.c
+    src/os/lua_bridge_config.c
+    src/os/lua_bridge_perf.c
+    src/os/lua_bridge_graphics.c
+    src/os/lua_bridge_ui.c
     src/os/lua_psram_alloc.c
     src/os/system_menu.c
     src/os/screenshot.c
@@ -138,6 +147,8 @@ add_executable(picocalc_os
     src/os/clock.c
     src/os/tz_picker.c
     src/os/ui.c
+    src/usb/usb_descriptors.c
+    src/usb/usb_msc.c
     src/os/image_decoders.cpp
     src/drivers/display.c
     src/drivers/keyboard.c
@@ -149,6 +160,7 @@ add_executable(picocalc_os
 )
 
 target_include_directories(picocalc_os PRIVATE
+    src/usb/
     src/
     src/os/
     src/drivers/
@@ -167,6 +179,7 @@ target_link_libraries(picocalc_os
     hardware_clocks
     hardware_pio
     hardware_xip_cache
+    tinyusb_device
     lua
     fatfs
     image_decoders
