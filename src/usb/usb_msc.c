@@ -10,6 +10,7 @@
 // Define BYTE/LBA_t and other FatFs types manually before diskio.h
 // just in case they are missing from diskio.h inclusion order
 #include <stdint.h>
+#include <stdio.h>
 typedef unsigned int UINT;
 typedef unsigned char BYTE;
 typedef uint32_t DWORD;
@@ -29,37 +30,49 @@ static bool s_msc_active = false;
 // --------------------------------------------------------------------
 
 void usb_msc_enter_mode(void) {
-  // 1. Unmount FatFS so host can take over safely
+  printf("[USB MSC] Entering USB Mass Storage mode\n");
+
+  // 1. Unmount FatFS so host can take over the SD card safely
+  printf("[USB MSC] Unmounting FatFS...\n");
   f_unmount("");
   s_msc_active = true;
 
-  // Initialize TinyUSB
-  tusb_init();
+  // NOTE: tusb_init() is already called by pico_stdio_usb during
+  // stdio_init_all(). Our custom tusb_config.h and usb_descriptors.c
+  // configure it as a composite CDC+MSC device from boot. We do NOT
+  // call tusb_init() again here — doing so could corrupt the stack.
+  //
+  // The MSC interface is always present in the descriptor but the
+  // callbacks return "not ready" while s_msc_active is false.
+
+  printf("[USB MSC] TinyUSB connected=%d, mounted=%d\n", tud_connected(),
+         tud_mounted());
 
   // 2. Draw the splash screen
   ui_draw_splash("USB Mode", "Press ESC to exit");
 
-  // 3. Connect USB (pico_stdlib might already have it connected, but we must
-  // handle tasks if we aren't doing it elsewhere, though stdio_usb might do it
-  // in irq) Actually, stdio_usb configures TinyUSB to run in IRQ mode on the
-  // Pico SDK by default! BUT we need to wait for ESC. We don't need to call
-  // tud_task() if it's IRQ driven. We'll just loop.
-
+  // 3. Poll loop — tud_task() is also called by the SDK's background IRQ,
+  //    but calling it here too ensures responsive MSC handling.
+  printf("[USB MSC] Waiting for host or ESC key...\n");
   while (true) {
     tud_task();
     kbd_poll();
     if (kbd_get_buttons_pressed() & BTN_ESC) {
       break;
     }
-    sleep_ms(10);
+    sleep_us(100); // 100µs — fast enough for MSC, lets I2C keyboard breathe
   }
 
-  // 4. Disconnect/cleanup and remount
-  tud_disconnect();
+  // 4. Deactivate MSC and remount
+  //    Do NOT call tud_disconnect() — that would kill CDC serial too.
+  //    Just set s_msc_active=false so callbacks return "not ready" again.
+  printf("[USB MSC] Exiting USB Mass Storage mode\n");
   s_msc_active = false;
 
   // Remount FatFS
+  printf("[USB MSC] Remounting FatFS...\n");
   sdcard_remount();
+  printf("[USB MSC] Done\n");
 }
 
 // --------------------------------------------------------------------
@@ -67,10 +80,10 @@ void usb_msc_enter_mode(void) {
 // --------------------------------------------------------------------
 
 // Invoked when device is mounted by the host
-void tud_mount_cb(void) {}
+void tud_mount_cb(void) { printf("[USB MSC] Device mounted by host\n"); }
 
 // Invoked when device is unmounted by the host
-void tud_umount_cb(void) {}
+void tud_umount_cb(void) { printf("[USB MSC] Device unmounted by host\n"); }
 
 // Invoked to determine max LUN
 uint8_t tud_msc_get_maxlun_cb(void) { return 0; }
@@ -85,6 +98,7 @@ void tud_msc_inquiry_cb(uint8_t lun, uint8_t p_vendor_id[8],
   memcpy(p_vendor_id, vendor, sizeof(vendor));
   memcpy(p_product_id, product, sizeof(product));
   memcpy(p_product_rev, revision, sizeof(revision));
+  printf("[USB MSC] Inquiry callback\n");
 }
 
 void tud_msc_capacity_cb(uint8_t lun, uint32_t *block_count,
@@ -96,9 +110,12 @@ void tud_msc_capacity_cb(uint8_t lun, uint32_t *block_count,
       count > 0) {
     *block_size = msc_block_size;
     *block_count = (uint32_t)count;
+    printf("[USB MSC] Capacity: %lu blocks x %u bytes\n", (unsigned long)count,
+           msc_block_size);
   } else {
     *block_size = 0;
     *block_count = 0;
+    printf("[USB MSC] Capacity: not ready (active=%d)\n", s_msc_active);
   }
 }
 
@@ -106,6 +123,7 @@ bool tud_msc_start_stop_cb(uint8_t lun, uint8_t power_condition, bool start,
                            bool load_eject) {
   (void)lun;
   (void)power_condition;
+  printf("[USB MSC] Start/Stop: start=%d, load_eject=%d\n", start, load_eject);
   return true;
 }
 
@@ -118,6 +136,7 @@ int32_t tud_msc_read10_cb(uint8_t lun, uint32_t lba, uint32_t offset,
     return -1;
 
   if (disk_read(0, (BYTE *)buffer, lba, bufsize / msc_block_size) != RES_OK) {
+    printf("[USB MSC] Read error at LBA %lu\n", (unsigned long)lba);
     return -1;
   }
 
@@ -139,6 +158,7 @@ int32_t tud_msc_write10_cb(uint8_t lun, uint32_t lba, uint32_t offset,
 
   if (disk_write(0, (const BYTE *)buffer, lba, bufsize / msc_block_size) !=
       RES_OK) {
+    printf("[USB MSC] Write error at LBA %lu\n", (unsigned long)lba);
     return -1;
   }
 
@@ -147,14 +167,13 @@ int32_t tud_msc_write10_cb(uint8_t lun, uint32_t lba, uint32_t offset,
 
 void tud_msc_write10_flush_cb(uint8_t lun) {
   (void)lun;
-  // disk_ioctl(0, CTRL_SYNC, NULL);
+  disk_ioctl(0, CTRL_SYNC, NULL);
 }
 
 bool tud_msc_test_unit_ready_cb(uint8_t lun) {
-  if (!s_msc_active || !sdcard_is_mounted()) { // Wait, sdcard_is_mounted is
-                                               // tracking FatFS mount state
-    // Actually sdcard_is_mounted might be false because we unmounted FatFS
-    // Let's just check s_msc_active.
+  // Only check s_msc_active — sdcard_is_mounted() tracks FatFS mount
+  // state, which is intentionally false during MSC mode.
+  if (!s_msc_active) {
     tud_msc_set_sense(lun, SCSI_SENSE_NOT_READY, 0x3A, 0x00);
     return false;
   }

@@ -22,15 +22,16 @@
 #define LCD_WIDTH 320
 #define LCD_HEIGHT 320
 #define LCD_SPI_BAUD                                                           \
-  (100* 1000 * 1000) // 80 MHz target (clk_peri=200MHz ÷2) — ~60 fps max
+  (100 * 1000 * 1000) // 80 MHz target (clk_peri=200MHz ÷2) — ~60 fps max
 
 // --- SD Card: FatFS, SPI0 ---------------------------------------------------
 #define SD_SPI_PORT spi0
-#define SD_PIN_MISO 16                 // GP16 / SPI0 RX
-#define SD_PIN_CS 17                   // GP17 / SPI0 CS
-#define SD_PIN_SCK 18                  // GP18 / SPI0 SCK
-#define SD_PIN_MOSI 19                 // GP19 / SPI0 TX
-#define SD_SPI_BAUD (10 * 1000 * 1000) // 10 MHz
+#define SD_PIN_MISO 16 // GP16 / SPI0 RX
+#define SD_PIN_CS 17   // GP17 / SPI0 CS
+#define SD_PIN_SCK 18  // GP18 / SPI0 SCK
+#define SD_PIN_MOSI 19 // GP19 / SPI0 TX
+#define SD_SPI_BAUD                                                            \
+  (25 * 1000 * 1000) // 25 MHz (max safe for most SD cards in SPI mode)
 
 // --- Keyboard: STM32F103 via I2C1 -------------------------------------------
 // Pins confirmed from working constellation-pico Rust project (official

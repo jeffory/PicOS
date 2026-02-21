@@ -230,6 +230,15 @@ target_compile_definitions(picocalc_os PRIVATE
     PICO_RP2350=1
     PICO_STACK_SIZE=4096  # Reduced to 4KB to fit in SCRATCH_X/Y
     MG_ENABLE_MBEDTLS=1
+    # Re-enable pico_stdio_usb features that get auto-disabled when
+    # tinyusb_device is linked directly. We provide our own descriptors
+    # (tusb_config.h + usb_descriptors.c with CDC+MSC) but still want
+    # the SDK to handle tusb_init() and the background tud_task() IRQ.
+    PICO_STDIO_USB_ENABLE_TINYUSB_INIT=1
+    PICO_STDIO_USB_ENABLE_IRQ_BACKGROUND_TASK=1
+    PICO_STDIO_USB_USE_DEFAULT_DESCRIPTORS=0
+    PICO_STDIO_USB_ENABLE_RESET_VIA_BAUD_RATE=0
+    PICO_STDIO_USB_ENABLE_RESET_VIA_VENDOR_INTERFACE=0
 )
 
 # ── Print firmware size after build ───────────────────────────────────────────
