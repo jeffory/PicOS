@@ -1,7 +1,7 @@
 #pragma once
 
-#include <stdint.h>
 #include <stdbool.h>
+#include <stdint.h>
 
 // =============================================================================
 // ST7365P Display Driver
@@ -11,29 +11,29 @@
 // Core 1 handles periodic flush from framebuffer → LCD over SPI.
 // Core 0 runs the OS + Lua. Both cores share the framebuffer via a mutex.
 //
-// SPI1 is also shared with WiFi (CYW43). The driver implements a lock that
-// pauses LCD DMA transfers during WiFi operations and vice versa.
+// LCD uses a dedicated PIO SPI master to avoid contending with WiFi on SPI1.
 // =============================================================================
 
 // RGB565 colour helpers
-#define RGB565(r, g, b) ((uint16_t)(((r & 0xF8) << 8) | ((g & 0xFC) << 3) | (b >> 3)))
+#define RGB565(r, g, b)                                                        \
+  ((uint16_t)(((r & 0xF8) << 8) | ((g & 0xFC) << 3) | (b >> 3)))
 
 // Common colours
-#define COLOR_BLACK   RGB565(0,   0,   0  )
-#define COLOR_WHITE   RGB565(255, 255, 255)
-#define COLOR_RED     RGB565(255, 0,   0  )
-#define COLOR_GREEN   RGB565(0,   255, 0  )
-#define COLOR_BLUE    RGB565(0,   0,   255)
-#define COLOR_YELLOW  RGB565(255, 255, 0  )
-#define COLOR_CYAN    RGB565(0,   255, 255)
-#define COLOR_GRAY    RGB565(128, 128, 128)
-#define COLOR_DKGRAY  RGB565(64,  64,  64 )
+#define COLOR_BLACK RGB565(0, 0, 0)
+#define COLOR_WHITE RGB565(255, 255, 255)
+#define COLOR_RED RGB565(255, 0, 0)
+#define COLOR_GREEN RGB565(0, 255, 0)
+#define COLOR_BLUE RGB565(0, 0, 255)
+#define COLOR_YELLOW RGB565(255, 255, 0)
+#define COLOR_CYAN RGB565(0, 255, 255)
+#define COLOR_GRAY RGB565(128, 128, 128)
+#define COLOR_DKGRAY RGB565(64, 64, 64)
 
 // Framebuffer size: 320*320*2 bytes = 204800 bytes (~200KB)
 // This is stored in PSRAM on Pimoroni Pico Plus 2W
-#define FB_WIDTH   320
-#define FB_HEIGHT  320
-#define FB_SIZE    (FB_WIDTH * FB_HEIGHT * 2)
+#define FB_WIDTH 320
+#define FB_HEIGHT 320
+#define FB_SIZE (FB_WIDTH * FB_HEIGHT * 2)
 
 // Public init/deinit
 void display_init(void);
@@ -49,8 +49,8 @@ void display_draw_line(int x0, int y0, int x1, int y1, uint16_t color);
 
 // Text rendering using the built-in 6x8 bitmap font
 // Returns pixel width of the rendered text
-int  display_draw_text(int x, int y, const char *text, uint16_t fg, uint16_t bg);
-int  display_text_width(const char *text);
+int display_draw_text(int x, int y, const char *text, uint16_t fg, uint16_t bg);
+int display_text_width(const char *text);
 
 // Blit raw RGB565 image data to the framebuffer at (x, y).
 // Pixel values must be in host byte order (same as the RGB565() macro).
@@ -69,12 +69,7 @@ void display_set_brightness(uint8_t brightness);
 // Call before drawing the menu panel, then call display_flush().
 void display_darken(void);
 
-// Returns a read-only pointer to the raw framebuffer (320×320 RGB565, big-endian).
-// Pixels are byte-swapped relative to the RGB565() macro — un-swap before use.
+// Returns a read-only pointer to the raw framebuffer (320×320 RGB565,
+// big-endian). Pixels are byte-swapped relative to the RGB565() macro — un-swap
+// before use.
 const uint16_t *display_get_framebuffer(void);
-
-// SPI bus arbitration — the WiFi (CYW43) and LCD share SPI1.
-// The WiFi driver must hold this lock for the duration of any CYW43 SPI
-// operation to prevent bus conflicts with LCD DMA transfers.
-void display_spi_lock(void);
-void display_spi_unlock(void);

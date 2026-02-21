@@ -1,0 +1,34 @@
+.program lcd_spi
+.side_set 1
+
+; PIO SPI master for ST7365P LCD
+; 8-bit mode (CPOL=1, CPHA=1)
+;
+; Pin mapping:
+; - SCK: side-set pin
+; - MOSI: OUT pin
+;
+; Manually unrolled 8 times. Auto-pull MUST be disabled.
+; Unrolling avoids injected PULL instructions destroying the rising edge 
+; of the final bit, which misaligns the ST7789 colors/commands.
+
+public entry_point:
+.wrap_target
+    pull            side 1
+    out pins, 1     side 0
+    nop             side 1
+    out pins, 1     side 0
+    nop             side 1
+    out pins, 1     side 0
+    nop             side 1
+    out pins, 1     side 0
+    nop             side 1
+    out pins, 1     side 0
+    nop             side 1
+    out pins, 1     side 0
+    nop             side 1
+    out pins, 1     side 0
+    nop             side 1
+    out pins, 1     side 0
+    nop             side 1
+.wrap

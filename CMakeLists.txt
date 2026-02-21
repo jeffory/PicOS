@@ -129,6 +129,7 @@ target_link_libraries(picocalc_os
     hardware_pwm
     hardware_dma
     hardware_clocks
+    hardware_pio
     lua
     fatfs
 )
@@ -157,6 +158,8 @@ endif()
 # Enable USB serial for stdio (printf goes to USB-C serial — handy for debug)
 pico_enable_stdio_usb(picocalc_os 1)
 pico_enable_stdio_uart(picocalc_os 1)
+
+pico_generate_pio_header(picocalc_os ${CMAKE_CURRENT_SOURCE_DIR}/src/drivers/lcd_spi.pio)
 
 # Generate UF2, map, and disassembly
 pico_add_extra_outputs(picocalc_os)
