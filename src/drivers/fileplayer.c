@@ -5,6 +5,7 @@
 #include "hardware/clocks.h"
 #include "pico/stdlib.h"
 #include "pico/time.h"
+#include "mp3_player.h"
 
 #include <string.h>
 #include <stdio.h>
@@ -143,6 +144,33 @@ static bool parse_wav_header(sdfile_t f, uint32_t *sample_rate, uint16_t *channe
     return false;
 }
 
+static fileplayer_type_t detect_file_type(sdfile_t f) {
+    uint8_t header[16];
+    memset(header, 0, sizeof(header));
+    
+    if (sdcard_fread(f, header, sizeof(header)) < (int)sizeof(header)) {
+        return FILEPLAYER_TYPE_UNKNOWN;
+    }
+
+    sdcard_fseek(f, 0);
+
+    if (memcmp(header, "RIFF", 4) == 0 && memcmp(header + 8, "WAVE", 4) == 0) {
+        return FILEPLAYER_TYPE_WAV;
+    }
+
+    if (memcmp(header, "ID3", 3) == 0) {
+        return FILEPLAYER_TYPE_MP3;
+    }
+
+    if ((header[0] == 0xFF && (header[1] & 0xE0) == 0xE0) ||
+        (header[0] == 0xFE) || (header[0] == 0xFA) ||
+        (header[0] == 0xFB) || (header[0] == 0xFC)) {
+        return FILEPLAYER_TYPE_MP3;
+    }
+
+    return FILEPLAYER_TYPE_UNKNOWN;
+}
+
 static bool fill_buffer_callback(repeating_timer_t *rt) {
     (void)rt;
 
@@ -253,8 +281,25 @@ bool fileplayer_load(fileplayer_t *player, const char *path) {
         return false;
     }
 
-    uint32_t sample_rate, data_size;
-    uint16_t channels, bits;
+    fileplayer_type_t type = detect_file_type(s_current_file);
+    player->type = type;
+
+    if (type == FILEPLAYER_TYPE_MP3) {
+        sdcard_fclose(s_current_file);
+        s_current_file = NULL;
+        printf("fileplayer: MP3 file detected, use sound.mp3player() instead\n");
+        return false;
+    }
+
+    if (type != FILEPLAYER_TYPE_WAV) {
+        sdcard_fclose(s_current_file);
+        s_current_file = NULL;
+        printf("fileplayer: unknown file format\n");
+        return false;
+    }
+
+    uint32_t sample_rate = 44100, data_size = 0;
+    uint16_t channels = 2, bits = 16;
     if (!parse_wav_header(s_current_file, &sample_rate, &channels, &bits, &data_size)) {
         sdcard_fclose(s_current_file);
         s_current_file = NULL;

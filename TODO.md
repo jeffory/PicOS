@@ -1,9 +1,5 @@
 # PicOS TODO
 
-Status key: **[done]** implemented and working · **[partial]** exists in C but not exposed to Lua · **[missing]** not implemented at all · **[pending]** waiting on test results
-
----
-
 ## Lua API gaps — C exists, not wired to Lua
 
 These are fully implemented in C but missing from `lua_bridge.c`. All are quick wins.
@@ -39,28 +35,120 @@ These are fully implemented in C but missing from `lua_bridge.c`. All are quick 
 
 ## `g_api` struct not fully wired in `main.c`
 
-`g_api.fs`, `g_api.audio`, and `g_api.wifi` are never assigned in `main.c` (left NULL).
+`g_api.fs` and `g_api.wifi` are never assigned in `main.c` (left NULL).
 The Lua bridge calls C functions directly so Lua is unaffected, but the C app loader
 (future) will need these populated.
 
 - [ ] Wire `g_api.fs = &s_fs_impl` once a `picocalc_fs_t` struct is built
-- [ ] Wire `g_api.audio` once audio is implemented
-- [ ] Wire `g_api.wifi` once WiFi is implemented
+- [x] Wire `g_api.audio` — implemented in this commit
+- [x] Wire `g_api.wifi` — was already implemented
 
 ---
 
-## Audio — not implemented
+## Audio — implemented
 
-Driver location: `src/drivers/audio.c` (to be created)
+Driver location: `src/drivers/audio.c` (created)
 Hardware: PWM on GP26 (left) and GP27 (right) — defined in `hardware.h`
 
-- [ ] Create `src/drivers/audio.h` / `audio.c`
-- [ ] `audio_init()` — configure PWM slices on GP26/GP27
-- [ ] `audio_play_tone(uint32_t freq_hz, uint32_t duration_ms)` — square wave; 0ms = indefinite
-- [ ] `audio_stop_tone()`
-- [ ] `audio_set_volume(uint8_t vol)` — 0–100, scales PWM duty cycle
-- [ ] Add `picocalc.audio.playTone(freq, duration)`, `stopTone()`, `setVolume(vol)` to Lua bridge
-- [ ] Wire `g_api.audio` in `main.c`
+- [x] Create `src/drivers/audio.h` / `audio.c`
+- [x] `audio_init()` — configure PWM slices on GP26/GP27
+- [x] `audio_play_tone(uint32_t freq_hz, uint32_t duration_ms)` — square wave; 0ms = indefinite
+- [x] `audio_stop_tone()`
+- [x] `audio_set_volume(uint8_t vol)` — 0–100, logarithmic scale
+- [x] Add `picocalc.audio.playTone(freq, duration)`, `stopTone()`, `setVolume(vol)` to Lua bridge
+- [x] Wire `g_api.audio` in `main.c`
+
+---
+
+## Sound - implemented
+
+- [x] sound.sampleplayer.new(path)
+- [x] sound.sampleplayer.new(sample)
+- [x] sound.sampleplayer:copy() - partial
+- [x] sound.sampleplayer:play([repeatCount], [rate])
+- [x] sound.sampleplayer:playAt(when, [vol], [rightvol], [rate])
+- [x] sound.sampleplayer:setVolume(left, [right])
+- [x] sound.sampleplayer:getVolume()
+- [ ] sound.sampleplayer:setLoopCallback(callback, [arg])
+- [ ] sound.sampleplayer:setPlayRange(start, end)
+- [ ] sound.sampleplayer:setPaused(flag)
+- [x] sound.sampleplayer:isPlaying()
+- [x] sound.sampleplayer:stop()
+- [ ] sound.sampleplayer:setFinishCallback(func, [arg])
+- [x] sound.sampleplayer:setSample(sample)
+- [ ] sound.sampleplayer:getSample()
+- [ ] sound.sampleplayer:getLength()
+- [ ] sound.sampleplayer:setRate(rate)
+- [ ] sound.sampleplayer:getRate()
+- [ ] sound.sampleplayer:setRateMod(signal)
+- [ ] sound.sampleplayer:setOffset(seconds)
+- [ ] sound.sampleplayer:getOffset()
+ - [x] sound.fileplayer.new([buffersize]) - For music
+ - [x] sound.fileplayer.new(path, [buffersize])
+ - [x] sound.fileplayer:load(path)
+ - [x] sound.fileplayer:play([repeatCount])
+ - [x] sound.fileplayer:stop()
+ - [x] sound.fileplayer:pause()
+ - [x] sound.fileplayer:isPlaying()
+ - [x] sound.fileplayer:getLength()
+ - [ ] sound.fileplayer:setFinishCallback(func, [arg])
+ - [x] sound.fileplayer:didUnderrun()
+ - [ ] sound.fileplayer:setStopOnUnderrun(flag)
+ - [x] sound.fileplayer:setLoopRange(start, [end, [loopCallback, [arg]]])
+ - [ ] sound.fileplayer:setLoopCallback(callback, [arg])
+ - [ ] sound.fileplayer:setBufferSize(seconds)
+ - [ ] sound.fileplayer:setRate(rate)
+ - [ ] sound.fileplayer:getRate()
+ - [ ] sound.fileplayer:setRateMod(signal)
+ - [x] sound.fileplayer:setVolume(left, [right, [fadeSeconds, [fadeCallback, [arg]]]])
+ - [x] sound.fileplayer:getVolume()
+ - [x] sound.fileplayer:setOffset(seconds)
+ - [x] sound.fileplayer:getOffset()
+- [x] sound.sample.new(path)
+- [ ] sound.sample.new(seconds, [format])
+- [ ] sound.sample:getSubsample(startOffset, endOffset)
+- [x] sound.sample:load(path)
+- [ ] sound.sample:decompress()
+- [x] sound.sample:getSampleRate()
+- [ ] sound.sample:getFormat()
+- [x] sound.sample:getLength()
+- [ ] sound.sample:play([repeatCount], [rate])
+- [ ] sound.sample:playAt(when, [vol], [rightvol], [rate])
+- [ ] sound.sample:save(filename)
+- [ ] sound.signal:setOffset(offset)
+- [ ] sound.signal:setScale(scale)
+- [ ] sound.signal:getValue()
+- [ ] sound.channel.new()
+- [ ] sound.channel:remove()
+- [ ] sound.channel:addEffect(effect)
+- [ ] sound.channel:removeEffect(effect)
+- [ ] sound.channel:addSource(source)
+- [ ] sound.channel:removeSource(source)
+- [ ] sound.channel:setVolume(volume)
+- [ ] sound.channel:getVolume()
+- [ ] sound.channel:setPan(pan)
+- [ ] sound.channel:setPanMod(signal)
+- [ ] sound.channel:setVolumeMod(signal)
+- [ ] sound.channel:getDryLevelSignal()
+- [ ] sound.channel:getWetLevelSignal()
+- [ ] sound.playingSources() - Return a list of sources playing
+- [x] sound.getCurrentTime() - Returns the current time, in seconds, as measured by the audio device
+- [x] sound.resetTime() - Resets the audio output device time counter.
+
+### MP3 Player (using picomp3lib)
+
+- [x] sound.mp3player.new() - Create MP3 player instance
+- [x] sound.mp3player:load(path) - Load MP3 file
+- [x] sound.mp3player:play([repeatCount]) - Start playback
+- [x] sound.mp3player:stop() - Stop playback
+- [x] sound.mp3player:pause() - Pause playback
+- [x] sound.mp3player:resume() - Resume playback
+- [x] sound.mp3player:isPlaying() - Check if playing
+- [x] sound.mp3player:getPosition() - Get current position in samples
+- [x] sound.mp3player:getLength() - Get total length in samples
+- [x] sound.mp3player:setVolume(vol) - Set volume (0-100)
+- [x] sound.mp3player:getVolume() - Get current volume
+- [x] sound.mp3player:setLoop(flag) - Enable/disable looping
 
 ---
 
@@ -108,15 +196,6 @@ The Menu/Sym key (`BTN_MENU`) pauses the running app and shows an OS-level overl
 
 ---
 
-## Keyboard — pending test results
-
-Run the **Key Test** app (`/apps/keytest`) and check what raw hex codes appear for each key.
-
-- [ ] **F1–F10 keys** — note the hex codes from the Key Test log and add `KEY_F1`–`KEY_F10` constants to `keyboard.h`, `BTN_F1`–`BTN_F10` to `os.h`, and wire them in `kbd_poll()`
-- [ ] Once F-key codes are known, expose `picocalc.input.BTN_F1` … `BTN_F10` constants to Lua
-
----
-
 ## System — miscellaneous
 
 - [ ] **Core 1 background tasks** — `core1_entry()` in `main.c` is an idle spin loop; candidates: audio mixing, WiFi polling, display DMA coordination
@@ -141,3 +220,31 @@ Run the **Key Test** app (`/apps/keytest`) and check what raw hex codes appear f
 ## Quality of life
 
 - [ ] Remember the position of the selected app/scrolling position when exiting an application
+- [ ] Add a loading spinner api that apps can use
+
+## Graphics APIs - For Lua
+
+- [done] Basic Context & State Management (These define how the MCU interacts with the frame buffer.)
+  - [x] graphics.clear(color): Wipes the current draw target.
+  - [x] graphics.setColor(color) / graphics.setBackgroundColor(color): Sets global draw state.
+
+- [done] Image Lifecycle & Memory (MCUs often need to distinguish between images stored in Flash (ROM) vs. those in RAM.)
+  - [x] graphics.image.new: Allocates a buffer in RAM.
+  - [x] graphics.image.load(path): Loads from SD card or SPIFFS.
+  - [x] graphics.image:getSize(): Crucial for bounds checking.
+  - [x] graphics.image:copy(): Clones an image buffer (use sparingly due to RAM).
+
+- [done] Coordinate-Based Drawing (These are the workhorses of your UI.)
+  - [x] graphics.image:draw(x, y, [flip, sourceRect]): Standard blitting.
+  - [x] graphics.image:drawAnchored(x, y, ax, ay): Simplifies UI alignment (e.g., centering text or icons).
+  - [x] graphics.image:drawTiled(rect): Great for backgrounds without using massive assets.
+
+## Optimisations
+
+- [ ] Route direct hardware calls in `lua_bridge.c` through g_api for environment portability (Medium effort)
+- [ ] Split `lua_bridge.c` into ~9 files along existing section boundaries
+- [ ] Replace tight_loop_contents() on Core 1 with __wfe() for power savings
+- [ ] Fix `display_draw_image_scaled()` to only byte-swap the affected region
+- [ ] Consider storing framebuffer in native endian, byte-swap only during DMA	
+- [ ] Disable Wifi after getting time, applications should be able to request the connection
+- [ ] Skip wifi_poll() in lua hook when WiFi is disabled

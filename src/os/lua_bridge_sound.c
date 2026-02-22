@@ -1,10 +1,12 @@
 #include "lua_bridge_internal.h"
 #include "../drivers/sound.h"
 #include "../drivers/fileplayer.h"
+#include "../drivers/mp3_player.h"
 
 #define SAMPLE_USERDATA "sound_sample"
 #define PLAYER_USERDATA "sound_player"
 #define FILEPLAYER_USERDATA "fileplayer"
+#define MP3PLAYER_USERDATA "mp3player"
 
 static sound_sample_t *check_sample(lua_State *L, int idx) {
     sound_sample_t **ud = luaL_checkudata(L, idx, SAMPLE_USERDATA);
@@ -18,6 +20,11 @@ static sound_player_t *check_player(lua_State *L, int idx) {
 
 static fileplayer_t *check_fileplayer(lua_State *L, int idx) {
     fileplayer_t **ud = luaL_checkudata(L, idx, FILEPLAYER_USERDATA);
+    return *ud;
+}
+
+static mp3_player_t *check_mp3player(lua_State *L, int idx) {
+    mp3_player_t **ud = luaL_checkudata(L, idx, MP3PLAYER_USERDATA);
     return *ud;
 }
 
@@ -271,6 +278,108 @@ static int l_sound_fileplayer_gc(lua_State *L) {
     return 0;
 }
 
+static int l_sound_mp3player_new(lua_State *L) {
+    mp3_player_t *player = mp3_player_create();
+    if (!player) {
+        lua_pushnil(L);
+        lua_pushstring(L, "failed to create mp3 player");
+        return 2;
+    }
+
+    mp3_player_t **ud = lua_newuserdata(L, sizeof(mp3_player_t *));
+    *ud = player;
+    luaL_setmetatable(L, MP3PLAYER_USERDATA);
+    return 1;
+}
+
+static int l_sound_mp3player_load(lua_State *L) {
+    mp3_player_t *player = check_mp3player(L, 1);
+    const char *path = luaL_checkstring(L, 2);
+
+    if (mp3_player_load(player, path)) {
+        lua_pushboolean(L, true);
+        return 1;
+    }
+    lua_pushnil(L);
+    lua_pushstring(L, "failed to load MP3 file");
+    return 2;
+}
+
+static int l_sound_mp3player_play(lua_State *L) {
+    mp3_player_t *player = check_mp3player(L, 1);
+    uint8_t repeat = (uint8_t)luaL_optinteger(L, 2, 1);
+    mp3_player_set_loop(player, repeat == 0);
+    if (mp3_player_play(player, repeat)) {
+        lua_pushboolean(L, true);
+        return 1;
+    }
+    lua_pushnil(L);
+    lua_pushstring(L, "failed to play");
+    return 2;
+}
+
+static int l_sound_mp3player_stop(lua_State *L) {
+    mp3_player_t *player = check_mp3player(L, 1);
+    mp3_player_stop(player);
+    return 0;
+}
+
+static int l_sound_mp3player_pause(lua_State *L) {
+    mp3_player_t *player = check_mp3player(L, 1);
+    mp3_player_pause(player);
+    return 0;
+}
+
+static int l_sound_mp3player_resume(lua_State *L) {
+    mp3_player_t *player = check_mp3player(L, 1);
+    mp3_player_resume(player);
+    return 0;
+}
+
+static int l_sound_mp3player_isPlaying(lua_State *L) {
+    mp3_player_t *player = check_mp3player(L, 1);
+    lua_pushboolean(L, mp3_player_is_playing(player));
+    return 1;
+}
+
+static int l_sound_mp3player_getPosition(lua_State *L) {
+    mp3_player_t *player = check_mp3player(L, 1);
+    lua_pushinteger(L, mp3_player_get_position(player));
+    return 1;
+}
+
+static int l_sound_mp3player_getLength(lua_State *L) {
+    mp3_player_t *player = check_mp3player(L, 1);
+    lua_pushinteger(L, mp3_player_get_length(player));
+    return 1;
+}
+
+static int l_sound_mp3player_setVolume(lua_State *L) {
+    mp3_player_t *player = check_mp3player(L, 1);
+    uint8_t vol = (uint8_t)luaL_checkinteger(L, 2);
+    mp3_player_set_volume(player, vol);
+    return 0;
+}
+
+static int l_sound_mp3player_getVolume(lua_State *L) {
+    mp3_player_t *player = check_mp3player(L, 1);
+    lua_pushinteger(L, mp3_player_get_volume(player));
+    return 1;
+}
+
+static int l_sound_mp3player_setLoop(lua_State *L) {
+    mp3_player_t *player = check_mp3player(L, 1);
+    bool loop = lua_toboolean(L, 2);
+    mp3_player_set_loop(player, loop);
+    return 0;
+}
+
+static int l_sound_mp3player_gc(lua_State *L) {
+    mp3_player_t *player = check_mp3player(L, 1);
+    mp3_player_destroy(player);
+    return 0;
+}
+
 static int l_sound_getCurrentTime(lua_State *L) {
     lua_pushinteger(L, sound_get_current_time());
     return 1;
@@ -317,10 +426,27 @@ static const luaL_Reg sound_fileplayer_methods[] = {
     {NULL, NULL}
 };
 
+static const luaL_Reg sound_mp3player_methods[] = {
+    {"load", l_sound_mp3player_load},
+    {"play", l_sound_mp3player_play},
+    {"stop", l_sound_mp3player_stop},
+    {"pause", l_sound_mp3player_pause},
+    {"resume", l_sound_mp3player_resume},
+    {"isPlaying", l_sound_mp3player_isPlaying},
+    {"getPosition", l_sound_mp3player_getPosition},
+    {"getLength", l_sound_mp3player_getLength},
+    {"setVolume", l_sound_mp3player_setVolume},
+    {"getVolume", l_sound_mp3player_getVolume},
+    {"setLoop", l_sound_mp3player_setLoop},
+    {"__gc", l_sound_mp3player_gc},
+    {NULL, NULL}
+};
+
 static const luaL_Reg sound_funcs[] = {
     {"sample", l_sound_sample_new},
     {"sampleplayer", l_sound_sampleplayer_new},
     {"fileplayer", l_sound_fileplayer_new},
+    {"mp3player", l_sound_mp3player_new},
     {"getCurrentTime", l_sound_getCurrentTime},
     {"resetTime", l_sound_resetTime},
     {NULL, NULL}
@@ -345,7 +471,14 @@ void lua_bridge_sound_init(lua_State *L) {
     luaL_setfuncs(L, sound_fileplayer_methods, 0);
     lua_pop(L, 1);
 
+    luaL_newmetatable(L, MP3PLAYER_USERDATA);
+    lua_pushvalue(L, -1);
+    lua_setfield(L, -2, "__index");
+    luaL_setfuncs(L, sound_mp3player_methods, 0);
+    lua_pop(L, 1);
+
     fileplayer_init();
+    mp3_player_init();
 
     register_subtable(L, "sound", sound_funcs);
 }

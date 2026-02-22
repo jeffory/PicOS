@@ -13,9 +13,16 @@ typedef enum {
     FILEPLAYER_STATE_STOPPED
 } fileplayer_state_t;
 
+typedef enum {
+    FILEPLAYER_TYPE_UNKNOWN = 0,
+    FILEPLAYER_TYPE_WAV,
+    FILEPLAYER_TYPE_MP3
+} fileplayer_type_t;
+
 typedef struct {
     char path[256];
     fileplayer_state_t state;
+    fileplayer_type_t type;
     uint32_t position;
     uint32_t length;
     uint8_t volume;
