@@ -138,6 +138,7 @@ add_executable(picocalc_os
     src/os/lua_bridge_perf.c
     src/os/lua_bridge_graphics.c
     src/os/lua_bridge_ui.c
+    src/os/lua_bridge_audio.c
     src/os/lua_psram_alloc.c
     src/os/system_menu.c
     src/os/screenshot.c
@@ -151,6 +152,7 @@ add_executable(picocalc_os
     src/usb/usb_msc.c
     src/os/image_decoders.cpp
     src/drivers/display.c
+    src/drivers/audio.c
     src/drivers/keyboard.c
     src/drivers/sdcard.c
     src/drivers/wifi.c
