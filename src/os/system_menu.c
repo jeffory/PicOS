@@ -458,6 +458,7 @@ void system_menu_show(lua_State *L) {
       }
       case ITEM_SCREENSHOT:
         screenshot_schedule(250);
+        kbd_clear_state();
         running = false;
         break;
       case ITEM_REBOOT:

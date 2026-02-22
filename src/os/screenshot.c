@@ -97,8 +97,8 @@ void screenshot_save(void) {
   // s_framebuffer stores RGB565 big-endian (byte-swapped for the SPI display).
   // We must un-swap to recover the original RGB565 value, then expand to 8-bit
   // and write as BGR (BMP convention).
-
-  const uint16_t *fb = display_get_front_buffer();
+  // Wait for any ongoing DMA to complete so we capture what's actually on screen.
+  const uint16_t *fb = display_get_screen_buffer();
   uint8_t row_buf[BMP_ROW_BYTES];
 
   for (int y = 0; y < BMP_HEIGHT; y++) {

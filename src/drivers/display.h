@@ -84,3 +84,8 @@ void display_darken(void);
 // before use.
 const uint16_t *display_get_framebuffer(void);
 const uint16_t *display_get_front_buffer(void);
+
+// Wait for any ongoing DMA transfer to complete and return a pointer to the
+// buffer that is currently visible on screen. This ensures screenshots capture
+// the actual displayed frame, not a buffer still being transferred.
+const uint16_t *display_get_screen_buffer(void);

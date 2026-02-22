@@ -665,3 +665,13 @@ const uint16_t *display_get_framebuffer(void) { return s_framebuffer; }
 const uint16_t *display_get_front_buffer(void) {
   return s_framebuffers[1 - s_back_buffer_idx];
 }
+
+const uint16_t *display_get_screen_buffer(void) {
+  if (s_dma_active) {
+    dma_channel_wait_for_finish_blocking(s_dma_chan);
+    lcd_spi_wait_idle();
+    lcd_cs_high();
+    s_dma_active = false;
+  }
+  return display_get_front_buffer();
+}

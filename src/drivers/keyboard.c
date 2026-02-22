@@ -36,6 +36,9 @@ static bool s_menu_pressed =
 static bool s_screenshot_pressed =
     false; // set on KEY_BRK press; cleared by kbd_consume_screenshot_press()
 
+// ── Public API
+// ────────────────────────────────────────────────────────────────
+
 // ── I2C helpers
 // ───────────────────────────────────────────────────────────────
 
@@ -60,9 +63,6 @@ static bool i2c_write_reg(uint8_t reg, uint8_t val) {
                                  KBD_I2C_TIMEOUT_US);
   return ret == 2;
 }
-
-// ── Public API
-// ────────────────────────────────────────────────────────────────
 
 bool kbd_init(void) {
   // ── Step 1: Unconditional bus clear ───────────────────────────────────────
@@ -352,4 +352,11 @@ bool kbd_consume_screenshot_press(void) {
   bool val = s_screenshot_pressed;
   s_screenshot_pressed = false;
   return val;
+}
+
+void kbd_clear_state(void) {
+  s_buttons_prev = 0;
+  s_buttons_curr = 0;
+  s_last_char = 0;
+  s_last_raw_key = 0;
 }

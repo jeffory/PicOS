@@ -89,3 +89,7 @@ bool kbd_consume_menu_press(void);
 // Returns true (once) when the Brk key (0xD0) was pressed since last call.
 // Brk is intercepted by the OS for screenshots and is never visible to apps.
 bool kbd_consume_screenshot_press(void);
+
+// Clear all keyboard state. Call this after an app exits to prevent
+// button presses in the launcher from being "inherited" by the next app.
+void kbd_clear_state(void);

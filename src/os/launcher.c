@@ -5,6 +5,7 @@
 #include "../drivers/wifi.h"
 
 #include "clock.h"
+#include "config.h"
 #include "lauxlib.h"
 #include "lua.h"
 #include "lua_bridge.h"
@@ -32,6 +33,7 @@ typedef struct {
   char description[128]; // Short description from app.json
   char version[16];
   bool has_root_filesystem; // "root-filesystem" permission
+  bool has_http;            // "http" permission
 } app_entry_t;
 
 static app_entry_t s_apps[MAX_APPS];
@@ -127,6 +129,7 @@ static void on_app_dir(const sdcard_entry_t *entry, void *user) {
     
     // Parse permissions
     app->has_root_filesystem = json_has_permission(json, "root-filesystem");
+    app->has_http = json_has_permission(json, "http");
     
     free(json);
   } else {
@@ -223,6 +226,8 @@ static bool run_app(int idx) {
   if (idx < 0 || idx >= s_app_count)
     return false;
 
+  printf("[LAUNCHER] Starting app %d, PSRAM free: %zu\n", idx, lua_psram_alloc_free_size());
+
   // Read main.lua into memory
   char main_path[160];
   snprintf(main_path, sizeof(main_path), "%s/main.lua", s_apps[idx].path);
@@ -238,12 +243,29 @@ static bool run_app(int idx) {
     return false;
   }
 
+  printf("[LAUNCHER] Loaded lua (%d bytes), PSRAM free: %zu\n", lua_len, lua_psram_alloc_free_size());
+
+  // Auto-connect WiFi if app has http permission
+  if (s_apps[idx].has_http && wifi_is_available()) {
+    if (wifi_get_status() != WIFI_STATUS_CONNECTED) {
+      const char *ssid = config_get("wifi_ssid");
+      const char *pass = config_get("wifi_pass");
+      if (ssid && ssid[0]) {
+        wifi_connect(ssid, pass ? pass : "");
+      }
+    }
+  }
+
   // Create a fresh Lua VM for this app using the PSRAM allocator
+  printf("[LAUNCHER] Creating Lua state...\n");
   lua_State *L = lua_psram_newstate();
   if (!L) {
+    printf("[LAUNCHER] FAILED: lua_psram_newstate returned NULL\n");
     free(lua_src);
     return false;
   }
+
+  printf("[LAUNCHER] Lua state created, PSRAM free: %zu\n", lua_psram_alloc_free_size());
 
   lua_bridge_register(L);
 
@@ -259,6 +281,8 @@ static bool run_app(int idx) {
   lua_newtable(L);
   lua_pushboolean(L, s_apps[idx].has_root_filesystem);
   lua_setfield(L, -2, "root_filesystem");
+  lua_pushboolean(L, s_apps[idx].has_http);
+  lua_setfield(L, -2, "http");
   lua_setglobal(L, "APP_PERMISSIONS");
 
   // Load and execute the app
@@ -339,7 +363,12 @@ void launcher_run(void) {
     }
 
     if (pressed & BTN_ENTER) {
+      size_t free_mem = lua_psram_alloc_free_size();
+      printf("[LAUNCHER] PSRAM free before launch: %zu bytes\n", free_mem);
       run_app(s_selected);
+      // Clear button state to prevent the Enter press from being
+      // inherited by the next app or file browser
+      kbd_clear_state();
       // After app exits, re-scan and redraw
       scan_apps();
       s_selected = 0;
