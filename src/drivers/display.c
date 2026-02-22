@@ -14,6 +14,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <math.h>
 
 #include "../os/image_decoders.h"
 
@@ -543,20 +544,57 @@ void display_draw_image_scaled(int x, int y, int img_w, int img_h,
   // byte-swapped (big-endian) for the 8-bit DMA path, so we need to:
   //   1. Byte-swap the affected region to native LE so TGX math is correct.
   //   2. Let TGX render.
-  //   3. Byte-swap the entire affected region back to BE for the DMA flush.
-  //
-  // For simplicity we swap the whole framebuffer before/after since TGX's
-  // blitScaledRotated can touch any pixel.
+  //   3. Byte-swap the affected region back to BE for the DMA flush.
+
+  // Calculate bounding box of transformed image to only swap affected region.
+  // Image is centered at (x, y). Transform corners, find min/max.
+  float cosa = cosf(angle);
+  float sina = sinf(angle);
+  float w = img_w * scale * 0.5f;
+  float h = img_h * scale * 0.5f;
+
+  // Transform all 4 corners and track min/max
+  float corners[4][2] = {
+    {-w, -h}, {w, -h}, {w, h}, {-w, h}
+  };
+  float min_x = x, max_x = x, min_y = y, max_y = y;
+  for (int i = 0; i < 4; i++) {
+    float tx = corners[i][0] * cosa - corners[i][1] * sina + x;
+    float ty = corners[i][0] * sina + corners[i][1] * cosa + y;
+    if (tx < min_x) min_x = tx;
+    if (tx > max_x) max_x = tx;
+    if (ty < min_y) min_y = ty;
+    if (ty > max_y) max_y = ty;
+  }
+
+  // Clamp to framebuffer bounds
+  int bx = (int)floorf(min_x);
+  int by = (int)floorf(min_y);
+  int bw = (int)ceilf(max_x - min_x);
+  int bh = (int)ceilf(max_y - min_y);
+  if (bx < 0) bx = 0;
+  if (by < 0) by = 0;
+  if (bx + bw > FB_WIDTH) bw = FB_WIDTH - bx;
+  if (by + bh > FB_HEIGHT) bh = FB_HEIGHT - by;
+  if (bw <= 0 || bh <= 0) return;
+
+  // Byte-swap only the affected region
   uint16_t *fb = s_framebuffer;
-  size_t n = FB_WIDTH * FB_HEIGHT;
-  for (size_t i = 0; i < n; i++)
-    fb[i] = (fb[i] >> 8) | (fb[i] << 8);
+  for (int row = by; row < by + bh; row++) {
+    for (int col = bx; col < bx + bw; col++) {
+      fb[row * FB_WIDTH + col] = (fb[row * FB_WIDTH + col] >> 8) | (fb[row * FB_WIDTH + col] << 8);
+    }
+  }
 
   tgx_draw_image_scaled(fb, FB_WIDTH, FB_HEIGHT, data, img_w, img_h, x, y,
                         scale, angle);
 
-  for (size_t i = 0; i < n; i++)
-    fb[i] = (fb[i] >> 8) | (fb[i] << 8);
+  // Byte-swap back only the affected region
+  for (int row = by; row < by + bh; row++) {
+    for (int col = bx; col < bx + bw; col++) {
+      fb[row * FB_WIDTH + col] = (fb[row * FB_WIDTH + col] >> 8) | (fb[row * FB_WIDTH + col] << 8);
+    }
+  }
 }
 
 void display_flush(void) {

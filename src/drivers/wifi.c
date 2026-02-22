@@ -33,6 +33,8 @@ static void sntp_cb(struct mg_connection *c, int ev, void *ev_data) {
     printf("WiFi: SNTP sync OK, time: %lld\n", *t);
     clock_sntp_set((unsigned)(*t / 1000));
     c->is_closing = 1;
+    // Disconnect after getting time to save power - apps can reconnect if needed
+    wifi_disconnect();
   } else if (ev == MG_EV_CLOSE) {
     // SNTP closed
   }
@@ -152,6 +154,11 @@ const char *wifi_get_ssid(void) { return s_ssid[0] ? s_ssid : NULL; }
 
 void wifi_poll(void) {
   if (!s_available)
+    return;
+
+  // Skip polling when disconnected to save power
+  wifi_status_t st = wifi_get_status();
+  if (st != WIFI_STATUS_CONNECTED && st != WIFI_STATUS_CONNECTING)
     return;
 
   mg_mgr_poll(&s_mgr, 0);

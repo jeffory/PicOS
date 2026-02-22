@@ -97,8 +97,9 @@ static picocalc_wifi_t s_wifi_impl = {
 static void core1_entry(void) {
   // Currently unused. Reserve Core 1 for future background tasks.
   // Do NOT touch the LCD or SPI from here without acquiring the mutex first.
+  // Use __wfe() (Wait For Event) for lower power than tight_loop_contents().
   while (true) {
-    tight_loop_contents();
+    __wfe();
   }
 }
 

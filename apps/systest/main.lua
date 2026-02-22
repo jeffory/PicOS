@@ -389,7 +389,6 @@ while true do
     -- ENTER or R: rerun tests
     if pressed & input.BTN_ENTER ~= 0 or (last_char and last_char:upper() == "R") then
         run_all_tests()
-        history = {}  -- Clear on test rerun
         last_raw = 0
         last_char = nil
     end
