@@ -155,6 +155,7 @@ add_executable(picocalc_os
     src/drivers/display.c
     src/drivers/audio.c
     src/drivers/sound.c
+    src/drivers/fileplayer.c
     src/drivers/keyboard.c
     src/drivers/sdcard.c
     src/drivers/wifi.c

@@ -1,8 +1,10 @@
 #include "lua_bridge_internal.h"
 #include "../drivers/sound.h"
+#include "../drivers/fileplayer.h"
 
 #define SAMPLE_USERDATA "sound_sample"
 #define PLAYER_USERDATA "sound_player"
+#define FILEPLAYER_USERDATA "fileplayer"
 
 static sound_sample_t *check_sample(lua_State *L, int idx) {
     sound_sample_t **ud = luaL_checkudata(L, idx, SAMPLE_USERDATA);
@@ -11,6 +13,11 @@ static sound_sample_t *check_sample(lua_State *L, int idx) {
 
 static sound_player_t *check_player(lua_State *L, int idx) {
     sound_player_t **ud = luaL_checkudata(L, idx, PLAYER_USERDATA);
+    return *ud;
+}
+
+static fileplayer_t *check_fileplayer(lua_State *L, int idx) {
+    fileplayer_t **ud = luaL_checkudata(L, idx, FILEPLAYER_USERDATA);
     return *ud;
 }
 
@@ -154,6 +161,116 @@ static int l_sound_sampleplayer_gc(lua_State *L) {
     return 0;
 }
 
+static int l_sound_fileplayer_new(lua_State *L) {
+    size_t buffer_size = luaL_optinteger(L, 1, 8192);
+    (void)buffer_size;
+
+    fileplayer_t *player = fileplayer_create();
+    if (!player) {
+        lua_pushnil(L);
+        lua_pushstring(L, "failed to create fileplayer");
+        return 2;
+    }
+
+    fileplayer_t **ud = lua_newuserdata(L, sizeof(fileplayer_t *));
+    *ud = player;
+    luaL_setmetatable(L, FILEPLAYER_USERDATA);
+    return 1;
+}
+
+static int l_sound_fileplayer_load(lua_State *L) {
+    fileplayer_t *player = check_fileplayer(L, 1);
+    const char *path = luaL_checkstring(L, 2);
+
+    if (fileplayer_load(player, path)) {
+        lua_pushboolean(L, true);
+        return 1;
+    }
+    lua_pushnil(L);
+    lua_pushstring(L, "failed to load file");
+    return 2;
+}
+
+static int l_sound_fileplayer_play(lua_State *L) {
+    fileplayer_t *player = check_fileplayer(L, 1);
+    uint8_t repeat = (uint8_t)luaL_optinteger(L, 2, 1);
+    if (fileplayer_play(player, repeat)) {
+        lua_pushboolean(L, true);
+        return 1;
+    }
+    lua_pushnil(L);
+    lua_pushstring(L, "failed to play");
+    return 2;
+}
+
+static int l_sound_fileplayer_stop(lua_State *L) {
+    fileplayer_t *player = check_fileplayer(L, 1);
+    fileplayer_stop(player);
+    return 0;
+}
+
+static int l_sound_fileplayer_pause(lua_State *L) {
+    fileplayer_t *player = check_fileplayer(L, 1);
+    fileplayer_pause(player);
+    return 0;
+}
+
+static int l_sound_fileplayer_isPlaying(lua_State *L) {
+    fileplayer_t *player = check_fileplayer(L, 1);
+    lua_pushboolean(L, fileplayer_is_playing(player));
+    return 1;
+}
+
+static int l_sound_fileplayer_getLength(lua_State *L) {
+    fileplayer_t *player = check_fileplayer(L, 1);
+    lua_pushinteger(L, fileplayer_get_length(player));
+    return 1;
+}
+
+static int l_sound_fileplayer_getOffset(lua_State *L) {
+    fileplayer_t *player = check_fileplayer(L, 1);
+    lua_pushinteger(L, fileplayer_get_offset(player));
+    return 1;
+}
+
+static int l_sound_fileplayer_setOffset(lua_State *L) {
+    fileplayer_t *player = check_fileplayer(L, 1);
+    uint32_t seconds = (uint32_t)luaL_checkinteger(L, 2);
+    fileplayer_set_offset(player, seconds);
+    return 0;
+}
+
+static int l_sound_fileplayer_setVolume(lua_State *L) {
+    fileplayer_t *player = check_fileplayer(L, 1);
+    uint8_t left = (uint8_t)luaL_checkinteger(L, 2);
+    uint8_t right = (uint8_t)luaL_optinteger(L, 3, 0);
+    fileplayer_set_volume(player, left, right);
+    return 0;
+}
+
+static int l_sound_fileplayer_getVolume(lua_State *L) {
+    fileplayer_t *player = check_fileplayer(L, 1);
+    uint8_t left, right;
+    fileplayer_get_volume(player, &left, &right);
+    lua_pushinteger(L, left);
+    lua_pushinteger(L, right);
+    return 2;
+}
+
+static int l_sound_fileplayer_setLoopRange(lua_State *L) {
+    fileplayer_t *player = check_fileplayer(L, 1);
+    uint32_t start = (uint32_t)luaL_optinteger(L, 2, 0);
+    uint32_t end = (uint32_t)luaL_optinteger(L, 3, 0);
+    fileplayer_set_loop_range(player, start, end);
+    return 0;
+}
+
+static int l_sound_fileplayer_gc(lua_State *L) {
+    fileplayer_t *player = check_fileplayer(L, 1);
+    fileplayer_destroy(player);
+    return 0;
+}
+
 static int l_sound_getCurrentTime(lua_State *L) {
     lua_pushinteger(L, sound_get_current_time());
     return 1;
@@ -184,9 +301,26 @@ static const luaL_Reg sound_player_methods[] = {
     {NULL, NULL}
 };
 
+static const luaL_Reg sound_fileplayer_methods[] = {
+    {"load", l_sound_fileplayer_load},
+    {"play", l_sound_fileplayer_play},
+    {"stop", l_sound_fileplayer_stop},
+    {"pause", l_sound_fileplayer_pause},
+    {"isPlaying", l_sound_fileplayer_isPlaying},
+    {"getLength", l_sound_fileplayer_getLength},
+    {"getOffset", l_sound_fileplayer_getOffset},
+    {"setOffset", l_sound_fileplayer_setOffset},
+    {"setVolume", l_sound_fileplayer_setVolume},
+    {"getVolume", l_sound_fileplayer_getVolume},
+    {"setLoopRange", l_sound_fileplayer_setLoopRange},
+    {"__gc", l_sound_fileplayer_gc},
+    {NULL, NULL}
+};
+
 static const luaL_Reg sound_funcs[] = {
     {"sample", l_sound_sample_new},
     {"sampleplayer", l_sound_sampleplayer_new},
+    {"fileplayer", l_sound_fileplayer_new},
     {"getCurrentTime", l_sound_getCurrentTime},
     {"resetTime", l_sound_resetTime},
     {NULL, NULL}
@@ -204,6 +338,14 @@ void lua_bridge_sound_init(lua_State *L) {
     lua_setfield(L, -2, "__index");
     luaL_setfuncs(L, sound_player_methods, 0);
     lua_pop(L, 1);
+
+    luaL_newmetatable(L, FILEPLAYER_USERDATA);
+    lua_pushvalue(L, -1);
+    lua_setfield(L, -2, "__index");
+    luaL_setfuncs(L, sound_fileplayer_methods, 0);
+    lua_pop(L, 1);
+
+    fileplayer_init();
 
     register_subtable(L, "sound", sound_funcs);
 }

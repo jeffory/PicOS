@@ -1,3 +1,6 @@
 [submodule "third_party/umm_malloc"]
 	path = third_party/umm_malloc
 	url = https://github.com/rhempel/umm_malloc.git
+[submodule "third_party/BackgroundAudio"]
+	path = third_party/BackgroundAudio
+	url = https://github.com/earlephilhower/BackgroundAudio.git
