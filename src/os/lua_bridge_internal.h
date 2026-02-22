@@ -47,3 +47,4 @@ void lua_bridge_perf_init(lua_State *L);
 void lua_bridge_graphics_init(lua_State *L);
 void lua_bridge_ui_init(lua_State *L);
 void lua_bridge_audio_init(lua_State *L);
+void lua_bridge_sound_init(lua_State *L);

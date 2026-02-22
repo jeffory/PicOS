@@ -9,6 +9,7 @@
 #include <stdio.h>
 
 #include "drivers/audio.h"
+#include "drivers/sound.h"
 #include "drivers/display.h"
 #include "drivers/http.h"
 #include "drivers/keyboard.h"
@@ -156,6 +157,7 @@ int main(void) {
   // Initialise display first so we can show progress
   display_init();
   audio_init();
+  sound_init();
   ui_draw_splash("Initialising keyboard...", NULL);
 
   bool kbd_ok = kbd_init();
