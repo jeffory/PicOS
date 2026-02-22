@@ -2,6 +2,7 @@
 #include "../drivers/display.h"
 #include "../drivers/keyboard.h"
 #include "../drivers/sdcard.h"
+#include "../drivers/wifi.h"
 #include "os.h"
 
 #include "pico/stdlib.h"
@@ -188,6 +189,7 @@ bool file_browser_show(const char *start_path, const char *root_path,
     }
 
     kbd_poll();
+    wifi_poll();
     uint32_t pressed = kbd_get_buttons_pressed();
 
     if (pressed & BTN_UP) {

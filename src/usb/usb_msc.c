@@ -4,6 +4,8 @@
 
 #include "../drivers/keyboard.h"
 #include "../drivers/sdcard.h"
+#include "../drivers/wifi.h"
+#include "../os/config.h"
 #include "../os/os.h"
 #include "../os/ui.h"
 
@@ -32,7 +34,14 @@ static bool s_msc_active = false;
 void usb_msc_enter_mode(void) {
   printf("[USB MSC] Entering USB Mass Storage mode\n");
 
-  // 1. Unmount FatFS so host can take over the SD card safely
+  // 1. Disconnect WiFi to prevent SPI contention with USB
+  bool was_connected = (wifi_get_status() == WIFI_STATUS_CONNECTED);
+  if (was_connected) {
+    printf("[USB MSC] Disconnecting WiFi...\n");
+    wifi_disconnect();
+  }
+
+  // 2. Unmount FatFS so host can take over the SD card safely
   printf("[USB MSC] Unmounting FatFS...\n");
   f_unmount("");
   s_msc_active = true;
@@ -65,6 +74,9 @@ void usb_msc_enter_mode(void) {
     uint32_t poll_start = to_ms_since_boot(get_absolute_time());
     tud_task();
     
+    // Service WiFi (if connected) to prevent lwIP timeouts
+    wifi_poll();
+    
     // Check ESC key with rate limiting to avoid I2C bus congestion
     uint32_t now = to_ms_since_boot(get_absolute_time());
     if (now - last_kbd_poll_ms >= KBD_POLL_INTERVAL_MS) {
@@ -78,7 +90,7 @@ void usb_msc_enter_mode(void) {
     
     // Check if host is still connected
     if (!tud_mounted() && poll_loop_ms > HOST_TIMEOUT_MS) {
-      printf("[USB MSC] Host disconnected for >%dms, exiting\n", HOST_TIMEOUT_MS);
+      printf("[USB MSC] Host disconnected for >%ums, exiting\n", HOST_TIMEOUT_MS);
       break;
     }
     
@@ -101,6 +113,17 @@ void usb_msc_enter_mode(void) {
   // Remount FatFS
   printf("[USB MSC] Remounting FatFS...\n");
   sdcard_remount();
+
+  // Reconnect WiFi if we were connected before
+  if (was_connected) {
+    const char *ssid = config_get("wifi_ssid");
+    const char *pass = config_get("wifi_pass");
+    if (ssid && ssid[0]) {
+      printf("[USB MSC] Reconnecting WiFi...\n");
+      wifi_connect(ssid, pass ? pass : "");
+    }
+  }
+
   printf("[USB MSC] Done\n");
 }
 
