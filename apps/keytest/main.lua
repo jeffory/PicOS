@@ -80,27 +80,27 @@ while true do
     pc.ui.drawFooter("Esc = exit", nil)
 
     -- Last raw keycode (large, prominent)
-    disp.drawText(8, 28, "Last key:", DIM, BG)
+    disp.drawText(8, 36, "Last key:", DIM, BG)
     if raw ~= 0 then
-        disp.drawText(72, 28, string.format("0x%02X  (%d)", raw, raw), YEL, BG)
+        disp.drawText(72, 36, string.format("0x%02X  (%d)", raw, raw), YEL, BG)
     else
         disp.drawText(72, 28, "--", DIM, BG)
     end
 
     -- Currently held buttons
     local held_str = btn_names(input.getButtons()) or "(none)"
-    disp.drawText(8, 42, "Held:", DIM, BG)
-    disp.drawText(56, 42, held_str, FG, BG)
+    disp.drawText(8, 50, "Held:", DIM, BG)
+    disp.drawText(56, 50, held_str, FG, BG)
 
     -- Divider + log
-    disp.fillRect(0, 56, 320, 1, disp.rgb(60, 60, 100))
-    disp.drawText(8, 60, "Event log (hex = raw STM32 keycode):", DIM, BG)
+    disp.fillRect(0, 64, 320, 1, disp.rgb(60, 60, 100))
+    disp.drawText(8, 68, "Event log (hex = raw STM32 keycode):", DIM, BG)
 
     if #history == 0 then
-        disp.drawText(8, 74, "Press any key...", DIM, BG)
+        disp.drawText(8, 82, "Press any key...", DIM, BG)
     else
         for i, entry in ipairs(history) do
-            local y = 74 + (i - 1) * 14
+            local y = 82 + (i - 1) * 14
             if y > 308 then break end
             disp.drawText(8, y, entry, i == 1 and FG or DIM, BG)
         end

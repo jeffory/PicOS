@@ -1,75 +1,55 @@
--- 3D Spinning Hexagon Demo
+-- 3D Spinning Icosahedron Demo
 -- Tests display performance with real-time 3D graphics
 
 local pc = picocalc
 local disp = picocalc.display
+local gfx = picocalc.graphics
 local input = picocalc.input
-local sys = picocalc.sys
-local perf = picocalc.perf
+local perf  = picocalc.perf
 
--- Screen center
+-- Screen centre
 local cx, cy = 160, 160
 
--- 3D hexagon vertices (in 3D space)
+-- Regular icosahedron: 12 vertices, circumradius ~50.
+-- Built from three mutually perpendicular golden rectangles.
+-- φ = (1+√5)/2 ≈ 1.618; scale so circumradius = 50:
+--   short half = 26.3,  long half = 42.5  (= φ × 26.3)
 local vertices = {
-    {x = 50, y = 0, z = 0},
-    {x = 25, y = 43.3, z = 0},
-    {x = -25, y = 43.3, z = 0},
-    {x = -50, y = 0, z = 0},
-    {x = -25, y = -43.3, z = 0},
-    {x = 25, y = -43.3, z = 0},
+     0,    26.3,  42.5,   -- 1
+     0,   -26.3,  42.5,   -- 2
+     0,    26.3, -42.5,   -- 3
+     0,   -26.3, -42.5,   -- 4
+    26.3,  42.5,   0,     -- 5
+   -26.3,  42.5,   0,     -- 6
+    26.3, -42.5,   0,     -- 7
+   -26.3, -42.5,   0,     -- 8
+    42.5,   0,    26.3,   -- 9
+   -42.5,   0,    26.3,   -- 10
+    42.5,   0,   -26.3,   -- 11
+   -42.5,   0,   -26.3,   -- 12
 }
 
--- Edges connecting vertices (hexagon outline + center lines)
+-- 30 edges (each pair listed once, lower index first)
 local edges = {
-    {1, 2}, {2, 3}, {3, 4}, {4, 5}, {5, 6}, {6, 1},  -- outer hexagon
-    {1, 4}, {2, 5}, {3, 6},  -- center cross lines
+    1,2,  1,5,  1,6,  1,9,  1,10,   -- vertex 1 fan
+    2,7,  2,8,  2,9,  2,10,          -- vertex 2 new
+    3,4,  3,5,  3,6,  3,11, 3,12,   -- vertex 3 fan
+    4,7,  4,8,  4,11, 4,12,          -- vertex 4 new
+    5,6,  5,9,  5,11,                -- vertex 5 new
+    6,10, 6,12,                       -- vertex 6 new
+    7,8,  7,9,  7,11,                -- vertex 7 new
+    8,10, 8,12,                       -- vertex 8 new
+    9,11,                             -- vertex 9 new
+    10,12,                            -- vertex 10 new
 }
 
--- Rotation angles
+-- Rotation angles (radians)
 local angleX = 0
 local angleY = 0
 local angleZ = 0
 
 -- Auto-rotate speeds (radians per frame)
 local rotSpeed = 0.02
-
--- 3D rotation matrix functions
-local function rotateX(v, angle)
-    local c, s = math.cos(angle), math.sin(angle)
-    return {
-        x = v.x,
-        y = v.y * c - v.z * s,
-        z = v.y * s + v.z * c
-    }
-end
-
-local function rotateY(v, angle)
-    local c, s = math.cos(angle), math.sin(angle)
-    return {
-        x = v.x * c + v.z * s,
-        y = v.y,
-        z = -v.x * s + v.z * c
-    }
-end
-
-local function rotateZ(v, angle)
-    local c, s = math.cos(angle), math.sin(angle)
-    return {
-        x = v.x * c - v.y * s,
-        y = v.x * s + v.y * c,
-        z = v.z
-    }
-end
-
--- 3D to 2D projection (simple perspective)
-local function project(v)
-    local scale = 200 / (200 + v.z)  -- perspective scale
-    return {
-        x = math.floor(cx + v.x * scale),
-        y = math.floor(cy + v.y * scale)
-    }
-end
 
 -- Main loop
 local mode = 1  -- 1=auto rotate, 2=manual control
@@ -79,90 +59,73 @@ local helpTimer = 0
 while true do
     perf.beginFrame()
     input.update()
-    
+
     -- Input handling
     local pressed = input.getButtonsPressed()
     if pressed & input.BTN_ESC ~= 0 then
         return  -- Exit to launcher
     end
-    
+
     if pressed & input.BTN_ENTER ~= 0 then
         mode = (mode == 1) and 2 or 1
         showHelp = true
         helpTimer = 0
     end
-    
+
     -- Update rotation
     if mode == 1 then
-        -- Auto-rotate on all axes
         angleX = angleX + rotSpeed
         angleY = angleY + rotSpeed * 0.7
         angleZ = angleZ + rotSpeed * 0.5
     else
-        -- Manual control with D-pad
         local buttons = input.getButtons()
-        if buttons & input.BTN_UP ~= 0 then angleX = angleX + 0.05 end
-        if buttons & input.BTN_DOWN ~= 0 then angleX = angleX - 0.05 end
-        if buttons & input.BTN_LEFT ~= 0 then angleY = angleY - 0.05 end
+        if buttons & input.BTN_UP    ~= 0 then angleX = angleX + 0.05 end
+        if buttons & input.BTN_DOWN  ~= 0 then angleX = angleX - 0.05 end
+        if buttons & input.BTN_LEFT  ~= 0 then angleY = angleY - 0.05 end
         if buttons & input.BTN_RIGHT ~= 0 then angleY = angleY + 0.05 end
-        if buttons & input.BTN_F1 ~= 0 then angleZ = angleZ - 0.05 end
-        if buttons & input.BTN_F2 ~= 0 then angleZ = angleZ + 0.05 end
+        if buttons & input.BTN_F1    ~= 0 then angleZ = angleZ - 0.05 end
+        if buttons & input.BTN_F2    ~= 0 then angleZ = angleZ + 0.05 end
     end
-    
-    -- Transform and project vertices
-    local projected = {}
-    for i, v in ipairs(vertices) do
-        -- Apply rotations in order: X, Y, Z
-        local rotated = rotateX(v, angleX)
-        rotated = rotateY(rotated, angleY)
-        rotated = rotateZ(rotated, angleZ)
-        projected[i] = project(rotated)
-    end
-    
+
     -- Clear screen
     disp.clear(disp.BLACK)
-    
-    -- Draw edges
-    for _, edge in ipairs(edges) do
-        local v1 = projected[edge[1]]
-        local v2 = projected[edge[2]]
-        disp.drawLine(v1.x, v1.y, v2.x, v2.y, disp.CYAN)
-    end
-    
-    -- Draw vertices as small filled circles (3x3 squares)
-    for _, v in ipairs(projected) do
-        disp.fillRect(v.x - 1, v.y - 1, 3, 3, disp.YELLOW)
-    end
-    
+
+    -- Transform, project, and draw all edges + vertex dots in one C call.
+    -- Replaces: 24 Lua function calls, 24 table allocs, 15 bridge round-trips.
+    gfx.draw3DWireframe(
+        vertices, edges,
+        angleX, angleY, angleZ,
+        cx, cy, 200,
+        disp.CYAN, disp.YELLOW, 3)
+
     -- Draw title and mode
     local modeText = mode == 1 and "AUTO" or "MANUAL"
-    pc.ui.drawHeader("3D Hexagon Test - " .. modeText)
-    
+    pc.ui.drawHeader("3D Icosahedron - " .. modeText)
+
     -- Show help for 3 seconds
     if showHelp then
         helpTimer = helpTimer + 1
-        if helpTimer < 180 then  -- ~3 seconds at 60fps
+        if helpTimer < 180 then
             local y = 230
             if mode == 1 then
                 disp.drawText(4, y, "ENTER: Manual mode", disp.GRAY, disp.BLACK)
             else
-                disp.drawText(4, y, "D-Pad: Rotate X/Y", disp.GRAY, disp.BLACK)
-                disp.drawText(4, y + 10, "F1/F2: Rotate Z", disp.GRAY, disp.BLACK)
-                disp.drawText(4, y + 20, "ENTER: Auto mode", disp.GRAY, disp.BLACK)
+                disp.drawText(4, y,      "D-Pad: Rotate X/Y", disp.GRAY, disp.BLACK)
+                disp.drawText(4, y + 10, "F1/F2: Rotate Z",   disp.GRAY, disp.BLACK)
+                disp.drawText(4, y + 20, "ENTER: Auto mode",  disp.GRAY, disp.BLACK)
             end
         else
             showHelp = false
         end
     end
-    
+
     pc.ui.drawFooter("ENTER: Toggle Mode", "ESC: Exit")
-    
+
     -- FPS counter (top right)
     perf.drawFPS(250, 4)
-    
+
     -- Flush to display
     disp.flush()
-    
+
     perf.endFrame()
-    sys.sleep(20)  -- Target ~50 FPS (1000ms / 50 = 20ms per frame)
 end

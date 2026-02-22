@@ -1,7 +1,7 @@
 {
   "id": "com.picos.3dtest",
   "name": "3D Test",
-  "description": "Spinning 3D hexagon with FPS counter",
+  "description": "Spinning 3D icosahedron with FPS counter",
   "version": "1.0.0",
   "author": "PicOS"
 }

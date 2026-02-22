@@ -193,7 +193,7 @@ local function draw_status_color(status)
 end
 
 local function draw_test_results()
-    local y = 30
+    local y = 36
     local line_height = 11
     
     for _, key in ipairs(test_order) do

@@ -1,0 +1,6 @@
+{
+    "id": "com.picos.image_viewer",
+    "name": "Image Viewer",
+    "description": "Browse images in /data/image_viewer",
+    "version": "1.0"
+}

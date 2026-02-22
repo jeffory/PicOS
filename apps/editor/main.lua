@@ -397,8 +397,12 @@ local function clamp_cursor()
     if cursor_y > tl then cursor_y = tl end
 
     if large_file then
-        -- Read-only pager: no column tracking needed
-        cursor_x = 1
+        -- Read-only pager: bounded scrolling
+        local line = get_line(cursor_y)
+        local line_len = line and #line or 0
+        if cursor_x < 1 then cursor_x = 1 end
+        if cursor_x > line_len + 1 then cursor_x = line_len + 1 end
+        
         if cursor_y - 1 < scroll_y then
             scroll_y = cursor_y - 1
         end
@@ -406,6 +410,21 @@ local function clamp_cursor()
             scroll_y = cursor_y - TEXT_ROWS
         end
         if scroll_y < 0 then scroll_y = 0 end
+        
+        -- Adjust horizontal scroll to keep cursor visible
+        if not word_wrap then
+            local visible_cols = (tl > TEXT_ROWS) and COLS_WITH_SCROLLBAR or COLS_FULL
+            if show_line_numbers then
+                visible_cols = visible_cols - LINE_NUM_WIDTH
+            end
+            if cursor_x - 1 < scroll_x then
+                scroll_x = math.max(0, cursor_x - 1)
+            elseif cursor_x - 1 >= scroll_x + visible_cols then
+                scroll_x = cursor_x - visible_cols
+            end
+        else
+            scroll_x = 0
+        end
         return
     end
 
@@ -456,13 +475,30 @@ local function move_cursor(dx, dy)
             local line_len = #lines[cursor_y]
             if cursor_x > line_len + 1 then cursor_x = line_len + 1 end
         end
-    elseif dx ~= 0 and not large_file then
+    elseif dx ~= 0 then
         cursor_x = cursor_x + dx
+        
+        local current_len
+        if large_file then
+            local ln = get_line(cursor_y)
+            current_len = ln and #ln or 0
+        else
+            current_len = #lines[cursor_y]
+        end
+        
+        local total = total_lines()
+        
         if cursor_x < 1 and cursor_y > 1 then
             cursor_y = cursor_y - 1
-            cursor_x = #lines[cursor_y] + 1
+            if large_file then
+                update_view_cache() -- Need to trigger a cache update before getting the line
+                local ln = get_line(cursor_y)
+                cursor_x = (ln and #ln or 0) + 1
+            else
+                cursor_x = #lines[cursor_y] + 1
+            end
             scroll_x = 0
-        elseif cursor_x > #lines[cursor_y] + 1 and cursor_y < #lines then
+        elseif cursor_x > current_len + 1 and cursor_y < total then
             cursor_y = cursor_y + 1
             cursor_x = 1
             scroll_x = 0
