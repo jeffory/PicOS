@@ -114,6 +114,11 @@ local function create_mock_api()
         drawFPS = function() end,
     }
     
+    local mock_ui = {
+        drawHeader = function() end,
+        drawFooter = function() end,
+    }
+
     return {
         display = mock_display,
         input = mock_input,
@@ -122,6 +127,7 @@ local function create_mock_api()
         wifi = mock_wifi,
         config = mock_config,
         perf = mock_perf,
+        ui = mock_ui,
     }
 end
 
