@@ -97,6 +97,56 @@ void ui_draw_footer(const char *left_text, const char *right_text) {
   }
 }
 
+int ui_draw_tabs(const char **tabs, int count, int active_index, int y) {
+  if (count <= 0 || !tabs)
+    return 0;
+
+  // Clamp active_index to valid range
+  if (active_index < 0)
+    active_index = 0;
+  if (active_index >= count)
+    active_index = count - 1;
+
+  const int TAB_HEIGHT = 20;
+  const int TAB_PADDING = 8;
+  const int TAB_SPACING = 4;
+
+  // Draw background and border
+  display_fill_rect(0, y, FB_WIDTH, TAB_HEIGHT, C_HEADER_BG);
+  display_fill_rect(0, y + TAB_HEIGHT, FB_WIDTH, 1, C_BORDER);
+
+  // Calculate tab widths (distribute evenly)
+  int available_width = FB_WIDTH - (TAB_PADDING * 2) - (TAB_SPACING * (count - 1));
+  int tab_width = available_width / count;
+
+  // Draw each tab
+  int x = TAB_PADDING;
+  for (int i = 0; i < count; i++) {
+    if (!tabs[i])
+      continue;
+
+    bool is_active = (i == active_index);
+    uint16_t text_color = is_active ? C_TEXT : C_TEXT_DIM;
+    
+    // Draw active tab background highlight
+    if (is_active) {
+      display_fill_rect(x - 2, y + 2, tab_width + 4, TAB_HEIGHT - 4, 
+                        RGB565(40, 40, 80));
+    }
+
+    // Center text within tab
+    int text_w = display_text_width(tabs[i]);
+    int text_x = x + (tab_width - text_w) / 2;
+    int text_y = y + (TAB_HEIGHT - 8) / 2;
+    
+    display_draw_text(text_x, text_y, tabs[i], text_color, C_HEADER_BG);
+
+    x += tab_width + TAB_SPACING;
+  }
+
+  return TAB_HEIGHT + 1; // Return total height including border
+}
+
 void ui_draw_splash(const char *status, const char *subtext) {
   display_clear(COLOR_BLACK);
 

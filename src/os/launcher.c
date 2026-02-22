@@ -31,6 +31,7 @@ typedef struct {
   char path[128];        // Full path to app directory on SD card
   char description[128]; // Short description from app.json
   char version[16];
+  bool has_root_filesystem; // "root-filesystem" permission
 } app_entry_t;
 
 static app_entry_t s_apps[MAX_APPS];
@@ -58,6 +59,37 @@ static bool json_get_string(const char *json, const char *key, char *out,
   return true;
 }
 
+static bool json_has_permission(const char *json, const char *permission) {
+  // Look for "permissions": [ ... ] array and check if permission is in it
+  const char *p = strstr(json, "\"permissions\"");
+  if (!p)
+    return false;
+  
+  // Find the opening bracket
+  while (*p && *p != '[')
+    p++;
+  if (*p != '[')
+    return false;
+  
+  // Look for the permission string within the array
+  char search[96];
+  snprintf(search, sizeof(search), "\"%s\"", permission);
+  const char *bracket_start = p;
+  
+  while (*p && *p != ']') {
+    if (strstr(p, search)) {
+      // Verify it's before the closing bracket
+      const char *found = strstr(p, search);
+      const char *bracket_end = strchr(bracket_start, ']');
+      if (found < bracket_end)
+        return true;
+    }
+    p++;
+  }
+  
+  return false;
+}
+
 static void on_app_dir(const sdcard_entry_t *entry, void *user) {
   (void)user;
   if (!entry->is_dir)
@@ -75,8 +107,9 @@ static void on_app_dir(const sdcard_entry_t *entry, void *user) {
 
   app_entry_t *app = &s_apps[s_app_count];
   snprintf(app->path, sizeof(app->path), "/apps/%s", entry->name);
+  app->has_root_filesystem = false;
 
-  // Try to load app.json for display name / description / id
+  // Try to load app.json for display name / description / id / permissions
   char json_path[160];
   snprintf(json_path, sizeof(json_path), "/apps/%s/app.json", entry->name);
   int json_len = 0;
@@ -91,6 +124,10 @@ static void on_app_dir(const sdcard_entry_t *entry, void *user) {
       app->description[0] = '\0';
     if (!json_get_string(json, "version", app->version, sizeof(app->version)))
       strncpy(app->version, "1.0", sizeof(app->version));
+    
+    // Parse permissions
+    app->has_root_filesystem = json_has_permission(json, "root-filesystem");
+    
     free(json);
   } else {
     snprintf(app->id, sizeof(app->id), "local.%s", entry->name);
@@ -217,6 +254,12 @@ static bool run_app(int idx) {
   lua_setglobal(L, "APP_NAME");
   lua_pushstring(L, s_apps[idx].id);
   lua_setglobal(L, "APP_ID");
+  
+  // Set app permissions
+  lua_newtable(L);
+  lua_pushboolean(L, s_apps[idx].has_root_filesystem);
+  lua_setfield(L, -2, "root_filesystem");
+  lua_setglobal(L, "APP_PERMISSIONS");
 
   // Load and execute the app
   display_clear(C_BG);

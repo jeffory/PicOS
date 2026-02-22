@@ -8,7 +8,7 @@
 
 // ── Filesystem sandbox
 // ──────────────────────────────────────────────────────── Apps are allowed to
-// access only two trees:
+// access only two trees (unless "root-filesystem" permission is granted):
 //   /apps/<dirname>/  — read-only (their own app bundle)
 //   /data/<dirname>/  — read + write (their own data directory)
 //
@@ -16,12 +16,27 @@
 //   APP_DIR = "/apps/editor"  → dirname = "editor"
 //
 // Relative paths and any path containing ".." are always rejected.
+//
+// Apps with the "root-filesystem" permission can access the entire SD card.
 
 bool fs_sandbox_check(lua_State *L, const char *path, bool write) {
   if (!path || path[0] != '/')
     return false; // require absolute paths
   if (strstr(path, ".."))
     return false; // reject traversal
+
+  // Check for root-filesystem permission
+  lua_getglobal(L, "APP_PERMISSIONS");
+  if (lua_istable(L, -1)) {
+    lua_getfield(L, -1, "root_filesystem");
+    bool has_root_fs = lua_toboolean(L, -1);
+    lua_pop(L, 2); // pop root_filesystem and APP_PERMISSIONS
+    if (has_root_fs) {
+      return true; // full filesystem access granted
+    }
+  } else {
+    lua_pop(L, 1); // pop APP_PERMISSIONS if not a table
+  }
 
   lua_getglobal(L, "APP_DIR");
   const char *app_dir = lua_tostring(L, -1);
