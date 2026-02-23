@@ -8,6 +8,8 @@
 #include <stdarg.h>
 #include <stdio.h>
 
+#include "drivers/audio.h"
+#include "drivers/sound.h"
 #include "drivers/display.h"
 #include "drivers/http.h"
 #include "drivers/keyboard.h"
@@ -91,6 +93,12 @@ static picocalc_wifi_t s_wifi_impl = {
     .isAvailable = wifi_is_available,
 };
 
+static picocalc_audio_t s_audio_impl = {
+    .playTone = audio_play_tone,
+    .stopTone = audio_stop_tone,
+    .setVolume = audio_set_volume,
+};
+
 // ── Core 1 entry — periodic tasks (future: audio mixing, WiFi polling)
 // ────────
 
@@ -136,7 +144,8 @@ int main(void) {
   g_api.display = &s_display_impl;
   g_api.sys = &s_sys_impl;
   g_api.wifi = &s_wifi_impl;
-  // fs and audio wired after their init below
+  g_api.audio = &s_audio_impl;
+  // fs wired after SD card init
 
   // Explicitly configure PSRAM hardware pins and XIP write logic for the Pico
   // Plus 2W before any PSRAM pointers are accessed.
@@ -147,6 +156,8 @@ int main(void) {
 
   // Initialise display first so we can show progress
   display_init();
+  audio_init();
+  sound_init();
   ui_draw_splash("Initialising keyboard...", NULL);
 
   bool kbd_ok = kbd_init();

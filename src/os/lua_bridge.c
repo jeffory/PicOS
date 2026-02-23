@@ -97,6 +97,8 @@ void lua_bridge_register(lua_State *L) {
   lua_bridge_perf_init(L);
   lua_bridge_graphics_init(L);
   lua_bridge_ui_init(L);
+  lua_bridge_audio_init(L);
+  lua_bridge_sound_init(L);
   // Set as global
   lua_setglobal(L, "picocalc");
 
