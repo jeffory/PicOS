@@ -4,7 +4,7 @@
   "description": "Nano-like text editor for PicOS",
   "version": "1.0.0",
   "author": "PicOS",
-  "permissions": [
+  "requirements": [
     "filesystem",
     "root-filesystem",
     "clipboard"
