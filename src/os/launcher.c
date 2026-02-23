@@ -1,4 +1,5 @@
 #include "launcher.h"
+#include "../drivers/audio.h"
 #include "../drivers/display.h"
 #include "../drivers/keyboard.h"
 #include "../drivers/sdcard.h"
@@ -33,8 +34,9 @@ typedef struct {
   char path[128];        // Full path to app directory on SD card
   char description[128]; // Short description from app.json
   char version[16];
-  bool has_root_filesystem; // "root-filesystem" permission
-  bool has_http;            // "http" permission
+  bool has_root_filesystem; // "root-filesystem" requirement
+  bool has_http;            // "http" requirement
+  bool has_audio;           // "audio" requirement
 } app_entry_t;
 
 static app_entry_t s_apps[MAX_APPS];
@@ -62,9 +64,9 @@ static bool json_get_string(const char *json, const char *key, char *out,
   return true;
 }
 
-static bool json_has_permission(const char *json, const char *permission) {
-  // Look for "permissions": [ ... ] array and check if permission is in it
-  const char *p = strstr(json, "\"permissions\"");
+static bool json_has_requirement(const char *json, const char *requirement) {
+  // Look for "requirements": [ ... ] array and check if requirement is in it
+  const char *p = strstr(json, "\"requirements\"");
   if (!p)
     return false;
   
@@ -74,9 +76,9 @@ static bool json_has_permission(const char *json, const char *permission) {
   if (*p != '[')
     return false;
   
-  // Look for the permission string within the array
+  // Look for the requirement string within the array
   char search[96];
-  snprintf(search, sizeof(search), "\"%s\"", permission);
+  snprintf(search, sizeof(search), "\"%s\"", requirement);
   const char *bracket_start = p;
   
   while (*p && *p != ']') {
@@ -111,8 +113,10 @@ static void on_app_dir(const sdcard_entry_t *entry, void *user) {
   app_entry_t *app = &s_apps[s_app_count];
   snprintf(app->path, sizeof(app->path), "/apps/%s", entry->name);
   app->has_root_filesystem = false;
+  app->has_http = false;
+  app->has_audio = false;
 
-  // Try to load app.json for display name / description / id / permissions
+  // Try to load app.json for display name / description / id / requirements
   char json_path[160];
   snprintf(json_path, sizeof(json_path), "/apps/%s/app.json", entry->name);
   int json_len = 0;
@@ -128,9 +132,10 @@ static void on_app_dir(const sdcard_entry_t *entry, void *user) {
     if (!json_get_string(json, "version", app->version, sizeof(app->version)))
       strncpy(app->version, "1.0", sizeof(app->version));
     
-    // Parse permissions
-    app->has_root_filesystem = json_has_permission(json, "root-filesystem");
-    app->has_http = json_has_permission(json, "http");
+    // Parse requirements
+    app->has_root_filesystem = json_has_requirement(json, "root-filesystem");
+    app->has_http = json_has_requirement(json, "http");
+    app->has_audio = json_has_requirement(json, "audio");
     
     umm_free(json);
   } else {
@@ -246,7 +251,10 @@ static bool run_app(int idx) {
 
   printf("[LAUNCHER] Loaded lua (%d bytes), PSRAM free: %zu\n", lua_len, lua_psram_alloc_free_size());
 
-  // Auto-connect WiFi if app has http permission
+  // Set HTTP requirement flag before auto-connect
+  wifi_set_http_required(s_apps[idx].has_http);
+
+  // Auto-connect WiFi if app has http requirement
   if (s_apps[idx].has_http && wifi_is_available()) {
     if (wifi_get_status() != WIFI_STATUS_CONNECTED) {
       const char *ssid = config_get("wifi_ssid");
@@ -255,6 +263,11 @@ static bool run_app(int idx) {
         wifi_connect(ssid, pass ? pass : "");
       }
     }
+  }
+
+  // Initialize audio if app has audio requirement
+  if (s_apps[idx].has_audio) {
+    audio_init();
   }
 
   // Create a fresh Lua VM for this app using the PSRAM allocator
@@ -280,13 +293,15 @@ static bool run_app(int idx) {
   lua_pushstring(L, s_apps[idx].id);
   lua_setglobal(L, "APP_ID");
   
-  // Set app permissions
+  // Set app requirements
   lua_newtable(L);
   lua_pushboolean(L, s_apps[idx].has_root_filesystem);
   lua_setfield(L, -2, "root_filesystem");
   lua_pushboolean(L, s_apps[idx].has_http);
   lua_setfield(L, -2, "http");
-  lua_setglobal(L, "APP_PERMISSIONS");
+  lua_pushboolean(L, s_apps[idx].has_audio);
+  lua_setfield(L, -2, "audio");
+  lua_setglobal(L, "APP_REQUIREMENTS");
 
   // Load and execute the app
   display_clear(C_BG);

@@ -4,7 +4,7 @@
     "description": "Browse images in /data/image_viewer",
     "version": "1.0",
     "author": "PicOS",
-    "permissions": [
+    "requirements": [
         "filesystem"
     ]
 }

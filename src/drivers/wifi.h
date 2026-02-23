@@ -50,3 +50,8 @@ const char *wifi_get_ssid(void);
 // ~256 opcodes so apps do not need to call it themselves.
 // No-op when WiFi hardware is not available.
 void wifi_poll(void);
+
+// Set whether an app with HTTP requirement is running. When true, WiFi will
+// not automatically disconnect after SNTP time sync.
+void wifi_set_http_required(bool required);
+bool wifi_get_http_required(void);

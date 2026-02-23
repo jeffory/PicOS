@@ -19,6 +19,7 @@ static wifi_status_t s_status = WIFI_STATUS_DISCONNECTED;
 static char s_ssid[64] = {0};
 static char s_pass[64] = {0};
 static char s_ip[20] = {0};
+static bool s_http_required = false;
 
 static struct mg_mgr s_mgr;
 static struct mg_tcpip_if s_ifp;
@@ -33,8 +34,9 @@ static void sntp_cb(struct mg_connection *c, int ev, void *ev_data) {
     printf("WiFi: SNTP sync OK, time: %lld\n", *t);
     clock_sntp_set((unsigned)(*t / 1000));
     c->is_closing = 1;
-    // Disconnect after getting time to save power - apps can reconnect if needed
-    wifi_disconnect();
+    if (!s_http_required) {
+      wifi_disconnect();
+    }
   } else if (ev == MG_EV_CLOSE) {
     // SNTP closed
   }
@@ -151,6 +153,9 @@ const char *wifi_get_ip(void) {
 }
 
 const char *wifi_get_ssid(void) { return s_ssid[0] ? s_ssid : NULL; }
+
+void wifi_set_http_required(bool required) { s_http_required = required; }
+bool wifi_get_http_required(void) { return s_http_required; }
 
 void wifi_poll(void) {
   if (!s_available)

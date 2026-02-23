@@ -156,7 +156,6 @@ int main(void) {
 
   // Initialise display first so we can show progress
   display_init();
-  audio_init();
   sound_init();
   ui_draw_splash("Initialising keyboard...", NULL);
 
