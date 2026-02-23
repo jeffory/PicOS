@@ -205,16 +205,22 @@ int main(void) {
 
   printf("SD card mounted OK\n");
 
+  // Initialize the PSRAM allocator BEFORE anything that uses it
+  // (config_load, WiFi, Lua, etc.)
+  lua_psram_alloc_init();
+
   // Load persisted settings from /system/config.json
   config_load();
-
-  // Initialize the PSRAM allocator for Lua (used by Mongoose and Lua)
-  lua_psram_alloc_init();
 
   // Initialise WiFi hardware (auto-connects if credentials are in config)
   ui_draw_splash("Initialising WiFi...", NULL);
   wifi_init();
   http_init();
+  
+  // Debug: check free size after WiFi/HTTP init
+  extern size_t lua_psram_alloc_free_size(void);
+  printf("[PSRAM] Free after WiFi/HTTP init: %zu bytes (%zuK)\n",
+         lua_psram_alloc_free_size(), lua_psram_alloc_free_size() / 1024);
 
   // Launch Core 1 background tasks
   multicore_launch_core1(core1_entry);

@@ -5,6 +5,7 @@
 #include "hardware/pwm.h"
 #include "pico/time.h"
 #include "pico/stdlib.h"
+#include "umm_malloc.h"
 
 #include <stdlib.h>
 #include <string.h>
@@ -53,7 +54,7 @@ static bool parse_wav_header(sound_sample_t *sample, uint8_t *data, uint32_t siz
     if (data_size > SOUND_MAX_SAMPLE_SIZE)
         data_size = SOUND_MAX_SAMPLE_SIZE;
 
-    sample->data = malloc(data_size);
+    sample->data = umm_malloc(data_size);
     if (!sample->data)
         return false;
 
@@ -126,14 +127,14 @@ void sound_sample_destroy(sound_sample_t *sample) {
     if (!sample)
         return;
     if (sample->data)
-        free(sample->data);
+        umm_free(sample->data);
     for (int i = 0; i < SOUND_MAX_SAMPLES; i++) {
         if (s_context.samples[i] == sample) {
             s_context.samples[i] = NULL;
             break;
         }
     }
-    free(sample);
+    umm_free(sample);
 }
 
 bool sound_sample_load(sound_sample_t *sample, const char *path) {
@@ -158,7 +159,7 @@ bool sound_sample_load(sound_sample_t *sample, const char *path) {
     file_size = file_size > SOUND_MAX_SAMPLE_SIZE ? SOUND_MAX_SAMPLE_SIZE : file_size;
 
     sdcard_fseek(f, 0);
-    uint8_t *data = malloc(file_size);
+    uint8_t *data = umm_malloc(file_size);
     if (!data) {
         sdcard_fclose(f);
         return false;
@@ -168,12 +169,12 @@ bool sound_sample_load(sound_sample_t *sample, const char *path) {
     sdcard_fclose(f);
 
     if (!parse_wav_header(sample, data, bytes_read)) {
-        free(data);
+        umm_free(data);
         printf("sound: failed to parse WAV\n");
         return false;
     }
 
-    free(data);
+    umm_free(data);
     printf("sound: loaded %s (%lu Hz, %u bit, %u ch)\n",
            path, sample->sample_rate, sample->bits_per_sample, sample->channels);
     return true;

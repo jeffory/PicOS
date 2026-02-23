@@ -5,11 +5,9 @@
 #include "hardware/spi.h"
 #include "hardware/gpio.h"
 
-// FatFS headers — these come from the pico-extras FatFS port
-// or your vendored third_party/fatfs directory.
-// See CMakeLists.txt for the include path configuration.
 #include "ff.h"
 #include "diskio.h"
+#include "umm_malloc.h"
 
 #include <stdlib.h>
 #include <string.h>
@@ -175,16 +173,16 @@ char *sdcard_read_file(const char *path, int *out_len) {
     int size = sdcard_fsize(path);
     if (size < 0) return NULL;
 
-    char *buf = (char *)malloc(size + 1);
+    char *buf = (char *)umm_malloc(size + 1);
     if (!buf) return NULL;
 
     sdfile_t f = sdcard_fopen(path, "rb");
-    if (!f) { free(buf); return NULL; }
+    if (!f) { umm_free(buf); return NULL; }
 
     int n = sdcard_fread(f, buf, size);
     sdcard_fclose(f);
 
-    if (n < 0) { free(buf); return NULL; }
+    if (n < 0) { umm_free(buf); return NULL; }
     buf[n] = '\0';
     if (out_len) *out_len = n;
     return buf;

@@ -6,6 +6,7 @@
 #include "pico/stdlib.h"
 #include "pico/time.h"
 #include "mp3_player.h"
+#include "umm_malloc.h"
 
 #include <string.h>
 #include <stdio.h>
@@ -58,7 +59,7 @@ static void pwm_stereo_init(uint32_t sample_rate) {
 }
 
 static void ring_buffer_init(ring_buffer_t *rb, size_t size) {
-    rb->buffer = malloc(size);
+    rb->buffer = umm_malloc(size);
     rb->size = size;
     rb->read_pos = 0;
     rb->write_pos = 0;
@@ -243,8 +244,13 @@ static bool playback_callback(repeating_timer_t *rt) {
 void fileplayer_init(void) {
     if (s_initialized) return;
 
+    printf("[FILEPLAYER] Allocating ring buffer (%d bytes)...\n", WAV_BUFFER_SIZE);
     ring_buffer_init(&s_ring_buffer, WAV_BUFFER_SIZE);
-    s_wav_buffer = malloc(WAV_BUFFER_SIZE);
+    printf("[FILEPLAYER] Ring buffer allocated\n");
+    
+    printf("[FILEPLAYER] Allocating WAV buffer (%d bytes)...\n", WAV_BUFFER_SIZE);
+    s_wav_buffer = umm_malloc(WAV_BUFFER_SIZE);
+    printf("[FILEPLAYER] WAV buffer allocated: %s\n", s_wav_buffer ? "OK" : "FAILED");
 
     memset(s_players, 0, sizeof(s_players));
 

@@ -39,6 +39,11 @@ void lua_psram_alloc_init(void) {
   umm_init_heap(s_lua_psram_heap, UMM_MALLOC_CFG_HEAP_SIZE);
   printf("PSRAM Lua Allocator Initialized: %d bytes\n",
          (int)UMM_MALLOC_CFG_HEAP_SIZE);
+  
+  // Debug: check free size immediately after init
+  size_t free_after_init = umm_free_heap_size();
+  printf("[PSRAM] Free immediately after init: %zu bytes (%zuK)\n", 
+         free_after_init, free_after_init / 1024);
 }
 
 void *lua_psram_alloc(void *ud, void *ptr, size_t osize, size_t nsize) {

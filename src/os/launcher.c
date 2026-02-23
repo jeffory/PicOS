@@ -14,6 +14,7 @@
 #include "screenshot.h"
 #include "system_menu.h"
 #include "ui.h"
+#include "umm_malloc.h"
 
 #include "pico/stdlib.h"
 
@@ -131,7 +132,7 @@ static void on_app_dir(const sdcard_entry_t *entry, void *user) {
     app->has_root_filesystem = json_has_permission(json, "root-filesystem");
     app->has_http = json_has_permission(json, "http");
     
-    free(json);
+    umm_free(json);
   } else {
     snprintf(app->id, sizeof(app->id), "local.%s", entry->name);
     strncpy(app->name, entry->name, sizeof(app->name));
@@ -261,13 +262,15 @@ static bool run_app(int idx) {
   lua_State *L = lua_psram_newstate();
   if (!L) {
     printf("[LAUNCHER] FAILED: lua_psram_newstate returned NULL\n");
-    free(lua_src);
+    umm_free(lua_src);
     return false;
   }
 
   printf("[LAUNCHER] Lua state created, PSRAM free: %zu\n", lua_psram_alloc_free_size());
 
+  printf("[LAUNCHER] Calling lua_bridge_register...\n");
   lua_bridge_register(L);
+  printf("[LAUNCHER] lua_bridge_register done, PSRAM free: %zu\n", lua_psram_alloc_free_size());
 
   // Set app working directory as a global
   lua_pushstring(L, s_apps[idx].path);
@@ -290,7 +293,7 @@ static bool run_app(int idx) {
   display_flush();
 
   int load_err = luaL_loadbuffer(L, lua_src, lua_len, s_apps[idx].name);
-  free(lua_src);
+  umm_free(lua_src);
 
   if (load_err != LUA_OK) {
     lua_bridge_show_error(L, "Load error:");

@@ -145,11 +145,13 @@ static bool playback_callback(repeating_timer_t *rt) {
 bool mp3_player_init(void) {
     if (s_initialized) return true;
     
+    printf("[MP3] Initializing decoder...\n");
     s_decoder = MP3InitDecoder();
     if (!s_decoder) {
-        printf("mp3_player: failed to init decoder\n");
+        printf("[MP3] FAILED to init decoder\n");
         return false;
     }
+    printf("[MP3] Decoder initialized OK\n");
     
     memset(&s_player, 0, sizeof(s_player));
     s_player.volume = 100;
