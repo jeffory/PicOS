@@ -1,12 +1,17 @@
 #ifndef MBEDTLS_CONFIG_H
 #define MBEDTLS_CONFIG_H
 
+#include <stddef.h>
+extern void *umm_malloc(size_t size);
+extern void *umm_calloc(size_t num, size_t size);
+extern void umm_free(void *ptr);
+
 // System support
 #define MBEDTLS_PLATFORM_C
 #define MBEDTLS_PLATFORM_MEMORY
-#define MBEDTLS_PLATFORM_FREE_MACRO        free
-#define MBEDTLS_PLATFORM_MALLOC_MACRO      malloc
-#define MBEDTLS_PLATFORM_CALLOC_MACRO      calloc
+#define MBEDTLS_PLATFORM_FREE_MACRO        umm_free
+#define MBEDTLS_PLATFORM_MALLOC_MACRO      umm_malloc
+#define MBEDTLS_PLATFORM_CALLOC_MACRO      umm_calloc
 #define MBEDTLS_PLATFORM_EXIT_ALT
 #define MBEDTLS_NO_PLATFORM_ENTROPY        // disable /dev/urandom etc.
 #define MBEDTLS_ENTROPY_HARDWARE_ALT       // use pico_mbedtls mbedtls_hardware_poll (get_rand_64)
