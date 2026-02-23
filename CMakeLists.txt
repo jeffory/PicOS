@@ -138,6 +138,8 @@ add_executable(picocalc_os
     src/os/lua_bridge_perf.c
     src/os/lua_bridge_graphics.c
     src/os/lua_bridge_ui.c
+    src/os/lua_bridge_audio.c
+    src/os/lua_bridge_sound.c
     src/os/lua_psram_alloc.c
     src/os/system_menu.c
     src/os/screenshot.c
@@ -151,11 +153,30 @@ add_executable(picocalc_os
     src/usb/usb_msc.c
     src/os/image_decoders.cpp
     src/drivers/display.c
+    src/drivers/audio.c
+    src/drivers/sound.c
+    src/drivers/fileplayer.c
+    src/drivers/mp3_player.c
     src/drivers/keyboard.c
     src/drivers/sdcard.c
     src/drivers/wifi.c
     src/drivers/http.c
     third_party/mongoose/mongoose.c
+    third_party/picomp3lib/src/bitstream.c
+    third_party/picomp3lib/src/buffers.c
+    third_party/picomp3lib/src/dct32.c
+    third_party/picomp3lib/src/dequant.c
+    third_party/picomp3lib/src/dqchan.c
+    third_party/picomp3lib/src/huffman.c
+    third_party/picomp3lib/src/hufftabs.c
+    third_party/picomp3lib/src/imdct.c
+    third_party/picomp3lib/src/mp3dec.c
+    third_party/picomp3lib/src/mp3tabs.c
+    third_party/picomp3lib/src/polyphase.c
+    third_party/picomp3lib/src/scalfact.c
+    third_party/picomp3lib/src/stproc.c
+    third_party/picomp3lib/src/subband.c
+    third_party/picomp3lib/src/trigtabs.c
     third_party/umm_malloc/src/umm_malloc.c
 )
 
@@ -166,6 +187,8 @@ target_include_directories(picocalc_os PRIVATE
     src/drivers/
     third_party/mongoose/
     third_party/umm_malloc/src/
+    third_party/picomp3lib/src/
+    third_party/picomp3lib/interface/
 )
 
 target_link_libraries(picocalc_os
@@ -230,6 +253,7 @@ target_compile_definitions(picocalc_os PRIVATE
     PICO_RP2350=1
     PICO_STACK_SIZE=4096  # Reduced to 4KB to fit in SCRATCH_X/Y
     MG_ENABLE_MBEDTLS=1
+    __ARMEL__=1            # For picomp3lib MP3 decoder
     # Re-enable pico_stdio_usb features that get auto-disabled when
     # tinyusb_device is linked directly. We provide our own descriptors
     # (tusb_config.h + usb_descriptors.c with CDC+MSC) but still want

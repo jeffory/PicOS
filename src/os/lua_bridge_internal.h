@@ -2,6 +2,7 @@
 #include "lua_bridge.h"
 
 // All original lua_bridge.c includes to be shared
+#include "../drivers/audio.h"
 #include "../drivers/display.h"
 #include "../drivers/http.h"
 #include "../drivers/keyboard.h"
@@ -45,3 +46,5 @@ void lua_bridge_config_init(lua_State *L);
 void lua_bridge_perf_init(lua_State *L);
 void lua_bridge_graphics_init(lua_State *L);
 void lua_bridge_ui_init(lua_State *L);
+void lua_bridge_audio_init(lua_State *L);
+void lua_bridge_sound_init(lua_State *L);
