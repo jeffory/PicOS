@@ -1,5 +1,6 @@
 #include "config.h"
 #include "../drivers/sdcard.h"
+#include "umm_malloc.h"
 
 #include <string.h>
 #include <stdio.h>
@@ -134,16 +135,14 @@ bool config_load(void) {
         }
     }
 
-    free(json);
+    umm_free(json);
     printf("Config: loaded %d entries from %s\n", s_count, CONFIG_PATH);
     return true;
 }
 
 bool config_save(void) {
-    // Worst-case: every character in every key+value needs escaping (2x), plus
-    // JSON overhead (quotes, colon, comma) of 8 bytes per entry.
     int  cap = s_count * (2 * (CONFIG_KEY_MAX + CONFIG_VAL_MAX) + 8) + 4;
-    char *buf = (char *)malloc(cap);
+    char *buf = (char *)umm_malloc(cap);
     if (!buf) return false;
     int  pos = 0;
 
@@ -151,7 +150,6 @@ bool config_save(void) {
     for (int i = 0; i < s_count; i++) {
         if (i > 0) buf[pos++] = ',';
 
-        // Write "key":"value" — escape any '"' and '\' in key/val
         buf[pos++] = '"';
         for (const char *k = s_entries[i].key; *k; k++) {
             if (*k == '"' || *k == '\\') buf[pos++] = '\\';
@@ -174,12 +172,12 @@ bool config_save(void) {
     sdfile_t f = sdcard_fopen(CONFIG_PATH, "w");
     if (!f) {
         printf("Config: failed to open %s for writing\n", CONFIG_PATH);
-        free(buf);
+        umm_free(buf);
         return false;
     }
     int written = sdcard_fwrite(f, buf, pos);
     sdcard_fclose(f);
-    free(buf);
+    umm_free(buf);
 
     if (written != pos) {
         printf("Config: write truncated (%d/%d)\n", written, pos);

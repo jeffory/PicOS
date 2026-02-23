@@ -5,6 +5,7 @@
 
 #include "../drivers/sdcard.h"
 #include "file_browser.h"
+#include "umm_malloc.h"
 
 // ── Filesystem sandbox
 // ──────────────────────────────────────────────────────── Apps are allowed to
@@ -148,7 +149,7 @@ static int l_fs_readFile(lua_State *L) {
     return 1;
   }
   lua_pushlstring(L, buf, len);
-  free(buf);
+  umm_free(buf);
   return 1;
 }
 
