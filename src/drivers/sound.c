@@ -274,6 +274,10 @@ void sound_player_set_volume(sound_player_t *player, uint8_t volume) {
     player->volume = volume;
 }
 
+uint8_t sound_player_get_volume(const sound_player_t *player) {
+    return player ? player->volume : 0;
+}
+
 bool sound_player_is_playing(const sound_player_t *player) {
     return player && player->playing;
 }

@@ -35,9 +35,9 @@ These are fully implemented in C but missing from `lua_bridge.c`. All are quick 
 
 ## `g_api` struct not fully wired in `main.c`
 
-`g_api.fs` and `g_api.wifi` are never assigned in `main.c` (left NULL).
+`g_api.fs` is never assigned in `main.c` (left NULL).
 The Lua bridge calls C functions directly so Lua is unaffected, but the C app loader
-(future) will need these populated.
+(future) will need this populated.
 
 - [ ] Wire `g_api.fs = &s_fs_impl` once a `picocalc_fs_t` struct is built
 - [x] Wire `g_api.audio` — implemented in this commit

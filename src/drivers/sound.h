@@ -47,6 +47,7 @@ bool sound_player_set_sample(sound_player_t *player, sound_sample_t *sample);
 void sound_player_play(sound_player_t *player, uint8_t repeat_count);
 void sound_player_stop(sound_player_t *player);
 void sound_player_set_volume(sound_player_t *player, uint8_t volume);
+uint8_t sound_player_get_volume(const sound_player_t *player);
 bool sound_player_is_playing(const sound_player_t *player);
 
 uint32_t sound_get_current_time(void);

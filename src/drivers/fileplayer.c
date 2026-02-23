@@ -25,6 +25,7 @@ static ring_buffer_t s_ring_buffer;
 static fileplayer_t s_players[FILEPLAYER_MAX_INSTANCES];
 static fileplayer_t *s_active_player = NULL;
 static repeating_timer_t s_playback_timer;
+static repeating_timer_t s_buffer_timer;
 static bool s_timer_active = false;
 static uint32_t s_sample_rate = 44100;
 static uint8_t s_volume_l = 100;
@@ -206,30 +207,33 @@ static bool playback_callback(repeating_timer_t *rt) {
         return true;
     }
 
-    size_t bytes_per_sample = 2 * 2;
+    size_t bytes_per_sample = 2 * s_active_player->channels;
     size_t to_read = bytes_per_sample;
 
     if (ring_buffer_available(&s_ring_buffer) < to_read) {
         return true;
     }
 
-    uint8_t sample_buf[4];
+    uint8_t sample_buf[8];
     if (ring_buffer_read(&s_ring_buffer, sample_buf, to_read) < to_read) {
         return true;
     }
 
     int16_t left = *(int16_t *)sample_buf;
-    int16_t right = (s_active_player->state == FILEPLAYER_STATE_PLAYING) ?
+    int16_t right = (s_active_player->channels >= 2) ?
         *(int16_t *)(sample_buf + 2) : left;
 
     int32_t left_val = ((int32_t)left + 32768) * s_volume_l / 100;
     int32_t right_val = ((int32_t)right + 32768) * s_volume_r / 100;
 
-    left_val = (left_val * 128) / 255;
-    right_val = (right_val * 128) / 255;
+    left_val = ((uint64_t)left_val * 128) / 255;
+    right_val = ((uint64_t)right_val * 128) / 255;
 
-    pwm_set_gpio_level(AUDIO_PIN_L, left_val);
-    pwm_set_gpio_level(AUDIO_PIN_R, right_val);
+    if (left_val > 255) left_val = 255;
+    if (right_val > 255) right_val = 255;
+
+    pwm_set_gpio_level(AUDIO_PIN_L, (uint8_t)left_val);
+    pwm_set_gpio_level(AUDIO_PIN_R, (uint8_t)right_val);
 
     s_active_player->position += to_read;
 
@@ -252,6 +256,7 @@ fileplayer_t *fileplayer_create(void) {
         if (s_players[i].state == FILEPLAYER_STATE_IDLE) {
             memset(&s_players[i], 0, sizeof(fileplayer_t));
             s_players[i].volume = 100;
+            s_players[i].channels = 2;
             return &s_players[i];
         }
     }
@@ -299,8 +304,8 @@ bool fileplayer_load(fileplayer_t *player, const char *path) {
     }
 
     uint32_t sample_rate = 44100, data_size = 0;
-    uint16_t channels = 2, bits = 16;
-    if (!parse_wav_header(s_current_file, &sample_rate, &channels, &bits, &data_size)) {
+    uint16_t wav_channels = 2, bits = 16;
+    if (!parse_wav_header(s_current_file, &sample_rate, &wav_channels, &bits, &data_size)) {
         sdcard_fclose(s_current_file);
         s_current_file = NULL;
         printf("fileplayer: failed to parse WAV\n");
@@ -308,11 +313,12 @@ bool fileplayer_load(fileplayer_t *player, const char *path) {
     }
 
     s_sample_rate = sample_rate;
-    player->length = data_size / (channels * bits / 8);
+    player->channels = wav_channels;
+    player->length = data_size / (wav_channels * bits / 8);
     player->position = 0;
 
     printf("fileplayer: loaded %s (%lu Hz, %u bit, %u ch, %lu samples)\n",
-           path, sample_rate, bits, channels, player->length);
+           path, sample_rate, bits, wav_channels, player->length);
 
     return true;
 }
@@ -329,7 +335,7 @@ bool fileplayer_play(fileplayer_t *player, uint8_t repeat_count) {
     if (!s_timer_active) {
         int interval_us = 1000000 / s_sample_rate;
         add_repeating_timer_us(-interval_us, playback_callback, NULL, &s_playback_timer);
-        add_repeating_timer_us(-10000, fill_buffer_callback, NULL, NULL);
+        add_repeating_timer_us(-10000, fill_buffer_callback, NULL, &s_buffer_timer);
         s_timer_active = true;
     }
 
@@ -347,6 +353,20 @@ void fileplayer_stop(fileplayer_t *player) {
 
     if (s_active_player == player) {
         s_active_player = NULL;
+    }
+
+    bool any_playing = false;
+    for (int i = 0; i < FILEPLAYER_MAX_INSTANCES; i++) {
+        if (s_players[i].state == FILEPLAYER_STATE_PLAYING) {
+            any_playing = true;
+            break;
+        }
+    }
+
+    if (!any_playing && s_timer_active) {
+        cancel_repeating_timer(&s_playback_timer);
+        cancel_repeating_timer(&s_buffer_timer);
+        s_timer_active = false;
     }
 
     if (s_current_file) {

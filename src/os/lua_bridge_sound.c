@@ -158,7 +158,7 @@ static int l_sound_sampleplayer_setVolume(lua_State *L) {
 
 static int l_sound_sampleplayer_getVolume(lua_State *L) {
     sound_player_t *player = check_player(L, 1);
-    lua_pushinteger(L, player->volume);
+    lua_pushinteger(L, sound_player_get_volume(player));
     return 1;
 }
 

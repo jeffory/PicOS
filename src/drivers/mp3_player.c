@@ -127,11 +127,14 @@ static bool playback_callback(repeating_timer_t *rt) {
         int32_t left_val = ((int32_t)left + 32768) * s_player.volume / 100;
         int32_t right_val = ((int32_t)right + 32768) * s_player.volume / 100;
 
-        left_val = (left_val * 128) / 255;
-        right_val = (right_val * 128) / 255;
+        left_val = ((uint64_t)left_val * 128) / 255;
+        right_val = ((uint64_t)right_val * 128) / 255;
+        
+        if (left_val > 255) left_val = 255;
+        if (right_val > 255) right_val = 255;
 
-        pwm_set_gpio_level(AUDIO_PIN_L, left_val);
-        pwm_set_gpio_level(AUDIO_PIN_R, right_val);
+        pwm_set_gpio_level(AUDIO_PIN_L, (uint8_t)left_val);
+        pwm_set_gpio_level(AUDIO_PIN_R, (uint8_t)right_val);
         
         s_player.position += info.outputSamps;
     }

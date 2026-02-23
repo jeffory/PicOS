@@ -26,6 +26,7 @@ typedef struct {
     uint32_t position;
     uint32_t length;
     uint8_t volume;
+    uint8_t channels;
     bool loop;
     uint32_t loop_start;
     uint32_t loop_end;
