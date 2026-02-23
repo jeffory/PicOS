@@ -259,6 +259,12 @@ static bool start_request(http_conn_t *c, const char *method, const char *path,
     struct mg_tls_opts opts = {0};
     opts.name = mg_str(c->server);
     mg_tls_init(nc, &opts);
+    if (!nc->is_tls_hs) {
+      printf("[HTTP] TLS handshake init failed!\n");
+      conn_fail(c, "TLS init failed");
+      mg_close_conn(nc);
+      return false;
+    }
   }
 
   c->pcb = (void *)nc;

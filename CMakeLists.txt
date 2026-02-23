@@ -5,6 +5,10 @@ cmake_minimum_required(VERSION 3.13)
 # or "pico" for original Pico (note: very little RAM for Lua + framebuffer)
 set(PICO_BOARD pimoroni_pico_plus2_w_rp2350 CACHE STRING "Target board")
 
+# ── Custom mbedtls config (must be set before pico_sdk_init) ──────────────────
+# Routes mbedtls allocations to PSRAM via umm_malloc instead of SRAM
+set(PICO_MBEDTLS_CONFIG_FILE "${CMAKE_SOURCE_DIR}/src/mbedtls_config.h" CACHE STRING "Custom mbedtls config" FORCE)
+
 # Pull in Pico SDK (must be done before project())
 include(pico_sdk_import.cmake)
 
