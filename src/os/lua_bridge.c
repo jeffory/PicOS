@@ -138,17 +138,19 @@ void lua_bridge_show_error(lua_State *L, const char *context) {
                     COLOR_BLACK);
   display_flush();
 
-  // Drain any keys already held when the error occurred
-  do {
+  // Drain any keys already held when the error occurred.
+  // Timeout after ~2s in case the keyboard I2C is dead and state is stale.
+  for (int drain = 0; drain < 125 && kbd_get_buttons(); drain++) {
     kbd_poll();
     sleep_ms(16);
-  } while (kbd_get_buttons());
+  }
+  kbd_clear_state();
 
-  // Wait specifically for Esc before returning
-  while (true) {
+  // Wait specifically for Esc before returning.
+  // Timeout after ~30s so a dead keyboard doesn't block the launcher forever.
+  for (int wait = 0; wait < 1875; wait++) {
     kbd_poll();
-    uint32_t btns = kbd_get_buttons();
-    if (btns & BTN_ESC)
+    if (kbd_get_buttons() & BTN_ESC)
       break;
     sleep_ms(16);
   }
