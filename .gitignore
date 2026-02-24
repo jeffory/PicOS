@@ -10,5 +10,7 @@ third_party/fatfs/ffunicode.c
 third_party/fatfs/diskio.h
 third_party/umm_malloc/*
 .vscode/
+SDK-Planning.md
 SDK.md
+Code Review.md
 review.md

@@ -7,3 +7,6 @@
 [submodule "third_party/picomp3lib"]
 	path = third_party/picomp3lib
 	url = https://github.com/ikjordan/picomp3lib.git
+[submodule "docs"]
+	path = docs
+	url = https://github.com/jeffory/PicOS.wiki.git
