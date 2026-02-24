@@ -1,0 +1,10 @@
+{
+    "id": "com.picos.wikipedia",
+    "name": "Wikipedia",
+    "author": "PicOS",
+    "description": "Encyclopedia reader for PicOS",
+    "version": "1.0.0",
+    "requirements": [
+        "http"
+    ]
+}
