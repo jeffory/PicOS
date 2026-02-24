@@ -1,3 +1,6 @@
+[submodule "third_party/AnimatedGIF"]
+	path = third_party/AnimatedGIF
+	url = https://github.com/bitbank2/AnimatedGIF.git
 [submodule "third_party/umm_malloc"]
 	path = third_party/umm_malloc
 	url = https://github.com/rhempel/umm_malloc.git
@@ -7,6 +10,15 @@
 [submodule "third_party/picomp3lib"]
 	path = third_party/picomp3lib
 	url = https://github.com/ikjordan/picomp3lib.git
+[submodule "third_party/JPEGDEC"]
+	path = third_party/JPEGDEC
+	url = https://github.com/bitbank2/JPEGDEC.git
+[submodule "third_party/PNGdec"]
+	path = third_party/PNGdec
+	url = https://github.com/bitbank2/PNGdec.git
+[submodule "third_party/tgx"]
+	path = third_party/tgx
+	url = https://github.com/vindar/tgx.git
 [submodule "docs"]
 	path = docs
 	url = https://github.com/jeffory/PicOS.wiki.git
