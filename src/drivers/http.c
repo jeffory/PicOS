@@ -81,8 +81,9 @@ static void fn(struct mg_connection *nc, int ev, void *ev_data) {
               "%s %s HTTP/1.1\r\n"
               "Host: %s\r\n"
               "User-Agent: PicOS/1.0\r\n"
-              "Connection: close\r\n",
-              c->method, c->path, c->server);
+              "Connection: %s\r\n",
+              c->method, c->path, c->server,
+              c->keep_alive ? "keep-alive" : "close");
 
     if (c->extra_hdrs) {
       mg_printf(nc, "%s", c->extra_hdrs);
@@ -118,7 +119,9 @@ static void fn(struct mg_connection *nc, int ev, void *ev_data) {
     c->state = HTTP_STATE_DONE;
     c->pending |= HTTP_CB_COMPLETE;
 
-    nc->is_closing = 1;
+    if (!c->keep_alive) {
+      nc->is_closing = 1;
+    }
   } else if (ev == MG_EV_ERROR) {
     // If state is DONE, we got the data, so ignore this error (often late TLS
     // recv error)
@@ -243,6 +246,27 @@ static bool start_request(http_conn_t *c, const char *method, const char *path,
   umm_free(c->tx_buf);
   c->tx_buf = body ? http_strdup(body) : NULL;
   c->tx_len = (uint32_t)body_len;
+
+  if (c->keep_alive && c->pcb != NULL) {
+    struct mg_connection *nc = (struct mg_connection *)c->pcb;
+    c->state = HTTP_STATE_SENDING;
+    c->pending = 0;
+    printf("[HTTP] Reusing connection for %s %s\n", c->method, c->path);
+    mg_printf(nc,
+              "%s %s HTTP/1.1\r\n"
+              "Host: %s\r\n"
+              "User-Agent: PicOS/1.0\r\n"
+              "Connection: keep-alive\r\n",
+              c->method, c->path, c->server);
+    if (c->extra_hdrs) mg_printf(nc, "%s", c->extra_hdrs);
+    if (c->tx_buf && c->tx_len > 0) {
+      mg_printf(nc, "Content-Length: %u\r\n\r\n", (unsigned)c->tx_len);
+      mg_send(nc, c->tx_buf, c->tx_len);
+    } else {
+      mg_printf(nc, "\r\n");
+    }
+    return true;
+  }
 
   char url[320];
   snprintf(url, sizeof(url), "%s://%s:%u", c->use_ssl ? "https" : "http",

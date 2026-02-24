@@ -83,7 +83,7 @@ void wifi_init(void) {
   s_ifp.driver = &mg_tcpip_driver_pico_w;
   s_ifp.driver_data = &s_driver_data;
   s_ifp.pfn = tcpip_cb;
-  s_ifp.recv_queue.size = 4096;
+  s_ifp.recv_queue.size = 8192;
 
   mg_tcpip_init(&s_mgr, &s_ifp);
   s_ifp.pfn = tcpip_cb; // Ensure our callback is set
