@@ -1,0 +1,59 @@
+# Lua SDK Reference
+
+This document provides a complete reference for all Lua APIs available to PicOS apps.
+
+## API Sections
+
+- [[Global Variables and Permissions]]
+- [[API Display and Graphics]] — Graphics & Display
+- [[API Input]] — Keyboard & Button Input
+- [[API System and Config]] — System Functions & Persistent Config
+- [[API Filesystem]] — Filesystem (SD Card)
+- [[API UI]] — Standard UI Components
+- [[API Network and WiFi]] — WiFi & HTTP Client
+- [[API Audio and Sound]] — Audio Playback (WAV, MP3) & Tones
+- [[API Performance]] — Performance Monitoring
+- [[Standard Lua Libraries]]
+
+---
+
+## Example: Complete Game Loop
+
+```lua
+-- Initialize
+local x, y = 160, 160
+local color = picocalc.display.WHITE
+
+-- Main loop
+while true do
+    picocalc.perf.beginFrame()
+    picocalc.input.update()
+    
+    -- Handle input
+    local pressed = picocalc.input.getButtonsPressed()
+    if pressed & picocalc.input.BTN_UP ~= 0 then y = y - 5 end
+    if pressed & picocalc.input.BTN_DOWN ~= 0 then y = y + 5 end
+    if pressed & picocalc.input.BTN_ESC ~= 0 then return end
+    
+    -- Draw
+    picocalc.display.clear(picocalc.display.BLACK)
+    picocalc.display.fillRect(x - 10, y - 10, 20, 20, color)
+    picocalc.perf.drawFPS()
+    picocalc.display.flush()
+    
+    picocalc.perf.endFrame()
+    picocalc.sys.sleep(16)  -- ~60 FPS
+end
+```
+
+---
+
+## Notes
+
+- The display uses a **double-buffered framebuffer in PSRAM** (2× 200 KB). DMA flushes run in the background while the CPU draws the next frame.
+- Call `picocalc.input.update()` and `picocalc.display.flush()` **once per frame**.
+- The Menu key (F10) is automatically intercepted by the OS to show the system menu overlay.
+- All file paths must be absolute (e.g., `"/apps/myapp/data.txt"` or `APP_DIR .. "/data.txt"`).
+- Use `picocalc.fs.appPath("filename")` for per-app data storage — it auto-creates the directory.
+- Without `root-filesystem` permission, file access is sandboxed to your app's directory and `/data/<appid>/`.
+- Config data is shared across all apps — use namespaced keys (e.g., `"myapp.highscore"`).
