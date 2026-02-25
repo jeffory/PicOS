@@ -145,7 +145,7 @@ int main(void) {
   for (int i = 0; i < 30 && !stdio_usb_connected(); i++)
     sleep_ms(100);
 
-  printf("\n--- PicoCalc OS booting ---\n");
+  printf("\n--- PicOS booting ---\n");
 
   // Wire up the global API struct
   g_api.input = &s_input_impl;

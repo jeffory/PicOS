@@ -173,7 +173,7 @@ void launcher_refresh_apps(void) {
 #define C_BATTERY_LO COLOR_RED
 #define C_BORDER RGB565(60, 60, 100)
 
-static void draw_header(void) { ui_draw_header("PicoCalc OS"); }
+static void draw_header(void) { ui_draw_header("PicOS"); }
 
 static void draw_footer(void) {
   ui_draw_footer("Enter:Launch  Esc:Exit app  F10:Menu", NULL);

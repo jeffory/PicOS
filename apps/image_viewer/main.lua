@@ -1,4 +1,4 @@
--- Image Viewer for PicoCalc OS
+-- Image Viewer for PicOS
 -- Browse directories and view images in /data/image_viewer
 
 local pc    = picocalc
