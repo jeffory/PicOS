@@ -1,4 +1,8 @@
 #include "launcher.h"
+#include "launcher_types.h"
+#include "app_runner.h"
+#include "lua_runner.h"
+#include "native_loader.h"
 #include "../drivers/audio.h"
 #include "../drivers/display.h"
 #include "../drivers/keyboard.h"
@@ -7,11 +11,7 @@
 
 #include "clock.h"
 #include "config.h"
-#include "lauxlib.h"
-#include "lua.h"
-#include "lua_bridge.h"
 #include "lua_psram_alloc.h"
-#include "lualib.h"
 #include "screenshot.h"
 #include "system_menu.h"
 #include "ui.h"
@@ -28,22 +28,11 @@
 
 #define MAX_APPS 32
 
-typedef struct {
-  char id[80];           // Reverse DNS app ID (e.g., "com.picos.editor")
-  char name[64];         // Display name from app.json
-  char path[128];        // Full path to app directory on SD card
-  char description[128]; // Short description from app.json
-  char version[16];
-  bool has_root_filesystem; // "root-filesystem" requirement
-  bool has_http;            // "http" requirement
-  bool has_audio;           // "audio" requirement
-} app_entry_t;
-
 static app_entry_t s_apps[MAX_APPS];
 static int s_app_count = 0;
 
-// Tiny JSON parser - just enough to pull "name", "description", "version"
-// from a simple flat JSON object. Not a full parser.
+// Tiny JSON parser — just enough to pull "name", "description", "version"
+// from a simple flat JSON object.  Not a full parser.
 static bool json_get_string(const char *json, const char *key, char *out,
                             int out_len) {
   char search[64];
@@ -65,33 +54,27 @@ static bool json_get_string(const char *json, const char *key, char *out,
 }
 
 static bool json_has_requirement(const char *json, const char *requirement) {
-  // Look for "requirements": [ ... ] array and check if requirement is in it
   const char *p = strstr(json, "\"requirements\"");
   if (!p)
     return false;
-  
-  // Find the opening bracket
   while (*p && *p != '[')
     p++;
   if (*p != '[')
     return false;
-  
-  // Look for the requirement string within the array
+
   char search[96];
   snprintf(search, sizeof(search), "\"%s\"", requirement);
   const char *bracket_start = p;
-  
+
   while (*p && *p != ']') {
     if (strstr(p, search)) {
-      // Verify it's before the closing bracket
-      const char *found = strstr(p, search);
+      const char *found      = strstr(p, search);
       const char *bracket_end = strchr(bracket_start, ']');
       if (found < bracket_end)
         return true;
     }
     p++;
   }
-  
   return false;
 }
 
@@ -104,17 +87,27 @@ static void on_app_dir(const sdcard_entry_t *entry, void *user) {
   if (s_app_count >= MAX_APPS)
     return;
 
-  // Check that main.lua exists
-  char main_path[160];
-  snprintf(main_path, sizeof(main_path), "/apps/%s/main.lua", entry->name);
-  if (!sdcard_fexists(main_path))
+  // Detect available runtimes
+  char lua_path[160], elf_path[160];
+  snprintf(lua_path, sizeof(lua_path), "/apps/%s/main.lua", entry->name);
+  snprintf(elf_path, sizeof(elf_path), "/apps/%s/main.elf", entry->name);
+  bool has_lua = sdcard_fexists(lua_path);
+  bool has_elf = sdcard_fexists(elf_path);
+
+  if (!has_lua && !has_elf)
     return;
+
+  // Native wins when both exist (rare, but log it)
+  if (has_lua && has_elf)
+    printf("[LAUNCHER] '%s': both main.lua and main.elf found — using native\n",
+           entry->name);
 
   app_entry_t *app = &s_apps[s_app_count];
   snprintf(app->path, sizeof(app->path), "/apps/%s", entry->name);
+  app->type                = has_elf ? APP_TYPE_NATIVE : APP_TYPE_LUA;
   app->has_root_filesystem = false;
-  app->has_http = false;
-  app->has_audio = false;
+  app->has_http            = false;
+  app->has_audio           = false;
 
   // Try to load app.json for display name / description / id / requirements
   char json_path[160];
@@ -131,12 +124,11 @@ static void on_app_dir(const sdcard_entry_t *entry, void *user) {
       app->description[0] = '\0';
     if (!json_get_string(json, "version", app->version, sizeof(app->version)))
       strncpy(app->version, "1.0", sizeof(app->version));
-    
-    // Parse requirements
+
     app->has_root_filesystem = json_has_requirement(json, "root-filesystem");
-    app->has_http = json_has_requirement(json, "http");
-    app->has_audio = json_has_requirement(json, "audio");
-    
+    app->has_http            = json_has_requirement(json, "http");
+    app->has_audio           = json_has_requirement(json, "audio");
+
     umm_free(json);
   } else {
     snprintf(app->id, sizeof(app->id), "local.%s", entry->name);
@@ -170,7 +162,6 @@ void launcher_refresh_apps(void) {
   s_scroll = 0;
 }
 
-// Colour theme (easily remapped)
 #define C_BG COLOR_BLACK
 #define C_HEADER_BG RGB565(20, 20, 60)
 #define C_SEL_BG RGB565(40, 80, 160)
@@ -200,8 +191,8 @@ static void draw_launcher(void) {
   }
 
   for (int i = 0; i < LIST_VISIBLE && (i + s_scroll) < s_app_count; i++) {
-    int idx = i + s_scroll;
-    int y = LIST_Y + i * ITEM_H;
+    int idx  = i + s_scroll;
+    int y    = LIST_Y + i * ITEM_H;
     bool sel = (idx == s_selected);
 
     uint16_t bg = sel ? C_SEL_BG : C_BG;
@@ -209,8 +200,7 @@ static void draw_launcher(void) {
 
     display_draw_text(LIST_X, y + 4, s_apps[idx].name, C_TEXT, bg);
     if (s_apps[idx].description[0]) {
-      display_draw_text(LIST_X, y + 15, s_apps[idx].description, C_TEXT_DIM,
-                        bg);
+      display_draw_text(LIST_X, y + 15, s_apps[idx].description, C_TEXT_DIM, bg);
     }
   }
 
@@ -225,130 +215,71 @@ static void draw_launcher(void) {
   display_flush();
 }
 
-// ── App runner
-// ────────────────────────────────────────────────────────────────
+// ── Runner dispatch table ─────────────────────────────────────────────────────
+
+static const AppRunner *s_runners[] = {
+    &g_lua_runner,
+    &g_native_runner,
+    NULL,
+};
+
+// ── App launcher
+// ──────────────────────────────────────────────────────────────
 
 static bool run_app(int idx) {
   if (idx < 0 || idx >= s_app_count)
     return false;
 
-  printf("[LAUNCHER] Starting app %d, PSRAM free: %zu\n", idx, lua_psram_alloc_free_size());
+  app_entry_t *app = &s_apps[idx];
 
-  // Read main.lua into memory
-  char main_path[160];
-  snprintf(main_path, sizeof(main_path), "%s/main.lua", s_apps[idx].path);
+  printf("[LAUNCHER] Starting app %d '%s' (type=%s), PSRAM free: %zu\n",
+         idx, app->name,
+         app->type == APP_TYPE_NATIVE ? "native" : "lua",
+         lua_psram_alloc_free_size());
 
-  int lua_len = 0;
-  char *lua_src = sdcard_read_file(main_path, &lua_len);
-  if (!lua_src) {
-    display_clear(C_BG);
-    display_draw_text(8, 8, "Failed to load app:", COLOR_RED, C_BG);
-    display_draw_text(8, 20, main_path, C_TEXT, C_BG);
-    display_flush();
-    sleep_ms(2000);
-    return false;
-  }
+  // ── Shared pre-launch setup ───────────────────────────────────────────────
+  wifi_set_http_required(app->has_http);
 
-  printf("[LAUNCHER] Loaded lua (%d bytes), PSRAM free: %zu\n", lua_len, lua_psram_alloc_free_size());
-
-  // Set HTTP requirement flag before auto-connect
-  wifi_set_http_required(s_apps[idx].has_http);
-
-  // Auto-connect WiFi if app has http requirement
-  if (s_apps[idx].has_http && wifi_is_available()) {
+  if (app->has_http && wifi_is_available()) {
     if (wifi_get_status() != WIFI_STATUS_CONNECTED) {
       const char *ssid = config_get("wifi_ssid");
       const char *pass = config_get("wifi_pass");
-      if (ssid && ssid[0]) {
+      if (ssid && ssid[0])
         wifi_connect(ssid, pass ? pass : "");
-      }
     }
   }
 
-  // Initialize audio if app has audio requirement
-  if (s_apps[idx].has_audio) {
+  if (app->has_audio)
     audio_init();
-  }
 
-  // Create a fresh Lua VM for this app using the PSRAM allocator
-  printf("[LAUNCHER] Creating Lua state...\n");
-  lua_State *L = lua_psram_newstate();
-  if (!L) {
-    printf("[LAUNCHER] FAILED: lua_psram_newstate returned NULL\n");
-    umm_free(lua_src);
-    return false;
-  }
-
-  printf("[LAUNCHER] Lua state created, PSRAM free: %zu\n", lua_psram_alloc_free_size());
-
-  printf("[LAUNCHER] Calling lua_bridge_register...\n");
-  lua_bridge_register(L);
-  printf("[LAUNCHER] lua_bridge_register done, PSRAM free: %zu\n", lua_psram_alloc_free_size());
-
-  // Set app working directory as a global
-  lua_pushstring(L, s_apps[idx].path);
-  lua_setglobal(L, "APP_DIR");
-  lua_pushstring(L, s_apps[idx].name);
-  lua_setglobal(L, "APP_NAME");
-  lua_pushstring(L, s_apps[idx].id);
-  lua_setglobal(L, "APP_ID");
-  
-  // Set app requirements
-  lua_newtable(L);
-  lua_pushboolean(L, s_apps[idx].has_root_filesystem);
-  lua_setfield(L, -2, "root_filesystem");
-  lua_pushboolean(L, s_apps[idx].has_http);
-  lua_setfield(L, -2, "http");
-  lua_pushboolean(L, s_apps[idx].has_audio);
-  lua_setfield(L, -2, "audio");
-  lua_setglobal(L, "APP_REQUIREMENTS");
-
-  // Load and execute the app
-  display_clear(C_BG);
-  display_flush();
-
-  int load_err = luaL_loadbuffer(L, lua_src, lua_len, s_apps[idx].name);
-  umm_free(lua_src);
-
-  if (load_err != LUA_OK) {
-    lua_bridge_show_error(L, "Load error:");
-    lua_close(L);
-    return false;
-  }
-
-  // pcall the chunk — the app runs inside this call
-  // Apps that use a game loop should call picocalc.sys.sleep() each frame
-  // or structure themselves with an update() function called from their own
-  // loop
-  int run_err = lua_pcall(L, 0, 0, 0);
-  if (run_err != LUA_OK) {
-    const char *msg = lua_tostring(L, -1);
-    if (!msg || !strstr(msg, "__picocalc_exit__")) {
-      lua_bridge_show_error(L, "Runtime error:");
-    } else {
-      lua_pop(L, 1); // discard sentinel
+  // ── Dispatch to runner ────────────────────────────────────────────────────
+  bool ok = false;
+  for (int i = 0; s_runners[i]; i++) {
+    if (s_runners[i]->can_handle(app)) {
+      ok = s_runners[i]->run(app);
+      break;
     }
   }
 
-  // Clean up C-side menu items before closing the Lua state.
-  // Lua-side registry refs are freed automatically by lua_close().
+  // ── Shared post-exit cleanup ──────────────────────────────────────────────
   system_menu_clear_items();
 
-  lua_close(L);
-  return true;
+  printf("[LAUNCHER] App '%s' exited (ok=%d), PSRAM free: %zu\n",
+         app->name, ok, lua_psram_alloc_free_size());
+
+  return ok;
 }
 
 // ── Public interface
 // ──────────────────────────────────────────────────────────
 
 void launcher_run(void) {
-  // Scan for apps on every launch so hot-swapping SD is supported
   scan_apps();
   draw_launcher();
 
   while (true) {
     kbd_poll();
-    wifi_poll();
+    // wifi_poll() is now driven by Core 1 — do not call from Core 0
 
     bool dirty = false;
 
@@ -384,23 +315,19 @@ void launcher_run(void) {
       size_t free_mem = lua_psram_alloc_free_size();
       printf("[LAUNCHER] PSRAM free before launch: %zu bytes\n", free_mem);
       run_app(s_selected);
-      // Clear button state to prevent the Enter press from being
-      // inherited by the next app or file browser
       kbd_clear_state();
-      // After app exits, re-scan and redraw
       scan_apps();
       s_selected = 0;
-      s_scroll = 0;
-      dirty = true;
+      s_scroll   = 0;
+      dirty      = true;
     }
 
-    if (ui_needs_header_redraw()) {
+    if (ui_needs_header_redraw())
       dirty = true;
-    }
 
     if (dirty)
       draw_launcher();
 
-    sleep_ms(16); // ~60Hz polling
+    sleep_ms(16); // ~60 Hz polling
   }
 }
