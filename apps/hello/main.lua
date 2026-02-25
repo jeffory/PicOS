@@ -1,4 +1,4 @@
--- Hello World app for PicoCalc OS
+-- Hello World app for PicOS
 -- Demonstrates: display drawing, input handling, basic game loop, FPS tracking
 
 local pc = picocalc          -- short alias for convenience
