@@ -4,6 +4,7 @@
 #include <stdbool.h>
 
 #include "../os/os.h"   // wifi_status_t
+#include "http.h"       // http_conn_t (for conn_req_t)
 
 // =============================================================================
 // WiFi Driver — CYW43 on Pimoroni Pico Plus 2W
@@ -17,6 +18,11 @@
 //
 // Compile guard: WIFI_ENABLED=1 is defined by CMakeLists when the board has
 // a CYW43 chip. All functions are safe no-ops when WIFI_ENABLED is absent.
+//
+// Thread model: Core 1 is the sole owner of the Mongoose manager. Core 0
+// never calls mg_* functions directly. Instead it pushes conn_req_t entries
+// to a spinlock-guarded ring buffer; Core 1's wifi_poll() drains them before
+// each mg_mgr_poll() call.
 // =============================================================================
 
 // Initialise CYW43 hardware and enable station mode. Call once during boot
@@ -46,12 +52,35 @@ const char *wifi_get_ip(void);
 const char *wifi_get_ssid(void);
 
 // Drive the CYW43 lwip-poll state machine and update connection status.
-// Must be called regularly. The OS Lua instruction hook calls this every
-// ~256 opcodes so apps do not need to call it themselves.
-// No-op when WiFi hardware is not available.
+// Must be called regularly from Core 1. No-op when WiFi is not available.
 void wifi_poll(void);
 
 // Set whether an app with HTTP requirement is running. When true, WiFi will
 // not automatically disconnect after SNTP time sync.
 void wifi_set_http_required(bool required);
 bool wifi_get_http_required(void);
+
+// ── Core 0 → Core 1 request queue ────────────────────────────────────────────
+//
+// Core 0 (Lua main loop) must never call mg_* functions directly. Instead it
+// populates the relevant http_conn_t fields and pushes a conn_req_t to this
+// queue. Core 1's drain_requests() (called from wifi_poll) executes the
+// actual Mongoose operations.
+
+typedef enum {
+    CONN_REQ_HTTP_START,      // new TCP conn (or reuse keep-alive) + send request
+    CONN_REQ_HTTP_CLOSE,      // mark nc->is_closing = 1
+    CONN_REQ_WIFI_CONNECT,    // mg_wifi_connect()
+    CONN_REQ_WIFI_DISCONNECT, // mg_wifi_disconnect()
+} conn_req_type_t;
+
+typedef struct {
+    conn_req_type_t  type;
+    http_conn_t     *conn;       // NULL for wifi ops
+    char             ssid[64];   // used by CONN_REQ_WIFI_CONNECT
+    char             pass[64];
+} conn_req_t;
+
+// Push a request from Core 0 to the Core 1 queue.
+// Returns false (and does nothing) if the 8-slot queue is full.
+bool wifi_req_push(const conn_req_t *req);

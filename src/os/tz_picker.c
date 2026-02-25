@@ -183,7 +183,6 @@ bool tz_picker_show(void) {
         }
 
         kbd_poll();
-        wifi_poll();
 
         char     ch      = kbd_get_char();
         uint32_t pressed = kbd_get_buttons_pressed();

@@ -1,4 +1,5 @@
 #include "http.h"
+#include "wifi.h"
 #include "display.h"
 #include "mbedtls/platform.h"
 #include "mongoose.h"
@@ -19,9 +20,6 @@ static char *http_strdup(const char *s) {
     memcpy(d, s, len);
   return d;
 }
-
-// Forward decl from wifi.c
-struct mg_mgr *wifi_get_mgr(void);
 
 // ── Static pool
 // ───────────────────────────────────────────────────────────────
@@ -67,8 +65,10 @@ static void rx_write(http_conn_t *c, const uint8_t *data, uint32_t len) {
 }
 
 // ── Mongoose Event Handler ───────────────────────────────────────────────────
+// Non-static: called by wifi.c drain_requests() via mg_http_connect().
+// Runs exclusively on Core 1 inside mg_mgr_poll().
 
-static void fn(struct mg_connection *nc, int ev, void *ev_data) {
+void http_ev_fn(struct mg_connection *nc, int ev, void *ev_data) {
   http_conn_t *c = (http_conn_t *)nc->fn_data;
   if (!c)
     return;
@@ -87,11 +87,15 @@ static void fn(struct mg_connection *nc, int ev, void *ev_data) {
 
     if (c->extra_hdrs) {
       mg_printf(nc, "%s", c->extra_hdrs);
+      umm_free(c->extra_hdrs);
+      c->extra_hdrs = NULL;
     }
 
     if (c->tx_buf && c->tx_len > 0) {
       mg_printf(nc, "Content-Length: %u\r\n\r\n", (unsigned)c->tx_len);
       mg_send(nc, c->tx_buf, c->tx_len);
+      umm_free(c->tx_buf);
+      c->tx_buf = NULL;
     } else {
       mg_printf(nc, "\r\n");
     }
@@ -144,6 +148,37 @@ static void fn(struct mg_connection *nc, int ev, void *ev_data) {
 void http_init(void) { memset(s_conns, 0, sizeof(s_conns)); }
 
 void http_close_all(void (*on_free)(void *lua_ud)) {
+  // Push CLOSE requests for all in-use connections.  If a CONN_REQ_HTTP_START
+  // for any of these is already in the queue, the FIFO ordering guarantees
+  // that Core 1 processes START before CLOSE — so c->pcb will be set before
+  // the CLOSE is handled.
+  for (int i = 0; i < HTTP_MAX_CONNECTIONS; i++) {
+    if (s_conns[i].in_use) {
+      conn_req_t req = {.type = CONN_REQ_HTTP_CLOSE, .conn = &s_conns[i]};
+      wifi_req_push(&req);
+    }
+  }
+
+  // Wait for all connections to close: pcb cleared (by CONN_REQ_HTTP_CLOSE
+  // or MG_EV_CLOSE) and no connection still queued/pending.
+  uint32_t start_ms = to_ms_since_boot(get_absolute_time());
+  bool any_pending;
+  do {
+    any_pending = false;
+    for (int i = 0; i < HTTP_MAX_CONNECTIONS; i++) {
+      if (s_conns[i].in_use &&
+          (s_conns[i].pcb != NULL ||
+           s_conns[i].state == HTTP_STATE_QUEUED)) {
+        any_pending = true;
+        break;
+      }
+    }
+    if (any_pending)
+      sleep_ms(5);
+  } while (any_pending &&
+           (to_ms_since_boot(get_absolute_time()) - start_ms) < 500);
+
+  // Free all connections
   for (int i = 0; i < HTTP_MAX_CONNECTIONS; i++) {
     if (s_conns[i].in_use) {
       if (on_free && s_conns[i].lua_ud)
@@ -184,22 +219,44 @@ void http_close(http_conn_t *c) {
   if (!c)
     return;
   if (c->pcb) {
-    struct mg_connection *nc = (struct mg_connection *)c->pcb;
-    nc->is_closing = 1;
-    c->pcb = NULL;
+    // Queue CLOSE for Core 1 — do not touch nc->is_closing from Core 0
+    conn_req_t req = {.type = CONN_REQ_HTTP_CLOSE, .conn = c};
+    wifi_req_push(&req);
+    // Note: c->pcb is NOT cleared here; Core 1 clears it in
+    // CONN_REQ_HTTP_CLOSE processing and again in MG_EV_CLOSE.
   }
-  umm_free(c->extra_hdrs);
-  c->extra_hdrs = NULL;
-  umm_free(c->tx_buf);
-  c->tx_buf = NULL;
-  c->state = HTTP_STATE_IDLE;
+  // Do not free extra_hdrs or tx_buf here: if a CONN_REQ_HTTP_START is in
+  // the queue, Core 1 owns those buffers until after MG_EV_CONNECT fires.
+  // They will be freed by http_ev_fn() MG_EV_CONNECT, drain_requests()
+  // (keep-alive path), or http_free() after waiting for Core 1.
+  if (c->state != HTTP_STATE_QUEUED) {
+    c->state = HTTP_STATE_IDLE;
+  }
   c->pending = 0;
 }
 
 void http_free(http_conn_t *c) {
   if (!c)
     return;
-  http_close(c);
+
+  // Enqueue a close if there is an active connection
+  if (c->pcb) {
+    conn_req_t req = {.type = CONN_REQ_HTTP_CLOSE, .conn = c};
+    wifi_req_push(&req);
+  }
+
+  // Wait briefly for Core 1 to process any pending requests for this conn
+  // so we don't free extra_hdrs/tx_buf while Core 1 is still using them.
+  uint32_t start_ms = to_ms_since_boot(get_absolute_time());
+  while ((c->pcb != NULL || c->state == HTTP_STATE_QUEUED) &&
+         (to_ms_since_boot(get_absolute_time()) - start_ms) < 200) {
+    sleep_ms(1);
+  }
+
+  umm_free(c->extra_hdrs);
+  c->extra_hdrs = NULL;
+  umm_free(c->tx_buf);
+  c->tx_buf = NULL;
   umm_free(c->rx_buf);
   umm_free(c->hdr_buf);
   memset(c, 0, sizeof(*c));
@@ -225,11 +282,10 @@ static bool start_request(http_conn_t *c, const char *method, const char *path,
   if (!c)
     return false;
 
-  struct mg_mgr *mgr = wifi_get_mgr();
-  if (!mgr)
+  if (!wifi_is_available())
     return false;
 
-  // Reset state
+  // Reset state for a new request
   c->status_code = 0;
   c->content_length = -1;
   c->body_received = 0;
@@ -238,61 +294,35 @@ static bool start_request(http_conn_t *c, const char *method, const char *path,
   c->rx_tail = 0;
   c->rx_count = 0;
   c->err[0] = '\0';
+  c->pending = 0;
 
   strncpy(c->method, method, sizeof(c->method) - 1);
   strncpy(c->path, path, sizeof(c->path) - 1);
+
+  // Allocate request buffers — ownership transfers to Core 1 at push time.
+  // Core 1 frees them in drain_requests() (keep-alive) or http_ev_fn()
+  // MG_EV_CONNECT (new connection).
   umm_free(c->extra_hdrs);
   c->extra_hdrs = extra_hdr ? http_strdup(extra_hdr) : NULL;
   umm_free(c->tx_buf);
   c->tx_buf = body ? http_strdup(body) : NULL;
   c->tx_len = (uint32_t)body_len;
 
-  if (c->keep_alive && c->pcb != NULL) {
-    struct mg_connection *nc = (struct mg_connection *)c->pcb;
-    c->state = HTTP_STATE_SENDING;
-    c->pending = 0;
-    printf("[HTTP] Reusing connection for %s %s\n", c->method, c->path);
-    mg_printf(nc,
-              "%s %s HTTP/1.1\r\n"
-              "Host: %s\r\n"
-              "User-Agent: PicOS/1.0\r\n"
-              "Connection: keep-alive\r\n",
-              c->method, c->path, c->server);
-    if (c->extra_hdrs) mg_printf(nc, "%s", c->extra_hdrs);
-    if (c->tx_buf && c->tx_len > 0) {
-      mg_printf(nc, "Content-Length: %u\r\n\r\n", (unsigned)c->tx_len);
-      mg_send(nc, c->tx_buf, c->tx_len);
-    } else {
-      mg_printf(nc, "\r\n");
-    }
-    return true;
-  }
+  // Mark as queued so http_close_all() and http_free() know to wait
+  c->state = HTTP_STATE_QUEUED;
 
-  char url[320];
-  snprintf(url, sizeof(url), "%s://%s:%u", c->use_ssl ? "https" : "http",
-           c->server, c->port);
-
-  printf("[HTTP] Connecting to %s (SSL=%d)...\n", url, c->use_ssl);
-  struct mg_connection *nc = mg_http_connect(mgr, url, fn, c);
-  if (!nc) {
-    conn_fail(c, "mg_http_connect failed");
+  // Push to Core 1's request queue — it will call mg_http_connect() /
+  // mg_printf() / etc. from within drain_requests().
+  conn_req_t req = {.type = CONN_REQ_HTTP_START, .conn = c};
+  if (!wifi_req_push(&req)) {
+    // Queue full — fail immediately and release buffers
+    umm_free(c->extra_hdrs);
+    c->extra_hdrs = NULL;
+    umm_free(c->tx_buf);
+    c->tx_buf = NULL;
+    conn_fail(c, "request queue full");
     return false;
   }
-
-  if (c->use_ssl) {
-    struct mg_tls_opts opts = {0};
-    opts.name = mg_str(c->server);
-    mg_tls_init(nc, &opts);
-    if (!nc->is_tls_hs) {
-      printf("[HTTP] TLS init failed\n");
-      conn_fail(c, "TLS init failed");
-      mg_close_conn(nc);
-      return false;
-    }
-  }
-
-  c->pcb = (void *)nc;
-  c->state = HTTP_STATE_CONNECTING;
 
   return true;
 }

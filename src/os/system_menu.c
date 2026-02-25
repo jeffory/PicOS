@@ -120,7 +120,6 @@ static int show_wifi_submenu(void) {
     }
 
     kbd_poll();
-    wifi_poll();
     uint32_t pressed = kbd_get_buttons_pressed();
 
     if ((pressed & BTN_UP) && sel > 0) {
@@ -358,7 +357,6 @@ void system_menu_show(lua_State *L) {
     }
 
     kbd_poll();
-    wifi_poll();
     uint32_t pressed = kbd_get_buttons_pressed();
 
     if (pressed & BTN_UP) {

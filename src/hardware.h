@@ -62,3 +62,6 @@
 // --- UART Debug -------------------------------------------------------------
 #define DBG_UART_TX 0 // GP0 / UART0 TX → USB serial on Pico
 #define DBG_UART_RX 1 // GP1 / UART0 RX
+
+// --- USB VBUS Sense ----------------------------------------------------------
+#define USB_VBUS_PIN 24 // GP24 / VBUS sense (high = USB powered)

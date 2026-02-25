@@ -41,9 +41,8 @@ static int l_sys_sleep(lua_State *L) {
     if (now >= end_ms)
       break;
 
-    // Poll WiFi and fire HTTP callbacks while sleeping so async requests
-    // can progress even if the app is just waiting.
-    wifi_poll();
+    // Fire HTTP callbacks while sleeping so async requests can progress.
+    // WiFi is driven by Core 1; no poll needed here.
     http_lua_fire_pending(L);
 
     uint32_t remaining = end_ms - now;

@@ -73,10 +73,7 @@ void usb_msc_enter_mode(void) {
     // Service USB, giving it priority
     uint32_t poll_start = to_ms_since_boot(get_absolute_time());
     tud_task();
-    
-    // Service WiFi (if connected) to prevent lwIP timeouts
-    wifi_poll();
-    
+
     // Check ESC key with rate limiting to avoid I2C bus congestion
     uint32_t now = to_ms_since_boot(get_absolute_time());
     if (now - last_kbd_poll_ms >= KBD_POLL_INTERVAL_MS) {

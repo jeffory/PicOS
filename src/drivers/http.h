@@ -42,7 +42,8 @@
 
 typedef enum {
     HTTP_STATE_IDLE = 0,
-    HTTP_STATE_DNS,         // DNS resolution in progress
+    HTTP_STATE_QUEUED,      // Request pushed to Core 1 queue, awaiting processing
+    HTTP_STATE_DNS,         // DNS resolution (handled by Mongoose internally)
     HTTP_STATE_CONNECTING,  // TCP connect in progress
     HTTP_STATE_SENDING,     // Sending HTTP request
     HTTP_STATE_HEADERS,     // Receiving and parsing response headers
@@ -166,3 +167,9 @@ void http_poll(void);
 // Called from Core 1 after wifi_poll() so native apps get network events
 // without needing a Lua-style opcode hook.
 void http_fire_c_pending(void);
+
+// Mongoose event handler for HTTP connections.
+// Defined in http.c; referenced by wifi.c's drain_requests() when calling
+// mg_http_connect() — Core 1 owns all mg_* calls.
+struct mg_connection;  // forward declaration to avoid pulling in mongoose.h
+void http_ev_fn(struct mg_connection *nc, int ev, void *ev_data);
