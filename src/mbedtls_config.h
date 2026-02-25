@@ -73,7 +73,7 @@ extern void umm_free(void *ptr);
 
 // Memory tuning
 #define MBEDTLS_SSL_IN_CONTENT_LEN  16384
-#define MBEDTLS_SSL_OUT_CONTENT_LEN  4096
+#define MBEDTLS_SSL_OUT_CONTENT_LEN 8192
 #define MBEDTLS_SSL_MAX_CONTENT_LEN 16384
 
 #endif /* MBEDTLS_CONFIG_H */

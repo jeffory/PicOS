@@ -92,11 +92,11 @@ static BYTE mode_to_fatfs(const char *mode) {
 
 sdfile_t sdcard_fopen(const char *path, const char *mode) {
     if (!s_mounted) return NULL;
-    FIL *f = (FIL *)malloc(sizeof(FIL));
+    FIL *f = (FIL *)umm_malloc(sizeof(FIL));
     if (!f) return NULL;
 
     FRESULT res = f_open(f, path, mode_to_fatfs(mode));
-    if (res != FR_OK) { free(f); return NULL; }
+    if (res != FR_OK) { umm_free(f); return NULL; }
     return (sdfile_t)f;
 }
 

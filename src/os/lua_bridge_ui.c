@@ -1,6 +1,6 @@
 #include "lua_bridge_internal.h"
 #include "../../third_party/lua-5.4/src/lauxlib.h"
-#include <stdlib.h>
+#include "umm_malloc.h"
 
 // ── picocalc.ui.*
 // ─────────────────────────────────────────────────────────────
@@ -37,7 +37,7 @@ static int l_ui_drawTabs(lua_State *L) {
   }
 
   // Allocate tab strings array
-  const char **tabs = (const char **)malloc(sizeof(char *) * count);
+  const char **tabs = (const char **)umm_malloc(sizeof(char *) * count);
   if (!tabs) {
     return luaL_error(L, "Failed to allocate memory for tabs");
   }
@@ -67,7 +67,7 @@ static int l_ui_drawTabs(lua_State *L) {
   // Draw tabs
   int height = ui_draw_tabs(tabs, count, active_index, y);
 
-  free(tabs);
+  umm_free(tabs);
 
   // Return new active index (1-based) and height consumed
   lua_pushinteger(L, active_index + 1);
