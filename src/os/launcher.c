@@ -155,6 +155,8 @@ static void scan_apps(void) {
 
 static int s_selected = 0;
 static int s_scroll = 0;
+static int s_desc_scroll = 0;
+static int s_desc_scroll_timer = 0;
 
 void launcher_refresh_apps(void) {
   scan_apps();
@@ -200,7 +202,20 @@ static void draw_launcher(void) {
 
     display_draw_text(LIST_X, y + 4, s_apps[idx].name, C_TEXT, bg);
     if (s_apps[idx].description[0]) {
-      display_draw_text(LIST_X, y + 15, s_apps[idx].description, C_TEXT_DIM, bg);
+      int max_w = FB_WIDTH - LIST_X * 2 - 4;
+      int tw = display_text_width(s_apps[idx].description);
+      if (tw > max_w) {
+        const char *p = s_apps[idx].description + s_desc_scroll;
+        int avail = strlen(p);
+        char buf[64];
+        int out_len = (avail * 6 > max_w * 6) ? (max_w / 6 + 1) : avail;
+        if (out_len > 63) out_len = 63;
+        strncpy(buf, p, out_len);
+        buf[out_len] = '\0';
+        display_draw_text(LIST_X, y + 15, buf, C_TEXT_DIM, bg);
+      } else {
+        display_draw_text(LIST_X, y + 15, s_apps[idx].description, C_TEXT_DIM, bg);
+      }
     }
   }
 
@@ -299,6 +314,8 @@ void launcher_run(void) {
         s_selected--;
         if (s_selected < s_scroll)
           s_scroll = s_selected;
+        s_desc_scroll = 0;
+        s_desc_scroll_timer = 0;
         dirty = true;
       }
     }
@@ -307,8 +324,21 @@ void launcher_run(void) {
         s_selected++;
         if (s_selected >= s_scroll + LIST_VISIBLE)
           s_scroll = s_selected - LIST_VISIBLE + 1;
+        s_desc_scroll = 0;
+        s_desc_scroll_timer = 0;
         dirty = true;
       }
+    }
+
+    if (pressed & BTN_LEFT) {
+      if (s_desc_scroll > 0) {
+        s_desc_scroll--;
+        dirty = true;
+      }
+    }
+    if (pressed & BTN_RIGHT) {
+      s_desc_scroll++;
+      dirty = true;
     }
 
     if (pressed & BTN_ENTER) {
@@ -317,13 +347,26 @@ void launcher_run(void) {
       run_app(s_selected);
       kbd_clear_state();
       scan_apps();
-      s_selected = 0;
-      s_scroll   = 0;
+      s_desc_scroll = 0;
+      s_desc_scroll_timer = 0;
       dirty      = true;
     }
 
     if (ui_needs_header_redraw())
       dirty = true;
+
+    s_desc_scroll_timer++;
+    if (s_desc_scroll_timer >= 10) {
+      s_desc_scroll_timer = 0;
+      if (s_selected < s_app_count) {
+        int tw = display_text_width(s_apps[s_selected].description);
+        int max_w = FB_WIDTH - LIST_X * 2 - 4;
+        int desc_len = strlen(s_apps[s_selected].description);
+        int max_scroll = desc_len - (max_w / 6);
+        if (tw > max_w && s_desc_scroll < max_scroll)
+          s_desc_scroll++;
+      }
+    }
 
     if (dirty)
       draw_launcher();

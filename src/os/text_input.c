@@ -107,7 +107,6 @@ bool text_input_show(const char *title, const char *prompt,
         }
 
         kbd_poll();
-        wifi_poll();
 
         char     ch      = kbd_get_char();
         uint32_t pressed = kbd_get_buttons_pressed();

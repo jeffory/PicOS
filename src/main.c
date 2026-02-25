@@ -62,9 +62,7 @@ static void sys_reboot(void) {
     tight_loop_contents();
 }
 static bool sys_isUSBPowered(void) {
-  // RP2350: check VBUS via USB power detect (GP24 on standard Pico layout)
-  // Pimoroni may differ — implement if needed
-  return false;
+  return gpio_get(USB_VBUS_PIN);
 }
 static void sys_log(const char *fmt, ...) {
   va_list ap;
@@ -163,6 +161,9 @@ int main(void) {
   gpio_set_function(47, GPIO_FUNC_XIP_CS1);
   xip_ctrl_hw->ctrl |= XIP_CTRL_WRITABLE_M1_BITS;
 #endif
+
+  gpio_init(USB_VBUS_PIN);
+  gpio_set_dir(USB_VBUS_PIN, GPIO_IN);
 
   // Initialise display first so we can show progress
   display_init();
