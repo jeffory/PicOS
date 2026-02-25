@@ -20,6 +20,7 @@ static char s_ssid[64] = {0};
 static char s_pass[64] = {0};
 static char s_ip[20] = {0};
 static bool s_http_required = false;
+static bool s_disconnect_pending = false; // deferred disconnect from SNTP callback
 
 static struct mg_mgr s_mgr;
 static struct mg_tcpip_if s_ifp;
@@ -35,7 +36,11 @@ static void sntp_cb(struct mg_connection *c, int ev, void *ev_data) {
     clock_sntp_set((unsigned)(*t / 1000));
     c->is_closing = 1;
     if (!s_http_required) {
-      wifi_disconnect();
+      // Don't call wifi_disconnect() directly here — we're inside mg_mgr_poll()
+      // and calling mg_wifi_disconnect() from within a Mongoose callback causes
+      // reentrancy into the CYW43 driver.  Set a flag; wifi_poll() will
+      // perform the disconnect safely after mg_mgr_poll() returns.
+      s_disconnect_pending = true;
     }
   } else if (ev == MG_EV_CLOSE) {
     // SNTP closed
@@ -167,6 +172,12 @@ void wifi_poll(void) {
     return;
 
   mg_mgr_poll(&s_mgr, 0);
+
+  // Process any disconnect deferred from inside a Mongoose callback (SNTP etc.)
+  if (s_disconnect_pending) {
+    s_disconnect_pending = false;
+    wifi_disconnect();
+  }
 }
 
 // Access to manager for HTTP

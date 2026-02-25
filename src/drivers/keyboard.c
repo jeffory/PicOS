@@ -21,7 +21,7 @@
 // pelrun/uf2loader used sleep_ms(16), but that's too slow for 60fps apps.
 // Testing shows 1ms is reliable and gives us ~60 FPS.
 #define KBD_REG_DELAY_MS 1
-#define KBD_I2C_TIMEOUT_US 50000
+#define KBD_I2C_TIMEOUT_US 5000  // 5ms — ample for 100kHz I2C; 50ms was causing ~150ms stalls per frame on failure
 
 // ── Internal state
 // ────────────────────────────────────────────────────────────
@@ -35,7 +35,8 @@ static bool s_menu_pressed =
     false; // set on BTN_MENU rising edge; cleared by kbd_consume_menu_press()
 static bool s_screenshot_pressed =
     false; // set on KEY_BRK press; cleared by kbd_consume_screenshot_press()
-static int s_i2c_fail_count = 0; // consecutive kbd_poll() I2C failures
+static int s_i2c_fail_count = 0;      // consecutive kbd_poll() I2C failures
+static uint32_t s_i2c_backoff_ms = 0; // when to next attempt recovery
 
 // ── Public API
 // ────────────────────────────────────────────────────────────────
@@ -89,6 +90,17 @@ static void kbd_recover_i2c_bus(void) {
     gpio_set_dir(KBD_PIN_SDA, GPIO_IN);
     gpio_pull_up(KBD_PIN_SDA);
   }
+
+  // Check final bus state — log if still stuck (helps diagnose STM32 issues).
+  bool sda_free = gpio_get(KBD_PIN_SDA);
+  bool scl_free = gpio_get(KBD_PIN_SCL);
+  if (!sda_free || !scl_free)
+    printf("[KBD] bus recovery: SDA=%s SCL=%s after 9-clock sequence\n",
+           sda_free ? "high" : "LOW-STUCK", scl_free ? "high" : "LOW-STUCK");
+
+  // Give the STM32 time to recognise the bus-free condition before we
+  // re-assert a START.  Without this pause the STM32 may miss the STOP.
+  sleep_ms(10);
 
   // Re-initialize the I2C peripheral and restore GPIO functions.
   i2c_init(KBD_I2C_PORT, KBD_I2C_BAUD);
@@ -211,7 +223,14 @@ void kbd_poll(void) {
   // Poll REG_FIF (0x09) directly — up to 8 events per frame.
   // Each read returns 2 bytes: [state, keycode].
   // Loop ends when state==IDLE (no more queued events).
+  // After repeated failures, skip the I2C attempt entirely until the backoff
+  // window expires — prevents 5ms timeouts from dominating the frame budget.
   bool poll_ok = false;
+  uint32_t now_ms = to_ms_since_boot(get_absolute_time());
+  if (s_i2c_fail_count > 5 && now_ms < s_i2c_backoff_ms) {
+    // Bus is struggling — skip this frame entirely to keep display responsive
+    goto done_polling;
+  }
   for (int i = 0; i < 8; i++) {
     uint8_t event[2] = {0, 0};
     if (!i2c_read_reg(KBD_REG_FIF, event, 2, KBD_REG_DELAY_MS))
@@ -335,9 +354,18 @@ void kbd_poll(void) {
     if (s_i2c_fail_count == 3)
       printf("[KBD] warning: %d consecutive I2C failures — bus recovery active\n",
              s_i2c_fail_count);
+    // After 5 failures, back off 500ms before the next recovery attempt.
+    // This keeps the frame loop fast even when the STM32 is unresponsive.
+    if (s_i2c_fail_count > 5)
+      s_i2c_backoff_ms = to_ms_since_boot(get_absolute_time()) + 500;
   } else {
+    if (s_i2c_fail_count > 5)
+      printf("[KBD] I2C recovered after %d failures\n", s_i2c_fail_count);
     s_i2c_fail_count = 0;
+    s_i2c_backoff_ms = 0;
   }
+
+done_polling:;
 
   // Intercept BTN_MENU: detect rising edge, flag it for the OS, hide from apps.
   if ((s_buttons_curr & BTN_MENU) && !(s_buttons_prev & BTN_MENU))
@@ -374,8 +402,10 @@ int kbd_get_battery_percent(void) {
 
   if (s_last_ms == 0 || now - s_last_ms >= 5000) {
     uint8_t val[2] = {0, 0}; // STM32 I2C firmware preps 2 bytes
-    if (!i2c_read_reg(KBD_REG_BAT, val, 2, KBD_REG_DELAY_MS))
+    if (!i2c_read_reg(KBD_REG_BAT, val, 2, KBD_REG_DELAY_MS)) {
+      s_last_ms = now - 3000; // back off 2s before retry (avoids hammering I2C every frame on failure)
       return s_cached_val;
+    }
     s_cached_val = (int)(val[1] & 0x7F);
     s_last_ms = now;
   }

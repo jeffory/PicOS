@@ -1,8 +1,13 @@
 #include "lua_psram_alloc.h"
 #include "umm_malloc.h"
 #include "umm_malloc_cfg.h"
+#include "pico/critical_section.h"
 #include <stdint.h>
 #include <stdio.h>
+
+// Hardware spinlock protecting all umm_malloc heap operations across both cores.
+// Referenced by UMM_CRITICAL_ENTRY/EXIT in umm_malloc_cfgport.h.
+critical_section_t g_umm_critsec;
 
 // Allocate 6 MB of PSRAM for the Lua VM heap
 #ifdef PICO_RP2350
@@ -36,6 +41,7 @@ static void l_warnfoff(void *ud, const char *message, int tocont) {
 }
 
 void lua_psram_alloc_init(void) {
+  critical_section_init(&g_umm_critsec);
   umm_init_heap(s_lua_psram_heap, UMM_MALLOC_CFG_HEAP_SIZE);
   printf("PSRAM Lua Allocator Initialized: %d bytes\n",
          (int)UMM_MALLOC_CFG_HEAP_SIZE);

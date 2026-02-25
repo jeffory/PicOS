@@ -117,7 +117,7 @@ int sdcard_fwrite(sdfile_t f, const void *buf, int len) {
 void sdcard_fclose(sdfile_t f) {
     if (!f) return;
     f_close((FIL *)f);
-    free(f);
+    umm_free(f);  // Must match sdcard_fopen() which allocates via umm_malloc
 }
 
 bool sdcard_fseek(sdfile_t f, uint32_t offset) {
