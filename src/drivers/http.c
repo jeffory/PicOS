@@ -344,6 +344,15 @@ uint8_t http_take_pending(http_conn_t *c) {
 
 void http_poll(void) {}
 
+// Fire C-language (non-Lua) HTTP callbacks.
+// Native apps store their callback function pointers directly in http_conn_t
+// extension fields (to be added when native HTTP is fully implemented).
+// For now this is a no-op stub; the infrastructure is wired up so Core 1
+// can call it safely every poll cycle.
+void http_fire_c_pending(void) {
+  // Future: iterate s_conns, check pending flags, call C callbacks.
+}
+
 // ── Custom Mongoose Allocator ────────────────────────────────────────────────
 void *mg_calloc(size_t count, size_t size) { return umm_calloc(count, size); }
 

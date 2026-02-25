@@ -74,6 +74,13 @@ static void sys_log(const char *fmt, ...) {
   printf("\n");
 }
 
+// Native-app tick: poll keyboard (for input) and fire pending C HTTP callbacks.
+// WiFi is handled by Core 1; call this in your main loop for input responsiveness.
+static void sys_poll(void) {
+  kbd_poll();
+  http_fire_c_pending();
+}
+
 static picocalc_sys_t s_sys_impl = {
     .getTimeMs = sys_getTimeMs,
     .reboot = sys_reboot,
@@ -82,6 +89,7 @@ static picocalc_sys_t s_sys_impl = {
     .addMenuItem = system_menu_add_item,
     .clearMenuItems = system_menu_clear_items,
     .log = sys_log,
+    .poll = sys_poll,
 };
 
 static picocalc_wifi_t s_wifi_impl = {
@@ -99,15 +107,17 @@ static picocalc_audio_t s_audio_impl = {
     .setVolume = audio_set_volume,
 };
 
-// ── Core 1 entry — periodic tasks (future: audio mixing, WiFi polling)
-// ────────
+// ── Core 1 entry — background WiFi polling ────────────────────────────────────
+// Core 1 drives the Mongoose / CYW43 network stack every 5 ms.
+// wifi_poll() acquires display_spi_lock() internally, so the SPI1 bus
+// (shared between the LCD and the WiFi chip) is safe to access from here.
+// Lua apps benefit automatically; native apps benefit via http_fire_c_pending().
 
 static void core1_entry(void) {
-  // Currently unused. Reserve Core 1 for future background tasks.
-  // Do NOT touch the LCD or SPI from here without acquiring the mutex first.
-  // Use __wfe() (Wait For Event) for lower power than tight_loop_contents().
   while (true) {
-    __wfe();
+    wifi_poll();
+    http_fire_c_pending();
+    sleep_ms(5);
   }
 }
 

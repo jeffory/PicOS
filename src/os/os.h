@@ -107,6 +107,11 @@ typedef struct {
     void     (*clearMenuItems)(void);
     // Log a message to UART serial debug output
     void     (*log)(const char *fmt, ...);
+    // Single OS tick for native apps: polls keyboard + fires any pending
+    // C HTTP callbacks.  Call in your main loop instead of busy-waiting.
+    // WiFi is polled automatically on Core 1; native apps need not call
+    // wifi_poll() directly.
+    void     (*poll)(void);
 } picocalc_sys_t;
 
 // --- Audio ------------------------------------------------------------------
@@ -147,7 +152,7 @@ typedef struct {
 // --- The complete OS API struct ---------------------------------------------
 // This is what gets passed to every Lua environment and future C app loaders.
 
-typedef struct {
+typedef struct PicoCalcAPI {
     const picocalc_input_t   *input;
     const picocalc_display_t *display;
     const picocalc_fs_t      *fs;

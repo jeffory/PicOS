@@ -132,6 +132,8 @@ target_compile_definitions(image_decoders PUBLIC __LINUX__=1)
 add_executable(picocalc_os
     src/main.c
     src/os/launcher.c
+    src/os/lua_runner.c
+    src/os/native_loader.c
     src/os/lua_bridge.c
     src/os/lua_bridge_display.c
     src/os/lua_bridge_input.c

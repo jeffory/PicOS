@@ -1,0 +1,7 @@
+{
+  "id": "com.example.hello_c",
+  "name": "Hello C",
+  "description": "Native C demo app",
+  "version": "1.0",
+  "author": "PicOS"
+}

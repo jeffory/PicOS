@@ -48,10 +48,9 @@ void register_subtable(lua_State *L, const char *name,
 }
 
 // Instruction-count hook: fires every 256 Lua opcodes.
-// Drives the WiFi state machine and checks for the system menu button.
+// WiFi is now driven by Core 1 (wifi_poll every 5 ms) — no call needed here.
 static void menu_lua_hook(lua_State *L, lua_Debug *ar) {
   (void)ar;
-  wifi_poll();
   http_lua_fire_pending(L); // fire any queued HTTP Lua callbacks
   if (kbd_consume_menu_press())
     system_menu_show(L);
