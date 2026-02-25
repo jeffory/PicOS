@@ -284,7 +284,7 @@ static bool start_request(http_conn_t *c, const char *method, const char *path,
     opts.name = mg_str(c->server);
     mg_tls_init(nc, &opts);
     if (!nc->is_tls_hs) {
-      printf("[HTTP] TLS handshake init failed!\n");
+      printf("[HTTP] TLS init failed\n");
       conn_fail(c, "TLS init failed");
       mg_close_conn(nc);
       return false;

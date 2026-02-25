@@ -95,19 +95,19 @@ static int l_fs_open(lua_State *L) {
 static int l_fs_read(lua_State *L) {
   sdfile_t f = lua_touserdata(L, 1);
   int len = (int)luaL_checkinteger(L, 2);
-  char *buf = (char *)malloc(len);
+  char *buf = (char *)umm_malloc(len);
   if (!buf) {
     lua_pushnil(L);
     return 1;
   }
   int n = sdcard_fread(f, buf, len);
   if (n <= 0) {
-    free(buf);
+    umm_free(buf);
     lua_pushnil(L);
     return 1;
   }
   lua_pushlstring(L, buf, n);
-  free(buf);
+  umm_free(buf);
   return 1;
 }
 
