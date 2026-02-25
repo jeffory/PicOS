@@ -2,7 +2,6 @@
 #include "../drivers/display.h"
 #include "../drivers/keyboard.h"
 #include "../drivers/sdcard.h"
-#include "../drivers/wifi.h"
 #include "os.h"
 
 #include "pico/stdlib.h"
