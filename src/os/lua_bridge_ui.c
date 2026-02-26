@@ -75,9 +75,31 @@ static int l_ui_drawTabs(lua_State *L) {
   return 2;
 }
 
+// picocalc.ui.textInput([prompt [, default]]) → string | nil
+static int l_ui_textInput(lua_State *L) {
+  const char *prompt      = luaL_optstring(L, 1, NULL);
+  const char *default_val = luaL_optstring(L, 2, NULL);
+  char buf[128];
+  if (ui_text_input(prompt, default_val, buf, sizeof(buf))) {
+    lua_pushstring(L, buf);
+  } else {
+    lua_pushnil(L);
+  }
+  return 1;
+}
+
+// picocalc.ui.confirm(message) → bool
+static int l_ui_confirm(lua_State *L) {
+  const char *message = luaL_checkstring(L, 1);
+  lua_pushboolean(L, ui_confirm(message));
+  return 1;
+}
+
 static const luaL_Reg l_ui_lib[] = {{"drawHeader", l_ui_drawHeader},
                                     {"drawFooter", l_ui_drawFooter},
-                                    {"drawTabs", l_ui_drawTabs},
+                                    {"drawTabs",   l_ui_drawTabs},
+                                    {"textInput",  l_ui_textInput},
+                                    {"confirm",    l_ui_confirm},
                                     {NULL, NULL}};
 
 

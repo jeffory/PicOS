@@ -43,15 +43,47 @@ bool     sdcard_mkdir(const char *path);
 // ── Directory listing ─────────────────────────────────────────────────────────
 
 typedef struct {
-    char name[64];
-    bool is_dir;
+    char     name[64];
+    bool     is_dir;
     uint32_t size;
+    uint16_t fdate;  // FatFS packed date: bits[15:9]=year-1980, [8:5]=month, [4:0]=day
+    uint16_t ftime;  // FatFS packed time: bits[15:11]=hour, [10:5]=min, [4:0]=sec/2
 } sdcard_entry_t;
 
 // Calls callback for each entry in path. Returns count of entries, -1 on error.
 int sdcard_list_dir(const char *path,
                     void (*callback)(const sdcard_entry_t *entry, void *user),
                     void *user);
+
+// ── File/directory operations ─────────────────────────────────────────────────
+
+// Delete a file or empty directory.
+bool sdcard_delete(const char *path);
+
+// Rename or move a file/directory. Both paths must be on the same volume.
+bool sdcard_rename(const char *src, const char *dst);
+
+// Copy src to dst. Optional progress callback: cb(bytes_done, total, user).
+// Returns false and removes dst on error.
+bool sdcard_copy(const char *src, const char *dst,
+                 void (*progress_cb)(uint32_t done, uint32_t total, void *user),
+                 void *user);
+
+// ── Metadata ─────────────────────────────────────────────────────────────────
+
+// Detailed file/directory metadata (single path lookup, no directory scan).
+typedef struct {
+    uint32_t size;     // File size in bytes (0 for directories)
+    bool     is_dir;
+    uint16_t fdate;    // Same encoding as sdcard_entry_t
+    uint16_t ftime;
+} sdcard_stat_t;
+
+// Fills *out with metadata for path. Returns false if path not found.
+bool sdcard_stat(const char *path, sdcard_stat_t *out);
+
+// Returns free and total space in KB for the mounted volume.
+bool sdcard_disk_info(uint32_t *out_free_kb, uint32_t *out_total_kb);
 
 // ── Convenience: read entire file into a heap-allocated buffer ─────────────-
 // Caller must free() the returned pointer. Returns NULL on error.

@@ -183,6 +183,19 @@ typedef struct {
   int n;
 } listdir_ctx_t;
 
+// Decode FatFS packed date/time fields into separate Lua table entries.
+// fdate bits: [15:9]=year-1980, [8:5]=month, [4:0]=day
+// ftime bits: [15:11]=hour, [10:5]=min, [4:0]=sec/2
+static void push_mtime_fields(lua_State *L, uint16_t fdate, uint16_t ftime) {
+  if (fdate == 0) return; // no timestamp stored
+  lua_pushinteger(L, (fdate >> 9) + 1980); lua_setfield(L, -2, "year");
+  lua_pushinteger(L, (fdate >> 5) & 0xF);  lua_setfield(L, -2, "month");
+  lua_pushinteger(L, fdate & 0x1F);         lua_setfield(L, -2, "day");
+  lua_pushinteger(L, ftime >> 11);           lua_setfield(L, -2, "hour");
+  lua_pushinteger(L, (ftime >> 5) & 0x3F);  lua_setfield(L, -2, "min");
+  lua_pushinteger(L, (ftime & 0x1F) * 2);   lua_setfield(L, -2, "sec");
+}
+
 static void listdir_cb(const sdcard_entry_t *e, void *user) {
   listdir_ctx_t *ctx = (listdir_ctx_t *)user;
   lua_State *L = ctx->L;
@@ -193,6 +206,7 @@ static void listdir_cb(const sdcard_entry_t *e, void *user) {
   lua_setfield(L, -2, "is_dir");
   lua_pushinteger(L, e->size);
   lua_setfield(L, -2, "size");
+  push_mtime_fields(L, e->fdate, e->ftime);
   lua_rawseti(L, ctx->tidx, ++ctx->n);
 }
 
@@ -279,14 +293,185 @@ static int l_fs_browse(lua_State *L) {
   return 1;
 }
 
+// ── picocalc.fs.delete(path) → ok [, err] ────────────────────────────────────
+static int l_fs_delete(lua_State *L) {
+  const char *path = luaL_checkstring(L, 1);
+  if (!fs_sandbox_check(L, path, true)) {
+    lua_pushboolean(L, false);
+    lua_pushstring(L, "permission denied");
+    return 2;
+  }
+  if (sdcard_delete(path)) {
+    lua_pushboolean(L, true);
+    return 1;
+  }
+  lua_pushboolean(L, false);
+  lua_pushstring(L, "delete failed");
+  return 2;
+}
+
+// ── picocalc.fs.rename(src, dst) → ok [, err] ────────────────────────────────
+static int l_fs_rename(lua_State *L) {
+  const char *src = luaL_checkstring(L, 1);
+  const char *dst = luaL_checkstring(L, 2);
+  if (!fs_sandbox_check(L, src, true)) {
+    lua_pushboolean(L, false);
+    lua_pushstring(L, "permission denied (source)");
+    return 2;
+  }
+  if (!fs_sandbox_check(L, dst, true)) {
+    lua_pushboolean(L, false);
+    lua_pushstring(L, "permission denied (destination)");
+    return 2;
+  }
+  if (sdcard_rename(src, dst)) {
+    lua_pushboolean(L, true);
+    return 1;
+  }
+  lua_pushboolean(L, false);
+  lua_pushstring(L, "rename failed");
+  return 2;
+}
+
+// ── picocalc.fs.copy(src, dst [, progress_fn]) → ok [, err] ─────────────────
+typedef struct { lua_State *L; int fn_ref; } copy_progress_ctx_t;
+
+static void copy_progress_trampoline(uint32_t done, uint32_t total, void *user) {
+  copy_progress_ctx_t *ctx = (copy_progress_ctx_t *)user;
+  lua_rawgeti(ctx->L, LUA_REGISTRYINDEX, ctx->fn_ref);
+  lua_pushinteger(ctx->L, (lua_Integer)done);
+  lua_pushinteger(ctx->L, (lua_Integer)total);
+  lua_pcall(ctx->L, 2, 0, 0);
+}
+
+static int l_fs_copy(lua_State *L) {
+  const char *src = luaL_checkstring(L, 1);
+  const char *dst = luaL_checkstring(L, 2);
+  if (!fs_sandbox_check(L, src, false)) {
+    lua_pushboolean(L, false);
+    lua_pushstring(L, "permission denied (source)");
+    return 2;
+  }
+  if (!fs_sandbox_check(L, dst, true)) {
+    lua_pushboolean(L, false);
+    lua_pushstring(L, "permission denied (destination)");
+    return 2;
+  }
+
+  copy_progress_ctx_t ctx = {NULL, LUA_NOREF};
+  if (lua_isfunction(L, 3)) {
+    lua_pushvalue(L, 3);
+    ctx.L      = L;
+    ctx.fn_ref = luaL_ref(L, LUA_REGISTRYINDEX);
+  }
+
+  bool ok = sdcard_copy(src, dst,
+                        ctx.fn_ref != LUA_NOREF ? copy_progress_trampoline : NULL,
+                        &ctx);
+  if (ctx.fn_ref != LUA_NOREF)
+    luaL_unref(L, LUA_REGISTRYINDEX, ctx.fn_ref);
+
+  if (ok) {
+    lua_pushboolean(L, true);
+    return 1;
+  }
+  lua_pushboolean(L, false);
+  lua_pushstring(L, "copy failed");
+  return 2;
+}
+
+// ── picocalc.fs.stat(path) → {size, is_dir, year, month, day, hour, min, sec} ─
+static int l_fs_stat(lua_State *L) {
+  const char *path = luaL_checkstring(L, 1);
+  if (!fs_sandbox_check(L, path, false)) {
+    lua_pushnil(L);
+    lua_pushstring(L, "permission denied");
+    return 2;
+  }
+  sdcard_stat_t st;
+  if (!sdcard_stat(path, &st)) {
+    lua_pushnil(L);
+    lua_pushstring(L, "not found");
+    return 2;
+  }
+  lua_newtable(L);
+  lua_pushinteger(L, (lua_Integer)st.size); lua_setfield(L, -2, "size");
+  lua_pushboolean(L, st.is_dir);            lua_setfield(L, -2, "is_dir");
+  push_mtime_fields(L, st.fdate, st.ftime);
+  return 1;
+}
+
+// ── picocalc.fs.diskInfo() → {free, total}  (values in KB) ──────────────────
+static int l_fs_diskInfo(lua_State *L) {
+  uint32_t free_kb = 0, total_kb = 0;
+  if (!sdcard_disk_info(&free_kb, &total_kb)) {
+    lua_pushnil(L);
+    lua_pushstring(L, "disk info unavailable");
+    return 2;
+  }
+  lua_newtable(L);
+  lua_pushinteger(L, (lua_Integer)free_kb);  lua_setfield(L, -2, "free");
+  lua_pushinteger(L, (lua_Integer)total_kb); lua_setfield(L, -2, "total");
+  return 1;
+}
+
+// ── picocalc.fs.glob(path, pattern) → [{name, is_dir, size, year, …}] ────────
+// Pattern supports * (any sequence) and ? (any single char); case-insensitive.
+static bool glob_match(const char *pat, const char *str) {
+  const char *star = NULL, *ss = str;
+  while (*str) {
+    char p = (*pat >= 'A' && *pat <= 'Z') ? (*pat + 32) : *pat;
+    char s = (*str >= 'A' && *str <= 'Z') ? (*str + 32) : *str;
+    if (p == '?' || p == s) {
+      pat++; str++;
+    } else if (*pat == '*') {
+      star = pat++; ss = str;
+    } else if (star) {
+      pat = star + 1; str = ++ss;
+    } else {
+      return false;
+    }
+  }
+  while (*pat == '*') pat++;
+  return !*pat;
+}
+
+typedef struct { lua_State *L; int tidx; int n; const char *pattern; } glob_ctx_t;
+
+static void glob_cb(const sdcard_entry_t *e, void *user) {
+  glob_ctx_t *ctx = (glob_ctx_t *)user;
+  if (!glob_match(ctx->pattern, e->name)) return;
+  lua_State *L = ctx->L;
+  lua_newtable(L);
+  lua_pushstring(L, e->name);           lua_setfield(L, -2, "name");
+  lua_pushboolean(L, e->is_dir);        lua_setfield(L, -2, "is_dir");
+  lua_pushinteger(L, (lua_Integer)e->size); lua_setfield(L, -2, "size");
+  push_mtime_fields(L, e->fdate, e->ftime);
+  lua_rawseti(L, ctx->tidx, ++ctx->n);
+}
+
+static int l_fs_glob(lua_State *L) {
+  const char *path    = luaL_checkstring(L, 1);
+  const char *pattern = luaL_checkstring(L, 2);
+  lua_newtable(L);
+  if (!fs_sandbox_check(L, path, false)) return 1;
+  glob_ctx_t ctx = {L, lua_gettop(L), 0, pattern};
+  sdcard_list_dir(path, glob_cb, &ctx);
+  return 1;
+}
+
 static const luaL_Reg l_fs_lib[] = {
-    {"open", l_fs_open},     {"read", l_fs_read},
-    {"write", l_fs_write},   {"close", l_fs_close},
-    {"seek", l_fs_seek},     {"tell", l_fs_tell},
-    {"exists", l_fs_exists}, {"readFile", l_fs_readFile},
-    {"size", l_fs_size},     {"listDir", l_fs_listDir},
-    {"mkdir", l_fs_mkdir},   {"appPath", l_fs_appPath},
-    {"browse", l_fs_browse}, {NULL, NULL}};
+    {"open",     l_fs_open},     {"read",     l_fs_read},
+    {"write",    l_fs_write},    {"close",    l_fs_close},
+    {"seek",     l_fs_seek},     {"tell",     l_fs_tell},
+    {"exists",   l_fs_exists},   {"readFile", l_fs_readFile},
+    {"size",     l_fs_size},     {"listDir",  l_fs_listDir},
+    {"mkdir",    l_fs_mkdir},    {"appPath",  l_fs_appPath},
+    {"browse",   l_fs_browse},
+    {"delete",   l_fs_delete},   {"rename",   l_fs_rename},
+    {"copy",     l_fs_copy},     {"stat",     l_fs_stat},
+    {"diskInfo", l_fs_diskInfo}, {"glob",     l_fs_glob},
+    {NULL, NULL}};
 
 
 void lua_bridge_fs_init(lua_State *L) {
