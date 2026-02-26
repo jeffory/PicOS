@@ -32,6 +32,9 @@ static bool s_dma_active = false;
 static int s_dma_chan = -1;
 static uint s_pio_sm = 0;
 
+// Transparent color key (0 = disabled)
+static uint16_t s_transparent_color = 0;
+
 // ── Built-in 6x8 font (ASCII 0x20–0x7E) ─────────────────────────────────────
 // Minimal 6x8 pixel font data — each character is 6 bytes (columns), 8 rows.
 // This is a standard "font6x8" pattern used widely in embedded projects.
@@ -500,7 +503,11 @@ void display_draw_image(int x, int y, int w, int h, const uint16_t *data) {
 
 void display_draw_image_partial(int x, int y, int img_w, int img_h,
                                 const uint16_t *data, int sx, int sy, int sw,
-                                int sh, bool flip_x, bool flip_y) {
+                                int sh, bool flip_x, bool flip_y,
+                                uint16_t transparent_color) {
+  // (x, y) is the top-left corner of the image.
+  int draw_x = x;
+  int draw_y = y;
   if (sx < 0) {
     sw += sx;
     sx = 0;
@@ -517,20 +524,28 @@ void display_draw_image_partial(int x, int y, int img_w, int img_h,
   if (sw <= 0 || sh <= 0)
     return;
 
+  // Use global setting if transparent_color is 0
+  if (transparent_color == 0)
+    transparent_color = s_transparent_color;
+
   for (int row = 0; row < sh; row++) {
-    int py = y + row;
+    int py = draw_y + row;
     if (py < 0 || py >= FB_HEIGHT)
       continue;
 
     int src_row = flip_y ? (sy + sh - 1 - row) : (sy + row);
 
     for (int col = 0; col < sw; col++) {
-      int px = x + col;
+      int px = draw_x + col;
       if (px < 0 || px >= FB_WIDTH)
         continue;
 
       int src_col = flip_x ? (sx + sw - 1 - col) : (sx + col);
       uint16_t c = data[src_row * img_w + src_col];
+
+      // Skip transparent pixels (compare in native endian)
+      if (transparent_color != 0 && c == transparent_color)
+        continue;
 
       s_framebuffer[py * FB_WIDTH + px] = (c >> 8) | (c << 8);
     }
@@ -538,7 +553,12 @@ void display_draw_image_partial(int x, int y, int img_w, int img_h,
 }
 
 void display_draw_image_scaled(int x, int y, int img_w, int img_h,
-                               const uint16_t *data, float scale, float angle) {
+                               const uint16_t *data, float scale, float angle,
+                               uint16_t transparent_color) {
+  // If transparent_color is 0, use the global setting
+  if (transparent_color == 0)
+    transparent_color = s_transparent_color;
+
   // tgx_draw_image_scaled renders directly into the framebuffer using TGX's
   // native RGB565 format (little-endian).  Our framebuffer stores pixels
   // byte-swapped (big-endian) for the 8-bit DMA path, so we need to:
@@ -547,20 +567,23 @@ void display_draw_image_scaled(int x, int y, int img_w, int img_h,
   //   3. Byte-swap the affected region back to BE for the DMA flush.
 
   // Calculate bounding box of transformed image to only swap affected region.
-  // Image is centered at (x, y). Transform corners, find min/max.
+  // (x, y) is the top-left corner; compute centre for TGX and rotation.
+  float half_w = img_w * scale * 0.5f;
+  float half_h = img_h * scale * 0.5f;
+  float cx = x + half_w;
+  float cy = y + half_h;
+
   float cosa = cosf(angle);
   float sina = sinf(angle);
-  float w = img_w * scale * 0.5f;
-  float h = img_h * scale * 0.5f;
 
   // Transform all 4 corners and track min/max
   float corners[4][2] = {
-    {-w, -h}, {w, -h}, {w, h}, {-w, h}
+    {-half_w, -half_h}, {half_w, -half_h}, {half_w, half_h}, {-half_w, half_h}
   };
-  float min_x = x, max_x = x, min_y = y, max_y = y;
+  float min_x = cx, max_x = cx, min_y = cy, max_y = cy;
   for (int i = 0; i < 4; i++) {
-    float tx = corners[i][0] * cosa - corners[i][1] * sina + x;
-    float ty = corners[i][0] * sina + corners[i][1] * cosa + y;
+    float tx = corners[i][0] * cosa - corners[i][1] * sina + cx;
+    float ty = corners[i][0] * sina + corners[i][1] * cosa + cy;
     if (tx < min_x) min_x = tx;
     if (tx > max_x) max_x = tx;
     if (ty < min_y) min_y = ty;
@@ -586,8 +609,14 @@ void display_draw_image_scaled(int x, int y, int img_w, int img_h,
     }
   }
 
-  tgx_draw_image_scaled(fb, FB_WIDTH, FB_HEIGHT, data, img_w, img_h, x, y,
-                        scale, angle);
+  // Use masked version if transparency is enabled, otherwise use regular version
+  if (transparent_color != 0) {
+    tgx_draw_image_scaled_masked(fb, FB_WIDTH, FB_HEIGHT, data, img_w, img_h, (int)cx, (int)cy,
+                                  scale, angle, transparent_color);
+  } else {
+    tgx_draw_image_scaled(fb, FB_WIDTH, FB_HEIGHT, data, img_w, img_h, (int)cx, (int)cy,
+                          scale, angle);
+  }
 
   // Byte-swap back only the affected region
   for (int row = by; row < by + bh; row++) {
@@ -595,6 +624,73 @@ void display_draw_image_scaled(int x, int y, int img_w, int img_h,
       fb[row * FB_WIDTH + col] = (fb[row * FB_WIDTH + col] >> 8) | (fb[row * FB_WIDTH + col] << 8);
     }
   }
+}
+
+void display_draw_image_scaled_nn(int x, int y, const uint16_t *data,
+                                   int src_w, int src_h, int dst_w, int dst_h,
+                                   uint16_t transparent_color) {
+  if (!data || dst_w <= 0 || dst_h <= 0 || src_w <= 0 || src_h <= 0)
+    return;
+
+  // (x, y) is the top-left corner of the scaled image.
+  int draw_x = x;
+  int draw_y = y;
+
+  // Clamp to framebuffer bounds
+  if (draw_x >= FB_WIDTH || draw_y >= FB_HEIGHT)
+    return;
+  if (draw_x + dst_w < 0 || draw_y + dst_h < 0)
+    return;
+
+  // Calculate actual drawing bounds
+  int start_x = draw_x < 0 ? -draw_x : 0;
+  int start_y = draw_y < 0 ? -draw_y : 0;
+  int end_x = (draw_x + dst_w > FB_WIDTH) ? FB_WIDTH - draw_x : dst_w;
+  int end_y = (draw_y + dst_h > FB_HEIGHT) ? FB_HEIGHT - draw_y : dst_h;
+
+  if (end_x <= start_x || end_y <= start_y)
+    return;
+
+  // Use global setting if transparent_color is 0
+  if (transparent_color == 0)
+    transparent_color = s_transparent_color;
+
+  // Fixed-point ratios (16-bit precision)
+  uint32_t ratio_x = ((uint32_t)src_w << 16) / (uint32_t)dst_w;
+  uint32_t ratio_y = ((uint32_t)src_h << 16) / (uint32_t)dst_h;
+
+  uint16_t *fb = s_framebuffer;
+
+  for (int dy = start_y; dy < end_y; dy++) {
+    // Source Y position (fixed-point)
+    uint32_t sy = (dy * ratio_y) >> 16;
+    if (sy >= (uint32_t)src_h)
+      sy = src_h - 1;
+
+    for (int dx = start_x; dx < end_x; dx++) {
+      // Source X position (fixed-point)
+      uint32_t sx = (dx * ratio_x) >> 16;
+      if (sx >= (uint32_t)src_w)
+        sx = src_w - 1;
+
+      uint16_t color = data[sy * src_w + sx];
+      
+      // Skip transparent pixels
+      if (transparent_color != 0 && color == transparent_color)
+        continue;
+      
+      // Byte-swap for big-endian framebuffer
+      fb[(draw_y + dy) * FB_WIDTH + (draw_x + dx)] = (color >> 8) | (color << 8);
+    }
+  }
+}
+
+void display_set_transparent_color(uint16_t color) {
+  s_transparent_color = color;
+}
+
+uint16_t display_get_transparent_color(void) {
+  return s_transparent_color;
 }
 
 void display_flush(void) {

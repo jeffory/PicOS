@@ -41,8 +41,8 @@
 #define KBD_PIN_SCL 7     // GP7 / I2C1 SCL
 #define KBD_I2C_ADDR 0x1F // STM32 keyboard controller default address
 #define KBD_I2C_BAUD                                                           \
-  (100 * 1000) // 100 kHz standard I2C — 10× faster than 10 kHz
-               // Revert to (10 * 1000) if keyboard reliability regresses
+  (10 * 1000) // 10 kHz — conservative speed for STM32F103 I2C reliability
+              // 100 kHz caused STM32 lockup after extended use (requires power cycle)
 
 // STM32 register map (from clockworkpi/PicoCalc picocalc_keyboard firmware)
 // Read protocol:  send reg address (1 byte, nostop=false i.e. STOP), wait, then

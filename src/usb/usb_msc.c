@@ -60,22 +60,24 @@ void usb_msc_enter_mode(void) {
   // 2. Draw the splash screen
   ui_draw_splash("USB Mode", "Press ESC to exit");
 
-  // 3. Poll loop — tud_task() is also called by the SDK's background IRQ,
-  //    but calling it here too ensures responsive MSC handling.
+  // 3. Poll loop — USB events are processed exclusively by the SDK's
+  //    USBCTRL_IRQ background task (PICO_STDIO_USB_ENABLE_IRQ_BACKGROUND_TASK=1
+  //    installs low_priority_worker_irq which calls tud_task() under
+  //    stdio_usb_mutex).  We must NOT call tud_task() here: the IRQ and a
+  //    direct call share no mutual exclusion around the processing callbacks,
+  //    so both could call disk_read() simultaneously, corrupting SPI0 state
+  //    and hanging the device (which manifests as the keyboard locking up).
   printf("[USB MSC] Waiting for host or ESC key...\n");
-  
-  uint32_t poll_loop_ms = 0;
+
   uint32_t last_kbd_poll_ms = 0;
+  uint32_t loop_start_ms = to_ms_since_boot(get_absolute_time());
   const uint32_t KBD_POLL_INTERVAL_MS = 10;  // Poll keyboard every 10ms max
   const uint32_t HOST_TIMEOUT_MS = 5000;      // 5 second timeout if no host activity
-  
+
   while (true) {
-    // Service USB, giving it priority
-    uint32_t poll_start = to_ms_since_boot(get_absolute_time());
-    tud_task();
+    uint32_t now = to_ms_since_boot(get_absolute_time());
 
     // Check ESC key with rate limiting to avoid I2C bus congestion
-    uint32_t now = to_ms_since_boot(get_absolute_time());
     if (now - last_kbd_poll_ms >= KBD_POLL_INTERVAL_MS) {
       kbd_poll();
       last_kbd_poll_ms = now;
@@ -84,21 +86,15 @@ void usb_msc_enter_mode(void) {
         break;
       }
     }
-    
-    // Check if host is still connected
-    if (!tud_mounted() && poll_loop_ms > HOST_TIMEOUT_MS) {
-      printf("[USB MSC] Host disconnected for >%ums, exiting\n", HOST_TIMEOUT_MS);
+
+    // Exit if no host has mounted the device within HOST_TIMEOUT_MS.
+    // Use wall time so the timeout is accurate regardless of loop body duration.
+    if (!tud_mounted() && (now - loop_start_ms) > HOST_TIMEOUT_MS) {
+      printf("[USB MSC] No host connected for >%ums, exiting\n", HOST_TIMEOUT_MS);
       break;
     }
-    
-    // Track loop timing for timeout detection
-    uint32_t poll_end = to_ms_since_boot(get_absolute_time());
-    poll_loop_ms += (poll_end - poll_start);
-    if (poll_loop_ms > HOST_TIMEOUT_MS) {
-      poll_loop_ms = 0;  // Reset counter each 5 seconds
-    }
-    
-    sleep_us(100); // 100µs base interval
+
+    sleep_us(100); // 100µs base interval — lets USB IRQs fire between iterations
   }
 
   // 4. Deactivate MSC and remount

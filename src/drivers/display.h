@@ -60,13 +60,28 @@ void display_draw_image(int x, int y, int w, int h, const uint16_t *data);
 // Blit a sub-rectangle of an image to the framebuffer at (x, y).
 // sx, sy, sw, sh define the source rectangle within the w x h image.
 // flip_x and flip_y mirror the drawing horizontally and vertically.
+// transparent_color: 0 = use global setting, otherwise RGB565 color to treat as transparent.
 void display_draw_image_partial(int x, int y, int img_w, int img_h,
                                 const uint16_t *data, int sx, int sy, int sw,
-                                int sh, bool flip_x, bool flip_y);
+                                int sh, bool flip_x, bool flip_y,
+                                uint16_t transparent_color);
 
 // Draw a scaled/rotated image to the framebuffer at (x, y).
+// transparent_color: 0 = use global setting, otherwise RGB565 color to treat as transparent.
 void display_draw_image_scaled(int x, int y, int img_w, int img_h,
-                               const uint16_t *data, float scale, float angle);
+                               const uint16_t *data, float scale, float angle,
+                               uint16_t transparent_color);
+
+// Draw a scaled image using nearest-neighbor (crisp pixel art).
+// dst_w and dst_h specify the output size in pixels.
+// transparent_color: 0 = use global setting, otherwise RGB565 color to treat as transparent.
+void display_draw_image_scaled_nn(int x, int y, const uint16_t *data,
+                                  int src_w, int src_h, int dst_w, int dst_h,
+                                  uint16_t transparent_color);
+
+// Transparent color key support (0 = disabled)
+void display_set_transparent_color(uint16_t color);
+uint16_t display_get_transparent_color(void);
 
 // Push framebuffer to LCD (starts DMA transfer in the background).
 void display_flush(void);
