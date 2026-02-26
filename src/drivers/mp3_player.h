@@ -32,4 +32,5 @@ uint32_t mp3_player_get_length(const mp3_player_t *player);
 void mp3_player_set_volume(mp3_player_t *player, uint8_t volume);
 uint8_t mp3_player_get_volume(const mp3_player_t *player);
 void mp3_player_set_loop(mp3_player_t *player, bool loop);
+uint32_t mp3_player_get_sample_rate(const mp3_player_t *player);
 void mp3_player_update(void);

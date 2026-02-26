@@ -449,6 +449,7 @@ void system_menu_show(lua_State *L) {
       }
       case ITEM_USB_MSC: {
         usb_msc_enter_mode();
+        kbd_clear_state(); // discard the ESC that exited MSC mode
         if (L == NULL)
           launcher_refresh_apps();
         need_redraw = true;

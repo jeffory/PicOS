@@ -367,6 +367,12 @@ static int l_sound_mp3player_getVolume(lua_State *L) {
     return 1;
 }
 
+static int l_sound_mp3player_getSampleRate(lua_State *L) {
+    mp3_player_t *player = check_mp3player(L, 1);
+    lua_pushinteger(L, mp3_player_get_sample_rate(player));
+    return 1;
+}
+
 static int l_sound_mp3player_setLoop(lua_State *L) {
     mp3_player_t *player = check_mp3player(L, 1);
     bool loop = lua_toboolean(L, 2);
@@ -437,6 +443,7 @@ static const luaL_Reg sound_mp3player_methods[] = {
     {"getLength", l_sound_mp3player_getLength},
     {"setVolume", l_sound_mp3player_setVolume},
     {"getVolume", l_sound_mp3player_getVolume},
+    {"getSampleRate", l_sound_mp3player_getSampleRate},
     {"setLoop", l_sound_mp3player_setLoop},
     {"__gc", l_sound_mp3player_gc},
     {NULL, NULL}

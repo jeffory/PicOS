@@ -44,6 +44,13 @@ void tgx_draw_image_scaled(uint16_t *dst_fb, int dst_w, int dst_h,
                            const uint16_t *src_data, int src_w, int src_h,
                            int dst_x, int dst_y, float scale, float angle);
 
+// Draws a scaled/rotated image using tgx with color-key transparency.
+// transparent_color: RGB565 color that will be treated as transparent (skipped).
+void tgx_draw_image_scaled_masked(uint16_t *dst_fb, int dst_w, int dst_h,
+                                  const uint16_t *src_data, int src_w, int src_h,
+                                  int dst_x, int dst_y, float scale, float angle,
+                                  uint16_t transparent_color);
+
 #ifdef __cplusplus
 }
 #endif

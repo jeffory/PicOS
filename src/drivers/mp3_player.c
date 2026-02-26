@@ -24,6 +24,7 @@ static mp3_player_t s_player;
 static bool s_initialized = false;
 static repeating_timer_t s_playback_timer;
 static bool s_timer_active = false;
+static short s_pcm_output[1152 * 2];   // static: must not live on ISR stack
 
 static void pwm_stereo_init(uint32_t sample_rate) {
     gpio_set_function(AUDIO_PIN_L, GPIO_FUNC_PWM);
@@ -90,9 +91,8 @@ static bool playback_callback(repeating_timer_t *rt) {
         return true;
     }
 
-    short pcm_output[1152 * 2];
     unsigned char *inbuf = s_decode_buffer + s_buffer_pos;
-    int err = MP3Decode(s_decoder, &inbuf, &s_bytes_in_buffer, pcm_output, 0);
+    int err = MP3Decode(s_decoder, &inbuf, &s_bytes_in_buffer, s_pcm_output, 0);
 
     if (err == ERR_MP3_INDATA_UNDERFLOW) {
         int read = sdcard_fread(s_file, s_decode_buffer, sizeof(s_decode_buffer));
@@ -118,11 +118,12 @@ static bool playback_callback(repeating_timer_t *rt) {
         }
         return true;
     } else if (err == 0) {
+        s_buffer_pos = (int)(inbuf - s_decode_buffer);
         MP3FrameInfo info;
         MP3GetLastFrameInfo(s_decoder, &info);
-        
-        int16_t left = pcm_output[0];
-        int16_t right = (info.nChans > 1) ? pcm_output[1] : left;
+
+        int16_t left = s_pcm_output[0];
+        int16_t right = (info.nChans > 1) ? s_pcm_output[1] : left;
 
         int32_t left_val = ((int32_t)left + 32768) * s_player.volume / 100;
         int32_t right_val = ((int32_t)right + 32768) * s_player.volume / 100;
@@ -296,6 +297,11 @@ void mp3_player_set_volume(mp3_player_t *player, uint8_t volume) {
 uint8_t mp3_player_get_volume(const mp3_player_t *player) {
     if (!player) return 0;
     return player->volume;
+}
+
+uint32_t mp3_player_get_sample_rate(const mp3_player_t *player) {
+    if (!player) return 0;
+    return player->sample_rate;
 }
 
 void mp3_player_set_loop(mp3_player_t *player, bool loop) {

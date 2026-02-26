@@ -391,3 +391,22 @@ extern "C" void tgx_draw_image_scaled(uint16_t *dst_fb, int dst_w, int dst_h,
   dst_im.blitScaledRotated(src_im, {src_w / 2.0f, src_h / 2.0f},
                            {(float)dst_x, (float)dst_y}, scale, angle);
 }
+
+extern "C" void tgx_draw_image_scaled_masked(uint16_t *dst_fb, int dst_w, int dst_h,
+                                            const uint16_t *src_data, int src_w,
+                                            int src_h, int dst_x, int dst_y,
+                                            float scale, float angle,
+                                            uint16_t transparent_color) {
+  if (!dst_fb || !src_data)
+    return;
+
+  tgx::Image<tgx::RGB565> dst_im(dst_fb, dst_w, dst_h);
+  tgx::Image<tgx::RGB565> src_im((uint16_t *)src_data, src_w, src_h);
+
+  // Anchor at the center of the source image to draw it at the (dst_x, dst_y)
+  // center point, with transparency
+  tgx::RGB565 mask_color(transparent_color);
+  dst_im.blitScaledRotatedMasked(src_im, mask_color,
+                                 {src_w / 2.0f, src_h / 2.0f},
+                                 {(float)dst_x, (float)dst_y}, scale, angle);
+}
