@@ -238,10 +238,13 @@ bool decode_jpeg_file(const char *path, image_decode_result_t *result) {
     int scale_div = 1;
     int scale_opt = 0;
 
-    // Use JPEG sub-sampling to natively shrink 4K/8K images without fully
-    // decoding them into PSRAM! We target a maximum of ~1-2 megapixel buffer
-    // footprints
-    while ((size_t)(w / scale_div) * (size_t)(h / scale_div) > 1000000 &&
+    // Use JPEG sub-sampling to natively shrink large images without fully
+    // decoding them into PSRAM.  Target ~360K pixels (≈2× display area in each
+    // dimension) — enough for sharp rendering on the 320×320 screen while
+    // keeping allocations well under 1 MB.  The old 1 000 000-pixel threshold
+    // allowed 960×960 (921 600 px → 1.84 MB) and 640×1136 (726 400 px →
+    // 1.45 MB) through without downscaling, causing PSRAM OOM.
+    while ((size_t)(w / scale_div) * (size_t)(h / scale_div) > 360000 &&
            scale_div < 8) {
       if (scale_div == 1) {
         scale_div = 2;

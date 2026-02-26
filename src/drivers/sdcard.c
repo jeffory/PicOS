@@ -162,11 +162,85 @@ int sdcard_list_dir(const char *path,
         e.name[sizeof(e.name) - 1] = '\0';
         e.is_dir = (fi.fattrib & AM_DIR) != 0;
         e.size   = fi.fsize;
+        e.fdate  = fi.fdate;
+        e.ftime  = fi.ftime;
         if (callback) callback(&e, user);
         count++;
     }
     f_closedir(&dir);
     return count;
+}
+
+bool sdcard_delete(const char *path) {
+    if (!s_mounted) return false;
+    return f_unlink(path) == FR_OK;
+}
+
+bool sdcard_rename(const char *src, const char *dst) {
+    if (!s_mounted) return false;
+    return f_rename(src, dst) == FR_OK;
+}
+
+#define COPY_CHUNK 4096
+
+bool sdcard_copy(const char *src, const char *dst,
+                 void (*progress_cb)(uint32_t done, uint32_t total, void *user),
+                 void *user) {
+    if (!s_mounted) return false;
+
+    FILINFO fi;
+    uint32_t total = (f_stat(src, &fi) == FR_OK) ? fi.fsize : 0;
+
+    FIL fsrc, fdst;
+    if (f_open(&fsrc, src, FA_READ | FA_OPEN_EXISTING) != FR_OK) return false;
+    if (f_open(&fdst, dst, FA_WRITE | FA_CREATE_ALWAYS) != FR_OK) {
+        f_close(&fsrc);
+        return false;
+    }
+
+    uint8_t *buf = (uint8_t *)umm_malloc(COPY_CHUNK);
+    if (!buf) { f_close(&fsrc); f_close(&fdst); return false; }
+
+    uint32_t done = 0;
+    bool ok = true;
+    while (true) {
+        UINT br;
+        if (f_read(&fsrc, buf, COPY_CHUNK, &br) != FR_OK) { ok = false; break; }
+        if (br == 0) break; // EOF
+        UINT bw;
+        if (f_write(&fdst, buf, br, &bw) != FR_OK || bw != br) { ok = false; break; }
+        done += br;
+        if (progress_cb) progress_cb(done, total, user);
+    }
+
+    umm_free(buf);
+    f_close(&fsrc);
+    f_close(&fdst);
+    if (!ok) f_unlink(dst); // remove partial destination on error
+    return ok;
+}
+
+bool sdcard_stat(const char *path, sdcard_stat_t *out) {
+    if (!out) return false;
+    FILINFO fi;
+    if (f_stat(path, &fi) != FR_OK) return false;
+    out->size   = fi.fsize;
+    out->is_dir = (fi.fattrib & AM_DIR) != 0;
+    out->fdate  = fi.fdate;
+    out->ftime  = fi.ftime;
+    return true;
+}
+
+bool sdcard_disk_info(uint32_t *out_free_kb, uint32_t *out_total_kb) {
+    if (!s_mounted) return false;
+    FATFS *fs;
+    DWORD free_clust;
+    if (f_getfree("", &free_clust, &fs) != FR_OK) return false;
+    // sectors/cluster * 512 bytes/sector / 1024 bytes/KB = sectors/cluster / 2
+    uint32_t spc = fs->csize;
+    if (out_total_kb) *out_total_kb = (uint32_t)((uint64_t)(fs->n_fatent - 2) * spc / 2);
+    if (out_free_kb)  *out_free_kb  = (uint32_t)((uint64_t)free_clust * spc / 2);
+    return true;
 }
 
 char *sdcard_read_file(const char *path, int *out_len) {

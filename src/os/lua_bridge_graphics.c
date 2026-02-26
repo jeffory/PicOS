@@ -1,4 +1,5 @@
 #include "lua_bridge_internal.h"
+#include "pico/time.h"
 #include <math.h>
 
 // ── picocalc.graphics.* ──────────────────────────────────────────────────────
@@ -35,6 +36,23 @@ static int l_graphics_setColor(lua_State *L) {
 static int l_graphics_setBackgroundColor(lua_State *L) {
   s_graphics_bg_color = l_checkcolor(L, 1);
   return 0;
+}
+
+static int l_graphics_setTransparentColor(lua_State *L) {
+  uint16_t color = 0;
+  if (!lua_isnil(L, 1))
+    color = l_checkcolor(L, 1);
+  display_set_transparent_color(color);
+  return 0;
+}
+
+static int l_graphics_getTransparentColor(lua_State *L) {
+  uint16_t color = display_get_transparent_color();
+  if (color == 0)
+    lua_pushnil(L);
+  else
+    lua_pushinteger(L, color);
+  return 1;
 }
 
 static int l_graphics_clear(lua_State *L) {
@@ -268,7 +286,7 @@ static int l_graphics_image_draw(lua_State *L) {
   }
 
   display_draw_image_partial(x, y, img->w, img->h, img->data, sx, sy, sw, sh,
-                             flip_x, flip_y);
+                             flip_x, flip_y, 0);
   return 0;
 }
 
@@ -283,7 +301,7 @@ static int l_graphics_image_drawAnchored(lua_State *L) {
   y -= (int)(img->h * ay);
 
   display_draw_image_partial(x, y, img->w, img->h, img->data, 0, 0, img->w,
-                             img->h, false, false);
+                             img->h, false, false, 0);
   return 0;
 }
 
@@ -299,7 +317,7 @@ static int l_graphics_image_drawTiled(lua_State *L) {
       int draw_w = (tx + img->w > rect_w) ? (rect_w - tx) : img->w;
       int draw_h = (ty + img->h > rect_h) ? (rect_h - ty) : img->h;
       display_draw_image_partial(x + tx, y + ty, img->w, img->h, img->data, 0,
-                                 0, draw_w, draw_h, false, false);
+                                 0, draw_w, draw_h, false, false, 0);
     }
   }
 
@@ -321,7 +339,23 @@ static int l_graphics_image_drawScaled(lua_State *L) {
   float scale = luaL_checknumber(L, 4);
   float angle = luaL_optnumber(L, 5, 0.0);
 
-  display_draw_image_scaled(x, y, img->w, img->h, img->data, scale, angle);
+  display_draw_image_scaled(x, y, img->w, img->h, img->data, scale, angle, 0);
+  return 0;
+}
+
+static int l_graphics_image_drawScaledNN(lua_State *L) {
+  lua_image_t *img = check_image(L, 1);
+  int x = luaL_checkinteger(L, 2);
+  int y = luaL_checkinteger(L, 3);
+  int scale = luaL_checkinteger(L, 4);
+
+  if (scale <= 0)
+    return luaL_error(L, "scale must be positive integer");
+
+  int dst_w = img->w * scale;
+  int dst_h = img->h * scale;
+
+  display_draw_image_scaled_nn(x, y, img->data, img->w, img->h, dst_w, dst_h, 0);
   return 0;
 }
 
@@ -332,6 +366,7 @@ static const luaL_Reg l_graphics_image_methods[] = {
     {"drawAnchored", l_graphics_image_drawAnchored},
     {"drawTiled", l_graphics_image_drawTiled},
     {"drawScaled", l_graphics_image_drawScaled},
+    {"drawScaledNN", l_graphics_image_drawScaledNN},
     {"setStorageLocation", l_graphics_image_setStorageLocation},
     {"getMetadata", l_graphics_image_getMetadata},
     {NULL, NULL}};
@@ -661,6 +696,9 @@ typedef struct {
   int z_index;
   bool visible;
   bool updates_enabled;
+  bool always_redraw;
+  bool redraws_on_image_change;
+  bool dirty;
   int tag;
   bool ignores_draw_offset;
   bool opaque;
@@ -668,11 +706,16 @@ typedef struct {
   int bounds_x, bounds_y, bounds_w, bounds_h;
   bool collisions_enabled;
   int collide_x, collide_y, collide_w, collide_h;
+  int clip_x, clip_y, clip_w, clip_h;
+  bool has_clip;
   int group_mask;
   int collides_with_mask;
   lua_image_t *image;
   uint16_t *frame_data;  // extracted frame pixels (NULL = use full image)
   int frame_w, frame_h;  // dimensions of extracted frame
+  int scale_nn;         // integer scale for NN scaling
+  bool use_nn_scaling;  // use NN instead of bilinear
+  uint16_t transparent_color;  // 0 = use global setting
 } lua_sprite_t;
 
 static lua_sprite_t *s_sprites[MAX_SPRITES];
@@ -703,6 +746,8 @@ static int l_sprite_getSize(lua_State *L);
 static int l_sprite_setScale(lua_State *L);
 static int l_sprite_getScale(lua_State *L);
 static int l_sprite_setRotation(lua_State *L);
+static int l_sprite_setScaleNN(lua_State *L);
+static int l_sprite_setTransparentColor(lua_State *L);
 static int l_sprite_getRotation(lua_State *L);
 static int l_sprite_copy(lua_State *L);
 static int l_sprite_setUpdatesEnabled(lua_State *L);
@@ -749,6 +794,15 @@ static int l_sprite_resetCollidesWithGroupsMask(lua_State *L);
 static int l_sprite_checkCollisions(lua_State *L);
 static int l_sprite_querySpritesAtPoint(lua_State *L);
 static int l_sprite_querySpritesInRect(lua_State *L);
+static int l_sprite_setClipRect(lua_State *L);
+static int l_sprite_clearClipRect(lua_State *L);
+static int l_sprite_setAlwaysRedraw(lua_State *L);
+static int l_sprite_getAlwaysRedraw(lua_State *L);
+static int l_sprite_markDirty(lua_State *L);
+static int l_sprite_addDirtyRect(lua_State *L);
+static int l_sprite_setRedrawsOnImageChange(lua_State *L);
+static int l_sprite_querySpritesAlongLine(lua_State *L);
+static int l_sprite_querySpriteInfoAlongLine(lua_State *L);
 
 static int l_sprite_gc(lua_State *L) {
   // getAllSprites() previously pushed proxy full-userdata of sizeof(lua_sprite_t*)
@@ -779,6 +833,9 @@ static int l_sprite_new(lua_State *L) {
   s->z_index = 0;
   s->visible = true;
   s->updates_enabled = true;
+  s->always_redraw = false;
+  s->redraws_on_image_change = true;
+  s->dirty = false;
   s->tag = 0;
   s->ignores_draw_offset = false;
   s->opaque = true;
@@ -793,12 +850,20 @@ static int l_sprite_new(lua_State *L) {
   s->collide_y = 0;
   s->collide_w = 0;
   s->collide_h = 0;
+  s->clip_x = 0;
+  s->clip_y = 0;
+  s->clip_w = 0;
+  s->clip_h = 0;
+  s->has_clip = false;
   s->group_mask = 0;
   s->collides_with_mask = 0;
   s->image = NULL;
   s->frame_data = NULL;
   s->frame_w = 0;
   s->frame_h = 0;
+  s->scale_nn = 1;
+  s->use_nn_scaling = false;
+  s->transparent_color = 0;  // use global setting
 
   if (lua_isuserdata(L, 1)) {
     s->image = (lua_image_t *)lua_touserdata(L, 1);
@@ -841,15 +906,22 @@ static int l_sprite_update(lua_State *L) {
       int draw_y = s->y;
       // Use extracted frame if available, otherwise the full image
       const uint16_t *data = s->frame_data ? s->frame_data : s->image->data;
-      int dw = s->frame_data ? s->frame_w : s->width;
-      int dh = s->frame_data ? s->frame_h : s->height;
-      if (s->rotation != 0.0f || s->scale != 1.0f || s->scale_y != 1.0f) {
-        display_draw_image_scaled(draw_x, draw_y, dw, dh,
-                                  data, s->scale, s->rotation);
+      int src_w = s->frame_data ? s->frame_w : s->width;
+      int src_h = s->frame_data ? s->frame_h : s->height;
+      
+      // Handle NN scaling
+      if (s->use_nn_scaling && s->scale_nn > 1) {
+        int dst_w = src_w * s->scale_nn;
+        int dst_h = src_h * s->scale_nn;
+        display_draw_image_scaled_nn(draw_x, draw_y, data, src_w, src_h, dst_w, dst_h, s->transparent_color);
+      } else if (s->rotation != 0.0f || s->scale != 1.0f || s->scale_y != 1.0f) {
+        display_draw_image_scaled(draw_x, draw_y, src_w, src_h,
+                                  data, s->scale, s->rotation,
+                                  s->transparent_color);
       } else {
-        display_draw_image_partial(draw_x, draw_y, dw, dh,
-                                   data, 0, 0, dw, dh,
-                                   s->flip_x, s->flip_y);
+        display_draw_image_partial(draw_x, draw_y, src_w, src_h,
+                                   data, 0, 0, src_w, src_h,
+                                   s->flip_x, s->flip_y, s->transparent_color);
       }
     }
   }
@@ -1002,6 +1074,27 @@ static int l_sprite_getRotation(lua_State *L) {
   lua_sprite_t *s = check_sprite(L, 1);
   lua_pushnumber(L, s->rotation);
   return 1;
+}
+
+static int l_sprite_setScaleNN(lua_State *L) {
+  lua_sprite_t *s = check_sprite(L, 1);
+  int scale = luaL_checkinteger(L, 2);
+  if (scale <= 0)
+    return luaL_error(L, "scale must be positive integer");
+  
+  s->scale_nn = scale;
+  s->use_nn_scaling = true;
+  return 0;
+}
+
+static int l_sprite_setTransparentColor(lua_State *L) {
+  lua_sprite_t *s = check_sprite(L, 1);
+  if (lua_isnil(L, 2)) {
+    s->transparent_color = 0;  // use global setting
+  } else {
+    s->transparent_color = l_checkcolor(L, 2);
+  }
+  return 0;
 }
 
 static int l_sprite_copy(lua_State *L) {
@@ -1177,14 +1270,24 @@ static int l_sprite_draw(lua_State *L) {
   if (!s->visible || !s->image)
     return 0;
     
-  if (s->rotation != 0.0f || s->scale != 1.0f || s->scale_y != 1.0f) {
-    display_draw_image_scaled(x, y, s->width, s->height,
-                              s->image->data, s->scale,
-                              s->rotation);
+  // Use extracted frame if available
+  const uint16_t *data = s->frame_data ? s->frame_data : s->image->data;
+  int src_w = s->frame_data ? s->frame_w : s->width;
+  int src_h = s->frame_data ? s->frame_h : s->height;
+  
+  // Handle NN scaling
+  if (s->use_nn_scaling && s->scale_nn > 1) {
+    int dst_w = src_w * s->scale_nn;
+    int dst_h = src_h * s->scale_nn;
+    display_draw_image_scaled_nn(x, y, data, src_w, src_h, dst_w, dst_h, s->transparent_color);
+  } else if (s->rotation != 0.0f || s->scale != 1.0f || s->scale_y != 1.0f) {
+    display_draw_image_scaled(x, y, src_w, src_h,
+                              data, s->scale,
+                              s->rotation, s->transparent_color);
   } else {
-    display_draw_image_partial(x, y, s->width, s->height,
-                               s->image->data, 0, 0, s->width, s->height,
-                               s->flip_x, s->flip_y);
+    display_draw_image_partial(x, y, src_w, src_h,
+                               data, 0, 0, src_w, src_h,
+                               s->flip_x, s->flip_y, s->transparent_color);
   }
   return 0;
 }
@@ -1194,14 +1297,24 @@ static int l_sprite_updateSingle(lua_State *L) {
   if (s->updates_enabled && s->visible && s->image) {
     int draw_x = s->x;
     int draw_y = s->y;
-    if (s->rotation != 0.0f || s->scale != 1.0f || s->scale_y != 1.0f) {
-      display_draw_image_scaled(draw_x, draw_y, s->width, s->height,
-                                s->image->data, s->scale,
-                                s->rotation);
+    // Use extracted frame if available
+    const uint16_t *data = s->frame_data ? s->frame_data : s->image->data;
+    int src_w = s->frame_data ? s->frame_w : s->width;
+    int src_h = s->frame_data ? s->frame_h : s->height;
+    
+    // Handle NN scaling
+    if (s->use_nn_scaling && s->scale_nn > 1) {
+      int dst_w = src_w * s->scale_nn;
+      int dst_h = src_h * s->scale_nn;
+      display_draw_image_scaled_nn(draw_x, draw_y, data, src_w, src_h, dst_w, dst_h, s->transparent_color);
+    } else if (s->rotation != 0.0f || s->scale != 1.0f || s->scale_y != 1.0f) {
+      display_draw_image_scaled(draw_x, draw_y, src_w, src_h,
+                                data, s->scale,
+                                s->rotation, s->transparent_color);
     } else {
-      display_draw_image_partial(draw_x, draw_y, s->width, s->height,
-                                 s->image->data, 0, 0, s->width, s->height,
-                                 s->flip_x, s->flip_y);
+      display_draw_image_partial(draw_x, draw_y, src_w, src_h,
+                               data, 0, 0, src_w, src_h,
+                               s->flip_x, s->flip_y, s->transparent_color);
     }
   }
   return 0;
@@ -1239,6 +1352,8 @@ static int l_sprite_index(lua_State *L) {
     } else {
       lua_pushnil(L);
     }
+  } else if (!strcmp(key, "scale_nn")) {
+    lua_pushinteger(L, s->scale_nn);
   } else {
     lua_getmetatable(L, 1);
     lua_pushvalue(L, 2);
@@ -1292,6 +1407,8 @@ static const luaL_Reg l_sprite_methods[] = {
     {"getSize", l_sprite_getSize},
     {"setScale", l_sprite_setScale},
     {"getScale", l_sprite_getScale},
+    {"setScaleNN", l_sprite_setScaleNN},
+    {"setTransparentColor", l_sprite_setTransparentColor},
     {"setRotation", l_sprite_setRotation},
     {"getRotation", l_sprite_getRotation},
     {"copy", l_sprite_copy},
@@ -1330,6 +1447,13 @@ static const luaL_Reg l_sprite_methods[] = {
     {"resetGroupMask", l_sprite_resetGroupMask},
     {"resetCollidesWithGroupsMask", l_sprite_resetCollidesWithGroupsMask},
     {"checkCollisions", l_sprite_checkCollisions},
+    {"setClipRect", l_sprite_setClipRect},
+    {"clearClipRect", l_sprite_clearClipRect},
+    {"setAlwaysRedraw", l_sprite_setAlwaysRedraw},
+    {"getAlwaysRedraw", l_sprite_getAlwaysRedraw},
+    {"markDirty", l_sprite_markDirty},
+    {"addDirtyRect", l_sprite_addDirtyRect},
+    {"setRedrawsOnImageChange", l_sprite_setRedrawsOnImageChange},
     {NULL, NULL}};
 
 static int l_sprite_addSprite(lua_State *L) {
@@ -1467,16 +1591,38 @@ static int l_sprite_clearCollideRect(lua_State *L) {
   return 0;
 }
 
+// Returns the effective on-screen pixel dimensions of a sprite.
+// Uses frame dimensions if a source rect has been extracted, otherwise the
+// full image dimensions, then applies NN or bilinear scaling.
+static void sprite_visual_size(const lua_sprite_t *s, int *w, int *h) {
+  int bw = s->frame_w > 0 ? s->frame_w : s->width;
+  int bh = s->frame_h > 0 ? s->frame_h : s->height;
+  if (s->use_nn_scaling && s->scale_nn > 1) {
+    *w = bw * s->scale_nn;
+    *h = bh * s->scale_nn;
+  } else {
+    *w = (int)(bw * s->scale);
+    *h = (int)(bh * s->scale_y);
+  }
+}
+
 static bool spritesOverlap(lua_sprite_t *a, lua_sprite_t *b) {
   if (!a->collisions_enabled || !b->collisions_enabled) return false;
-  
+
+  // Use explicit collide rect if set; otherwise derive from visual size
+  int aw, ah, bw, bh;
+  if (a->collide_w > 0) { aw = a->collide_w; ah = a->collide_h; }
+  else                  { sprite_visual_size(a, &aw, &ah); }
+  if (b->collide_w > 0) { bw = b->collide_w; bh = b->collide_h; }
+  else                  { sprite_visual_size(b, &bw, &bh); }
+
   int ax = a->x + a->collide_x;
   int ay = a->y + a->collide_y;
   int bx = b->x + b->collide_x;
   int by = b->y + b->collide_y;
-  
-  return (ax < bx + b->collide_w && ax + a->collide_w > bx &&
-          ay < by + b->collide_h && ay + a->collide_h > by);
+
+  return (ax < bx + bw && ax + aw > bx &&
+          ay < by + bh && ay + ah > by);
 }
 
 static int l_sprite_overlappingSprites(lua_State *L) {
@@ -1487,9 +1633,7 @@ static int l_sprite_overlappingSprites(lua_State *L) {
   for (int i = 0; i < s_sprite_count; i++) {
     lua_sprite_t *other = s_sprites[i];
     if (other != s && spritesOverlap(s, other)) {
-      lua_sprite_t **ptr = (lua_sprite_t **)lua_newuserdata(L, sizeof(lua_sprite_t *));
-      *ptr = other;
-      luaL_setmetatable(L, GRAPHICS_SPRITE_MT);
+      lua_pushlightuserdata(L, other);
       lua_rawseti(L, -2, ++count);
     }
   }
@@ -1510,17 +1654,13 @@ static int l_sprite_allOverlappingSprites(lua_State *L) {
       
       if (spritesOverlap(a, b)) {
         lua_createtable(L, 2, 0);
-        
-        lua_sprite_t **ptrA = (lua_sprite_t **)lua_newuserdata(L, sizeof(lua_sprite_t *));
-        *ptrA = a;
-        luaL_setmetatable(L, GRAPHICS_SPRITE_MT);
+
+        lua_pushlightuserdata(L, a);
         lua_rawseti(L, -2, 1);
-        
-        lua_sprite_t **ptrB = (lua_sprite_t **)lua_newuserdata(L, sizeof(lua_sprite_t *));
-        *ptrB = b;
-        luaL_setmetatable(L, GRAPHICS_SPRITE_MT);
+
+        lua_pushlightuserdata(L, b);
         lua_rawseti(L, -2, 2);
-        
+
         lua_rawseti(L, -2, ++count);
       }
     }
@@ -1672,6 +1812,202 @@ static int l_sprite_querySpritesInRect(lua_State *L) {
   return 1;
 }
 
+static int l_sprite_setClipRect(lua_State *L) {
+  lua_sprite_t *s = check_sprite(L, 1);
+  
+  if (lua_istable(L, 2)) {
+    lua_getfield(L, 2, "x");
+    lua_getfield(L, 2, "y");
+    lua_getfield(L, 2, "w");
+    lua_getfield(L, 2, "h");
+    s->clip_x = luaL_optinteger(L, -4, 0);
+    s->clip_y = luaL_optinteger(L, -3, 0);
+    s->clip_w = luaL_optinteger(L, -2, s->width);
+    s->clip_h = luaL_optinteger(L, -1, s->height);
+    lua_pop(L, 4);
+    s->has_clip = true;
+  } else if (lua_gettop(L) >= 5) {
+    s->clip_x = luaL_checkinteger(L, 2);
+    s->clip_y = luaL_checkinteger(L, 3);
+    s->clip_w = luaL_checkinteger(L, 4);
+    s->clip_h = luaL_checkinteger(L, 5);
+    s->has_clip = true;
+  } else {
+    s->has_clip = false;
+  }
+  return 0;
+}
+
+static int l_sprite_clearClipRect(lua_State *L) {
+  lua_sprite_t *s = check_sprite(L, 1);
+  s->has_clip = false;
+  return 0;
+}
+
+static int l_sprite_setAlwaysRedraw(lua_State *L) {
+  lua_sprite_t *s = check_sprite(L, 1);
+  s->always_redraw = lua_toboolean(L, 2);
+  return 0;
+}
+
+static int l_sprite_getAlwaysRedraw(lua_State *L) {
+  lua_sprite_t *s = check_sprite(L, 1);
+  lua_pushboolean(L, s->always_redraw);
+  return 1;
+}
+
+static int l_sprite_markDirty(lua_State *L) {
+  lua_sprite_t *s = check_sprite(L, 1);
+  s->dirty = true;
+  return 0;
+}
+
+static int l_sprite_addDirtyRect(lua_State *L) {
+  lua_sprite_t *s = check_sprite(L, 1);
+  (void)s;
+  return 0;
+}
+
+static int l_sprite_setRedrawsOnImageChange(lua_State *L) {
+  lua_sprite_t *s = check_sprite(L, 1);
+  s->redraws_on_image_change = lua_toboolean(L, 2);
+  return 0;
+}
+
+static bool sprite_line_line_intersect(int x1, int y1, int x2, int y2,
+                                       int x3, int y3, int x4, int y4) {
+  int denom = (x1 - x2) * (y3 - y4) - (y1 - y2) * (x3 - x4);
+  if (denom == 0) return false;
+  
+  float t = ((x1 - x3) * (y3 - y4) - (y1 - y3) * (x3 - x4)) / (float)denom;
+  float u = -((x1 - x2) * (y1 - y3) - (y1 - y2) * (x1 - x3)) / (float)denom;
+  
+  return (t >= 0 && t <= 1 && u >= 0 && u <= 1);
+}
+
+static bool sprite_line_intersect(int x1, int y1, int x2, int y2, 
+                                  int rx, int ry, int rw, int rh) {
+  if (rw <= 0 || rh <= 0) return false;
+  
+  int left = rx;
+  int right = rx + rw;
+  int top = ry;
+  int bottom = ry + rh;
+  
+  if ((x1 >= left && x1 <= right && y1 >= top && y1 <= bottom) ||
+      (x2 >= left && x2 <= right && y2 >= top && y2 <= bottom)) {
+    return true;
+  }
+  
+  if (sprite_line_line_intersect(x1, y1, x2, y2, left, top, right, top)) return true;
+  if (sprite_line_line_intersect(x1, y1, x2, y2, left, bottom, right, bottom)) return true;
+  if (sprite_line_line_intersect(x1, y1, x2, y2, left, top, left, bottom)) return true;
+  if (sprite_line_line_intersect(x1, y1, x2, y2, right, top, right, bottom)) return true;
+  
+  return false;
+}
+
+static int l_sprite_querySpritesAlongLine(lua_State *L) {
+  int x1 = luaL_checkinteger(L, 1);
+  int y1 = luaL_checkinteger(L, 2);
+  int x2 = luaL_checkinteger(L, 3);
+  int y2 = luaL_checkinteger(L, 4);
+  
+  lua_createtable(L, 0, 0);
+  int count = 0;
+  
+  for (int i = 0; i < s_sprite_count; i++) {
+    lua_sprite_t *s = s_sprites[i];
+    int sx = s->x;
+    int sy = s->y;
+    int sw = s->width > 0 ? s->width : s->collide_w;
+    int sh = s->height > 0 ? s->height : s->collide_h;
+    
+    if (sprite_line_intersect(x1, y1, x2, y2, sx, sy, sw, sh)) {
+      lua_sprite_t **ptr = (lua_sprite_t **)lua_newuserdata(L, sizeof(lua_sprite_t *));
+      *ptr = s;
+      luaL_setmetatable(L, GRAPHICS_SPRITE_MT);
+      lua_rawseti(L, -2, ++count);
+    }
+  }
+  return 1;
+}
+
+static bool sprite_line_rect_intersection(int x1, int y1, int x2, int y2,
+                                           int rx, int ry, int rw, int rh,
+                                           int *out_x, int *out_y) {
+  if (rw <= 0 || rh <= 0) return false;
+  
+  int left = rx;
+  int right = rx + rw;
+  int top = ry;
+  int bottom = ry + rh;
+  
+  int ix = 0, iy = 0;
+  bool found = false;
+  float min_dist = 1e9f;
+  
+  int edges[4][4] = {
+    {left, top, right, top},
+    {left, bottom, right, bottom},
+    {left, top, left, bottom},
+    {right, top, right, bottom}
+  };
+  
+  for (int i = 0; i < 4; i++) {
+    int ex1 = edges[i][0], ey1 = edges[i][1], ex2 = edges[i][2], ey2 = edges[i][3];
+    int denom = (x1 - x2) * (ey1 - ey2) - (y1 - y2) * (ex1 - ex2);
+    if (denom == 0) continue;
+    float t = ((x1 - ex1) * (ey1 - ey2) - (y1 - ey1) * (ex1 - ex2)) / (float)denom;
+    float u = -((x1 - x2) * (y1 - ey1) - (y1 - y2) * (x1 - ex1)) / (float)denom;
+    if (t >= 0 && t <= 1 && u >= 0 && u <= 1) {
+      int px = (int)(x1 + t * (x2 - x1));
+      int py = (int)(y1 + t * (y2 - y1));
+      float d = (px - x1) * (px - x1) + (py - y1) * (py - y1);
+      if (d < min_dist) { min_dist = d; ix = px; iy = py; found = true; }
+    }
+  }
+  
+  if (found) {
+    *out_x = ix;
+    *out_y = iy;
+  }
+  return found;
+}
+
+static int l_sprite_querySpriteInfoAlongLine(lua_State *L) {
+  int x1 = luaL_checkinteger(L, 1);
+  int y1 = luaL_checkinteger(L, 2);
+  int x2 = luaL_checkinteger(L, 3);
+  int y2 = luaL_checkinteger(L, 4);
+  
+  lua_createtable(L, 0, 0);
+  int count = 0;
+  
+  for (int i = 0; i < s_sprite_count; i++) {
+    lua_sprite_t *s = s_sprites[i];
+    int sx = s->x;
+    int sy = s->y;
+    int sw = s->width > 0 ? s->width : s->collide_w;
+    int sh = s->height > 0 ? s->height : s->collide_h;
+    
+    int ix, iy;
+    if (sprite_line_rect_intersection(x1, y1, x2, y2, sx, sy, sw, sh, &ix, &iy)) {
+      lua_createtable(L, 0, 0);
+      lua_sprite_t **ptr = (lua_sprite_t **)lua_newuserdata(L, sizeof(lua_sprite_t *));
+      *ptr = s;
+      luaL_setmetatable(L, GRAPHICS_SPRITE_MT);
+      lua_setfield(L, -2, "sprite");
+      lua_pushinteger(L, ix);
+      lua_setfield(L, -2, "x");
+      lua_pushinteger(L, iy);
+      lua_setfield(L, -2, "y");
+      lua_rawseti(L, -2, ++count);
+    }
+  }
+  return 1;
+}
+
 static const luaL_Reg l_sprite_lib[] = {
     {"new", l_sprite_new},
     {"addSprite", l_sprite_addSprite},
@@ -1684,6 +2020,8 @@ static const luaL_Reg l_sprite_lib[] = {
     {"performOnAllSprites", l_sprite_performOnAllSprites},
     {"querySpritesAtPoint", l_sprite_querySpritesAtPoint},
     {"querySpritesInRect", l_sprite_querySpritesInRect},
+    {"querySpritesAlongLine", l_sprite_querySpritesAlongLine},
+    {"querySpriteInfoAlongLine", l_sprite_querySpriteInfoAlongLine},
     {NULL, NULL}};
 
 // ── Spritesheet System ─────────────────────────────────────────────────────────
@@ -1815,7 +2153,7 @@ static int l_spritesheet_drawFrame(lua_State *L) {
                             ss->image->data,
                             ss->frame_x[frame_idx], ss->frame_y[frame_idx],
                             ss->frame_w[frame_idx], ss->frame_h[frame_idx],
-                            flip, false);
+                            flip, false, 0);
   return 0;
 }
 
@@ -1835,6 +2173,8 @@ static const luaL_Reg l_spritesheet_lib[] = {
 static const luaL_Reg l_graphics_lib[] = {
     {"setColor", l_graphics_setColor},
     {"setBackgroundColor", l_graphics_setBackgroundColor},
+    {"setTransparentColor", l_graphics_setTransparentColor},
+    {"getTransparentColor", l_graphics_getTransparentColor},
     {"clear", l_graphics_clear},
     {"drawGrid", l_graphics_drawGrid},
     {"fillBorderedRect", l_graphics_fillBorderedRect},
@@ -1842,9 +2182,644 @@ static const luaL_Reg l_graphics_lib[] = {
     {"draw3DWireframe", l_graphics_draw3DWireframe},
     {NULL, NULL}};
 
+// ── Animation System ─────────────────────────────────────────────────────────
+
+#define GRAPHICS_ANIMATION_LOOP_MT "picocalc.graphics.animation.loop"
+#define MAX_ANIMATION_LOOP_FRAMES 32
+
+typedef struct {
+  lua_image_t *frames[MAX_ANIMATION_LOOP_FRAMES];
+  int frame_count;
+  int current_frame;
+  uint32_t interval_ms;
+  uint32_t last_update_ms;
+  bool looping;
+  bool valid;
+} lua_animation_loop_t;
+
+static lua_animation_loop_t *check_animation_loop(lua_State *L, int idx) {
+  return (lua_animation_loop_t *)luaL_checkudata(L, idx, GRAPHICS_ANIMATION_LOOP_MT);
+}
+
+static int l_animation_loop_gc(lua_State *L) {
+  lua_animation_loop_t *loop = check_animation_loop(L, 1);
+  loop->frame_count = 0;
+  loop->valid = false;
+  return 0;
+}
+
+static int l_animation_loop_new(lua_State *L) {
+  lua_animation_loop_t *loop = (lua_animation_loop_t *)lua_newuserdata(L, sizeof(lua_animation_loop_t));
+  loop->frame_count = 0;
+  loop->current_frame = 0;
+  loop->interval_ms = 100;
+  loop->last_update_ms = to_ms_since_boot(get_absolute_time());
+  loop->looping = true;
+  loop->valid = false;
+
+  if (lua_gettop(L) >= 1) {
+    if (lua_isnumber(L, 1)) {
+      loop->interval_ms = luaL_checkinteger(L, 1);
+    }
+  }
+
+  if (lua_gettop(L) >= 2 && lua_istable(L, 2)) {
+    lua_pushvalue(L, 2);
+    loop->frame_count = (int)lua_rawlen(L, -1);
+    if (loop->frame_count > MAX_ANIMATION_LOOP_FRAMES) {
+      loop->frame_count = MAX_ANIMATION_LOOP_FRAMES;
+    }
+    for (int i = 0; i < loop->frame_count; i++) {
+      lua_rawgeti(L, -1, i + 1);
+      if (lua_isuserdata(L, -1)) {
+        loop->frames[i] = (lua_image_t *)lua_touserdata(L, -1);
+      } else {
+        loop->frames[i] = NULL;
+      }
+      lua_pop(L, 1);
+    }
+    lua_pop(L, 1);
+    loop->valid = (loop->frame_count > 0);
+  }
+
+  if (lua_gettop(L) >= 3) {
+    loop->looping = lua_toboolean(L, 3);
+  }
+
+  luaL_setmetatable(L, GRAPHICS_ANIMATION_LOOP_MT);
+  return 1;
+}
+
+static int l_animation_loop_draw(lua_State *L) {
+  lua_animation_loop_t *loop = check_animation_loop(L, 1);
+  int x = luaL_checkinteger(L, 2);
+  int y = luaL_checkinteger(L, 3);
+  bool flip = lua_toboolean(L, 4);
+
+  if (!loop->valid || !loop->frames[loop->current_frame])
+    return 0;
+
+  lua_image_t *img = loop->frames[loop->current_frame];
+  display_draw_image_partial(x, y, img->w, img->h, img->data,
+                            0, 0, img->w, img->h, flip, false, 0);
+  return 0;
+}
+
+static int l_animation_loop_update(lua_State *L) {
+  lua_animation_loop_t *loop = check_animation_loop(L, 1);
+  uint32_t now = to_ms_since_boot(get_absolute_time());
+
+  if (!loop->valid)
+    return 0;
+
+  if (now - loop->last_update_ms >= loop->interval_ms) {
+    loop->last_update_ms = now;
+    loop->current_frame++;
+    if (loop->current_frame >= loop->frame_count) {
+      if (loop->looping) {
+        loop->current_frame = 0;
+      } else {
+        loop->current_frame = loop->frame_count - 1;
+      }
+    }
+  }
+  return 0;
+}
+
+static int l_animation_loop_image(lua_State *L) {
+  lua_animation_loop_t *loop = check_animation_loop(L, 1);
+  if (!loop->valid || !loop->frames[loop->current_frame])
+    return 0;
+  lua_pushlightuserdata(L, loop->frames[loop->current_frame]);
+  return 1;
+}
+
+static int l_animation_loop_isValid(lua_State *L) {
+  lua_animation_loop_t *loop = check_animation_loop(L, 1);
+  lua_pushboolean(L, loop->valid);
+  return 1;
+}
+
+static int l_animation_loop_getFrameIndex(lua_State *L) {
+  lua_animation_loop_t *loop = check_animation_loop(L, 1);
+  lua_pushinteger(L, loop->current_frame);
+  return 1;
+}
+
+static int l_animation_loop_setImageTable(lua_State *L) {
+  lua_animation_loop_t *loop = check_animation_loop(L, 1);
+  loop->frame_count = 0;
+  loop->current_frame = 0;
+  loop->valid = false;
+
+  if (!lua_istable(L, 2))
+    return 0;
+
+  loop->frame_count = (int)lua_rawlen(L, 2);
+  if (loop->frame_count > MAX_ANIMATION_LOOP_FRAMES) {
+    loop->frame_count = MAX_ANIMATION_LOOP_FRAMES;
+  }
+  for (int i = 0; i < loop->frame_count; i++) {
+    lua_rawgeti(L, 2, i + 1);
+    if (lua_isuserdata(L, -1)) {
+      loop->frames[i] = (lua_image_t *)lua_touserdata(L, -1);
+    } else {
+      loop->frames[i] = NULL;
+    }
+    lua_pop(L, 1);
+  }
+  loop->valid = (loop->frame_count > 0);
+  loop->last_update_ms = to_ms_since_boot(get_absolute_time());
+  return 0;
+}
+
+static int l_animation_loop_setInterval(lua_State *L) {
+  lua_animation_loop_t *loop = check_animation_loop(L, 1);
+  loop->interval_ms = luaL_checkinteger(L, 2);
+  return 0;
+}
+
+static int l_animation_loop_setLooping(lua_State *L) {
+  lua_animation_loop_t *loop = check_animation_loop(L, 1);
+  loop->looping = lua_toboolean(L, 2);
+  return 0;
+}
+
+static int l_animation_loop_reset(lua_State *L) {
+  lua_animation_loop_t *loop = check_animation_loop(L, 1);
+  loop->current_frame = 0;
+  loop->last_update_ms = to_ms_since_boot(get_absolute_time());
+  return 0;
+}
+
+static const luaL_Reg l_animation_loop_methods[] = {
+    {"draw", l_animation_loop_draw},
+    {"update", l_animation_loop_update},
+    {"image", l_animation_loop_image},
+    {"isValid", l_animation_loop_isValid},
+    {"getFrameIndex", l_animation_loop_getFrameIndex},
+    {"setImageTable", l_animation_loop_setImageTable},
+    {"setInterval", l_animation_loop_setInterval},
+    {"setLooping", l_animation_loop_setLooping},
+    {"reset", l_animation_loop_reset},
+    {NULL, NULL}};
+
+static const luaL_Reg l_animation_loop_lib[] = {
+    {"new", l_animation_loop_new},
+    {NULL, NULL}};
+
+// ── Easing Functions ─────────────────────────────────────────────────────────
+
+static float easing_linear(float t) {
+  return t;
+}
+
+static float easing_sineIn(float t) {
+  return sinf(t * (float)M_PI_2);
+}
+
+static float easing_sineOut(float t) {
+  return 1.0f - sinf((1.0f - t) * (float)M_PI_2);
+}
+
+static float easing_sineInOut(float t) {
+  return -(cosf((float)M_PI * t) - 1.0f) / 2.0f;
+}
+
+static float easing_quadIn(float t) {
+  return t * t;
+}
+
+static float easing_quadOut(float t) {
+  return 1.0f - (1.0f - t) * (1.0f - t);
+}
+
+static float easing_quadInOut(float t) {
+  return t < 0.5f ? 2.0f * t * t : 1.0f - powf(-2.0f * t + 2.0f, 2.0f) / 2.0f;
+}
+
+static float easing_cubicIn(float t) {
+  return t * t * t;
+}
+
+static float easing_cubicOut(float t) {
+  return 1.0f - powf(1.0f - t, 3.0f);
+}
+
+static float easing_cubicInOut(float t) {
+  return t < 0.5f ? 4.0f * t * t * t : 1.0f - powf(-2.0f * t + 2.0f, 3.0f) / 2.0f;
+}
+
+typedef float (*easing_fn)(float);
+
+static easing_fn get_easing_fn(const char *name) {
+  if (!strcmp(name, "linear")) return easing_linear;
+  if (!strcmp(name, "sineIn") || !strcmp(name, "SineIn")) return easing_sineIn;
+  if (!strcmp(name, "sineOut") || !strcmp(name, "SineOut")) return easing_sineOut;
+  if (!strcmp(name, "sineInOut") || !strcmp(name, "SineInOut")) return easing_sineInOut;
+  if (!strcmp(name, "quadIn") || !strcmp(name, "QuadIn")) return easing_quadIn;
+  if (!strcmp(name, "quadOut") || !strcmp(name, "QuadOut")) return easing_quadOut;
+  if (!strcmp(name, "quadInOut") || !strcmp(name, "QuadInOut")) return easing_quadInOut;
+  if (!strcmp(name, "cubicIn") || !strcmp(name, "CubicIn")) return easing_cubicIn;
+  if (!strcmp(name, "cubicOut") || !strcmp(name, "CubicOut")) return easing_cubicOut;
+  if (!strcmp(name, "cubicInOut") || !strcmp(name, "CubicInOut")) return easing_cubicInOut;
+  return easing_linear;
+}
+
+// ── Animator ─────────────────────────────────────────────────────────────────
+
+#define GRAPHICS_ANIMATOR_MT "picocalc.graphics.animator"
+
+typedef struct {
+  float start_value;
+  float end_value;
+  uint32_t duration_ms;
+  uint32_t start_time_ms;
+  float easing_amplitude;
+  float easing_period;
+  int repeat_count;
+  int current_repeat;
+  bool reverses;
+  bool ended;
+  easing_fn easing;
+} lua_animator_t;
+
+static lua_animator_t *check_animator(lua_State *L, int idx) {
+  return (lua_animator_t *)luaL_checkudata(L, idx, GRAPHICS_ANIMATOR_MT);
+}
+
+static int l_animator_gc(lua_State *L) {
+  lua_animator_t *a = check_animator(L, 1);
+  a->ended = true;
+  return 0;
+}
+
+static int l_animator_new(lua_State *L) {
+  lua_animator_t *a = (lua_animator_t *)lua_newuserdata(L, sizeof(lua_animator_t));
+  a->duration_ms = luaL_checkinteger(L, 1);
+  a->start_value = (float)luaL_checknumber(L, 2);
+  a->end_value = (float)luaL_checknumber(L, 3);
+  a->start_time_ms = to_ms_since_boot(get_absolute_time());
+  a->easing_amplitude = 1.0f;
+  a->easing_period = 0.0f;
+  a->repeat_count = 1;
+  a->current_repeat = 0;
+  a->reverses = false;
+  a->ended = false;
+  a->easing = easing_linear;
+
+  if (lua_gettop(L) >= 4 && lua_isstring(L, 4)) {
+    a->easing = get_easing_fn(luaL_checkstring(L, 4));
+  }
+
+  if (lua_gettop(L) >= 5) {
+    a->start_time_ms += luaL_checkinteger(L, 5);
+  }
+
+  luaL_setmetatable(L, GRAPHICS_ANIMATOR_MT);
+  return 1;
+}
+
+static int l_animator_currentValue(lua_State *L) {
+  lua_animator_t *a = check_animator(L, 1);
+  if (a->ended) {
+    lua_pushnumber(L, a->reverses ? a->start_value : a->end_value);
+    return 1;
+  }
+
+  uint32_t now = to_ms_since_boot(get_absolute_time());
+  uint32_t elapsed = now - a->start_time_ms;
+  float t = (float)elapsed / (float)a->duration_ms;
+
+  if (t >= 1.0f) {
+    if (a->current_repeat < a->repeat_count - 1) {
+      a->current_repeat++;
+      a->start_time_ms = now;
+      t = 0.0f;
+    } else if (a->reverses) {
+      float tmp = a->start_value;
+      a->start_value = a->end_value;
+      a->end_value = tmp;
+      a->start_time_ms = now;
+      a->reverses = false;
+      t = 0.0f;
+    } else {
+      t = 1.0f;
+      a->ended = true;
+    }
+  }
+
+  if (t < 0.0f) t = 0.0f;
+  if (t > 1.0f) t = 1.0f;
+
+  float eased = a->easing(t);
+  float value = a->start_value + (a->end_value - a->start_value) * eased;
+  lua_pushnumber(L, value);
+  return 1;
+}
+
+static int l_animator_valueAtTime(lua_State *L) {
+  lua_animator_t *a = check_animator(L, 1);
+  uint32_t time_ms = luaL_checkinteger(L, 2);
+
+  float t = (float)time_ms / (float)a->duration_ms;
+  if (t < 0.0f) t = 0.0f;
+  if (t > 1.0f) t = 1.0f;
+
+  float eased = a->easing(t);
+  float value = a->start_value + (a->end_value - a->start_value) * eased;
+  lua_pushnumber(L, value);
+  return 1;
+}
+
+static int l_animator_progress(lua_State *L) {
+  lua_animator_t *a = check_animator(L, 1);
+  if (a->ended) {
+    lua_pushnumber(L, 1.0f);
+    return 1;
+  }
+
+  uint32_t now = to_ms_since_boot(get_absolute_time());
+  uint32_t elapsed = now - a->start_time_ms;
+  float progress = (float)elapsed / (float)a->duration_ms;
+  if (progress > 1.0f) progress = 1.0f;
+  lua_pushnumber(L, progress);
+  return 1;
+}
+
+static int l_animator_reset(lua_State *L) {
+  lua_animator_t *a = check_animator(L, 1);
+  a->start_time_ms = to_ms_since_boot(get_absolute_time());
+  a->ended = false;
+  a->current_repeat = 0;
+
+  if (lua_isnumber(L, 2)) {
+    a->duration_ms = luaL_checkinteger(L, 2);
+  }
+  return 0;
+}
+
+static int l_animator_ended(lua_State *L) {
+  lua_animator_t *a = check_animator(L, 1);
+  lua_pushboolean(L, a->ended);
+  return 1;
+}
+
+static int l_animator_index(lua_State *L) {
+  lua_animator_t *a = check_animator(L, 1);
+  const char *key = luaL_checkstring(L, 2);
+
+  if (!strcmp(key, "easingAmplitude")) {
+    lua_pushnumber(L, a->easing_amplitude);
+  } else if (!strcmp(key, "easingPeriod")) {
+    lua_pushnumber(L, a->easing_period);
+  } else if (!strcmp(key, "repeatCount")) {
+    lua_pushinteger(L, a->repeat_count);
+  } else if (!strcmp(key, "reverses")) {
+    lua_pushboolean(L, a->reverses);
+  } else {
+    lua_getmetatable(L, 1);
+    lua_pushvalue(L, 2);
+    lua_gettable(L, -2);
+  }
+  return 1;
+}
+
+static int l_animator_newindex(lua_State *L) {
+  lua_animator_t *a = check_animator(L, 1);
+  const char *key = luaL_checkstring(L, 2);
+
+  if (!strcmp(key, "easingAmplitude")) {
+    a->easing_amplitude = (float)luaL_checknumber(L, 3);
+  } else if (!strcmp(key, "easingPeriod")) {
+    a->easing_period = (float)luaL_checknumber(L, 3);
+  } else if (!strcmp(key, "repeatCount")) {
+    a->repeat_count = luaL_checkinteger(L, 3);
+  } else if (!strcmp(key, "reverses")) {
+    a->reverses = lua_toboolean(L, 3);
+  }
+  return 0;
+}
+
+static const luaL_Reg l_animator_methods[] = {
+    {"currentValue", l_animator_currentValue},
+    {"valueAtTime", l_animator_valueAtTime},
+    {"progress", l_animator_progress},
+    {"reset", l_animator_reset},
+    {"ended", l_animator_ended},
+    {NULL, NULL}};
+
+static const luaL_Reg l_animator_lib[] = {
+    {"new", l_animator_new},
+    {NULL, NULL}};
+
+// ── Blinker ─────────────────────────────────────────────────────────────────
+
+#define GRAPHICS_ANIMATION_BLINKER_MT "picocalc.graphics.animation.blinker"
+#define MAX_BLINKERS 32
+
+typedef struct {
+  uint32_t on_duration_ms;
+  uint32_t off_duration_ms;
+  bool loop;
+  int cycles;
+  int current_cycle;
+  uint32_t start_time_ms;
+  bool running;
+  bool state;
+} lua_animation_blinker_t;
+
+static lua_animation_blinker_t *s_blinkers[MAX_BLINKERS];
+static int s_blinker_count = 0;
+
+static lua_animation_blinker_t *check_blinker(lua_State *L, int idx) {
+  return (lua_animation_blinker_t *)luaL_checkudata(L, idx, GRAPHICS_ANIMATION_BLINKER_MT);
+}
+
+static int l_animation_blinker_gc(lua_State *L) {
+  lua_animation_blinker_t *b = check_blinker(L, 1);
+  b->running = false;
+  return 0;
+}
+
+static int l_animation_blinker_new(lua_State *L) {
+  lua_animation_blinker_t *b = (lua_animation_blinker_t *)lua_newuserdata(L, sizeof(lua_animation_blinker_t));
+  b->on_duration_ms = 500;
+  b->off_duration_ms = 500;
+  b->loop = true;
+  b->cycles = 0;
+  b->current_cycle = 0;
+  b->start_time_ms = to_ms_since_boot(get_absolute_time());
+  b->running = false;
+  b->state = true;
+
+  int top = lua_gettop(L);
+  if (top >= 1) b->on_duration_ms = luaL_checkinteger(L, 1);
+  if (top >= 2) b->off_duration_ms = luaL_checkinteger(L, 2);
+  if (top >= 3) b->loop = lua_toboolean(L, 3);
+  if (top >= 4) b->cycles = luaL_checkinteger(L, 4);
+  if (top >= 5) b->state = !lua_toboolean(L, 5);
+
+  if (s_blinker_count < MAX_BLINKERS) {
+    s_blinkers[s_blinker_count++] = b;
+  }
+
+  luaL_setmetatable(L, GRAPHICS_ANIMATION_BLINKER_MT);
+  return 1;
+}
+
+static int l_animation_blinker_update(lua_State *L) {
+  lua_animation_blinker_t *b = check_blinker(L, 1);
+
+  if (!b->running) {
+    b->running = true;
+    b->start_time_ms = to_ms_since_boot(get_absolute_time());
+    b->current_cycle = 0;
+    b->state = true;
+    lua_pushboolean(L, b->state);
+    return 1;
+  }
+
+  uint32_t now = to_ms_since_boot(get_absolute_time());
+  uint32_t elapsed = now - b->start_time_ms;
+  uint32_t cycle_time = b->on_duration_ms + b->off_duration_ms;
+
+  if (cycle_time == 0) {
+    lua_pushboolean(L, b->state);
+    return 1;
+  }
+
+  uint32_t cycle_elapsed = elapsed % cycle_time;
+  bool new_state = (cycle_elapsed < b->on_duration_ms);
+
+  if (new_state != b->state) {
+    b->state = new_state;
+  }
+
+  if (!b->loop && b->cycles > 0) {
+    uint32_t total_cycles = elapsed / cycle_time;
+    if (total_cycles >= (uint32_t)b->cycles) {
+      b->running = false;
+      b->state = false;
+    }
+  }
+
+  lua_pushboolean(L, b->running ? b->state : false);
+  return 1;
+}
+
+static int l_animation_blinker_start(lua_State *L) {
+  lua_animation_blinker_t *b = check_blinker(L, 1);
+
+  int top = lua_gettop(L);
+  if (top >= 1) b->on_duration_ms = luaL_checkinteger(L, 1);
+  if (top >= 2) b->off_duration_ms = luaL_checkinteger(L, 2);
+  if (top >= 3) b->loop = lua_toboolean(L, 3);
+  if (top >= 4) b->cycles = luaL_checkinteger(L, 4);
+  if (top >= 5) b->state = !lua_toboolean(L, 5);
+
+  b->start_time_ms = to_ms_since_boot(get_absolute_time());
+  b->current_cycle = 0;
+  b->running = true;
+  b->state = true;
+  return 0;
+}
+
+static int l_animation_blinker_startLoop(lua_State *L) {
+  lua_animation_blinker_t *b = check_blinker(L, 1);
+  b->loop = true;
+  b->cycles = 0;
+  b->start_time_ms = to_ms_since_boot(get_absolute_time());
+  b->current_cycle = 0;
+  b->running = true;
+  b->state = true;
+  return 0;
+}
+
+static int l_animation_blinker_stop(lua_State *L) {
+  lua_animation_blinker_t *b = check_blinker(L, 1);
+  b->running = false;
+  return 0;
+}
+
+static int l_animation_blinker_remove(lua_State *L) {
+  lua_animation_blinker_t *b = check_blinker(L, 1);
+  b->running = false;
+
+  for (int i = 0; i < s_blinker_count; i++) {
+    if (s_blinkers[i] == b) {
+      for (int j = i; j < s_blinker_count - 1; j++) {
+        s_blinkers[j] = s_blinkers[j + 1];
+      }
+      s_blinker_count--;
+      break;
+    }
+  }
+  return 0;
+}
+
+static int l_animation_blinker_updateAll(lua_State *L) {
+  uint32_t now = to_ms_since_boot(get_absolute_time());
+
+  for (int i = 0; i < s_blinker_count; i++) {
+    lua_animation_blinker_t *b = s_blinkers[i];
+    if (!b->running) continue;
+
+    uint32_t elapsed = now - b->start_time_ms;
+    uint32_t cycle_time = b->on_duration_ms + b->off_duration_ms;
+
+    if (cycle_time == 0) continue;
+
+    uint32_t cycle_elapsed = elapsed % cycle_time;
+    bool new_state = (cycle_elapsed < b->on_duration_ms);
+
+    if (new_state != b->state) {
+      b->state = new_state;
+    }
+
+    if (!b->loop && b->cycles > 0) {
+      uint32_t total_cycles = elapsed / cycle_time;
+      if (total_cycles >= (uint32_t)b->cycles) {
+        b->running = false;
+        b->state = false;
+      }
+    }
+  }
+  return 0;
+}
+
+static int l_animation_blinker_stopAll(lua_State *L) {
+  (void)L;
+  for (int i = 0; i < s_blinker_count; i++) {
+    s_blinkers[i]->running = false;
+  }
+  return 0;
+}
+
+static int l_animation_blinker_isRunning(lua_State *L) {
+  lua_animation_blinker_t *b = check_blinker(L, 1);
+  lua_pushboolean(L, b->running);
+  return 1;
+}
+
+static const luaL_Reg l_animation_blinker_methods[] = {
+    {"update", l_animation_blinker_update},
+    {"start", l_animation_blinker_start},
+    {"startLoop", l_animation_blinker_startLoop},
+    {"stop", l_animation_blinker_stop},
+    {"remove", l_animation_blinker_remove},
+    {"isRunning", l_animation_blinker_isRunning},
+    {NULL, NULL}};
+
+static const luaL_Reg l_animation_blinker_lib[] = {
+    {"new", l_animation_blinker_new},
+    {"updateAll", l_animation_blinker_updateAll},
+    {"stopAll", l_animation_blinker_stopAll},
+    {NULL, NULL}};
 
 void lua_bridge_graphics_init(lua_State *L) {
   s_sprite_count = 0;  // reset on each app launch
+  s_blinker_count = 0;  // reset blinkers on each app launch
 
   // Install Graphics Image metatable
   luaL_newmetatable(L, GRAPHICS_IMAGE_MT);
@@ -1884,6 +2859,35 @@ void lua_bridge_graphics_init(lua_State *L) {
   lua_setfield(L, -2, "__gc");
   lua_pop(L, 1);
 
+  // Install Animation Loop metatable
+  luaL_newmetatable(L, GRAPHICS_ANIMATION_LOOP_MT);
+  lua_pushvalue(L, -1);
+  lua_setfield(L, -2, "__index");
+  luaL_setfuncs(L, l_animation_loop_methods, 0);
+  lua_pushcfunction(L, l_animation_loop_gc);
+  lua_setfield(L, -2, "__gc");
+  lua_pop(L, 1);
+
+  // Install Animator metatable
+  luaL_newmetatable(L, GRAPHICS_ANIMATOR_MT);
+  lua_pushcfunction(L, l_animator_index);
+  lua_setfield(L, -2, "__index");
+  lua_pushcfunction(L, l_animator_newindex);
+  lua_setfield(L, -2, "__newindex");
+  luaL_setfuncs(L, l_animator_methods, 0);
+  lua_pushcfunction(L, l_animator_gc);
+  lua_setfield(L, -2, "__gc");
+  lua_pop(L, 1);
+
+  // Install Animation Blinker metatable
+  luaL_newmetatable(L, GRAPHICS_ANIMATION_BLINKER_MT);
+  lua_pushvalue(L, -1);
+  lua_setfield(L, -2, "__index");
+  luaL_setfuncs(L, l_animation_blinker_methods, 0);
+  lua_pushcfunction(L, l_animation_blinker_gc);
+  lua_setfield(L, -2, "__gc");
+  lua_pop(L, 1);
+
   // Build picocalc.graphics table
   lua_newtable(L);
   luaL_setfuncs(L, l_graphics_lib, 0);
@@ -1903,6 +2907,20 @@ void lua_bridge_graphics_init(lua_State *L) {
   lua_newtable(L);
   luaL_setfuncs(L, l_graphics_cache_lib, 0);
   lua_setfield(L, -2, "cache");
+
+  lua_newtable(L);
+  luaL_setfuncs(L, l_animation_loop_lib, 0);
+  lua_setfield(L, -2, "loop");
+
+  lua_newtable(L);
+  luaL_setfuncs(L, l_animator_lib, 0);
+  lua_setfield(L, -2, "animator");
+
+  lua_newtable(L);
+  luaL_setfuncs(L, l_animation_blinker_lib, 0);
+  lua_setfield(L, -2, "blinker");
+
+  lua_setfield(L, -2, "animation");
 
   lua_setfield(L, -2, "graphics");
 }
