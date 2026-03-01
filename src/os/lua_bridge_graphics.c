@@ -2908,6 +2908,8 @@ void lua_bridge_graphics_init(lua_State *L) {
   luaL_setfuncs(L, l_graphics_cache_lib, 0);
   lua_setfield(L, -2, "cache");
 
+  lua_newtable(L);  // animation parent table
+
   lua_newtable(L);
   luaL_setfuncs(L, l_animation_loop_lib, 0);
   lua_setfield(L, -2, "loop");
@@ -2920,7 +2922,7 @@ void lua_bridge_graphics_init(lua_State *L) {
   luaL_setfuncs(L, l_animation_blinker_lib, 0);
   lua_setfield(L, -2, "blinker");
 
-  lua_setfield(L, -2, "animation");
+  lua_setfield(L, -2, "animation");  // graphics["animation"] = animation table
 
-  lua_setfield(L, -2, "graphics");
+  lua_setfield(L, -2, "graphics");   // picocalc["graphics"] = graphics table
 }

@@ -25,6 +25,7 @@
 
 #include "image_decoders.h"
 #include "umm_malloc.h"
+#include "umm_malloc_cfg.h"
 
 
 // ── Colour helpers
@@ -64,9 +65,8 @@ static void menu_lua_hook(lua_State *L, lua_Debug *ar) {
 
 
 void lua_bridge_register(lua_State *L) {
-
-
-
+  printf("[LUA] lua_bridge_register start, PSRAM free=%lu\n",
+         (unsigned long)umm_free_heap_size());
 
 
 
@@ -76,28 +76,47 @@ void lua_bridge_register(lua_State *L) {
 
 
   // Open standard Lua libs (but not io/os/package for sandboxing)
+  printf("[LUA] registering _G...\n");
   luaL_requiref(L, "_G", luaopen_base, 1);
   lua_pop(L, 1);
+  printf("[LUA] registering table...\n");
   luaL_requiref(L, "table", luaopen_table, 1);
   lua_pop(L, 1);
+  printf("[LUA] registering string...\n");
   luaL_requiref(L, "string", luaopen_string, 1);
   lua_pop(L, 1);
+  printf("[LUA] registering math...\n");
   luaL_requiref(L, "math", luaopen_math, 1);
   lua_pop(L, 1);
+  printf("[LUA] stdlib done, PSRAM free=%lu\n",
+         (unsigned long)umm_free_heap_size());
 
   // Create the top-level `picocalc` table
   lua_newtable(L);
+  printf("[LUA] registering display...\n");
   lua_bridge_display_init(L);
+  printf("[LUA] registering input...\n");
   lua_bridge_input_init(L);
+  printf("[LUA] registering sys...\n");
   lua_bridge_sys_init(L);
+  printf("[LUA] registering fs...\n");
   lua_bridge_fs_init(L);
+  printf("[LUA] registering network...\n");
   lua_bridge_network_init(L);
+  printf("[LUA] registering config...\n");
   lua_bridge_config_init(L);
+  printf("[LUA] registering perf...\n");
   lua_bridge_perf_init(L);
+  printf("[LUA] registering graphics...\n");
   lua_bridge_graphics_init(L);
+  printf("[LUA] registering ui...\n");
   lua_bridge_ui_init(L);
+  printf("[LUA] registering audio...\n");
   lua_bridge_audio_init(L);
+  printf("[LUA] registering sound...\n");
   lua_bridge_sound_init(L);
+  printf("[LUA] all modules done, PSRAM free=%lu\n",
+         (unsigned long)umm_free_heap_size());
   // Set as global
   lua_setglobal(L, "picocalc");
 
@@ -105,6 +124,7 @@ void lua_bridge_register(lua_State *L) {
   // Fires every 256 Lua opcodes (~100µs-1ms) to catch menu button presses
   // even during tight loops, without requiring apps to poll input.
   lua_sethook(L, menu_lua_hook, LUA_MASKCOUNT, 256);
+  printf("[LUA] lua_bridge_register complete\n");
 }
 
 void lua_bridge_show_error(lua_State *L, const char *context) {

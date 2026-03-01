@@ -693,15 +693,19 @@ uint16_t display_get_transparent_color(void) {
   return s_transparent_color;
 }
 
+// Set to true by native_loader before launching a native PSRAM app.
+// Native apps execute from 0x15xxxxxx (same SPI bus as DMA source), so DMA
+// must complete before returning from flush, or instruction fetches stall.
+// Lua apps run from flash and are unaffected, so we leave it non-blocking.
+bool g_display_flush_blocking = false;
+
 void display_flush(void) {
   if (s_dma_active) {
-    // Wait for previous DMA completion
+    // Wait for the previous frame's DMA to finish before starting the next.
     dma_channel_wait_for_finish_blocking(s_dma_chan);
-
-    // Ensure state machine is fully drained before deasserting CS
     lcd_spi_wait_idle();
-
     lcd_cs_high();
+    s_dma_active = false;
   }
 
   // Swap buffers
@@ -714,11 +718,20 @@ void display_flush(void) {
   lcd_cs_low();
   lcd_dc_data();
 
-  // DMA transfer: non-blocking, CPU-free framebuffer → SPI
   dma_channel_set_read_addr(s_dma_chan, s_framebuffers[front_buffer_idx],
                             false);
   dma_channel_set_trans_count(s_dma_chan, FB_SIZE, true); // start transfer
   s_dma_active = true;
+
+  if (g_display_flush_blocking) {
+    // Native PSRAM apps: must not return while DMA holds the SPI bus,
+    // or the CPU will hard-fault trying to fetch instructions from PSRAM.
+    dma_channel_wait_for_finish_blocking(s_dma_chan);
+    lcd_spi_wait_idle();
+    lcd_cs_high();
+    s_dma_active = false;
+  }
+  // Non-blocking path: DMA runs concurrently while CPU executes Lua/OS code.
 }
 
 void display_set_brightness(uint8_t brightness) {

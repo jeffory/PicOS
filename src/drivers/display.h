@@ -83,8 +83,13 @@ void display_draw_image_scaled_nn(int x, int y, const uint16_t *data,
 void display_set_transparent_color(uint16_t color);
 uint16_t display_get_transparent_color(void);
 
-// Push framebuffer to LCD (starts DMA transfer in the background).
+// Push framebuffer to LCD.
+// Default: non-blocking — DMA starts and returns immediately (CPU/DMA overlap).
+// When g_display_flush_blocking is true, blocks until DMA completes.
+// Set g_display_flush_blocking=true before launching a native PSRAM app so
+// the DMA doesn't race with PSRAM instruction fetches on the same SPI bus.
 void display_flush(void);
+extern bool g_display_flush_blocking;
 
 // Brightness via backlight PWM (0-255)
 void display_set_brightness(uint8_t brightness);
