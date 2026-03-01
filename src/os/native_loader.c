@@ -295,8 +295,20 @@ static bool native_run(const app_entry_t *app) {
 
   printf("[NATIVE] Entry %p (thumb)\n", (void *)entry_addr);
 
-  // Free the raw file buffer before calling the app — recovers memory
-  umm_free(file_buf);
+  // Sanity-check: print first 16 bytes of exec_base so we can verify the
+  // image is intact just before launch (useful for catching PSRAM corruption).
+  printf("[NATIVE] exec_base[0..15]:");
+  for (int i = 0; i < 16; i++)
+    printf(" %02x", exec_base[i]);
+  printf("\n");
+
+  // NOTE: file_buf is intentionally freed AFTER entry_fn returns, not before.
+  // Freeing it here (while Core 1 runs Mongoose via umm_malloc/umm_free every
+  // 5 ms) creates a race on the umm heap metadata.  A corrupted heap can cause
+  // Core 1 to overwrite exec_base PSRAM with network data, trashing the app's
+  // literal pool and format-string pointers before/during the first loop iter.
+  // Deferring the free costs ~file_len bytes of PSRAM for the app's lifetime
+  // but eliminates the race window entirely.
 
   // Clear any stale keyboard state from the launcher before starting the app.
   // This matches what lua_bridge.c does before running Lua apps.
@@ -306,12 +318,19 @@ static bool native_run(const app_entry_t *app) {
   display_clear(C_BG);
   display_flush();
 
+  // Native apps execute from uncached PSRAM (0x15xxxxxx), the same SPI bus as
+  // the DMA source for display_flush. Force blocking flush mode so DMA always
+  // completes before returning control to PSRAM code.
+  g_display_flush_blocking = true;
+
   picos_app_entry_t entry_fn = (picos_app_entry_t)entry_addr;
   entry_fn((const PicoCalcAPI *)&g_api, app->path, app->id, app->name);
 
+  g_display_flush_blocking = false;
   printf("[NATIVE] App '%s' returned\n", app->name);
 
-  // ── 9. Free loaded image ──────────────────────────────────────────────────
+  // ── 9. Free both buffers now that the app has exited ──────────────────────
+  umm_free(file_buf);    // safe to free now — app has finished executing
   umm_free(load_base);   // use original cached-alias address for the allocator
   return true;
 }

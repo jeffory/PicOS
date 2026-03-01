@@ -152,6 +152,7 @@ static void scan_apps(void) {
 #define LIST_X 8
 #define LIST_Y 32
 #define LIST_VISIBLE 9
+#define DESC_SCROLL_RESET_PAUSE 40  // frames to pause at start before re-scrolling
 
 static int s_selected = 0;
 static int s_scroll = 0;
@@ -205,7 +206,7 @@ static void draw_launcher(void) {
       int max_w = FB_WIDTH - LIST_X * 2 - 4;
       int tw = display_text_width(s_apps[idx].description);
       if (tw > max_w) {
-        const char *p = s_apps[idx].description + s_desc_scroll;
+        const char *p = s_apps[idx].description + (sel ? s_desc_scroll : 0);
         int avail = strlen(p);
         char buf[64];
         int out_len = (avail * 6 > max_w * 6) ? (max_w / 6 + 1) : avail;
@@ -310,18 +311,13 @@ void launcher_run(void) {
     uint32_t pressed = kbd_get_buttons_pressed();
 
     if (pressed & BTN_UP) {
-      if (s_selected > 0) {
-        s_selected--;
+      if (s_app_count > 0) {
+        if (s_selected > 0)
+          s_selected--;
+        else
+          s_selected = s_app_count - 1;  // wrap to bottom
         if (s_selected < s_scroll)
           s_scroll = s_selected;
-        s_desc_scroll = 0;
-        s_desc_scroll_timer = 0;
-        dirty = true;
-      }
-    }
-    if (pressed & BTN_DOWN) {
-      if (s_selected < s_app_count - 1) {
-        s_selected++;
         if (s_selected >= s_scroll + LIST_VISIBLE)
           s_scroll = s_selected - LIST_VISIBLE + 1;
         s_desc_scroll = 0;
@@ -329,16 +325,49 @@ void launcher_run(void) {
         dirty = true;
       }
     }
-
-    if (pressed & BTN_LEFT) {
-      if (s_desc_scroll > 0) {
-        s_desc_scroll--;
+    if (pressed & BTN_DOWN) {
+      if (s_app_count > 0) {
+        if (s_selected < s_app_count - 1)
+          s_selected++;
+        else
+          s_selected = 0;  // wrap to top
+        if (s_selected >= s_scroll + LIST_VISIBLE)
+          s_scroll = s_selected - LIST_VISIBLE + 1;
+        if (s_selected < s_scroll)
+          s_scroll = s_selected;
+        s_desc_scroll = 0;
+        s_desc_scroll_timer = 0;
         dirty = true;
       }
     }
+
+    if (pressed & BTN_LEFT) {
+      if (s_app_count > 0) {
+        int new_sel = s_selected - LIST_VISIBLE;
+        if (new_sel < 0) new_sel = 0;
+        if (new_sel != s_selected) {
+          s_selected = new_sel;
+          if (s_selected < s_scroll)
+            s_scroll = s_selected;
+          s_desc_scroll = 0;
+          s_desc_scroll_timer = 0;
+          dirty = true;
+        }
+      }
+    }
     if (pressed & BTN_RIGHT) {
-      s_desc_scroll++;
-      dirty = true;
+      if (s_app_count > 0) {
+        int new_sel = s_selected + LIST_VISIBLE;
+        if (new_sel >= s_app_count) new_sel = s_app_count - 1;
+        if (new_sel != s_selected) {
+          s_selected = new_sel;
+          if (s_selected >= s_scroll + LIST_VISIBLE)
+            s_scroll = s_selected - LIST_VISIBLE + 1;
+          s_desc_scroll = 0;
+          s_desc_scroll_timer = 0;
+          dirty = true;
+        }
+      }
     }
 
     if (pressed & BTN_ENTER) {
@@ -358,13 +387,22 @@ void launcher_run(void) {
     s_desc_scroll_timer++;
     if (s_desc_scroll_timer >= 10) {
       s_desc_scroll_timer = 0;
-      if (s_selected < s_app_count) {
+      if (s_selected < s_app_count && s_apps[s_selected].description[0]) {
         int tw = display_text_width(s_apps[s_selected].description);
         int max_w = FB_WIDTH - LIST_X * 2 - 4;
         int desc_len = strlen(s_apps[s_selected].description);
         int max_scroll = desc_len - (max_w / 6);
-        if (tw > max_w && s_desc_scroll < max_scroll)
-          s_desc_scroll++;
+        if (tw > max_w) {
+          if (s_desc_scroll < max_scroll) {
+            s_desc_scroll++;
+            dirty = true;
+          } else {
+            // Reached end — reset and pause before cycling
+            s_desc_scroll = 0;
+            s_desc_scroll_timer = -DESC_SCROLL_RESET_PAUSE;
+            dirty = true;
+          }
+        }
       }
     }
 
