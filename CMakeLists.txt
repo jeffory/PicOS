@@ -146,6 +146,7 @@ add_executable(picocalc_os
     src/os/lua_bridge_ui.c
     src/os/lua_bridge_audio.c
     src/os/lua_bridge_sound.c
+    src/os/lua_bridge_repl.c
     src/os/lua_psram_alloc.c
     src/os/system_menu.c
     src/os/screenshot.c
