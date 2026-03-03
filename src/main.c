@@ -276,14 +276,6 @@ static int fs_list_dir(const char *path,
                        void *user) {
     printf("[FS_LISTDIR] path=%s cb=%p user=%p\n",
            path, (void*)callback, user);
-
-    // Diagnostic: check stack headroom before deep FatFS call
-    extern uint32_t __StackBottom;
-    uint32_t sp = (uint32_t)__get_MSP();
-    uint32_t headroom = sp - (uint32_t)&__StackBottom;
-    printf("[FS] stack sp=%08lx bottom=%08lx headroom=%lu\n", 
-           (unsigned long)sp, (unsigned long)&__StackBottom, (unsigned long)headroom);
-
     s_list_cb.fn = callback;
     s_list_cb.user = user;
     return sdcard_list_dir(path, fs_list_dir_callback, NULL);

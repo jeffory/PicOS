@@ -117,6 +117,68 @@ static void show_error(const char *line1, const char *line2) {
 }
 
 // =============================================================================
+// App stack (PSP-based isolation)
+// =============================================================================
+
+// Native apps run on the PSP (Process Stack Pointer).  Interrupt handlers
+// always use the MSP (Main Stack Pointer) regardless of SPSEL, so the two
+// stacks are completely independent: app stack pressure and interrupt stacking
+// do not interfere with each other.
+//
+// 8 KB gives comfortable headroom for the GBC emulator's call depth and any
+// local arrays allocated on the stack.  The buffer lives in SRAM (fast) and
+// is a module-level static so it is zero-initialised.
+#define NATIVE_STACK_SIZE (8 * 1024)
+static uint8_t s_native_stack[NATIVE_STACK_SIZE] __attribute__((aligned(8)));
+
+// launch_on_psp() — naked trampoline that:
+//   1. Saves r4-r7 + LR onto the current MSP (OS stack).
+//   2. Loads the two extra args (app_id, app_name) before switching stacks.
+//   3. Sets PSP = psp_top and sets CONTROL.SPSEL=1 so Thread mode uses PSP.
+//   4. Calls fn(api, app_dir, app_id, app_name) — runs entirely on PSP.
+//   5. Clears CONTROL.SPSEL=0 to restore Thread mode to MSP.
+//   6. Pops r4-r7 + PC from MSP and returns to native_run normally.
+//
+// Signature (AAPCS):
+//   r0  = psp_top   (top of app stack buffer)
+//   r1  = fn        (Thumb entry point, bit-0 = 1)
+//   r2  = api       (1st app arg)
+//   r3  = app_dir   (2nd app arg)
+//   [sp+0]  = app_id   (3rd app arg, on caller's stack before this push)
+//   [sp+4]  = app_name (4th app arg)
+__attribute__((naked, noinline))
+static void launch_on_psp(uint32_t psp_top, picos_app_entry_t fn,
+                          const PicoCalcAPI *api, const char *app_dir,
+                          const char *app_id, const char *app_name)
+{
+    __asm__ (
+        "push   {r4-r7, lr}     \n\t"   /* save callee-saved + LR on MSP     */
+        "ldr    r4, [sp, #20]   \n\t"   /* load app_id   (was [sp+0] pre-push)*/
+        "ldr    r5, [sp, #24]   \n\t"   /* load app_name (was [sp+4] pre-push)*/
+        "mov    r6, r1          \n\t"   /* save fn before r1 is clobbered     */
+        "mrs    r7, control     \n\t"   /* save original CONTROL register     */
+        /* ── switch Thread mode to PSP ──────────────────────────────── */
+        "msr    psp, r0         \n\t"   /* PSP = psp_top                      */
+        "orr    r0, r7, #2      \n\t"   /* CONTROL | SPSEL                    */
+        "msr    control, r0     \n\t"   /* SPSEL = 1 → Thread uses PSP        */
+        "isb                    \n\t"   /* sync pipeline after CONTROL write  */
+        /* ── call fn(api, app_dir, app_id, app_name) ────────────────── */
+        "mov    r0, r2          \n\t"
+        "mov    r1, r3          \n\t"
+        "mov    r2, r4          \n\t"
+        "mov    r3, r5          \n\t"
+        "blx    r6              \n\t"   /* app runs here on PSP               */
+        /* r4-r7 are callee-saved so entry_fn has restored them         */
+        /* ── restore Thread mode to MSP ─────────────────────────────── */
+        "mrs    r0, control     \n\t"
+        "bic    r0, r0, #2      \n\t"   /* clear SPSEL                        */
+        "msr    control, r0     \n\t"   /* SPSEL = 0 → Thread uses MSP again  */
+        "isb                    \n\t"
+        "pop    {r4-r7, pc}     \n\t"   /* restore from MSP, return           */
+    );
+}
+
+// =============================================================================
 // ELF loader
 // =============================================================================
 
@@ -315,16 +377,20 @@ static bool native_run(const app_entry_t *app) {
   kbd_clear_state();
 
   // ── 8. Launch app ─────────────────────────────────────────────────────────
+  // Enable blocking flush BEFORE the initial clear so no DMA is in flight
+  // when entry_fn jumps to PSRAM. The clear flush must complete fully or the
+  // CPU stalls on instruction fetches while DMA holds the PSRAM SPI bus.
+  g_display_flush_blocking = true;
   display_clear(C_BG);
   display_flush();
 
-  // Native apps execute from uncached PSRAM (0x15xxxxxx), the same SPI bus as
-  // the DMA source for display_flush. Force blocking flush mode so DMA always
-  // completes before returning control to PSRAM code.
-  g_display_flush_blocking = true;
-
   picos_app_entry_t entry_fn = (picos_app_entry_t)entry_addr;
-  entry_fn((const PicoCalcAPI *)&g_api, app->path, app->id, app->name);
+
+  // Run the app on PSP so interrupt handlers keep using MSP.
+  // See launch_on_psp() above for the full rationale.
+  uint32_t stack_top = (uint32_t)(s_native_stack + NATIVE_STACK_SIZE);
+  launch_on_psp(stack_top, entry_fn,
+                (const PicoCalcAPI *)&g_api, app->path, app->id, app->name);
 
   g_display_flush_blocking = false;
   printf("[NATIVE] App '%s' returned\n", app->name);
