@@ -420,7 +420,9 @@ void fileplayer_update(void) {
 
     size_t space = s_ring_buffer.size - ring_buffer_available(&s_ring_buffer);
     if (space > 256) {
-        int bytes_read = sdcard_fread(s_current_file, s_wav_buffer, space);
+        // Limit read size per update to avoid monopolizing the SD card mutex
+        size_t to_read = (space > 1024) ? 1024 : space;
+        int bytes_read = sdcard_fread(s_current_file, s_wav_buffer, to_read);
         if (bytes_read > 0) {
             ring_buffer_write(&s_ring_buffer, s_wav_buffer, bytes_read);
         } else {

@@ -91,9 +91,14 @@ static void ring_write(const uint8_t *data, size_t len) {
 static int  s_dma_chan = -1;
 static uint32_t s_dma_buf[2][DMA_BUF_SAMPLES];  // ping-pong SRAM buffers
 static volatile int s_dma_active_buf = 0;
-static bool s_dma_active = false;
+static volatile bool s_dma_active = false;
 static int  s_pcm_channels = 2;
 static unsigned int s_pwm_slice = 0;
+
+// Deferred DMA start: set on Core 0, consumed on Core 1 so the DMA ISR
+// fires on Core 1 instead of preempting the game loop on Core 0.
+static volatile bool s_dma_start_pending = false;
+static bool          s_irq_on_core1 = false;
 
 // ── Fill one DMA buffer from the PCM ring (called from DMA ISR) ─────────────
 static void fill_dma_buffer(uint32_t *buf, int count) {
@@ -154,11 +159,13 @@ static void fill_dma_buffer(uint32_t *buf, int count) {
 }
 
 // ── DMA completion ISR: swap buffers, restart, refill ───────────────────────
+// With Fix 2 this ISR fires on Core 1 (registered via deferred start),
+// keeping the game loop on Core 0 free from audio interrupt overhead.
 static void dma_audio_irq_handler(void) {
     dma_hw->ints1 = 1u << s_dma_chan;          // clear IRQ (using DMA_IRQ_1)
 
-    if (!s_player.playing) {
-        // Stop: output silence at midpoint and don't restart
+    if (!s_dma_active || !s_player.playing) {
+        // Stopped or paused: silence outputs, don't restart DMA
         pwm_set_gpio_level(AUDIO_PIN_L, PWM_MID);
         pwm_set_gpio_level(AUDIO_PIN_R, PWM_MID);
         s_dma_active = false;
@@ -168,14 +175,6 @@ static void dma_audio_irq_handler(void) {
     // Swap to the pre-filled buffer and start DMA immediately
     int next_buf = s_dma_active_buf ^ 1;
     dma_channel_set_read_addr(s_dma_chan, s_dma_buf[next_buf], true);
-
-    // If paused, output silence but keep DMA running (preserves ring buffer)
-    if (s_player.paused) {
-        for (int i = 0; i < DMA_BUF_SAMPLES; i++)
-            s_dma_buf[s_dma_active_buf][i] = ((uint32_t)PWM_MID << 16) | PWM_MID;
-        s_dma_active_buf = next_buf;
-        return;
-    }
 
     // Refill the buffer that just finished playing
     fill_dma_buffer(s_dma_buf[s_dma_active_buf], DMA_BUF_SAMPLES);
@@ -195,7 +194,9 @@ static bool refill_decode_buffer(void) {
 
     int space = (int)MP3_DECODE_BUFFER_SIZE - s_bytes_in_buffer - MAD_BUFFER_GUARD;
     if (space > 0) {
-        int rd = sdcard_fread(s_file, s_decode_buffer + s_bytes_in_buffer, space);
+        // Limit read size to avoid monopolizing the SD card mutex
+        int to_read = (space > 1024) ? 1024 : space;
+        int rd = sdcard_fread(s_file, s_decode_buffer + s_bytes_in_buffer, to_read);
         if (rd > 0)
             s_bytes_in_buffer += rd;
     }
@@ -211,8 +212,11 @@ static void decode_fill_ring(void) {
     if (!s_player.playing || s_player.paused || !s_mad_stream || !s_file)
         return;
 
-    // Decode frames as long as the ring buffer has room for a full frame
-    while (ring_free() >= 1152 * 2 * 2) {
+    // Decode 1 frame per update to minimize PSRAM bus contention with Core 0.
+    // 1 frame = 1152 samples = ~26ms of audio — 5× the 5ms update interval,
+    // so the ring buffer stays comfortably full even if updates are skipped.
+    int frames_decoded = 0;
+    while (frames_decoded < 1 && ring_free() >= 1152 * 2 * 2) {
         mad_stream_buffer(s_mad_stream, s_decode_buffer + s_buffer_pos, s_bytes_in_buffer + MAD_BUFFER_GUARD);
 
         if (mad_frame_decode(s_mad_frame, s_mad_stream) != 0) {
@@ -263,6 +267,7 @@ static void decode_fill_ring(void) {
         }
 
         mad_synth_frame(s_mad_synth, s_mad_frame);
+        frames_decoded++;
 
         struct mad_pcm *pcm = &s_mad_synth->pcm;
         s_pcm_channels = pcm->channels;
@@ -282,15 +287,47 @@ static void decode_fill_ring(void) {
 
 // ── Stop DMA and PWM ────────────────────────────────────────────────────────
 static void stop_playback(void) {
-    if (s_dma_active && s_dma_chan >= 0) {
+    s_dma_start_pending = false;           // cancel any deferred start
+    if (s_dma_chan >= 0) {
+        dma_channel_set_irq1_enabled(s_dma_chan, false); // prevent ISR restart
         dma_channel_abort(s_dma_chan);
-        s_dma_active = false;
     }
+    s_dma_active = false;
     // Midpoint is true silence for AC-coupled output (no pop)
     pwm_set_gpio_level(AUDIO_PIN_L, PWM_MID);
     pwm_set_gpio_level(AUDIO_PIN_R, PWM_MID);
     s_fade_state = FADE_NONE;
     s_stop_after_fade = false;
+}
+
+// ── Helper to skip ID3v2 tags ───────────────────────────────────────────────
+static int skip_id3v2tag(struct mad_stream *stream) {
+    const unsigned char *ptr = stream->buffer;
+    size_t len = stream->bufend - stream->buffer;
+
+    if (len < 10) return 0;
+
+    // ID3v2 header: "ID3" (3 bytes), version (2 bytes), flags (1 byte), size (4 bytes)
+    if (ptr[0] == 'I' && ptr[1] == 'D' && ptr[2] == '3') {
+        // Size is 4 syncsafe bytes (msb is always 0)
+        unsigned long size = 
+            ((unsigned long)(ptr[6] & 0x7f) << 21) |
+            ((unsigned long)(ptr[7] & 0x7f) << 14) |
+            ((unsigned long)(ptr[8] & 0x7f) << 7) |
+            ((unsigned long)(ptr[9] & 0x7f));
+
+        size += 10; // header size
+
+        // If footer flag is set (bit 4 of flags byte 5), there's a 10-byte footer
+        if (ptr[5] & 0x10) size += 10;
+
+        if (size > len) size = len; // sanity check
+
+        mad_stream_skip(stream, size);
+        return (int)size;
+    }
+
+    return 0;
 }
 
 // ── Public API ──────────────────────────────────────────────────────────────
@@ -401,8 +438,17 @@ bool mp3_player_load(mp3_player_t *player, const char *path) {
     mad_frame_init(s_mad_frame);
     mad_synth_init(s_mad_synth);
 
-    // Probe first frame header
+    // Probe first frame header (skipping ID3 tags if present)
     mad_stream_buffer(s_mad_stream, s_decode_buffer, s_bytes_in_buffer + MAD_BUFFER_GUARD);
+    
+    // Skip ID3v2 tags (mad_header_decode doesn't do this automatically)
+    int tag_len = skip_id3v2tag(s_mad_stream);
+    if (tag_len > 0) {
+        // consumed from s_decode_buffer
+        s_buffer_pos += tag_len;
+        s_bytes_in_buffer -= tag_len;
+    }
+
     if (mad_header_decode(&s_mad_frame->header, s_mad_stream) != 0) {
         printf("mp3_player: not an MP3 file (%s)\n", path);
         sdcard_fclose(s_file); s_file = NULL;
@@ -429,29 +475,21 @@ bool mp3_player_load(mp3_player_t *player, const char *path) {
     return true;
 }
 
-bool mp3_player_play(mp3_player_t *player, uint8_t repeat_count) {
-    (void)repeat_count;
-    if (!player || !s_file) return false;
-
-    mutex_enter_blocking(&s_mp3_mutex);
-
-    player->playing = true;
-    player->paused  = false;
-
-    // Pre-fill ring buffer before starting playback
-    s_ring_rd = s_ring_wr = 0;
-    decode_fill_ring();
-
+// ── Setup PWM + DMA and request deferred start on Core 1 ─────────────────────
+// Configures all hardware but does NOT start DMA or register the IRQ.
+// Sets s_dma_start_pending so mp3_player_update() on Core 1 finishes the job,
+// ensuring the DMA ISR fires on Core 1 (not the game loop core).
+static void setup_playback_hw(void) {
     // Configure PWM with fractional divider for accurate sample rate
     gpio_set_function(AUDIO_PIN_L, GPIO_FUNC_PWM);
     gpio_set_function(AUDIO_PIN_R, GPIO_FUNC_PWM);
     s_pwm_slice = pwm_gpio_to_slice_num(AUDIO_PIN_L);
 
     uint32_t sys_clk = clock_get_hz(clk_sys);
-    uint32_t target = player->sample_rate * (uint32_t)(PWM_WRAP + 1);
+    uint32_t target = s_player.sample_rate * (uint32_t)(PWM_WRAP + 1);
     uint32_t div_int = sys_clk / target;
     uint32_t remainder = sys_clk - div_int * target;
-    uint32_t div_frac = (remainder * 16 + target / 2) / target;  // round to nearest
+    uint32_t div_frac = (remainder * 16 + target / 2) / target;
     if (div_int < 1) { div_int = 1; div_frac = 0; }
 
     pwm_config cfg = pwm_get_default_config();
@@ -470,15 +508,13 @@ bool mp3_player_play(mp3_player_t *player, uint8_t repeat_count) {
     channel_config_set_dreq(&dc, DREQ_PWM_WRAP0 + s_pwm_slice);
 
     dma_channel_configure(s_dma_chan, &dc,
-        &pwm_hw->slice[s_pwm_slice].cc,   // write to PWM CC register
-        s_dma_buf[0],                       // initial read buffer
-        DMA_BUF_SAMPLES,                    // transfer count
+        &pwm_hw->slice[s_pwm_slice].cc,
+        s_dma_buf[0],
+        DMA_BUF_SAMPLES,
         false);                             // don't start yet
 
-    // Enable DMA IRQ (use DMA_IRQ_1 to avoid conflict with display DMA)
+    // Enable DMA IRQ for this channel (shared DMA register, core-independent)
     dma_channel_set_irq1_enabled(s_dma_chan, true);
-    irq_set_exclusive_handler(DMA_IRQ_1, dma_audio_irq_handler);
-    irq_set_enabled(DMA_IRQ_1, true);
 
     // Fade in from silence to avoid pop
     s_fade_state = FADE_IN;
@@ -489,10 +525,26 @@ bool mp3_player_play(mp3_player_t *player, uint8_t repeat_count) {
     fill_dma_buffer(s_dma_buf[0], DMA_BUF_SAMPLES);
     fill_dma_buffer(s_dma_buf[1], DMA_BUF_SAMPLES);
     s_dma_active_buf = 0;
-    s_dma_active = true;
 
-    // Start DMA — audio begins playing
-    dma_channel_start(s_dma_chan);
+    // Signal Core 1 to register IRQ handler and start DMA
+    s_dma_start_pending = true;
+}
+
+bool mp3_player_play(mp3_player_t *player, uint8_t repeat_count) {
+    (void)repeat_count;
+    if (!player || !s_file) return false;
+
+    mutex_enter_blocking(&s_mp3_mutex);
+
+    player->playing = true;
+    player->paused  = false;
+
+    // Pre-fill ring buffer before starting playback
+    s_ring_rd = s_ring_wr = 0;
+    decode_fill_ring();
+
+    setup_playback_hw();
+
     mutex_exit(&s_mp3_mutex);
     return true;
 }
@@ -530,15 +582,19 @@ void mp3_player_stop(mp3_player_t *player) {
 }
 
 void mp3_player_pause(mp3_player_t *player) {
-    if (!player) return;
+    if (!player || !player->playing) return;
+    mutex_enter_blocking(&s_mp3_mutex);
     player->paused = true;
+    stop_playback();       // abort DMA + silence PWM — zero ISR overhead
+    mutex_exit(&s_mp3_mutex);
 }
 
 void mp3_player_resume(mp3_player_t *player) {
-    if (!player) return;
-    s_fade_state = FADE_IN;
-    s_fade_pos = 0;
+    if (!player || !player->paused || !player->playing) return;
+    mutex_enter_blocking(&s_mp3_mutex);
     player->paused = false;
+    setup_playback_hw();   // reconfigure PWM + DMA, deferred start on Core 1
+    mutex_exit(&s_mp3_mutex);
 }
 
 bool mp3_player_is_playing(const mp3_player_t *player) {
@@ -579,6 +635,20 @@ void mp3_player_set_loop(mp3_player_t *player, bool loop) {
 void mp3_player_update(void) {
     if (!s_initialized) return;
     if (!mutex_try_enter(&s_mp3_mutex, NULL)) return;
+
+    // Deferred DMA start: register the IRQ handler on THIS core (Core 1)
+    // so the audio ISR never preempts the game loop on Core 0.
+    if (s_dma_start_pending) {
+        if (!s_irq_on_core1) {
+            irq_set_exclusive_handler(DMA_IRQ_1, dma_audio_irq_handler);
+            irq_set_enabled(DMA_IRQ_1, true);
+            s_irq_on_core1 = true;
+        }
+        s_dma_active = true;
+        dma_channel_start(s_dma_chan);
+        s_dma_start_pending = false;
+    }
+
     if (s_player.playing && !s_player.paused) {
         decode_fill_ring();
     }

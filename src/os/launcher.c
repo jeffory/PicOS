@@ -19,6 +19,7 @@
 
 #include "pico/stdlib.h"
 #include "hardware/clocks.h"
+#include "hardware/uart.h"
 #include "hardware/vreg.h"
 
 #include <stdio.h>
@@ -274,9 +275,19 @@ static void launcher_apply_clock(uint32_t khz) {
   sleep_ms(2); // Give Core 1 a moment to notice and hit its sleep_ms(1)
 
   // 2. Up-clocking: Raise voltage BEFORE increasing frequency
-  if (khz > current_khz && khz >= 300000) {
-    vreg_set_voltage(VREG_VOLTAGE_1_15);
-    sleep_ms(2);
+  if (khz > current_khz) {
+    enum vreg_voltage v = VREG_VOLTAGE_DEFAULT;  // 1.10V, good to ~200 MHz
+    if (khz >= 400000)
+      v = VREG_VOLTAGE_1_25;
+    else if (khz >= 300000)
+      v = VREG_VOLTAGE_1_20;
+    else if (khz >= 250000)
+      v = VREG_VOLTAGE_1_15;
+
+    if (v != VREG_VOLTAGE_DEFAULT) {
+      vreg_set_voltage(v);
+      sleep_ms(2);
+    }
   }
 
   // 3. Ensure display DMA is finished before changing clock source
@@ -284,7 +295,7 @@ static void launcher_apply_clock(uint32_t khz) {
 
   // 4. Apply the new system clock
   bool ok = set_sys_clock_khz(khz, false);
-  
+
   if (ok) {
     // 5. Re-configure peripheral clock so SPI/I2C/UART/PWM stay stable.
     clock_configure(
@@ -300,14 +311,23 @@ static void launcher_apply_clock(uint32_t khz) {
     // 7. Update keyboard I2C divider for new clk_peri frequency
     kbd_apply_clock();
 
-    // 8. Re-init stdio because UART baud rate depends on clk_peri
-    stdio_init_all();
+    // 8. Re-init UART baud rate (depends on clk_peri)
+#if LIB_PICO_STDIO_UART
+    uart_init(uart0, 115200);
+#endif
   }
 
   // 9. Down-clocking: Lower voltage AFTER decreasing frequency
-  // Only lower voltage if we successfully moved away from the high speed.
-  if (khz < current_khz && khz <= 200000 && ok) {
-    vreg_set_voltage(VREG_VOLTAGE_DEFAULT);
+  if (khz < current_khz && ok) {
+    enum vreg_voltage v = VREG_VOLTAGE_DEFAULT;
+    if (khz >= 400000)
+      v = VREG_VOLTAGE_1_25;
+    else if (khz >= 300000)
+      v = VREG_VOLTAGE_1_20;
+    else if (khz >= 250000)
+      v = VREG_VOLTAGE_1_15;
+
+    vreg_set_voltage(v);
     sleep_ms(2);
   }
 
