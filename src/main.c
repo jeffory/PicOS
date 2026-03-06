@@ -25,7 +25,11 @@ extern uint32_t __StackBottom; // lowest valid address (4KB below StackTop)
 // to UART+USB so we can identify the crash address.  UART stdio is polling-
 // based, so this works even with interrupts disabled inside the fault handler.
 
-static void __attribute__((used)) hardfault_c(uint32_t *frame) {
+// Native app stack bounds (defined in native_loader.c).
+// Used to detect PSP stack overflow correctly in the hardfault handler.
+extern uint8_t s_native_stack[];
+
+static void __attribute__((used)) hardfault_c(uint32_t *frame, uint32_t exc_return) {
   // ARM exception frame layout (8 words pushed by hardware on entry):
   //   frame[0]=R0, [1]=R1, [2]=R2, [3]=R3,
   //   [4]=R12, [5]=LR(EXC), [6]=PC(fault), [7]=xPSR
@@ -37,25 +41,40 @@ static void __attribute__((used)) hardfault_c(uint32_t *frame) {
   uint32_t hfsr = *(volatile uint32_t *)0xE000ED2Cu; // HFSR
   uint32_t bfar = *(volatile uint32_t *)0xE000ED38u; // BFAR (if BFARVALID)
   uint32_t mmar = *(volatile uint32_t *)0xE000ED34u; // MMFAR (if MMFARVALID)
+  uint32_t ccr = *(volatile uint32_t *)0xE000ED14u;  // SCB CCR
 
   // frame IS the MSP/PSP just after the hardware pushed the 8-word exception
   // frame.  Pre-fault SP = frame + 32 (8 words × 4 bytes).
   uint32_t sp_at_fault = (uint32_t)(uintptr_t)frame + 32u;
+
+  // Determine which stack was active: EXC_RETURN bit 2 = 1 means PSP (native
+  // app), 0 means MSP (OS).  Compare SP against the correct stack bounds.
+  bool on_psp = (exc_return & 4u) != 0;
+  bool stack_overflow;
+  uint32_t stack_limit;
+  if (on_psp) {
+    stack_limit = (uint32_t)(uintptr_t)s_native_stack;
+    stack_overflow = (sp_at_fault < stack_limit);
+  } else {
+    stack_limit = (uint32_t)(uintptr_t)&__StackBottom;
+    stack_overflow = (sp_at_fault < stack_limit);
+  }
 
   // ── UART output (always works — polling-based, no IRQ required) ────────────
   printf("\n!!! HARDFAULT !!!\n");
   printf("  PC   = 0x%08lx\n", (unsigned long)pc);
   printf("  LR   = 0x%08lx\n", (unsigned long)lr);
   printf("  R0   = 0x%08lx\n", (unsigned long)r0);
-  bool stack_overflow = (sp_at_fault < (uint32_t)(uintptr_t)&__StackBottom);
-  printf("  SP   = 0x%08lx  (frame @ 0x%08lx)  stack_limit=0x%08lx%s\n",
+  printf("  SP   = 0x%08lx  (frame @ 0x%08lx)  stack_limit=0x%08lx [%s]%s\n",
          (unsigned long)sp_at_fault, (unsigned long)(uintptr_t)frame,
-         (unsigned long)(uintptr_t)&__StackBottom,
+         (unsigned long)stack_limit,
+         on_psp ? "PSP" : "MSP",
          stack_overflow ? " *** OVERFLOW ***" : "");
   printf("  CFSR = 0x%08lx\n", (unsigned long)cfsr);
   printf("  HFSR = 0x%08lx\n", (unsigned long)hfsr);
   printf("  BFAR = 0x%08lx\n", (unsigned long)bfar);
   printf("  MMAR = 0x%08lx\n", (unsigned long)mmar);
+  printf("  CCR  = 0x%08lx (bit3=UNALIGNED_TRP)\n", (unsigned long)ccr);
   // Decode CFSR flags to UART for easy diagnosis
   if (cfsr & (1u<<17)) printf("  INVSTATE: invalid CPU state (bad Thumb bit?)\n");
   if (cfsr & (1u<<16)) printf("  UNDEFINSTR: undefined instruction\n");
@@ -87,23 +106,23 @@ static void __attribute__((used)) hardfault_c(uint32_t *frame) {
   snprintf(ln, sizeof(ln), "PC %08lx  LR %08lx", (unsigned long)pc, (unsigned long)lr);
   display_draw_text(4, 20, ln, 0xFFFF, 0x0000);
 
-  {
-    bool stk_ovfl = (sp_at_fault < (uint32_t)(uintptr_t)&__StackBottom);
-    snprintf(ln, sizeof(ln), "SP %08lx  lim %08lx%s",
-             (unsigned long)sp_at_fault,
-             (unsigned long)(uintptr_t)&__StackBottom,
-             stk_ovfl ? " OVFL!" : "");
-    display_draw_text(4, 36, ln, stk_ovfl ? 0xF800 : 0xFFFF, 0x0000);
-  }
+  snprintf(ln, sizeof(ln), "SP %08lx  lim %08lx%s",
+           (unsigned long)sp_at_fault,
+           (unsigned long)stack_limit,
+           stack_overflow ? " OVFL!" : "");
+  display_draw_text(4, 36, ln, stack_overflow ? 0xF800 : 0xFFFF, 0x0000);
+
+  snprintf(ln, sizeof(ln), "Stack: %s", on_psp ? "PSP (native app)" : "MSP (OS)");
+  display_draw_text(4, 52, ln, 0x07E0, 0x0000); // green
 
   snprintf(ln, sizeof(ln), "CFSR %08lx  HFSR %08lx", (unsigned long)cfsr, (unsigned long)hfsr);
-  display_draw_text(4, 52, ln, 0xFFFF, 0x0000);
-
-  snprintf(ln, sizeof(ln), "BFAR %08lx  MMAR %08lx", (unsigned long)bfar, (unsigned long)mmar);
   display_draw_text(4, 68, ln, 0xFFFF, 0x0000);
 
+  snprintf(ln, sizeof(ln), "BFAR %08lx  MMAR %08lx", (unsigned long)bfar, (unsigned long)mmar);
+  display_draw_text(4, 84, ln, 0xFFFF, 0x0000);
+
   // Decode CFSR fault type flags on-screen
-  int y = 88;
+  int y = 104;
   uint16_t warn = 0xFD20; // orange
   if (cfsr & (1u<<17)) { display_draw_text(4, y, "INVSTATE: invalid CPU state", warn, 0); y += 14; }
   if (cfsr & (1u<<16)) { display_draw_text(4, y, "UNDEFINSTR", warn, 0);                  y += 14; }
@@ -120,7 +139,7 @@ static void __attribute__((used)) hardfault_c(uint32_t *frame) {
   if (cfsr & (1u<<24)) { display_draw_text(4, y, "UNALIGNED access",            warn, 0); y += 14; }
   if (hfsr & (1u<<30)) { display_draw_text(4, y, "HFSR: FORCED escalation",    warn, 0); y += 14; }
   if (hfsr & (1u<< 1)) { display_draw_text(4, y, "HFSR: vector table fault",   warn, 0); y += 14; }
-  if (y == 72)          { display_draw_text(4, y, "(no CFSR flags set)",        warn, 0); }
+  if (y == 104)         { display_draw_text(4, y, "(no CFSR flags set)",        warn, 0); }
 
   display_flush();
 
@@ -131,6 +150,7 @@ static void __attribute__((used)) hardfault_c(uint32_t *frame) {
 // then pass its address to the C handler.
 void __attribute__((naked)) isr_hardfault(void) {
   __asm volatile (
+    "mov  r1, lr     \n" // r1 = EXC_RETURN (2nd arg to hardfault_c)
     "tst  lr, #4     \n" // bit 2 of EXC_RETURN: 0=MSP, 1=PSP
     "ite  eq         \n"
     "mrseq r0, msp   \n" // frame on MSP (normal for thread mode without RTOS)
@@ -170,7 +190,6 @@ static picocalc_input_t s_input_impl = {
 
 static int display_get_width_fn(void) { return FB_WIDTH; }
 static int display_get_height_fn(void) { return FB_HEIGHT; }
-
 static picocalc_display_t s_display_impl = {
     .clear = display_clear,
     .setPixel = display_set_pixel,
@@ -297,8 +316,17 @@ static picocalc_fs_t s_fs_impl = {
 // (shared between the LCD and the WiFi chip) is safe to access from here.
 // Lua apps benefit automatically; native apps benefit via http_fire_c_pending().
 
+// Set to true to temporarily pause Core 1's Mongoose/WiFi polling.
+// Used during native app loading to eliminate PSRAM heap contention between
+// Core 1's umm_malloc/umm_free and the ELF loader on Core 0.
+volatile bool g_core1_pause = false;
+
 static void core1_entry(void) {
   while (true) {
+    if (g_core1_pause) {
+      sleep_ms(1);
+      continue;
+    }
     wifi_poll();
     http_fire_c_pending();
     sleep_ms(5);
@@ -308,6 +336,13 @@ static void core1_entry(void) {
 // ── Main ─────────────────────────────────────────────────────────────────────
 
 int main(void) {
+  // Enable unaligned memory access for legacy ARM code (picomp3lib)
+  // By default, ARM Cortex-M33 traps unaligned 32-bit accesses.
+  volatile uint32_t *scb_ccr = (volatile uint32_t *)(0xE000ED14);
+  uint32_t old_val = *scb_ccr;
+  *scb_ccr &= ~(1u << 3);  // Clear UNALIGNED_TRP bit (bit 3)
+  printf("SCB CCR: 0x%08lx -> 0x%08lx\n", (unsigned long)old_val, (unsigned long)*scb_ccr);
+
   // Overclock to 200 MHz for better display throughput (RP2350 supports 150+)
   // NOTE: If the keyboard fails to initialise reliably, try commenting this
   // out to test at the default 125 MHz — it isolates whether the overclock
