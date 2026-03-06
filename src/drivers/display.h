@@ -38,6 +38,7 @@
 // Public init/deinit
 void display_init(void);
 void display_deinit(void);
+void display_apply_clock(void);
 
 // Drawing — all operations go to the framebuffer, not directly to LCD
 // Call display_flush() to push to screen

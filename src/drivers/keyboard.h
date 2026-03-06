@@ -81,6 +81,8 @@ int kbd_get_battery_percent(void);
 // Set LCD backlight brightness 0-255 via STM32
 void kbd_set_backlight(uint8_t brightness);
 
+void kbd_apply_clock(void);
+
 // Returns true (once) when F10 (the system menu key) was pressed since last call.
 // The press is consumed and will not appear in kbd_get_buttons() — the OS
 // intercepts BTN_MENU before apps can see it.

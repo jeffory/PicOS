@@ -249,6 +249,31 @@ static void lcd_set_window(uint16_t x0, uint16_t y0, uint16_t x1, uint16_t y1) {
 // ST7796S-style 0xF0 manufacturer unlock — the panel responds to the standard
 // ST7789 init sequence. Backlight is controlled by the STM32 keyboard MCU.
 
+void display_apply_clock(void) {
+  // Safety: if a DMA transfer is active, wait for it to finish before
+  // changing the clock divider to avoid corrupting the current frame.
+  if (s_dma_active) {
+    dma_channel_wait_for_finish_blocking(s_dma_chan);
+    lcd_spi_wait_idle();
+    lcd_cs_high();
+    s_dma_active = false;
+  }
+
+  uint32_t clk_hz = clock_get_hz(clk_sys);
+  float clkdiv;
+  
+  if (clk_hz == 300000000) {
+    // At 300MHz, a 100MHz SPI target gives a 1.5 divider (fractional).
+    // PIO fractional dividers jitter (alternating cycles), which ST7365P
+    // does not like. Use an integer divider of 2.0 -> 75MHz SPI.
+    clkdiv = 2.0f;
+  } else {
+    clkdiv = (float)clk_hz / (LCD_SPI_BAUD * 2);
+  }
+  
+  pio_sm_set_clkdiv(LCD_PIO, s_pio_sm, clkdiv);
+}
+
 void display_init(void) {
   // Initialize PIO for SPI master
   uint offset = pio_add_program(LCD_PIO, &lcd_spi_program);
