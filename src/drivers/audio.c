@@ -14,6 +14,7 @@
 static unsigned int s_pwm_slice_l = 0;
 static unsigned int s_pwm_slice_r = 0;
 static uint8_t s_volume = 100;
+static uint32_t s_volume_scale = 256; // 256 = 100%, precomputed for fast scaling
 static bool s_playing = false;
 static repeating_timer_t s_timer;
 
@@ -142,6 +143,7 @@ void audio_set_volume(uint8_t volume) {
   if (volume > 100)
     volume = 100;
   s_volume = volume;
+  s_volume_scale = (uint32_t)volume * 256 / 100;
   audio_apply_volume();
 }
 
@@ -222,9 +224,9 @@ void audio_push_samples(const int16_t *samples, int count) {
     int16_t l = samples[i * 2 + 0];
     int16_t r = samples[i * 2 + 1];
 
-    // Apply master volume (0-100)
-    l = (int16_t)((int32_t)l * s_volume / 100);
-    r = (int16_t)((int32_t)r * s_volume / 100);
+    // Apply master volume via precomputed multiply+shift (avoids division)
+    l = (int16_t)(((int32_t)l * (int32_t)s_volume_scale) >> 8);
+    r = (int16_t)(((int32_t)r * (int32_t)s_volume_scale) >> 8);
 
     uint32_t idx = s_ring_write & AUDIO_RING_MASK;
     // int16_t [-32768,32767] → uint8_t [0,255] for PWM

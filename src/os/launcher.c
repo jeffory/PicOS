@@ -18,6 +18,8 @@
 #include "umm_malloc.h"
 
 #include "pico/stdlib.h"
+#include "hardware/clocks.h"
+#include "hardware/vreg.h"
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -50,6 +52,19 @@ static bool json_get_string(const char *json, const char *key, char *out,
   while (*p && *p != '"' && i < out_len - 1)
     out[i++] = *p++;
   out[i] = '\0';
+  return true;
+}
+
+static bool json_get_int(const char *json, const char *key, uint32_t *out) {
+  char search[64];
+  snprintf(search, sizeof(search), "\"%s\"", key);
+  const char *p = strstr(json, search);
+  if (!p)
+    return false;
+  p += strlen(search);
+  while (*p == ' ' || *p == ':' || *p == '\t')
+    p++;
+  *out = (uint32_t)atoi(p);
   return true;
 }
 
@@ -108,6 +123,7 @@ static void on_app_dir(const sdcard_entry_t *entry, void *user) {
   app->has_root_filesystem = false;
   app->has_http            = false;
   app->has_audio           = false;
+  app->system_clock_khz    = 0;
 
   // Try to load app.json for display name / description / id / requirements
   char json_path[160];
@@ -128,6 +144,7 @@ static void on_app_dir(const sdcard_entry_t *entry, void *user) {
     app->has_root_filesystem = json_has_requirement(json, "root-filesystem");
     app->has_http            = json_has_requirement(json, "http");
     app->has_audio           = json_has_requirement(json, "audio");
+    json_get_int(json, "system_clock_khz", &app->system_clock_khz);
 
     umm_free(json);
   } else {
@@ -242,6 +259,34 @@ static const AppRunner *s_runners[] = {
 // ── App launcher
 // ──────────────────────────────────────────────────────────────
 
+static void launcher_apply_clock(uint32_t khz) {
+  if (khz == 0) khz = 200000; // Default OS clock
+
+  // If >= 300MHz, bump voltage to be safe (RP2350 standard is ~1.1V at 150MHz)
+  if (khz >= 300000) {
+    vreg_set_voltage(VREG_VOLTAGE_1_15);
+    sleep_ms(2);
+  } else if (khz <= 200000) {
+    // Return to standard voltage for 200MHz and below
+    vreg_set_voltage(VREG_VOLTAGE_DEFAULT);
+    sleep_ms(2);
+  }
+
+  if (set_sys_clock_khz(khz, false)) {
+    // Re-configure peripheral clock so SPI/I2C/UART/PWM stay stable.
+    // clk_peri is sourced from PLL_SYS.
+    clock_configure(
+        clk_peri,
+        0,
+        CLOCKS_CLK_PERI_CTRL_AUXSRC_VALUE_CLKSRC_PLL_SYS,
+        khz * 1000,
+        khz * 1000);
+
+    // Re-init stdio because UART baud rate depends on clk_peri
+    stdio_init_all();
+  }
+}
+
 static bool run_app(int idx) {
   if (idx < 0 || idx >= s_app_count)
     return false;
@@ -254,6 +299,10 @@ static bool run_app(int idx) {
          lua_psram_alloc_free_size());
 
   // ── Shared pre-launch setup ───────────────────────────────────────────────
+  if (app->system_clock_khz > 0) {
+    launcher_apply_clock(app->system_clock_khz);
+  }
+
   wifi_set_http_required(app->has_http);
 
   if (app->has_http && wifi_is_available()) {
@@ -275,6 +324,10 @@ static bool run_app(int idx) {
   }
 
   // ── Shared post-exit cleanup ──────────────────────────────────────────────
+  if (app->system_clock_khz > 0) {
+    launcher_apply_clock(200000); // Reset to system default
+  }
+
   system_menu_clear_items();
 
   printf("[LAUNCHER] App '%s' exited (ok=%d), PSRAM free: %zu\n",
