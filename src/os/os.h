@@ -108,10 +108,13 @@ typedef struct {
     // Log a message to UART serial debug output
     void     (*log)(const char *fmt, ...);
     // Single OS tick for native apps: polls keyboard + fires any pending
-    // C HTTP callbacks.  Call in your main loop instead of busy-waiting.
-    // WiFi is polled automatically on Core 1; native apps need not call
-    // wifi_poll() directly.
+    // C HTTP callbacks.  Also checks for the Sym (Menu) key and shows the
+    // system menu overlay automatically.  Call in your main loop.
     void     (*poll)(void);
+    // Returns true (once) after the user selects "Exit App" from the system
+    // menu.  Native apps should check this each frame and return from
+    // picos_main() when it fires.
+    bool     (*shouldExit)(void);
 } picocalc_sys_t;
 
 // --- Audio ------------------------------------------------------------------

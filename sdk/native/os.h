@@ -88,8 +88,12 @@ typedef struct {
     void     (*clearMenuItems)(void);
     void     (*log)(const char *fmt, ...);
     // OS tick for native apps: polls keyboard + fires pending C HTTP callbacks.
+    // Also checks for the Sym (Menu) key and shows the system menu overlay.
     // Call this in your main loop (e.g. once per frame).
     void     (*poll)(void);
+    // Returns true (once) after the user selects "Exit App" from the system
+    // menu.  Check this each frame and return from picos_main() when it fires.
+    bool     (*shouldExit)(void);
 } picocalc_sys_t;
 
 // --- Audio -------------------------------------------------------------------
