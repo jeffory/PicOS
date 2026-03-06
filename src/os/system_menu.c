@@ -285,6 +285,12 @@ static void draw_panel(const flat_item_t *items, int count, int sel, int px,
   display_fill_rect(px + 1, footer_y, PANEL_W - 2, FOOTER_H, C_TITLE_BG);
   display_draw_text(px + 4, footer_y + 2, "Enter:select  Esc:close", COLOR_GRAY,
                     C_TITLE_BG);
+
+  // Show current clock speed in bottom-left corner
+  char clk_buf[16];
+  uint32_t clk_hz = clock_get_hz(clk_sys);
+  snprintf(clk_buf, sizeof(clk_buf), "%lu MHz", (unsigned long)(clk_hz / 1000000));
+  display_draw_text(4, FB_HEIGHT - 12, clk_buf, COLOR_GREEN, 0);
 }
 
 // ── Public API
