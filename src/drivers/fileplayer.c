@@ -1,4 +1,5 @@
 #include "fileplayer.h"
+#include "audio.h"
 #include "../hardware.h"
 #include "sdcard.h"
 #include "hardware/pwm.h"
@@ -26,7 +27,6 @@ static ring_buffer_t s_ring_buffer;
 static fileplayer_t s_players[FILEPLAYER_MAX_INSTANCES];
 static fileplayer_t *s_active_player = NULL;
 static repeating_timer_t s_playback_timer;
-static repeating_timer_t s_buffer_timer;
 static bool s_timer_active = false;
 static uint32_t s_sample_rate = 44100;
 static uint8_t s_volume_l = 100;
@@ -34,29 +34,6 @@ static uint8_t s_volume_r = 100;
 static bool s_initialized = false;
 static sdfile_t s_current_file = NULL;
 static uint8_t *s_wav_buffer = NULL;
-
-static void pwm_stereo_init(uint32_t sample_rate) {
-    gpio_set_function(AUDIO_PIN_L, GPIO_FUNC_PWM);
-    gpio_set_function(AUDIO_PIN_R, GPIO_FUNC_PWM);
-
-    uint slice_l = pwm_gpio_to_slice_num(AUDIO_PIN_L);
-    uint slice_r = pwm_gpio_to_slice_num(AUDIO_PIN_R);
-
-    pwm_config cfg = pwm_get_default_config();
-    pwm_config_set_wrap(&cfg, 255);
-
-    uint32_t sys_clk = clock_get_hz(clk_sys);
-    uint32_t div = sys_clk / (sample_rate * 256);
-    if (div < 1) div = 1;
-    if (div > 255) div = 255;
-    pwm_config_set_clkdiv(&cfg, div);
-
-    pwm_init(slice_l, &cfg, true);
-    pwm_init(slice_r, &cfg, true);
-
-    pwm_set_gpio_level(AUDIO_PIN_L, 0);
-    pwm_set_gpio_level(AUDIO_PIN_R, 0);
-}
 
 static void ring_buffer_init(ring_buffer_t *rb, size_t size) {
     rb->buffer = umm_malloc(size);
@@ -173,34 +150,6 @@ static fileplayer_type_t detect_file_type(sdfile_t f) {
     return FILEPLAYER_TYPE_UNKNOWN;
 }
 
-static bool fill_buffer_callback(repeating_timer_t *rt) {
-    (void)rt;
-
-    if (!s_current_file || !s_active_player || s_active_player->state != FILEPLAYER_STATE_PLAYING) {
-        return true;
-    }
-
-    size_t space = s_ring_buffer.size - ring_buffer_available(&s_ring_buffer);
-    if (space > 256) {
-        int bytes_read = sdcard_fread(s_current_file, s_wav_buffer, space);
-        if (bytes_read > 0) {
-            ring_buffer_write(&s_ring_buffer, s_wav_buffer, bytes_read);
-        } else {
-            if (s_active_player->loop) {
-                sdcard_fseek(s_current_file, 44);
-                s_active_player->position = 0;
-            } else {
-                s_active_player->state = FILEPLAYER_STATE_STOPPED;
-                if (s_active_player->finish_callback) {
-                    s_active_player->finish_callback(s_active_player->finish_callback_arg);
-                }
-            }
-        }
-    }
-
-    return true;
-}
-
 static bool playback_callback(repeating_timer_t *rt) {
     (void)rt;
 
@@ -245,7 +194,6 @@ void fileplayer_reset(void) {
     if (!s_initialized) return;
     if (s_timer_active) {
         cancel_repeating_timer(&s_playback_timer);
-        cancel_repeating_timer(&s_buffer_timer);
         s_timer_active = false;
     }
     if (s_current_file) {
@@ -356,12 +304,11 @@ bool fileplayer_play(fileplayer_t *player, uint8_t repeat_count) {
     player->state = FILEPLAYER_STATE_PLAYING;
     s_active_player = player;
 
-    pwm_stereo_init(s_sample_rate);
+    audio_pwm_setup(s_sample_rate);
 
     if (!s_timer_active) {
         int interval_us = 1000000 / s_sample_rate;
         add_repeating_timer_us(-interval_us, playback_callback, NULL, &s_playback_timer);
-        add_repeating_timer_us(-10000, fill_buffer_callback, NULL, &s_buffer_timer);
         s_timer_active = true;
     }
 
@@ -391,7 +338,6 @@ void fileplayer_stop(fileplayer_t *player) {
 
     if (!any_playing && s_timer_active) {
         cancel_repeating_timer(&s_playback_timer);
-        cancel_repeating_timer(&s_buffer_timer);
         s_timer_active = false;
     }
 
@@ -467,6 +413,27 @@ uint32_t fileplayer_get_offset(const fileplayer_t *player) {
 }
 
 void fileplayer_update(void) {
+    if (!s_initialized) return;
+    if (!s_current_file || !s_active_player ||
+        s_active_player->state != FILEPLAYER_STATE_PLAYING)
+        return;
+
+    size_t space = s_ring_buffer.size - ring_buffer_available(&s_ring_buffer);
+    if (space > 256) {
+        int bytes_read = sdcard_fread(s_current_file, s_wav_buffer, space);
+        if (bytes_read > 0) {
+            ring_buffer_write(&s_ring_buffer, s_wav_buffer, bytes_read);
+        } else {
+            if (s_active_player->loop) {
+                sdcard_fseek(s_current_file, 44);
+                s_active_player->position = 0;
+            } else {
+                s_active_player->state = FILEPLAYER_STATE_STOPPED;
+                if (s_active_player->finish_callback)
+                    s_active_player->finish_callback(s_active_player->finish_callback_arg);
+            }
+        }
+    }
 }
 
 bool fileplayer_did_underrun(void) {

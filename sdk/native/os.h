@@ -59,6 +59,8 @@ typedef struct {
     int  (*getWidth)(void);
     int  (*getHeight)(void);
     void (*setBrightness)(uint8_t brightness);
+    void (*drawImageNN)(int x, int y, const uint16_t *data,
+                        int src_w, int src_h, int scale);
 } picocalc_display_t;
 
 // --- Filesystem --------------------------------------------------------------
@@ -102,6 +104,9 @@ typedef struct {
     void (*playTone)(uint32_t freq_hz, uint32_t duration_ms);
     void (*stopTone)(void);
     void (*setVolume)(uint8_t volume);
+    void (*startStream)(uint32_t sample_rate);
+    void (*stopStream)(void);
+    void (*pushSamples)(const int16_t *samples, int count);
 } picocalc_audio_t;
 
 // --- WiFi --------------------------------------------------------------------

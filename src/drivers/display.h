@@ -79,6 +79,13 @@ void display_draw_image_scaled_nn(int x, int y, const uint16_t *data,
                                   int src_w, int src_h, int dst_w, int dst_h,
                                   uint16_t transparent_color);
 
+// Draw an integer-scaled image using nearest-neighbor, optimised for speed.
+// No transparency, no bounds check per pixel (pre-clamped).
+// Ideal for emulator framebuffer blits (e.g. 160x144 @ 2x).
+// Input data must be in host byte order (same as RGB565() macro).
+void display_draw_image_nn(int x, int y, const uint16_t *data,
+                           int src_w, int src_h, int scale);
+
 // Transparent color key support (0 = disabled)
 void display_set_transparent_color(uint16_t color);
 uint16_t display_get_transparent_color(void);
@@ -86,8 +93,8 @@ uint16_t display_get_transparent_color(void);
 // Push framebuffer to LCD.
 // Default: non-blocking — DMA starts and returns immediately (CPU/DMA overlap).
 // When g_display_flush_blocking is true, blocks until DMA completes.
-// Set g_display_flush_blocking=true before launching a native PSRAM app so
-// the DMA doesn't race with PSRAM instruction fetches on the same SPI bus.
+// Safe for all apps: DMA reads SRAM framebuffers (AHB), CPU fetches from
+// PSRAM (QMI/XIP) — separate buses.  Double buffering prevents conflicts.
 void display_flush(void);
 extern bool g_display_flush_blocking;
 

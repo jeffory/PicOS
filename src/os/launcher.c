@@ -265,9 +265,6 @@ static bool run_app(int idx) {
     }
   }
 
-  if (app->has_audio)
-    audio_init();
-
   // ── Dispatch to runner ────────────────────────────────────────────────────
   bool ok = false;
   for (int i = 0; s_runners[i]; i++) {

@@ -2,6 +2,12 @@
 
 #include <stdint.h>
 #include <stdbool.h>
+#include "pico/mutex.h"
+
+// Global SD card mutex — protects all FatFS operations from concurrent access
+// across cores. Recursive so that sdcard_list_dir callbacks can call other
+// sdcard_* functions without deadlocking. Initialised in sdcard_init().
+extern recursive_mutex_t g_sdcard_mutex;
 
 // =============================================================================
 // SD Card / Filesystem Driver
