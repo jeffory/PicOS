@@ -7,9 +7,6 @@
 [submodule "third_party/BackgroundAudio"]
 	path = third_party/BackgroundAudio
 	url = https://github.com/earlephilhower/BackgroundAudio.git
-[submodule "third_party/picomp3lib"]
-	path = third_party/picomp3lib
-	url = https://github.com/ikjordan/picomp3lib.git
 [submodule "third_party/JPEGDEC"]
 	path = third_party/JPEGDEC
 	url = https://github.com/bitbank2/JPEGDEC.git
