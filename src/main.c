@@ -222,11 +222,25 @@ static void sys_log(const char *fmt, ...) {
   printf("\n");
 }
 
-// Native-app tick: poll keyboard (for input) and fire pending C HTTP callbacks.
-// WiFi is handled by Core 1; call this in your main loop for input responsiveness.
+// Native-app exit flag: set by the system menu "Exit App" action,
+// consumed by sys_shouldExit() which the app checks each frame.
+static volatile bool s_native_exit = false;
+
+// Native-app tick: poll keyboard, fire pending C HTTP callbacks, and
+// check the Sym (Menu) key to show the system menu overlay.
 static void sys_poll(void) {
   kbd_poll();
   http_fire_c_pending();
+  if (kbd_consume_menu_press()) {
+    if (system_menu_show_for_native())
+      s_native_exit = true;
+  }
+}
+
+static bool sys_shouldExit(void) {
+  bool v = s_native_exit;
+  s_native_exit = false;
+  return v;
 }
 
 static picocalc_sys_t s_sys_impl = {
@@ -238,6 +252,7 @@ static picocalc_sys_t s_sys_impl = {
     .clearMenuItems = system_menu_clear_items,
     .log = sys_log,
     .poll = sys_poll,
+    .shouldExit = sys_shouldExit,
 };
 
 static picocalc_wifi_t s_wifi_impl = {
