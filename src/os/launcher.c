@@ -259,22 +259,34 @@ static const AppRunner *s_runners[] = {
 // ── App launcher
 // ──────────────────────────────────────────────────────────────
 
+extern volatile bool g_core1_pause;
+
 static void launcher_apply_clock(uint32_t khz) {
   if (khz == 0) khz = 200000; // Default OS clock
+  uint32_t current_khz = clock_get_hz(clk_sys) / 1000;
+  if (khz == current_khz) return;
 
-  // If >= 300MHz, bump voltage to be safe (RP2350 standard is ~1.1V at 150MHz)
-  if (khz >= 300000) {
+  printf("[LAUNCHER] Changing clock: %lu -> %lu MHz\n", 
+         (unsigned long)(current_khz / 1000), (unsigned long)(khz / 1000));
+
+  // 1. Pause Core 1 background tasks (WiFi/Audio) to avoid bus corruption
+  g_core1_pause = true;
+  sleep_ms(2); // Give Core 1 a moment to notice and hit its sleep_ms(1)
+
+  // 2. Up-clocking: Raise voltage BEFORE increasing frequency
+  if (khz > current_khz && khz >= 300000) {
     vreg_set_voltage(VREG_VOLTAGE_1_15);
-    sleep_ms(2);
-  } else if (khz <= 200000) {
-    // Return to standard voltage for 200MHz and below
-    vreg_set_voltage(VREG_VOLTAGE_DEFAULT);
     sleep_ms(2);
   }
 
-  if (set_sys_clock_khz(khz, false)) {
-    // Re-configure peripheral clock so SPI/I2C/UART/PWM stay stable.
-    // clk_peri is sourced from PLL_SYS.
+  // 3. Ensure display DMA is finished before changing clock source
+  display_apply_clock(); // This now waits for DMA internally
+
+  // 4. Apply the new system clock
+  bool ok = set_sys_clock_khz(khz, false);
+  
+  if (ok) {
+    // 5. Re-configure peripheral clock so SPI/I2C/UART/PWM stay stable.
     clock_configure(
         clk_peri,
         0,
@@ -282,9 +294,25 @@ static void launcher_apply_clock(uint32_t khz) {
         khz * 1000,
         khz * 1000);
 
-    // Re-init stdio because UART baud rate depends on clk_peri
+    // 6. Update display PIO divider for new clk_sys frequency
+    display_apply_clock();
+
+    // 7. Update keyboard I2C divider for new clk_peri frequency
+    kbd_apply_clock();
+
+    // 8. Re-init stdio because UART baud rate depends on clk_peri
     stdio_init_all();
   }
+
+  // 9. Down-clocking: Lower voltage AFTER decreasing frequency
+  // Only lower voltage if we successfully moved away from the high speed.
+  if (khz < current_khz && khz <= 200000 && ok) {
+    vreg_set_voltage(VREG_VOLTAGE_DEFAULT);
+    sleep_ms(2);
+  }
+
+  // 10. Resume Core 1
+  g_core1_pause = false;
 }
 
 static bool run_app(int idx) {

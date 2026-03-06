@@ -16,6 +16,7 @@
 #include "lua.h"
 
 #include "hardware/watchdog.h"
+#include "hardware/clocks.h"
 #include "pico/stdlib.h"
 
 #include <stdio.h>
