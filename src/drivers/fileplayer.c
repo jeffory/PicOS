@@ -241,6 +241,26 @@ static bool playback_callback(repeating_timer_t *rt) {
     return true;
 }
 
+void fileplayer_reset(void) {
+    if (!s_initialized) return;
+    if (s_timer_active) {
+        cancel_repeating_timer(&s_playback_timer);
+        cancel_repeating_timer(&s_buffer_timer);
+        s_timer_active = false;
+    }
+    if (s_current_file) {
+        sdcard_fclose(s_current_file);
+        s_current_file = NULL;
+    }
+    memset(s_players, 0, sizeof(s_players));
+    s_active_player = NULL;
+    s_ring_buffer.read_pos = 0;
+    s_ring_buffer.write_pos = 0;
+    s_ring_buffer.underflow = false;
+    pwm_set_gpio_level(AUDIO_PIN_L, 0);
+    pwm_set_gpio_level(AUDIO_PIN_R, 0);
+}
+
 void fileplayer_init(void) {
     if (s_initialized) return;
 

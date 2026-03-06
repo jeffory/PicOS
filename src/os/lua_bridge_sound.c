@@ -484,10 +484,15 @@ void lua_bridge_sound_init(lua_State *L) {
     luaL_setfuncs(L, sound_mp3player_methods, 0);
     lua_pop(L, 1);
 
+    // Reset audio state from any previous app (stop timers, close files, clear players)
+    sound_init();
+    fileplayer_reset();
+    mp3_player_reset();
+
     printf("[SOUND] Initializing fileplayer...\n");
     fileplayer_init();
     printf("[SOUND] fileplayer_init done\n");
-    
+
     printf("[SOUND] Initializing mp3_player...\n");
     mp3_player_init();
     printf("[SOUND] mp3_player_init done\n");

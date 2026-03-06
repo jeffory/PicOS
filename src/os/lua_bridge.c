@@ -1,4 +1,5 @@
 #include "lua_bridge_internal.h"
+#include "lua_psram_alloc.h"
 #include "../drivers/display.h"
 #include "../drivers/http.h"
 #include "../drivers/keyboard.h"
@@ -61,6 +62,24 @@ static void menu_lua_hook(lua_State *L, lua_Debug *ar) {
     s_screenshot_pending = true;
   if (screenshot_check_scheduled())
     s_screenshot_pending = true;
+
+  // Low-memory GC trigger: when the PSRAM heap drops below PSRAM_LOW_WATERMARK,
+  // force a full GC cycle to reclaim dead Lua objects before allocations start
+  // failing.  s_gc_triggered prevents hammering GC every 256 opcodes while
+  // memory stays low; it resets once the heap recovers above the watermark.
+  static bool s_gc_triggered = false;
+  if (lua_psram_alloc_is_low()) {
+    if (!s_gc_triggered) {
+      printf("[LUA] Memory low (%zu KB free), triggering emergency GC\n",
+             lua_psram_alloc_free_size() / 1024);
+      lua_gc(L, LUA_GCCOLLECT, 0);
+      s_gc_triggered = true;
+      printf("[LUA] After GC: %zu KB free\n",
+             lua_psram_alloc_free_size() / 1024);
+    }
+  } else {
+    s_gc_triggered = false;
+  }
 }
 
 

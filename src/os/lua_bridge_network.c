@@ -183,7 +183,12 @@ static char *lua_headers_to_str(lua_State *L, int idx) {
     umm_free(buf);
     return NULL;
   }
-  return buf;
+
+  // Shrink the buffer to the actual content length.  The 4096 allocation is a
+  // temporary worst-case ceiling; releasing the unused tail keeps heap pressure
+  // low for apps that pass small header sets (the common case).
+  char *compact = umm_realloc(buf, n + 1);
+  return compact ? compact : buf;
 }
 
 // Unref all callback registry entries on a userdata.
@@ -290,11 +295,15 @@ static int l_http_setReadTimeout(lua_State *L) {
   return 0;
 }
 
-// conn:setReadBufferSize(bytes)
+// conn:setReadBufferSize(bytes) -> bool
+// Returns true on success, false if the realloc failed (OOM) or the size
+// exceeds HTTP_RECV_BUF_MAX.  The connection retains its previous buffer on
+// failure, so callers should check the return value before sending a request.
 static int l_http_setReadBufferSize(lua_State *L) {
   http_ud_t *ud = check_http_open(L, 1);
-  http_set_recv_buf(ud->conn, (uint32_t)luaL_checkinteger(L, 2));
-  return 0;
+  bool ok = http_set_recv_buf(ud->conn, (uint32_t)luaL_checkinteger(L, 2));
+  lua_pushboolean(L, ok);
+  return 1;
 }
 
 // Shared implementation for get / post.

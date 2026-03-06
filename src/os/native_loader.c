@@ -17,9 +17,14 @@
 // umm_malloc returns addresses in the cached alias (0x11xxxxxx).
 // All code writes and execution must use the uncached alias (0x15xxxxxx)
 // to avoid XIP write-back cache coherency issues.
-#define PSRAM_CS1_CACHED_BASE   0x11000000u
-#define PSRAM_CS1_CACHED_END    0x12000000u
+#define PSRAM_CS1_CACHED_BASE    0x11000000u
+#define PSRAM_CS1_CACHED_END     0x12000000u
 #define PSRAM_CACHED_TO_UNCACHED 0x04000000u  // add to get uncached alias
+
+// Maximum virtual address range accepted for a native app image.
+// Rejects malformed or malicious ELFs before attempting a heap allocation.
+// 2 MB is generous — real apps are well under 512 KB.
+#define NATIVE_MAX_IMAGE_SIZE (2u * 1024u * 1024u)
 
 // =============================================================================
 // Minimal ELF32 type definitions
@@ -131,6 +136,14 @@ static void show_error(const char *line1, const char *line2) {
 #define NATIVE_STACK_SIZE (8 * 1024)
 static uint8_t s_native_stack[NATIVE_STACK_SIZE] __attribute__((aligned(8)));
 
+// Stack canary: the bottom NATIVE_STACK_GUARD_WORDS words are filled with a
+// sentinel before launch and checked afterwards.  If the stack overflows into
+// this guard zone the corruption is detected and reported.  The stack grows
+// downward from s_native_stack+NATIVE_STACK_SIZE, so the bottom of the buffer
+// is the last area to be reached by overflow.
+#define NATIVE_STACK_CANARY      0xDEADBEEFu
+#define NATIVE_STACK_GUARD_WORDS 8   // 32 bytes
+
 // launch_on_psp() — naked trampoline that:
 //   1. Saves r4-r7 + LR onto the current MSP (OS stack).
 //   2. Loads the two extra args (app_id, app_name) before switching stacks.
@@ -238,6 +251,12 @@ static bool native_run(const app_entry_t *app) {
     if (ph->p_vaddr < mem_min)
       mem_min = ph->p_vaddr;
     Elf32_Addr seg_end = ph->p_vaddr + ph->p_memsz;
+    if (seg_end < ph->p_vaddr) {
+      // uint32 overflow: p_vaddr + p_memsz wrapped around.
+      umm_free(file_buf);
+      show_error("ELF: segment vaddr overflow", NULL);
+      return false;
+    }
     if (seg_end > mem_max)
       mem_max = seg_end;
     found_load = true;
@@ -253,6 +272,12 @@ static bool native_run(const app_entry_t *app) {
   printf("[NATIVE] Image: %lu bytes (vaddr 0x%08lx..0x%08lx)\n",
          (unsigned long)image_size,
          (unsigned long)mem_min, (unsigned long)mem_max);
+
+  if (image_size > NATIVE_MAX_IMAGE_SIZE) {
+    umm_free(file_buf);
+    show_error("ELF: image too large (>2MB)", NULL);
+    return false;
+  }
 
   // ── 4. Allocate load image in PSRAM ──────────────────────────────────────
   uint8_t *load_base = (uint8_t *)umm_malloc(image_size);
@@ -365,12 +390,16 @@ static bool native_run(const app_entry_t *app) {
   printf("\n");
 
   // NOTE: file_buf is intentionally freed AFTER entry_fn returns, not before.
-  // Freeing it here (while Core 1 runs Mongoose via umm_malloc/umm_free every
-  // 5 ms) creates a race on the umm heap metadata.  A corrupted heap can cause
-  // Core 1 to overwrite exec_base PSRAM with network data, trashing the app's
-  // literal pool and format-string pointers before/during the first loop iter.
-  // Deferring the free costs ~file_len bytes of PSRAM for the app's lifetime
-  // but eliminates the race window entirely.
+  // This is correct behaviour — not a leak or an oversight.
+  //
+  // Freeing file_buf here (while Core 1 runs Mongoose via umm_malloc/umm_free
+  // every 5 ms) creates a race on the umm heap metadata.  A corrupted heap
+  // lets Core 1 overwrite exec_base PSRAM with network data, trashing the
+  // app's literal pool and format-string pointers before/during the first
+  // loop iteration.  All error-return paths above free file_buf correctly;
+  // only the successful-launch path defers the free.  The cost is ~file_len
+  // bytes of PSRAM held for the app's lifetime, which eliminates the race
+  // entirely.  Both buffers are freed together at step 9 below.
 
   // Clear any stale keyboard state from the launcher before starting the app.
   // This matches what lua_bridge.c does before running Lua apps.
@@ -388,11 +417,31 @@ static bool native_run(const app_entry_t *app) {
 
   // Run the app on PSP so interrupt handlers keep using MSP.
   // See launch_on_psp() above for the full rationale.
+
+  // Plant canary words at the bottom (low-address end) of the stack buffer.
+  // If the app overflows the stack downward far enough to reach this zone the
+  // corruption will be visible after the app returns.
+  uint32_t *guard = (uint32_t *)s_native_stack;
+  for (int i = 0; i < NATIVE_STACK_GUARD_WORDS; i++)
+    guard[i] = NATIVE_STACK_CANARY;
+
   uint32_t stack_top = (uint32_t)(s_native_stack + NATIVE_STACK_SIZE);
   launch_on_psp(stack_top, entry_fn,
                 (const PicoCalcAPI *)&g_api, app->path, app->id, app->name);
 
   g_display_flush_blocking = false;
+
+  // Check canary after app returns.  A corrupted word means the stack grew
+  // past the guard zone — report it so developers know to investigate.
+  for (int i = 0; i < NATIVE_STACK_GUARD_WORDS; i++) {
+    if (guard[i] != NATIVE_STACK_CANARY) {
+      printf("[NATIVE] WARNING: stack overflow detected in '%s' "
+             "(canary[%d] = 0x%08lx)\n",
+             app->name, i, (unsigned long)guard[i]);
+      break;
+    }
+  }
+
   printf("[NATIVE] App '%s' returned\n", app->name);
 
   // ── 9. Free both buffers now that the app has exited ──────────────────────
