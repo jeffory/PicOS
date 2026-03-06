@@ -143,6 +143,24 @@ static bool playback_callback(repeating_timer_t *rt) {
     return true;
 }
 
+void mp3_player_reset(void) {
+    if (!s_initialized) return;
+    if (s_timer_active) {
+        cancel_repeating_timer(&s_playback_timer);
+        s_timer_active = false;
+    }
+    if (s_file) {
+        sdcard_fclose(s_file);
+        s_file = NULL;
+    }
+    memset(&s_player, 0, sizeof(s_player));
+    s_player.volume = 100;
+    s_bytes_in_buffer = 0;
+    s_buffer_pos = 0;
+    pwm_set_gpio_level(AUDIO_PIN_L, 0);
+    pwm_set_gpio_level(AUDIO_PIN_R, 0);
+}
+
 bool mp3_player_init(void) {
     if (s_initialized) return true;
     

@@ -141,6 +141,12 @@ bool config_load(void) {
 }
 
 bool config_save(void) {
+    // Capacity formula accounts for worst-case JSON escaping:
+    //   - Each key char can expand to 2 bytes (e.g. '\' → "\\")    → 2*CONFIG_KEY_MAX
+    //   - Each val char can expand to 2 bytes                       → 2*CONFIG_VAL_MAX
+    //   - Per-entry overhead: "":""[,]                              → 8 bytes
+    //   - Outer braces + null terminator                            → 4 bytes
+    // So the estimate is tight but always sufficient for any key/value content.
     int  cap = s_count * (2 * (CONFIG_KEY_MAX + CONFIG_VAL_MAX) + 8) + 4;
     char *buf = (char *)umm_malloc(cap);
     if (!buf) return false;

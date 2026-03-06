@@ -256,15 +256,24 @@ static const luaL_Reg l_repl_lib[] = {
 };
 
 void lua_bridge_repl_init(lua_State *L) {
+    // Free state from a previous app to prevent SRAM heap exhaustion
+    if (s_repl) {
+        for (int i = 0; i < s_repl->line_count; i++)
+            free(s_repl->lines[i]);
+        free(s_repl->lines);
+        free(s_repl);
+        s_repl = NULL;
+    }
+
     s_repl = malloc(sizeof(repl_state_t));
     memset(s_repl, 0, sizeof(repl_state_t));
-    
+
     s_repl->lines = calloc(SCROLLBACK_LINES, sizeof(char*));
     s_repl->echo = true;
     s_repl->cursor_x = 0;
-    
+
     term_clear();
     display_flush();
-    
+
     register_subtable(L, "repl", l_repl_lib);
 }

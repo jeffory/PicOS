@@ -66,8 +66,13 @@ static bool parse_wav_header(sound_sample_t *sample, uint8_t *data, uint32_t siz
 }
 
 void sound_init(void) {
+    if (s_timer_active) {
+        cancel_repeating_timer(&s_playback_timer);
+        s_timer_active = false;
+    }
+    pwm_set_gpio_level(AUDIO_PIN_L, 0);
+    pwm_set_gpio_level(AUDIO_PIN_R, 0);
     memset(&s_context, 0, sizeof(s_context));
-    s_context.time_offset_us = 0;
 }
 
 void sound_update(void) {
@@ -134,7 +139,7 @@ void sound_sample_destroy(sound_sample_t *sample) {
             break;
         }
     }
-    umm_free(sample);
+    free(sample);  // allocated with calloc(), not umm_malloc
 }
 
 bool sound_sample_load(sound_sample_t *sample, const char *path) {
