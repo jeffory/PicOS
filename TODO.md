@@ -135,7 +135,7 @@ Hardware: PWM on GP26 (left) and GP27 (right) — defined in `hardware.h`
 - [x] sound.getCurrentTime() - Returns the current time, in seconds, as measured by the audio device
 - [x] sound.resetTime() - Resets the audio output device time counter.
 
-### MP3 Player (using libmad)
+### MP3 Player (using picomp3lib)
 
 - [x] sound.mp3player.new() - Create MP3 player instance
 - [x] sound.mp3player:load(path) - Load MP3 file
