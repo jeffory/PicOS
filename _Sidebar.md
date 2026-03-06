@@ -1,6 +1,7 @@
 ### Documentation
 * [[Home]]
 * [[Creating your first app]]
+* [[Native App Development]]
 * [[Lua SDK Reference]]
 
 ### API Reference

@@ -10,7 +10,11 @@ PicOS is built on a simple yet powerful idea: a small, fast C-language kernel li
 The OS handles the low-level hardware details so you can focus on your app's logic. The architecture is clean and robust:
 
 - Resident OS (Flash): The core kernel, drivers, Lua runtime, and the main app launcher are stored on the device's internal flash.
-- Your Apps (SD Card): Each app is a simple directory on the SD card containing an `app.json` metadata file and a `main.lua` script. This means you can swap apps just by swapping cards!
+- Your Apps (SD Card): Each app is a simple directory on the SD card containing an `app.json` metadata file and a `main.lua` script (for Lua apps) or a `main.elf` binary (for native apps). This means you can swap apps just by swapping cards!
+
+## Native App Support
+
+For performance-critical applications or those who prefer C/C++, PicOS supports [[Native App Development]] using a C API that mirrors the Lua SDK. Native apps are compiled as Position-Independent ELF binaries and loaded into PSRAM.
 
 ## Screenshots
 

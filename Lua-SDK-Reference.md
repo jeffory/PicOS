@@ -57,3 +57,10 @@ end
 - Use `picocalc.fs.appPath("filename")` for per-app data storage — it auto-creates the directory.
 - Without `root-filesystem` permission, file access is sandboxed to your app's directory and `/data/<appid>/`.
 - Config data is shared across all apps — use namespaced keys (e.g., `"myapp.highscore"`).
+
+---
+
+### Native App Development
+
+If you prefer to write apps in C or C++ instead of Lua, see the [[Native App Development]] guide. The C API mirrors the Lua modules documented here.
+

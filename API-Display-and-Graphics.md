@@ -213,6 +213,22 @@ Sets the background color for graphics operations.
 
 ---
 
+#### `picocalc.graphics.setTransparentColor(color)`
+Sets the global transparent color for image and sprite drawing. Pixels matching this color will not be drawn.
+
+- **Parameters:**
+  - `color` (number or nil): RGB565 color value, or `nil` to disable transparency.
+- **Returns:** None
+
+---
+
+#### `picocalc.graphics.getTransparentColor()`
+Returns the current global transparent color.
+
+- **Returns:** (number or nil) RGB565 color value, or `nil` if transparency is disabled.
+
+---
+
 #### `picocalc.graphics.clear([color])`
 Clears the screen using the background color (or a specified color).
 
@@ -457,6 +473,21 @@ img:drawScaled(160, 160, 1.0, 0.785) -- Rotate 45°
 
 ---
 
+#### `img:drawScaledNN(x, y, scale)`
+Draws the image scaled using nearest-neighbor interpolation. Faster and sharper for integer scaling (pixel art).
+
+- **Parameters:**
+  - `x` (number): Destination X coordinate
+  - `y` (number): Destination Y coordinate
+  - `scale` (number): Integer scale factor (e.g., 2 for 2x size)
+- **Returns:** None
+
+```lua
+img:drawScaledNN(10, 10, 3)  -- 3x zoom (pixel art style)
+```
+
+---
+
 #### `img:copy()`
 Creates a deep copy of the image.
 
@@ -464,4 +495,855 @@ Creates a deep copy of the image.
 
 ```lua
 local backup = img:copy()
+```
+
+---
+
+## picocalc.graphics.sprite
+
+Sprite system for game and graphics applications. Sprites are 2D objects that can be positioned, scaled, rotated, and managed through a global sprite manager.
+
+### Constructor Functions
+
+#### `picocalc.graphics.sprite.new([image])`
+Creates a new sprite, optionally with an image.
+
+- **Parameters:**
+  - `image` (userdata, optional): Image object from `graphics.image.new()` or `graphics.image.load()`
+- **Returns:** (userdata) Sprite object
+
+```lua
+local sprite = picocalc.graphics.sprite.new(myImage)
+local emptySprite = picocalc.graphics.sprite.new()
+```
+
+---
+
+#### `picocalc.graphics.sprite.update()`
+Updates and draws all sprites in the manager. Call once per frame.
+
+- **Returns:** None
+
+```lua
+while true do
+    -- Update sprite positions
+    sprite1:moveBy(1, 0)
+    picocalc.graphics.sprite.update()
+end
+```
+
+---
+
+#### `picocalc.graphics.sprite.spriteCount()`
+Returns the number of sprites in the manager.
+
+- **Returns:** (number) Count of sprites
+
+```lua
+local count = picocalc.graphics.sprite.spriteCount()
+```
+
+---
+
+#### `picocalc.graphics.sprite.getAllSprites()`
+Returns a table containing all sprites in the manager.
+
+- **Returns:** (table) Array of sprite objects
+
+```lua
+local all = picocalc.graphics.sprite.getAllSprites()
+for i, s in ipairs(all) do
+    print(i, s.x, s.y)
+end
+```
+
+---
+
+#### `picocalc.graphics.sprite.removeAll()`
+Removes all sprites from the manager.
+
+- **Returns:** None
+
+```lua
+picocalc.graphics.sprite.removeAll()
+```
+
+---
+
+#### `picocalc.graphics.sprite.removeSprites(spriteArray)`
+Removes multiple sprites from the manager.
+
+- **Parameters:**
+  - `spriteArray` (table): Array of sprite objects to remove
+- **Returns:** None
+
+```lua
+picocalc.graphics.sprite.removeSprites({sprite1, sprite2, sprite3})
+```
+
+---
+
+#### `picocalc.graphics.sprite.performOnAllSprites(callback)`
+Calls a function on each sprite in the manager.
+
+- **Parameters:**
+  - `callback` (function): Function to call with each sprite as argument
+- **Returns:** None
+
+```lua
+picocalc.graphics.sprite.performOnAllSprites(function(s)
+    s:setVisible(false)
+end)
+```
+
+---
+
+#### `picocalc.graphics.sprite.querySpritesAtPoint(x, y)`  
+#### `picocalc.graphics.sprite.querySpritesAtPoint(point)`
+Queries all sprites at a specific point.
+
+- **Parameters:**
+  - `x`, `y` (number): Coordinates, OR
+  - `point` (table): `{x=number, y=number}`
+- **Returns:** (table) Array of sprites at that point
+
+```lua
+local hits = picocalc.graphics.sprite.querySpritesAtPoint(160, 100)
+```
+
+---
+
+#### `picocalc.graphics.sprite.querySpritesInRect(x, y, w, h)`
+#### `picocalc.graphics.sprite.querySpritesInRect(rect)`
+Queries all sprites within a rectangular area.
+
+- **Parameters:**
+  - `x`, `y`, `w`, `h` (number), OR
+  - `rect` (table): `{x=number, y=number, w=number, h=number}`
+- **Returns:** (table) Array of sprites in the rect
+
+```lua
+local hits = picocalc.graphics.sprite.querySpritesInRect(0, 0, 100, 100)
+```
+
+---
+
+#### `picocalc.graphics.sprite.querySpritesAlongLine(x1, y1, x2, y2)`
+Queries all sprites that intersect a line segment.
+
+- **Parameters:**
+  - `x1`, `y1` (number): Start point
+  - `x2`, `y2` (number): End point
+- **Returns:** (table) Array of sprite objects
+
+```lua
+local hits = picocalc.graphics.sprite.querySpritesAlongLine(0, 0, 320, 320)
+```
+
+---
+
+#### `picocalc.graphics.sprite.querySpriteInfoAlongLine(x1, y1, x2, y2)`
+Queries all sprites that intersect a line segment, returning detailed intersection info.
+
+- **Parameters:**
+  - `x1`, `y1` (number): Start point
+  - `x2`, `y2` (number): End point
+- **Returns:** (table) Array of intersection info tables: `{sprite, x, y}`
+
+
+All methods are called on sprite objects with colon syntax.
+
+#### `sprite:add()` / `sprite:addSprite()`
+Adds the sprite to the global sprite manager.
+
+- **Returns:** None
+
+```lua
+mySprite:add()
+```
+
+---
+
+#### `sprite:remove()` / `sprite:removeSprite()`
+Removes the sprite from the global sprite manager.
+
+- **Returns:** None
+
+```lua
+mySprite:remove()
+```
+
+---
+
+#### `sprite:draw([x, y])`
+Draws the sprite to the framebuffer immediately (not via the manager).
+
+- **Parameters:**
+  - `x`, `y` (number, optional): Position to draw. Defaults to sprite's stored position.
+- **Returns:** None
+
+```lua
+mySprite:draw()  -- Draw at sprite.x, sprite.y
+mySprite:draw(50, 100)  -- Draw at custom position
+```
+
+---
+
+#### `sprite:update()`
+Updates and draws a single sprite (alternative to using the manager).
+
+- **Returns:** None
+
+```lua
+mySprite:update()
+```
+
+---
+
+#### `sprite:setImage(image [, flip [, scale [, yscale]]])`
+Sets the sprite's image.
+
+- **Parameters:**
+  - `image` (userdata): Image object
+  - `flip` (boolean, optional): Enable horizontal flip
+  - `scale` (number, optional): Scale factor
+  - `yscale` (number, optional): Y scale factor (defaults to scale)
+- **Returns:** None
+
+```lua
+sprite:setImage(myImage, false, 1.5)
+```
+
+---
+
+#### `sprite:getImage()`
+Gets the sprite's image.
+
+- **Returns:** (userdata or nil) Image object
+
+---
+
+#### `sprite:moveTo(x, y)`
+Moves the sprite to absolute coordinates.
+
+- **Parameters:**
+  - `x`, `y` (number): New position
+- **Returns:** None
+
+```lua
+sprite:moveTo(100, 50)
+```
+
+---
+
+#### `sprite:moveBy(dx, dy)`
+Moves the sprite by a relative offset.
+
+- **Parameters:**
+  - `dx`, `dy` (number): Offset to add to current position
+- **Returns:** None
+
+```lua
+sprite:moveBy(5, -3)
+```
+
+---
+
+#### `sprite:getPosition()`
+Gets the sprite's position.
+
+- **Returns:** (number, number) `x, y`
+
+```lua
+local x, y = sprite:getPosition()
+```
+
+---
+
+#### `sprite:setZIndex(z)`
+Sets the sprite's Z-index for draw ordering.
+
+- **Parameters:**
+  - `z` (number): Z-order value
+- **Returns:** None
+
+```lua
+sprite:setZIndex(10)
+```
+
+---
+
+#### `sprite:getZIndex()`
+Gets the sprite's Z-index.
+
+- **Returns:** (number) Z-index
+
+---
+
+#### `sprite:setVisible(flag)`
+Shows or hides the sprite.
+
+- **Parameters:**
+  - `flag` (boolean): `true` to show, `false` to hide
+- **Returns:** None
+
+```lua
+sprite:setVisible(false)
+```
+
+---
+
+#### `sprite:isVisible()`
+Checks if the sprite is visible.
+
+- **Returns:** (boolean)
+
+---
+
+#### `sprite:setCenter(x, y)`
+Sets the sprite's rotation/scale center point.
+
+- **Parameters:**
+  - `x`, `y` (number): Center point relative to sprite origin
+- **Returns:** None
+
+```lua
+sprite:setCenter(16, 16)  -- Center of a 32x32 sprite
+```
+
+---
+
+#### `sprite:getCenter()`
+Gets the sprite's center point.
+
+- **Returns:** (number, number) `centerX, centerY`
+
+---
+
+#### `sprite:getCenterPoint()`
+Gets the sprite's center point as a table.
+
+- **Returns:** (table) `{x, y}`
+
+---
+
+#### `sprite:setSize(width, height)`
+Sets the sprite's dimensions.
+
+- **Parameters:**
+  - `width`, `height` (number): New dimensions
+- **Returns:** None
+
+```lua
+sprite:setSize(64, 64)
+```
+
+---
+
+#### `sprite:getSize()`
+Gets the sprite's dimensions.
+
+- **Returns:** (number, number) `width, height`
+
+---
+
+#### `sprite:setScale(scale [, yScale])`
+Sets the sprite's scale factor(s).
+
+- **Parameters:**
+  - `scale` (number): Scale factor
+  - `yScale` (number, optional): Y scale (defaults to scale)
+- **Returns:** None
+
+```lua
+sprite:setScale(2.0)     -- Uniform 2x
+sprite:setScale(2.0, 1.5)  -- Non-uniform
+```
+
+---
+
+#### `sprite:getScale()`
+Gets the sprite's scale factors.
+
+- **Returns:** (number, number) `scaleX, scaleY`
+
+---
+
+#### `sprite:setScaleNN(scale)`
+Sets an integer scale factor using nearest-neighbor interpolation. Sharp for pixel art.
+
+- **Parameters:**
+  - `scale` (number): Positive integer scale (1, 2, 3...)
+- **Returns:** None
+
+---
+
+#### `sprite:setTransparentColor(color)`
+Sets a per-sprite transparent color, overriding the global transparent color.
+
+- **Parameters:**
+  - `color` (number or nil): RGB565 color value, or `nil` to use the global setting.
+- **Returns:** None
+
+---
+
+#### `sprite:setRotation(angle [, scale [, yScale]])`
+Sets the sprite's rotation angle in radians.
+
+- **Parameters:**
+  - `angle` (number): Rotation in radians
+  - `scale` (number, optional): Scale X
+  - `yScale` (number, optional): Scale Y
+- **Returns:** None
+
+```lua
+sprite:setRotation(math.pi / 4)  -- 45 degrees
+```
+
+---
+
+#### `sprite:getRotation()`
+Gets the sprite's rotation angle.
+
+- **Returns:** (number) Rotation in radians
+
+---
+
+#### `sprite:copy()`
+Creates a copy of the sprite.
+
+- **Returns:** (userdata) New sprite object
+
+```lua
+local clone = sprite:copy()
+```
+
+---
+
+#### `sprite:setSourceRect(x, y, w, h)`
+Extracts a sub-region of the sprite's image as its new frame. Subsequent `draw()` or `update()` calls will only render this region. This effectively creates an internal copy of the frame data.
+
+- **Parameters:**
+  - `x`, `y` (number): Top-left coordinate in source image
+  - `w`, `h` (number): Dimensions of the frame to extract
+- **Returns:** None
+
+```lua
+-- Select a 32x32 frame from a larger sheet
+sprite:setSourceRect(32, 0, 32, 32)
+```
+
+---
+
+#### `sprite:clearSourceRect()`
+Resets the sprite to use its full source image.
+
+- **Returns:** None
+
+---
+
+#### `sprite:setUpdatesEnabled(flag)`
+Enables or disables automatic updates when using `graphics.sprite.update()`.
+
+- **Parameters:**
+  - `flag` (boolean): Enable/disable updates
+- **Returns:** None
+
+---
+
+#### `sprite:updatesEnabled()`
+Checks if updates are enabled.
+
+- **Returns:** (boolean)
+
+---
+
+#### `sprite:setAlwaysRedraw(flag)`
+Enables or disables forced redraw for this sprite every frame, even if it hasn't moved.
+
+- **Parameters:**
+  - `flag` (boolean)
+- **Returns:** None
+
+---
+
+#### `sprite:getAlwaysRedraw()`
+- **Returns:** (boolean)
+
+---
+
+#### `sprite:markDirty()`
+Explicitly marks the sprite as needing to be redrawn in the next update.
+
+- **Returns:** None
+
+---
+
+#### `sprite:addDirtyRect(x, y, width, height)`
+Adds a dirty rectangle for partial redrawing. (Stub implementation)
+
+---
+
+#### `sprite:setRedrawsOnImageChange(flag)`
+Sets whether the sprite automatically redraws when its image is changed.
+
+- **Parameters:**
+  - `flag` (boolean)
+- **Returns:** None
+
+---
+
+#### `sprite:setTag(tag)`
+Sets a user-defined tag value.
+
+- **Parameters:**
+  - `tag` (number): Tag value
+- **Returns:** None
+
+```lua
+sprite:setTag(123)
+```
+
+---
+
+#### `sprite:getTag()`
+Gets the sprite's tag.
+
+- **Returns:** (number) Tag value
+
+---
+
+#### `sprite:setImageFlip(flip)`
+Sets horizontal flip.
+
+- **Parameters:**
+  - `flip` (boolean): Flip enabled
+- **Returns:** None
+
+---
+
+#### `sprite:getImageFlip()`
+Gets horizontal flip state.
+
+- **Returns:** (boolean)
+
+---
+
+#### `sprite:setIgnoresDrawOffset(flag)`
+Sets whether the sprite ignores global draw offsets.
+
+- **Parameters:**
+  - `flag` (boolean): Ignore offset
+- **Returns:** None
+
+---
+
+#### `sprite:setBounds(x, y, w, h)` / `sprite:setBounds(rect)`
+Sets the sprite's bounding box for culling.
+
+- **Parameters:**
+  - `x`, `y`, `w`, `h` (number), OR
+  - `rect` (table): `{x, y, w, h}`
+- **Returns:** None
+
+---
+
+#### `sprite:getBounds()`
+Gets the sprite's bounding box.
+
+- **Returns:** (number, number, number, number) `x, y, w, h`
+
+---
+
+#### `sprite:getBoundsRect()`
+Gets the sprite's bounding box as a table.
+
+- **Returns:** (table) `{x, y, w, h}`
+
+---
+
+#### `sprite:setOpaque(flag)`
+Sets whether the sprite is opaque (affects collision detection).
+
+- **Parameters:**
+  - `flag` (boolean): Opaque state
+- **Returns:** None
+
+---
+
+#### `sprite:isOpaque()`
+Gets the sprite's opaque state.
+
+- **Returns:** (boolean)
+
+---
+
+#### `sprite:setCollisionsEnabled(flag)`
+Enables collision detection for this sprite.
+
+- **Parameters:**
+  - `flag` (boolean): Enable collisions
+- **Returns:** None
+
+---
+
+#### `sprite:collisionsEnabled()`
+Checks if collisions are enabled.
+
+- **Returns:** (boolean)
+
+---
+
+#### `sprite:setCollideRect(x, y, w, h)` / `sprite:setCollideRect(rect)`
+Sets the sprite's collision rectangle.
+
+- **Parameters:**
+  - `x`, `y`, `w`, `h` (number), OR
+  - `rect` (table): `{x, y, w, h}`
+- **Returns:** None
+
+---
+
+#### `sprite:getCollideRect()`
+Gets the sprite's collision rectangle.
+
+- **Returns:** (number, number, number, number) `x, y, w, h`
+
+---
+
+#### `sprite:getCollideBounds()`
+Gets the absolute collision bounds (sprite position + collide rect).
+
+- **Returns:** (number, number, number, number) `x, y, w, h`
+
+---
+
+#### `sprite:clearCollideRect()`
+Resets the collision rectangle to the full sprite size.
+
+- **Returns:** None
+
+---
+
+#### `sprite:setClipRect(x, y, w, h)` / `sprite:setClipRect(rect)`
+Sets a clipping rectangle for the sprite, relative to the screen.
+
+- **Parameters:**
+  - `x`, `y`, `w`, `h` (number), OR
+  - `rect` (table): `{x, y, w, h}`
+- **Returns:** None
+
+---
+
+#### `sprite:clearClipRect()`
+Clears the clipping rectangle.
+
+- **Returns:** None
+
+---
+
+#### `sprite:overlappingSprites()`
+Gets all sprites that overlap with this sprite.
+
+- **Returns:** (table) Array of overlapping sprites
+
+```lua
+local hits = mySprite:overlappingSprites()
+```
+
+---
+
+#### `sprite:allOverlappingSprites()`
+Gets all sprite pairs that overlap each other.
+
+- **Returns:** (table) Array of `{sprite1, sprite2}` pairs
+
+---
+
+#### `sprite:setGroups(groups)`
+Sets collision group membership.
+
+- **Parameters:**
+  - `groups` (number): Bitmask of groups
+- **Returns:** None
+
+---
+
+#### `sprite:setCollidesWithGroups(groups)`
+Sets which collision groups this sprite collides with.
+
+- **Parameters:**
+  - `groups` (number): Bitmask
+- **Returns:** None
+
+---
+
+#### `sprite:setGroupMask(mask)` / `sprite:getGroupMask()`
+Sets/gets the group mask.
+
+---
+
+#### `sprite:setCollidesWithGroupsMask(mask)` / `sprite:getCollidesWithGroupsMask()`
+Sets/gets the collision-with-groups mask.
+
+---
+
+#### `sprite:resetGroupMask()` / `sprite:resetCollidesWithGroupsMask()`
+Resets the group masks to 0.
+
+---
+
+#### `sprite:checkCollisions(x, y)` / `sprite:checkCollisions(point)`
+Checks if a point collides with the sprite's collision rect.
+
+- **Parameters:**
+  - `x`, `y` (number), OR
+  - `point` (table): `{x, y}`
+- **Returns:** (boolean) True if collision
+
+---
+
+### Sprite Properties
+
+Sprites support direct property access via Lua:
+
+```lua
+sprite.x = 100      -- Set X position
+sprite.y = 50      -- Set Y position
+sprite.width = 64  -- Set width
+sprite.height = 64 -- Set height
+sprite.z = 10      -- Set Z-index
+sprite.visible = true   -- Show/hide
+sprite.scale = 2.0      -- Set uniform scale
+sprite.scale_nn = 1     -- Get/set integer NN scale
+sprite.rotation = 0.5   -- Set rotation (radians)
+sprite.tag = 123        -- Set tag
+sprite.image            -- Get image (userdata or nil)
+```
+
+---
+
+## picocalc.graphics.spritesheet
+
+Spritesheet support for sprite animations. A spritesheet is a single image containing multiple animation frames.
+
+### Constructor Functions
+
+#### `picocalc.graphics.spritesheet.new([image])`
+Creates a new spritesheet, optionally with a base image.
+
+- **Parameters:**
+  - `image` (userdata, optional): Image object containing the spritesheet
+- **Returns:** (userdata) Spritesheet object
+
+```lua
+local ss = picocalc.graphics.spritesheet.new(myImage)
+```
+
+---
+
+#### `picocalc.graphics.spritesheet.newGrid(image, cols, rows, frameWidth, frameHeight)`
+Creates a spritesheet from a grid layout. Automatically calculates frame positions.
+
+- **Parameters:**
+  - `image` (userdata): Image object containing the spritesheet
+  - `cols` (number): Number of columns
+  - `rows` (number): Number of rows
+  - `frameWidth` (number): Width of each frame in pixels
+  - `frameHeight` (number): Height of each frame in pixels
+- **Returns:** (userdata) Spritesheet object
+
+```lua
+-- 4x4 grid of 32x32 pixel frames
+local ss = picocalc.graphics.spritesheet.newGrid(spritesheetImg, 4, 4, 32, 32)
+```
+
+---
+
+### Spritesheet Methods
+
+#### `spritesheet:addFrame(x, y, width, height)`
+Manually adds a frame to the spritesheet.
+
+- **Parameters:**
+  - `x`, `y` (number): Top-left position of frame in the image
+  - `width`, `height` (number): Dimensions of the frame
+- **Returns:** (number) Frame index (0-based)
+
+```lua
+ss:addFrame(0, 0, 32, 32)   -- Frame 0
+ss:addFrame(32, 0, 32, 32)  -- Frame 1
+```
+
+---
+
+#### `spritesheet:getFrameCount()`
+Returns the total number of frames.
+
+- **Returns:** (number) Frame count
+
+```lua
+local count = ss:getFrameCount()
+```
+
+---
+
+#### `spritesheet:getFrame(index)`
+Returns the bounds of a specific frame.
+
+- **Parameters:**
+  - `index` (number): Frame index (0-based)
+- **Returns:** (table) `{x, y, w, h}` or nil if invalid
+
+```lua
+local frame = ss:getFrame(0)
+print(frame.x, frame.y, frame.w, frame.h)
+```
+
+---
+
+#### `spritesheet:getImage()`
+Returns the base image.
+
+- **Returns:** (userdata or nil) Image object
+
+---
+
+#### `spritesheet:drawFrame(frameIndex, x, y [, flip])`
+Draws a specific frame to the screen.
+
+- **Parameters:**
+  - `frameIndex` (number): Which frame to draw
+  - `x`, `y` (number): Screen position
+  - `flip` (boolean, optional): Horizontal flip
+- **Returns:** None
+
+```lua
+ss:drawFrame(0, 100, 100)  -- Draw frame 0 at (100,100)
+ss:drawFrame(1, 100, 100, true)  -- Flipped
+```
+
+---
+
+### Example: Simple Animation
+
+```lua
+local spritesheet = picocalc.graphics.image.load("/apps/myapp/character.png")
+local ss = picocalc.graphics.spritesheet.newGrid(spritesheet, 4, 4, 32, 32)
+
+local frame = 0
+local timer = 0
+
+while true do
+    picocalc.display.clear(picocalc.display.BLACK)
+    
+    timer = timer + 1
+    if timer > 5 then  -- Change frame every 5 frames
+        frame = (frame + 1) % ss:getFrameCount()
+        timer = 0
+    end
+    
+    ss:drawFrame(frame, 144, 144)
+    picocalc.display.flush()
+end
 ```

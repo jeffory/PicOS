@@ -238,6 +238,13 @@ Returns current playback position or total duration in seconds.
 
 ---
 
+#### `player:getSampleRate()`
+Returns the sample rate of the MP3 file in Hz.
+
+- **Returns:** (number)
+
+---
+
 #### `player:setVolume(vol)` / `player:getVolume()`
 Volume range 0–255.
 
