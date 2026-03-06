@@ -98,15 +98,43 @@ void sound_update(void) {
             pos = 0;
         }
 
-        uint8_t sample_val = sample->data[pos];
+        uint32_t bytes_per_sample = sample->bits_per_sample / 8;
+        uint32_t bytes_per_frame = bytes_per_sample * sample->channels;
+
+        if (pos + bytes_per_frame > sample->length) {
+            player->position = sample->length;
+            continue;
+        }
+
+        uint8_t left_8, right_8;
+        if (sample->bits_per_sample == 16) {
+            int16_t left_16 = *(int16_t *)(sample->data + pos);
+            left_8 = (uint8_t)((left_16 + 32768) >> 8);
+            if (sample->channels >= 2) {
+                int16_t right_16 = *(int16_t *)(sample->data + pos + 2);
+                right_8 = (uint8_t)((right_16 + 32768) >> 8);
+            } else {
+                right_8 = left_8;
+            }
+        } else {
+            left_8 = sample->data[pos];
+            if (sample->channels >= 2) {
+                right_8 = sample->data[pos + 1];
+            } else {
+                right_8 = left_8;
+            }
+        }
+
         uint32_t volume = player->volume;
-        uint32_t level = (sample_val * volume) / 100;
-        level = (level * 128) / 255;
+        uint32_t left_level = (left_8 * volume) / 100;
+        uint32_t right_level = (right_8 * volume) / 100;
+        left_level = (left_level * 128) / 255;
+        right_level = (right_level * 128) / 255;
 
-        pwm_set_gpio_level(AUDIO_PIN_L, level);
-        pwm_set_gpio_level(AUDIO_PIN_R, level);
+        pwm_set_gpio_level(AUDIO_PIN_L, left_level);
+        pwm_set_gpio_level(AUDIO_PIN_R, right_level);
 
-        player->position++;
+        player->position += bytes_per_frame;
     }
 
     s_context.time_offset_us += s_timer_interval_us;
@@ -237,8 +265,7 @@ void sound_player_play(sound_player_t *player, uint8_t repeat_count) {
     if (sample_rate > 0) {
         s_timer_interval_us = 1000000 / sample_rate;
         if (!s_timer_active) {
-            pwm_set_enabled(pwm_gpio_to_slice_num(AUDIO_PIN_L), true);
-            pwm_set_enabled(pwm_gpio_to_slice_num(AUDIO_PIN_R), true);
+            audio_pwm_setup(sample_rate);
             add_repeating_timer_us(-s_timer_interval_us, playback_timer_callback, NULL, &s_playback_timer);
             s_timer_active = true;
         }

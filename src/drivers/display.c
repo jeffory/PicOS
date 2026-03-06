@@ -626,6 +626,62 @@ void display_draw_image_scaled(int x, int y, int img_w, int img_h,
   }
 }
 
+void display_draw_image_nn(int x, int y, const uint16_t *data,
+                           int src_w, int src_h, int scale) {
+  if (!data || src_w <= 0 || src_h <= 0 || scale <= 0)
+    return;
+
+  int dst_w = src_w * scale;
+  int dst_h = src_h * scale;
+
+  // Early reject if entirely off-screen
+  if (x >= FB_WIDTH || y >= FB_HEIGHT || x + dst_w <= 0 || y + dst_h <= 0)
+    return;
+
+  // Clamp source region to framebuffer bounds
+  int src_y0 = 0, src_y1 = src_h;
+  int src_x0 = 0, src_x1 = src_w;
+  if (y < 0) { src_y0 = (-y) / scale; y += src_y0 * scale; }
+  if (x < 0) { src_x0 = (-x) / scale; x += src_x0 * scale; }
+  if (y + (src_y1 - src_y0) * scale > FB_HEIGHT)
+    src_y1 = src_y0 + (FB_HEIGHT - y) / scale;
+  if (x + (src_x1 - src_x0) * scale > FB_WIDTH)
+    src_x1 = src_x0 + (FB_WIDTH - x) / scale;
+
+  uint16_t *fb = s_framebuffer;
+  int clamped_w = (src_x1 - src_x0) * scale;
+
+  for (int sy = src_y0; sy < src_y1; sy++) {
+    const uint16_t *src_row = &data[sy * src_w + src_x0];
+    int fb_y = y + (sy - src_y0) * scale;
+    uint16_t *dst_row = &fb[fb_y * FB_WIDTH + x];
+
+    // Build one scaled row with byte-swap
+    if (scale == 2) {
+      // Fast path: 32-bit writes for scale==2 (halves store count)
+      for (int sx = 0; sx < src_x1 - src_x0; sx++) {
+        uint16_t c = src_row[sx];
+        uint16_t be = (c >> 8) | (c << 8);
+        uint32_t pair = ((uint32_t)be << 16) | be;
+        *(uint32_t *)&dst_row[sx * 2] = pair;
+      }
+    } else {
+      for (int sx = 0; sx < src_x1 - src_x0; sx++) {
+        uint16_t c = src_row[sx];
+        uint16_t be = (c >> 8) | (c << 8);
+        int dx = sx * scale;
+        for (int s = 0; s < scale; s++)
+          dst_row[dx + s] = be;
+      }
+    }
+
+    // Duplicate the row (scale-1) times
+    for (int s = 1; s < scale; s++) {
+      memcpy(&fb[(fb_y + s) * FB_WIDTH + x], dst_row, clamped_w * sizeof(uint16_t));
+    }
+  }
+}
+
 void display_draw_image_scaled_nn(int x, int y, const uint16_t *data,
                                    int src_w, int src_h, int dst_w, int dst_h,
                                    uint16_t transparent_color) {
@@ -693,10 +749,12 @@ uint16_t display_get_transparent_color(void) {
   return s_transparent_color;
 }
 
-// Set to true by native_loader before launching a native PSRAM app.
-// Native apps execute from 0x15xxxxxx (same SPI bus as DMA source), so DMA
-// must complete before returning from flush, or instruction fetches stall.
-// Lua apps run from flash and are unaffected, so we leave it non-blocking.
+// When true, display_flush() blocks until DMA completes before returning.
+// Previously set for native PSRAM apps under the assumption that DMA and CPU
+// instruction fetches share the same bus.  In reality, DMA reads from SRAM
+// (AHB) while CPU fetches app code from PSRAM (QMI/XIP) — no contention.
+// Double buffering already prevents CPU/DMA conflicts on the framebuffer.
+// Left as a safety valve but no longer set by the native loader.
 bool g_display_flush_blocking = false;
 
 void display_flush(void) {

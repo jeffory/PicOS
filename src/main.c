@@ -160,6 +160,8 @@ void __attribute__((naked)) isr_hardfault(void) {
 }
 
 #include "drivers/audio.h"
+#include "drivers/fileplayer.h"
+#include "drivers/mp3_player.h"
 #include "drivers/sound.h"
 #include "drivers/display.h"
 #include "drivers/http.h"
@@ -201,6 +203,7 @@ static picocalc_display_t s_display_impl = {
     .getWidth = display_get_width_fn,
     .getHeight = display_get_height_fn,
     .setBrightness = display_set_brightness,
+    .drawImageNN = display_draw_image_nn,
 };
 
 static uint32_t sys_getTimeMs(void) {
@@ -268,6 +271,9 @@ static picocalc_audio_t s_audio_impl = {
     .playTone = audio_play_tone,
     .stopTone = audio_stop_tone,
     .setVolume = audio_set_volume,
+    .startStream = audio_start_stream,
+    .stopStream = audio_stop_stream,
+    .pushSamples = audio_push_samples,
 };
 
 static pcfile_t fs_open(const char *path, const char *mode) {
@@ -337,6 +343,12 @@ static picocalc_fs_t s_fs_impl = {
 volatile bool g_core1_pause = false;
 
 static void core1_entry(void) {
+  // Clear UNALIGN_TRP on Core 1 (each core has its own SCB/CCR)
+  volatile uint32_t *scb_ccr = (volatile uint32_t *)(0xE000ED14);
+  *scb_ccr &= ~(1u << 3);
+  __asm volatile ("dsb sy" ::: "memory");
+  __asm volatile ("isb sy" ::: "memory");
+
   while (true) {
     if (g_core1_pause) {
       sleep_ms(1);
@@ -344,6 +356,8 @@ static void core1_entry(void) {
     }
     wifi_poll();
     http_fire_c_pending();
+    mp3_player_update();
+    fileplayer_update();
     sleep_ms(5);
   }
 }
@@ -351,13 +365,6 @@ static void core1_entry(void) {
 // ── Main ─────────────────────────────────────────────────────────────────────
 
 int main(void) {
-  // Enable unaligned memory access for legacy ARM code (picomp3lib)
-  // By default, ARM Cortex-M33 traps unaligned 32-bit accesses.
-  volatile uint32_t *scb_ccr = (volatile uint32_t *)(0xE000ED14);
-  uint32_t old_val = *scb_ccr;
-  *scb_ccr &= ~(1u << 3);  // Clear UNALIGNED_TRP bit (bit 3)
-  printf("SCB CCR: 0x%08lx -> 0x%08lx\n", (unsigned long)old_val, (unsigned long)*scb_ccr);
-
   // Overclock to 200 MHz for better display throughput (RP2350 supports 150+)
   // NOTE: If the keyboard fails to initialise reliably, try commenting this
   // out to test at the default 125 MHz — it isolates whether the overclock
@@ -404,6 +411,7 @@ int main(void) {
   // Initialise display first so we can show progress
   display_init();
   sound_init();
+  audio_init();
   ui_draw_splash("Initialising keyboard...", NULL);
 
   bool kbd_ok = kbd_init();

@@ -2,6 +2,7 @@
 #include "../hardware.h"
 
 #include "pico/stdlib.h"
+#include "pico/mutex.h"
 #include "hardware/spi.h"
 #include "hardware/gpio.h"
 
@@ -17,6 +18,10 @@
 static FATFS s_fs;
 static bool  s_mounted = false;
 
+// Protects all FatFS operations from concurrent access across cores.
+// Recursive so that sdcard_list_dir callbacks can call other sdcard_* functions.
+recursive_mutex_t g_sdcard_mutex;
+
 // ── SPI SD card low-level (bit-bang layer for FatFS diskio) ──────────────────
 // FatFS calls the diskio_ functions. Those in turn call these SPI helpers.
 // The actual diskio.c implementation is in third_party/fatfs/port/diskio.c
@@ -30,6 +35,8 @@ const uint s_sd_pin_mosi = SD_PIN_MOSI;
 const uint s_sd_pin_sck  = SD_PIN_SCK;
 
 bool sdcard_init(void) {
+    recursive_mutex_init(&g_sdcard_mutex);
+
     // SPI0 hardware setup
     spi_init(SD_SPI_PORT, 400 * 1000);   // 400 kHz for card init
     spi_set_format(SD_SPI_PORT, 8, SPI_CPOL_0, SPI_CPHA_0, SPI_MSB_FIRST);
@@ -64,10 +71,12 @@ bool sdcard_is_mounted(void) {
 }
 
 bool sdcard_remount(void) {
+    recursive_mutex_enter_blocking(&g_sdcard_mutex);
     f_unmount("");
     s_mounted = false;
     FRESULT res = f_mount(&s_fs, "", 1);
     s_mounted = (res == FR_OK);
+    recursive_mutex_exit(&g_sdcard_mutex);
     return s_mounted;
 }
 
@@ -95,45 +104,61 @@ sdfile_t sdcard_fopen(const char *path, const char *mode) {
     FIL *f = (FIL *)umm_malloc(sizeof(FIL));
     if (!f) return NULL;
 
+    recursive_mutex_enter_blocking(&g_sdcard_mutex);
     FRESULT res = f_open(f, path, mode_to_fatfs(mode));
+    recursive_mutex_exit(&g_sdcard_mutex);
     if (res != FR_OK) { umm_free(f); return NULL; }
     return (sdfile_t)f;
 }
 
 int sdcard_fread(sdfile_t f, void *buf, int len) {
     if (!f) return -1;
+    recursive_mutex_enter_blocking(&g_sdcard_mutex);
     UINT br = 0;
     FRESULT res = f_read((FIL *)f, buf, (UINT)len, &br);
+    recursive_mutex_exit(&g_sdcard_mutex);
     return (res == FR_OK) ? (int)br : -1;
 }
 
 int sdcard_fwrite(sdfile_t f, const void *buf, int len) {
     if (!f) return -1;
+    recursive_mutex_enter_blocking(&g_sdcard_mutex);
     UINT bw = 0;
     FRESULT res = f_write((FIL *)f, buf, (UINT)len, &bw);
+    recursive_mutex_exit(&g_sdcard_mutex);
     return (res == FR_OK) ? (int)bw : -1;
 }
 
 void sdcard_fclose(sdfile_t f) {
     if (!f) return;
+    recursive_mutex_enter_blocking(&g_sdcard_mutex);
     f_close((FIL *)f);
+    recursive_mutex_exit(&g_sdcard_mutex);
     umm_free(f);  // Must match sdcard_fopen() which allocates via umm_malloc
 }
 
 bool sdcard_fseek(sdfile_t f, uint32_t offset) {
     if (!f) return false;
-    return f_lseek((FIL *)f, (FSIZE_t)offset) == FR_OK;
+    recursive_mutex_enter_blocking(&g_sdcard_mutex);
+    bool ok = f_lseek((FIL *)f, (FSIZE_t)offset) == FR_OK;
+    recursive_mutex_exit(&g_sdcard_mutex);
+    return ok;
 }
 
 uint32_t sdcard_ftell(sdfile_t f) {
     if (!f) return 0;
-    return (uint32_t)f_tell((FIL *)f);
+    recursive_mutex_enter_blocking(&g_sdcard_mutex);
+    uint32_t pos = (uint32_t)f_tell((FIL *)f);
+    recursive_mutex_exit(&g_sdcard_mutex);
+    return pos;
 }
 
 bool sdcard_fexists(const char *path) {
     FILINFO *fi = (FILINFO *)umm_malloc(sizeof(FILINFO));
     if (!fi) return false;
+    recursive_mutex_enter_blocking(&g_sdcard_mutex);
     bool exists = (f_stat(path, fi) == FR_OK);
+    recursive_mutex_exit(&g_sdcard_mutex);
     umm_free(fi);
     return exists;
 }
@@ -141,7 +166,10 @@ bool sdcard_fexists(const char *path) {
 int sdcard_fsize(const char *path) {
     FILINFO *fi = (FILINFO *)umm_malloc(sizeof(FILINFO));
     if (!fi) return -1;
-    if (f_stat(path, fi) != FR_OK) {
+    recursive_mutex_enter_blocking(&g_sdcard_mutex);
+    FRESULT res = f_stat(path, fi);
+    recursive_mutex_exit(&g_sdcard_mutex);
+    if (res != FR_OK) {
         umm_free(fi);
         return -1;
     }
@@ -152,8 +180,10 @@ int sdcard_fsize(const char *path) {
 
 bool sdcard_mkdir(const char *path) {
     if (!s_mounted) return false;
+    recursive_mutex_enter_blocking(&g_sdcard_mutex);
     // f_mkdir returns FR_OK if successful or FR_EXIST if already exists
     FRESULT res = f_mkdir(path);
+    recursive_mutex_exit(&g_sdcard_mutex);
     return (res == FR_OK || res == FR_EXIST);
 }
 
@@ -170,7 +200,9 @@ int sdcard_list_dir(const char *path,
         return -1;
     }
 
+    recursive_mutex_enter_blocking(&g_sdcard_mutex);
     if (f_opendir(dir, path) != FR_OK) {
+        recursive_mutex_exit(&g_sdcard_mutex);
         umm_free(dir);
         umm_free(fi);
         return -1;
@@ -189,6 +221,7 @@ int sdcard_list_dir(const char *path,
         count++;
     }
     f_closedir(dir);
+    recursive_mutex_exit(&g_sdcard_mutex);
     umm_free(dir);
     umm_free(fi);
     return count;
@@ -196,12 +229,18 @@ int sdcard_list_dir(const char *path,
 
 bool sdcard_delete(const char *path) {
     if (!s_mounted) return false;
-    return f_unlink(path) == FR_OK;
+    recursive_mutex_enter_blocking(&g_sdcard_mutex);
+    bool ok = f_unlink(path) == FR_OK;
+    recursive_mutex_exit(&g_sdcard_mutex);
+    return ok;
 }
 
 bool sdcard_rename(const char *src, const char *dst) {
     if (!s_mounted) return false;
-    return f_rename(src, dst) == FR_OK;
+    recursive_mutex_enter_blocking(&g_sdcard_mutex);
+    bool ok = f_rename(src, dst) == FR_OK;
+    recursive_mutex_exit(&g_sdcard_mutex);
+    return ok;
 }
 
 #define COPY_CHUNK 4096
@@ -213,6 +252,9 @@ bool sdcard_copy(const char *src, const char *dst,
 
     FILINFO *fi = (FILINFO *)umm_malloc(sizeof(FILINFO));
     if (!fi) return false;
+
+    recursive_mutex_enter_blocking(&g_sdcard_mutex);
+
     uint32_t total = (f_stat(src, fi) == FR_OK) ? fi->fsize : 0;
     umm_free(fi);
 
@@ -221,18 +263,21 @@ bool sdcard_copy(const char *src, const char *dst,
     if (!fsrc || !fdst) {
         if (fsrc) umm_free(fsrc);
         if (fdst) umm_free(fdst);
+        recursive_mutex_exit(&g_sdcard_mutex);
         return false;
     }
 
     if (f_open(fsrc, src, FA_READ | FA_OPEN_EXISTING) != FR_OK) {
         umm_free(fsrc);
         umm_free(fdst);
+        recursive_mutex_exit(&g_sdcard_mutex);
         return false;
     }
     if (f_open(fdst, dst, FA_WRITE | FA_CREATE_ALWAYS) != FR_OK) {
         f_close(fsrc);
         umm_free(fsrc);
         umm_free(fdst);
+        recursive_mutex_exit(&g_sdcard_mutex);
         return false;
     }
 
@@ -242,6 +287,7 @@ bool sdcard_copy(const char *src, const char *dst,
         f_close(fdst);
         umm_free(fsrc);
         umm_free(fdst);
+        recursive_mutex_exit(&g_sdcard_mutex);
         return false;
     }
 
@@ -271,6 +317,8 @@ bool sdcard_copy(const char *src, const char *dst,
     umm_free(fdst);
     if (!ok)
         f_unlink(dst); // remove partial destination on error
+
+    recursive_mutex_exit(&g_sdcard_mutex);
     return ok;
 }
 
@@ -278,7 +326,10 @@ bool sdcard_stat(const char *path, sdcard_stat_t *out) {
     if (!out) return false;
     FILINFO *fi = (FILINFO *)umm_malloc(sizeof(FILINFO));
     if (!fi) return false;
-    if (f_stat(path, fi) != FR_OK) {
+    recursive_mutex_enter_blocking(&g_sdcard_mutex);
+    FRESULT res = f_stat(path, fi);
+    recursive_mutex_exit(&g_sdcard_mutex);
+    if (res != FR_OK) {
         umm_free(fi);
         return false;
     }
@@ -292,13 +343,18 @@ bool sdcard_stat(const char *path, sdcard_stat_t *out) {
 
 bool sdcard_disk_info(uint32_t *out_free_kb, uint32_t *out_total_kb) {
     if (!s_mounted) return false;
+    recursive_mutex_enter_blocking(&g_sdcard_mutex);
     FATFS *fs;
     DWORD free_clust;
-    if (f_getfree("", &free_clust, &fs) != FR_OK) return false;
+    if (f_getfree("", &free_clust, &fs) != FR_OK) {
+        recursive_mutex_exit(&g_sdcard_mutex);
+        return false;
+    }
     // sectors/cluster * 512 bytes/sector / 1024 bytes/KB = sectors/cluster / 2
     uint32_t spc = fs->csize;
     if (out_total_kb) *out_total_kb = (uint32_t)((uint64_t)(fs->n_fatent - 2) * spc / 2);
     if (out_free_kb)  *out_free_kb  = (uint32_t)((uint64_t)free_clust * spc / 2);
+    recursive_mutex_exit(&g_sdcard_mutex);
     return true;
 }
 

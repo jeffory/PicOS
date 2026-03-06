@@ -69,6 +69,10 @@ typedef struct {
     int  (*getHeight)(void);
     // Set display brightness 0-255 (controls backlight PWM)
     void (*setBrightness)(uint8_t brightness);
+    // Draw an integer-scaled image (nearest-neighbor, no transparency).
+    // Input data in host byte order (RGB565). Ideal for emulator blits.
+    void (*drawImageNN)(int x, int y, const uint16_t *data,
+                        int src_w, int src_h, int scale);
 } picocalc_display_t;
 
 // --- Filesystem (SD card) ---------------------------------------------------
@@ -126,6 +130,11 @@ typedef struct {
     void (*stopTone)(void);
     // Master volume 0-100
     void (*setVolume)(uint8_t volume);
+    // PCM sample streaming. Samples are stereo interleaved int16_t (L,R,L,R).
+    // count = number of stereo frames (each frame = 2 int16_t values).
+    void (*startStream)(uint32_t sample_rate);
+    void (*stopStream)(void);
+    void (*pushSamples)(const int16_t *samples, int count);
 } picocalc_audio_t;
 
 // --- WiFi (Pico 2W only, shares SPI1 with LCD) ------------------------------

@@ -1,6 +1,7 @@
 #include "native_loader.h"
 #include "launcher_types.h"
 #include "app_abi.h"
+#include "../drivers/audio.h"
 #include "../drivers/display.h"
 #include "../drivers/keyboard.h"
 #include "../drivers/sdcard.h"
@@ -448,10 +449,9 @@ static bool native_run(const app_entry_t *app) {
   kbd_clear_state();
 
   // ── 8. Launch app ─────────────────────────────────────────────────────────
-  // Enable blocking flush to prevent DMA bus activity while app code is
-  // executing from PSRAM.  Even with cached execution, cache misses still
-  // fetch from PSRAM via QMI, and DMA contention could corrupt those fetches.
-  g_display_flush_blocking = true;
+  // Non-blocking flush is safe: DMA reads from SRAM framebuffers (AHB) while
+  // the CPU fetches app code from PSRAM (QMI/XIP) — separate buses, no
+  // contention.  Double buffering prevents CPU/DMA framebuffer conflicts.
 
   display_clear(C_BG);
   display_flush();
@@ -472,8 +472,6 @@ static bool native_run(const app_entry_t *app) {
   launch_on_psp(stack_top, entry_fn,
                 (const PicoCalcAPI *)&g_api, app->path, app->id, app->name);
 
-  g_display_flush_blocking = false;
-
   // Check canary after app returns.  A corrupted word means the stack grew
   // past the guard zone — report it so developers know to investigate.
   for (int i = 0; i < NATIVE_STACK_GUARD_WORDS; i++) {
@@ -489,7 +487,9 @@ static bool native_run(const app_entry_t *app) {
   ok = true;
 
 out:
-  // ── 9. Free buffers and resume Core 1 ─────────────────────────────────────
+  // ── 9. Cleanup and resume Core 1 ──────────────────────────────────────────
+  audio_stop_stream();   // ensure audio streaming is stopped on exit/crash
+  audio_stop_tone();
   if (load_base)
     umm_free(load_base);
   if (file_buf)
