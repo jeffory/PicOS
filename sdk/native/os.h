@@ -59,6 +59,8 @@ typedef struct {
     int  (*getWidth)(void);
     int  (*getHeight)(void);
     void (*setBrightness)(uint8_t brightness);
+    void (*drawImageNN)(int x, int y, const uint16_t *data,
+                        int src_w, int src_h, int scale);
 } picocalc_display_t;
 
 // --- Filesystem --------------------------------------------------------------
@@ -88,8 +90,12 @@ typedef struct {
     void     (*clearMenuItems)(void);
     void     (*log)(const char *fmt, ...);
     // OS tick for native apps: polls keyboard + fires pending C HTTP callbacks.
+    // Also checks for the Sym (Menu) key and shows the system menu overlay.
     // Call this in your main loop (e.g. once per frame).
     void     (*poll)(void);
+    // Returns true (once) after the user selects "Exit App" from the system
+    // menu.  Check this each frame and return from picos_main() when it fires.
+    bool     (*shouldExit)(void);
 } picocalc_sys_t;
 
 // --- Audio -------------------------------------------------------------------
@@ -98,6 +104,9 @@ typedef struct {
     void (*playTone)(uint32_t freq_hz, uint32_t duration_ms);
     void (*stopTone)(void);
     void (*setVolume)(uint8_t volume);
+    void (*startStream)(uint32_t sample_rate);
+    void (*stopStream)(void);
+    void (*pushSamples)(const int16_t *samples, int count);
 } picocalc_audio_t;
 
 // --- WiFi --------------------------------------------------------------------

@@ -18,6 +18,9 @@
 #include "umm_malloc.h"
 
 #include "pico/stdlib.h"
+#include "hardware/clocks.h"
+#include "hardware/uart.h"
+#include "hardware/vreg.h"
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -50,6 +53,19 @@ static bool json_get_string(const char *json, const char *key, char *out,
   while (*p && *p != '"' && i < out_len - 1)
     out[i++] = *p++;
   out[i] = '\0';
+  return true;
+}
+
+static bool json_get_int(const char *json, const char *key, uint32_t *out) {
+  char search[64];
+  snprintf(search, sizeof(search), "\"%s\"", key);
+  const char *p = strstr(json, search);
+  if (!p)
+    return false;
+  p += strlen(search);
+  while (*p == ' ' || *p == ':' || *p == '\t')
+    p++;
+  *out = (uint32_t)atoi(p);
   return true;
 }
 
@@ -108,6 +124,7 @@ static void on_app_dir(const sdcard_entry_t *entry, void *user) {
   app->has_root_filesystem = false;
   app->has_http            = false;
   app->has_audio           = false;
+  app->system_clock_khz    = 0;
 
   // Try to load app.json for display name / description / id / requirements
   char json_path[160];
@@ -128,6 +145,7 @@ static void on_app_dir(const sdcard_entry_t *entry, void *user) {
     app->has_root_filesystem = json_has_requirement(json, "root-filesystem");
     app->has_http            = json_has_requirement(json, "http");
     app->has_audio           = json_has_requirement(json, "audio");
+    json_get_int(json, "system_clock_khz", &app->system_clock_khz);
 
     umm_free(json);
   } else {
@@ -152,9 +170,12 @@ static void scan_apps(void) {
 #define LIST_X 8
 #define LIST_Y 32
 #define LIST_VISIBLE 9
+#define DESC_SCROLL_RESET_PAUSE 40  // frames to pause at start before re-scrolling
 
 static int s_selected = 0;
 static int s_scroll = 0;
+static int s_desc_scroll = 0;
+static int s_desc_scroll_timer = 0;
 
 void launcher_refresh_apps(void) {
   scan_apps();
@@ -171,7 +192,7 @@ void launcher_refresh_apps(void) {
 #define C_BATTERY_LO COLOR_RED
 #define C_BORDER RGB565(60, 60, 100)
 
-static void draw_header(void) { ui_draw_header("PicoCalc OS"); }
+static void draw_header(void) { ui_draw_header("PicOS"); }
 
 static void draw_footer(void) {
   ui_draw_footer("Enter:Launch  Esc:Exit app  F10:Menu", NULL);
@@ -200,7 +221,20 @@ static void draw_launcher(void) {
 
     display_draw_text(LIST_X, y + 4, s_apps[idx].name, C_TEXT, bg);
     if (s_apps[idx].description[0]) {
-      display_draw_text(LIST_X, y + 15, s_apps[idx].description, C_TEXT_DIM, bg);
+      int max_w = FB_WIDTH - LIST_X * 2 - 4;
+      int tw = display_text_width(s_apps[idx].description);
+      if (tw > max_w) {
+        const char *p = s_apps[idx].description + (sel ? s_desc_scroll : 0);
+        int avail = strlen(p);
+        char buf[64];
+        int out_len = (avail * 6 > max_w * 6) ? (max_w / 6 + 1) : avail;
+        if (out_len > 63) out_len = 63;
+        strncpy(buf, p, out_len);
+        buf[out_len] = '\0';
+        display_draw_text(LIST_X, y + 15, buf, C_TEXT_DIM, bg);
+      } else {
+        display_draw_text(LIST_X, y + 15, s_apps[idx].description, C_TEXT_DIM, bg);
+      }
     }
   }
 
@@ -226,6 +260,81 @@ static const AppRunner *s_runners[] = {
 // ── App launcher
 // ──────────────────────────────────────────────────────────────
 
+extern volatile bool g_core1_pause;
+
+static void launcher_apply_clock(uint32_t khz) {
+  if (khz == 0) khz = 200000; // Default OS clock
+  uint32_t current_khz = clock_get_hz(clk_sys) / 1000;
+  if (khz == current_khz) return;
+
+  printf("[LAUNCHER] Changing clock: %lu -> %lu MHz\n", 
+         (unsigned long)(current_khz / 1000), (unsigned long)(khz / 1000));
+
+  // 1. Pause Core 1 background tasks (WiFi/Audio) to avoid bus corruption
+  g_core1_pause = true;
+  sleep_ms(2); // Give Core 1 a moment to notice and hit its sleep_ms(1)
+
+  // 2. Up-clocking: Raise voltage BEFORE increasing frequency
+  if (khz > current_khz) {
+    enum vreg_voltage v = VREG_VOLTAGE_DEFAULT;  // 1.10V, good to ~200 MHz
+    if (khz >= 400000)
+      v = VREG_VOLTAGE_1_25;
+    else if (khz >= 300000)
+      v = VREG_VOLTAGE_1_20;
+    else if (khz >= 250000)
+      v = VREG_VOLTAGE_1_15;
+
+    if (v != VREG_VOLTAGE_DEFAULT) {
+      vreg_set_voltage(v);
+      sleep_ms(2);
+    }
+  }
+
+  // 3. Ensure display DMA is finished before changing clock source
+  display_apply_clock(); // This now waits for DMA internally
+
+  // 4. Apply the new system clock
+  bool ok = set_sys_clock_khz(khz, false);
+
+  if (ok) {
+    // 5. Re-configure peripheral clock so SPI/I2C/UART/PWM stay stable.
+    clock_configure(
+        clk_peri,
+        0,
+        CLOCKS_CLK_PERI_CTRL_AUXSRC_VALUE_CLKSRC_PLL_SYS,
+        khz * 1000,
+        khz * 1000);
+
+    // 6. Update display PIO divider for new clk_sys frequency
+    display_apply_clock();
+
+    // 7. Update keyboard I2C divider for new clk_peri frequency
+    kbd_apply_clock();
+
+    // 8. Re-init UART baud rate (depends on clk_peri)
+#if LIB_PICO_STDIO_UART
+    uart_init(uart0, 115200);
+#endif
+  }
+
+  // 9. Down-clocking: Lower voltage AFTER decreasing frequency
+  if (khz < current_khz && ok) {
+    enum vreg_voltage v = VREG_VOLTAGE_DEFAULT;
+    if (khz >= 400000)
+      v = VREG_VOLTAGE_1_25;
+    else if (khz >= 300000)
+      v = VREG_VOLTAGE_1_20;
+    else if (khz >= 250000)
+      v = VREG_VOLTAGE_1_15;
+
+    vreg_set_voltage(v);
+    sleep_ms(2);
+  }
+
+  // 10. Resume Core 1
+  g_core1_pause = false;
+}
+
 static bool run_app(int idx) {
   if (idx < 0 || idx >= s_app_count)
     return false;
@@ -238,6 +347,10 @@ static bool run_app(int idx) {
          lua_psram_alloc_free_size());
 
   // ── Shared pre-launch setup ───────────────────────────────────────────────
+  if (app->system_clock_khz > 0) {
+    launcher_apply_clock(app->system_clock_khz);
+  }
+
   wifi_set_http_required(app->has_http);
 
   if (app->has_http && wifi_is_available()) {
@@ -249,9 +362,6 @@ static bool run_app(int idx) {
     }
   }
 
-  if (app->has_audio)
-    audio_init();
-
   // ── Dispatch to runner ────────────────────────────────────────────────────
   bool ok = false;
   for (int i = 0; s_runners[i]; i++) {
@@ -262,6 +372,10 @@ static bool run_app(int idx) {
   }
 
   // ── Shared post-exit cleanup ──────────────────────────────────────────────
+  if (app->system_clock_khz > 0) {
+    launcher_apply_clock(200000); // Reset to system default
+  }
+
   system_menu_clear_items();
 
   printf("[LAUNCHER] App '%s' exited (ok=%d), PSRAM free: %zu\n",
@@ -295,19 +409,62 @@ void launcher_run(void) {
     uint32_t pressed = kbd_get_buttons_pressed();
 
     if (pressed & BTN_UP) {
-      if (s_selected > 0) {
-        s_selected--;
+      if (s_app_count > 0) {
+        if (s_selected > 0)
+          s_selected--;
+        else
+          s_selected = s_app_count - 1;  // wrap to bottom
         if (s_selected < s_scroll)
           s_scroll = s_selected;
+        if (s_selected >= s_scroll + LIST_VISIBLE)
+          s_scroll = s_selected - LIST_VISIBLE + 1;
+        s_desc_scroll = 0;
+        s_desc_scroll_timer = 0;
         dirty = true;
       }
     }
     if (pressed & BTN_DOWN) {
-      if (s_selected < s_app_count - 1) {
-        s_selected++;
+      if (s_app_count > 0) {
+        if (s_selected < s_app_count - 1)
+          s_selected++;
+        else
+          s_selected = 0;  // wrap to top
         if (s_selected >= s_scroll + LIST_VISIBLE)
           s_scroll = s_selected - LIST_VISIBLE + 1;
+        if (s_selected < s_scroll)
+          s_scroll = s_selected;
+        s_desc_scroll = 0;
+        s_desc_scroll_timer = 0;
         dirty = true;
+      }
+    }
+
+    if (pressed & BTN_LEFT) {
+      if (s_app_count > 0) {
+        int new_sel = s_selected - LIST_VISIBLE;
+        if (new_sel < 0) new_sel = 0;
+        if (new_sel != s_selected) {
+          s_selected = new_sel;
+          if (s_selected < s_scroll)
+            s_scroll = s_selected;
+          s_desc_scroll = 0;
+          s_desc_scroll_timer = 0;
+          dirty = true;
+        }
+      }
+    }
+    if (pressed & BTN_RIGHT) {
+      if (s_app_count > 0) {
+        int new_sel = s_selected + LIST_VISIBLE;
+        if (new_sel >= s_app_count) new_sel = s_app_count - 1;
+        if (new_sel != s_selected) {
+          s_selected = new_sel;
+          if (s_selected >= s_scroll + LIST_VISIBLE)
+            s_scroll = s_selected - LIST_VISIBLE + 1;
+          s_desc_scroll = 0;
+          s_desc_scroll_timer = 0;
+          dirty = true;
+        }
       }
     }
 
@@ -317,13 +474,35 @@ void launcher_run(void) {
       run_app(s_selected);
       kbd_clear_state();
       scan_apps();
-      s_selected = 0;
-      s_scroll   = 0;
+      s_desc_scroll = 0;
+      s_desc_scroll_timer = 0;
       dirty      = true;
     }
 
     if (ui_needs_header_redraw())
       dirty = true;
+
+    s_desc_scroll_timer++;
+    if (s_desc_scroll_timer >= 10) {
+      s_desc_scroll_timer = 0;
+      if (s_selected < s_app_count && s_apps[s_selected].description[0]) {
+        int tw = display_text_width(s_apps[s_selected].description);
+        int max_w = FB_WIDTH - LIST_X * 2 - 4;
+        int desc_len = strlen(s_apps[s_selected].description);
+        int max_scroll = desc_len - (max_w / 6);
+        if (tw > max_w) {
+          if (s_desc_scroll < max_scroll) {
+            s_desc_scroll++;
+            dirty = true;
+          } else {
+            // Reached end — reset and pause before cycling
+            s_desc_scroll = 0;
+            s_desc_scroll_timer = -DESC_SCROLL_RESET_PAUSE;
+            dirty = true;
+          }
+        }
+      }
+    }
 
     if (dirty)
       draw_launcher();

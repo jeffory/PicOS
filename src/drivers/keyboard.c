@@ -416,6 +416,16 @@ void kbd_set_backlight(uint8_t brightness) {
   i2c_write_reg(KBD_REG_BL, brightness);
 }
 
+void kbd_apply_clock(void) {
+  // Re-initialize I2C with the same baud rate.
+  // i2c_init uses clk_peri to calculate internal dividers.
+  i2c_init(KBD_I2C_PORT, KBD_I2C_BAUD);
+  gpio_set_function(KBD_PIN_SDA, GPIO_FUNC_I2C);
+  gpio_set_function(KBD_PIN_SCL, GPIO_FUNC_I2C);
+  gpio_pull_up(KBD_PIN_SDA);
+  gpio_pull_up(KBD_PIN_SCL);
+}
+
 bool kbd_consume_menu_press(void) {
   bool val = s_menu_pressed;
   s_menu_pressed = false;

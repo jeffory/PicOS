@@ -2,6 +2,7 @@
 #include "umm_malloc.h"
 #include "umm_malloc_cfg.h"
 #include "pico/critical_section.h"
+#include <stdbool.h>
 #include <stdint.h>
 #include <stdio.h>
 
@@ -59,13 +60,22 @@ void *lua_psram_alloc(void *ud, void *ptr, size_t osize, size_t nsize) {
   if (nsize == 0) {
     umm_free(ptr);
     return NULL;
-  } else {
-    return umm_realloc(ptr, nsize);
   }
+
+  void *result = umm_realloc(ptr, nsize);
+  if (!result) {
+    printf("[PSRAM] OOM: failed to allocate %zu bytes, %zu free\n",
+           nsize, umm_free_heap_size());
+  }
+  return result;
 }
 
 size_t lua_psram_alloc_free_size(void) {
   return umm_free_heap_size();
+}
+
+bool lua_psram_alloc_is_low(void) {
+  return umm_free_heap_size() < PSRAM_LOW_WATERMARK;
 }
 
 size_t lua_psram_alloc_total_size(void) {

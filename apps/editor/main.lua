@@ -1,4 +1,4 @@
--- Text Editor for PicoCalc OS
+-- Text Editor for PicOS
 -- Nano-like text editor with full editing capabilities
 -- Large files (> LARGE_FILE_THRESHOLD bytes) are opened read-only using a
 -- seek-based pager that keeps only the visible window in memory.

@@ -52,7 +52,15 @@ static bool lua_run(const app_entry_t *app) {
 
   printf("[LUA] Lua state created, PSRAM free: %zu\n", lua_psram_alloc_free_size());
 
-  lua_bridge_register(L);
+  // Wrap registration in a pcall to catch errors before we enter the main loop.
+  // This prevents abort() if a module fails to register (e.g. OOM).
+  lua_pushcfunction(L, (lua_CFunction)lua_bridge_register);
+  if (lua_pcall(L, 0, 0, 0) != LUA_OK) {
+    lua_bridge_show_error(L, "Init error:");
+    lua_close(L);
+    umm_free(lua_src);
+    return false;
+  }
 
   // ── Set app globals ───────────────────────────────────────────────────────
   lua_pushstring(L, app->path);

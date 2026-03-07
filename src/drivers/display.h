@@ -38,6 +38,7 @@
 // Public init/deinit
 void display_init(void);
 void display_deinit(void);
+void display_apply_clock(void);
 
 // Drawing — all operations go to the framebuffer, not directly to LCD
 // Call display_flush() to push to screen
@@ -60,16 +61,43 @@ void display_draw_image(int x, int y, int w, int h, const uint16_t *data);
 // Blit a sub-rectangle of an image to the framebuffer at (x, y).
 // sx, sy, sw, sh define the source rectangle within the w x h image.
 // flip_x and flip_y mirror the drawing horizontally and vertically.
+// transparent_color: 0 = use global setting, otherwise RGB565 color to treat as transparent.
 void display_draw_image_partial(int x, int y, int img_w, int img_h,
                                 const uint16_t *data, int sx, int sy, int sw,
-                                int sh, bool flip_x, bool flip_y);
+                                int sh, bool flip_x, bool flip_y,
+                                uint16_t transparent_color);
 
 // Draw a scaled/rotated image to the framebuffer at (x, y).
+// transparent_color: 0 = use global setting, otherwise RGB565 color to treat as transparent.
 void display_draw_image_scaled(int x, int y, int img_w, int img_h,
-                               const uint16_t *data, float scale, float angle);
+                               const uint16_t *data, float scale, float angle,
+                               uint16_t transparent_color);
 
-// Push framebuffer to LCD (starts DMA transfer in the background).
+// Draw a scaled image using nearest-neighbor (crisp pixel art).
+// dst_w and dst_h specify the output size in pixels.
+// transparent_color: 0 = use global setting, otherwise RGB565 color to treat as transparent.
+void display_draw_image_scaled_nn(int x, int y, const uint16_t *data,
+                                  int src_w, int src_h, int dst_w, int dst_h,
+                                  uint16_t transparent_color);
+
+// Draw an integer-scaled image using nearest-neighbor, optimised for speed.
+// No transparency, no bounds check per pixel (pre-clamped).
+// Ideal for emulator framebuffer blits (e.g. 160x144 @ 2x).
+// Input data must be in host byte order (same as RGB565() macro).
+void display_draw_image_nn(int x, int y, const uint16_t *data,
+                           int src_w, int src_h, int scale);
+
+// Transparent color key support (0 = disabled)
+void display_set_transparent_color(uint16_t color);
+uint16_t display_get_transparent_color(void);
+
+// Push framebuffer to LCD.
+// Default: non-blocking — DMA starts and returns immediately (CPU/DMA overlap).
+// When g_display_flush_blocking is true, blocks until DMA completes.
+// Safe for all apps: DMA reads SRAM framebuffers (AHB), CPU fetches from
+// PSRAM (QMI/XIP) — separate buses.  Double buffering prevents conflicts.
 void display_flush(void);
+extern bool g_display_flush_blocking;
 
 // Brightness via backlight PWM (0-255)
 void display_set_brightness(uint8_t brightness);

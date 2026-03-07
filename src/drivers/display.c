@@ -32,6 +32,9 @@ static bool s_dma_active = false;
 static int s_dma_chan = -1;
 static uint s_pio_sm = 0;
 
+// Transparent color key (0 = disabled)
+static uint16_t s_transparent_color = 0;
+
 // ── Built-in 6x8 font (ASCII 0x20–0x7E) ─────────────────────────────────────
 // Minimal 6x8 pixel font data — each character is 6 bytes (columns), 8 rows.
 // This is a standard "font6x8" pattern used widely in embedded projects.
@@ -245,6 +248,31 @@ static void lcd_set_window(uint16_t x0, uint16_t y0, uint16_t x1, uint16_t y1) {
 // from the working constellation-pico Rust project (st7789.rs). No
 // ST7796S-style 0xF0 manufacturer unlock — the panel responds to the standard
 // ST7789 init sequence. Backlight is controlled by the STM32 keyboard MCU.
+
+void display_apply_clock(void) {
+  // Safety: if a DMA transfer is active, wait for it to finish before
+  // changing the clock divider to avoid corrupting the current frame.
+  if (s_dma_active) {
+    dma_channel_wait_for_finish_blocking(s_dma_chan);
+    lcd_spi_wait_idle();
+    lcd_cs_high();
+    s_dma_active = false;
+  }
+
+  uint32_t clk_hz = clock_get_hz(clk_sys);
+  float clkdiv;
+  
+  if (clk_hz == 300000000) {
+    // At 300MHz, a 100MHz SPI target gives a 1.5 divider (fractional).
+    // PIO fractional dividers jitter (alternating cycles), which ST7365P
+    // does not like. Use an integer divider of 2.0 -> 75MHz SPI.
+    clkdiv = 2.0f;
+  } else {
+    clkdiv = (float)clk_hz / (LCD_SPI_BAUD * 2);
+  }
+  
+  pio_sm_set_clkdiv(LCD_PIO, s_pio_sm, clkdiv);
+}
 
 void display_init(void) {
   // Initialize PIO for SPI master
@@ -500,7 +528,11 @@ void display_draw_image(int x, int y, int w, int h, const uint16_t *data) {
 
 void display_draw_image_partial(int x, int y, int img_w, int img_h,
                                 const uint16_t *data, int sx, int sy, int sw,
-                                int sh, bool flip_x, bool flip_y) {
+                                int sh, bool flip_x, bool flip_y,
+                                uint16_t transparent_color) {
+  // (x, y) is the top-left corner of the image.
+  int draw_x = x;
+  int draw_y = y;
   if (sx < 0) {
     sw += sx;
     sx = 0;
@@ -517,20 +549,28 @@ void display_draw_image_partial(int x, int y, int img_w, int img_h,
   if (sw <= 0 || sh <= 0)
     return;
 
+  // Use global setting if transparent_color is 0
+  if (transparent_color == 0)
+    transparent_color = s_transparent_color;
+
   for (int row = 0; row < sh; row++) {
-    int py = y + row;
+    int py = draw_y + row;
     if (py < 0 || py >= FB_HEIGHT)
       continue;
 
     int src_row = flip_y ? (sy + sh - 1 - row) : (sy + row);
 
     for (int col = 0; col < sw; col++) {
-      int px = x + col;
+      int px = draw_x + col;
       if (px < 0 || px >= FB_WIDTH)
         continue;
 
       int src_col = flip_x ? (sx + sw - 1 - col) : (sx + col);
       uint16_t c = data[src_row * img_w + src_col];
+
+      // Skip transparent pixels (compare in native endian)
+      if (transparent_color != 0 && c == transparent_color)
+        continue;
 
       s_framebuffer[py * FB_WIDTH + px] = (c >> 8) | (c << 8);
     }
@@ -538,7 +578,12 @@ void display_draw_image_partial(int x, int y, int img_w, int img_h,
 }
 
 void display_draw_image_scaled(int x, int y, int img_w, int img_h,
-                               const uint16_t *data, float scale, float angle) {
+                               const uint16_t *data, float scale, float angle,
+                               uint16_t transparent_color) {
+  // If transparent_color is 0, use the global setting
+  if (transparent_color == 0)
+    transparent_color = s_transparent_color;
+
   // tgx_draw_image_scaled renders directly into the framebuffer using TGX's
   // native RGB565 format (little-endian).  Our framebuffer stores pixels
   // byte-swapped (big-endian) for the 8-bit DMA path, so we need to:
@@ -547,20 +592,23 @@ void display_draw_image_scaled(int x, int y, int img_w, int img_h,
   //   3. Byte-swap the affected region back to BE for the DMA flush.
 
   // Calculate bounding box of transformed image to only swap affected region.
-  // Image is centered at (x, y). Transform corners, find min/max.
+  // (x, y) is the top-left corner; compute centre for TGX and rotation.
+  float half_w = img_w * scale * 0.5f;
+  float half_h = img_h * scale * 0.5f;
+  float cx = x + half_w;
+  float cy = y + half_h;
+
   float cosa = cosf(angle);
   float sina = sinf(angle);
-  float w = img_w * scale * 0.5f;
-  float h = img_h * scale * 0.5f;
 
   // Transform all 4 corners and track min/max
   float corners[4][2] = {
-    {-w, -h}, {w, -h}, {w, h}, {-w, h}
+    {-half_w, -half_h}, {half_w, -half_h}, {half_w, half_h}, {-half_w, half_h}
   };
-  float min_x = x, max_x = x, min_y = y, max_y = y;
+  float min_x = cx, max_x = cx, min_y = cy, max_y = cy;
   for (int i = 0; i < 4; i++) {
-    float tx = corners[i][0] * cosa - corners[i][1] * sina + x;
-    float ty = corners[i][0] * sina + corners[i][1] * cosa + y;
+    float tx = corners[i][0] * cosa - corners[i][1] * sina + cx;
+    float ty = corners[i][0] * sina + corners[i][1] * cosa + cy;
     if (tx < min_x) min_x = tx;
     if (tx > max_x) max_x = tx;
     if (ty < min_y) min_y = ty;
@@ -586,8 +634,14 @@ void display_draw_image_scaled(int x, int y, int img_w, int img_h,
     }
   }
 
-  tgx_draw_image_scaled(fb, FB_WIDTH, FB_HEIGHT, data, img_w, img_h, x, y,
-                        scale, angle);
+  // Use masked version if transparency is enabled, otherwise use regular version
+  if (transparent_color != 0) {
+    tgx_draw_image_scaled_masked(fb, FB_WIDTH, FB_HEIGHT, data, img_w, img_h, (int)cx, (int)cy,
+                                  scale, angle, transparent_color);
+  } else {
+    tgx_draw_image_scaled(fb, FB_WIDTH, FB_HEIGHT, data, img_w, img_h, (int)cx, (int)cy,
+                          scale, angle);
+  }
 
   // Byte-swap back only the affected region
   for (int row = by; row < by + bh; row++) {
@@ -597,15 +651,144 @@ void display_draw_image_scaled(int x, int y, int img_w, int img_h,
   }
 }
 
+void display_draw_image_nn(int x, int y, const uint16_t *data,
+                           int src_w, int src_h, int scale) {
+  if (!data || src_w <= 0 || src_h <= 0 || scale <= 0)
+    return;
+
+  int dst_w = src_w * scale;
+  int dst_h = src_h * scale;
+
+  // Early reject if entirely off-screen
+  if (x >= FB_WIDTH || y >= FB_HEIGHT || x + dst_w <= 0 || y + dst_h <= 0)
+    return;
+
+  // Clamp source region to framebuffer bounds
+  int src_y0 = 0, src_y1 = src_h;
+  int src_x0 = 0, src_x1 = src_w;
+  if (y < 0) { src_y0 = (-y) / scale; y += src_y0 * scale; }
+  if (x < 0) { src_x0 = (-x) / scale; x += src_x0 * scale; }
+  if (y + (src_y1 - src_y0) * scale > FB_HEIGHT)
+    src_y1 = src_y0 + (FB_HEIGHT - y) / scale;
+  if (x + (src_x1 - src_x0) * scale > FB_WIDTH)
+    src_x1 = src_x0 + (FB_WIDTH - x) / scale;
+
+  uint16_t *fb = s_framebuffer;
+  int clamped_w = (src_x1 - src_x0) * scale;
+
+  for (int sy = src_y0; sy < src_y1; sy++) {
+    const uint16_t *src_row = &data[sy * src_w + src_x0];
+    int fb_y = y + (sy - src_y0) * scale;
+    uint16_t *dst_row = &fb[fb_y * FB_WIDTH + x];
+
+    // Build one scaled row with byte-swap
+    if (scale == 2) {
+      // Fast path: 32-bit writes for scale==2 (halves store count)
+      for (int sx = 0; sx < src_x1 - src_x0; sx++) {
+        uint16_t c = src_row[sx];
+        uint16_t be = (c >> 8) | (c << 8);
+        uint32_t pair = ((uint32_t)be << 16) | be;
+        *(uint32_t *)&dst_row[sx * 2] = pair;
+      }
+    } else {
+      for (int sx = 0; sx < src_x1 - src_x0; sx++) {
+        uint16_t c = src_row[sx];
+        uint16_t be = (c >> 8) | (c << 8);
+        int dx = sx * scale;
+        for (int s = 0; s < scale; s++)
+          dst_row[dx + s] = be;
+      }
+    }
+
+    // Duplicate the row (scale-1) times
+    for (int s = 1; s < scale; s++) {
+      memcpy(&fb[(fb_y + s) * FB_WIDTH + x], dst_row, clamped_w * sizeof(uint16_t));
+    }
+  }
+}
+
+void display_draw_image_scaled_nn(int x, int y, const uint16_t *data,
+                                   int src_w, int src_h, int dst_w, int dst_h,
+                                   uint16_t transparent_color) {
+  if (!data || dst_w <= 0 || dst_h <= 0 || src_w <= 0 || src_h <= 0)
+    return;
+
+  // (x, y) is the top-left corner of the scaled image.
+  int draw_x = x;
+  int draw_y = y;
+
+  // Clamp to framebuffer bounds
+  if (draw_x >= FB_WIDTH || draw_y >= FB_HEIGHT)
+    return;
+  if (draw_x + dst_w < 0 || draw_y + dst_h < 0)
+    return;
+
+  // Calculate actual drawing bounds
+  int start_x = draw_x < 0 ? -draw_x : 0;
+  int start_y = draw_y < 0 ? -draw_y : 0;
+  int end_x = (draw_x + dst_w > FB_WIDTH) ? FB_WIDTH - draw_x : dst_w;
+  int end_y = (draw_y + dst_h > FB_HEIGHT) ? FB_HEIGHT - draw_y : dst_h;
+
+  if (end_x <= start_x || end_y <= start_y)
+    return;
+
+  // Use global setting if transparent_color is 0
+  if (transparent_color == 0)
+    transparent_color = s_transparent_color;
+
+  // Fixed-point ratios (16-bit precision)
+  uint32_t ratio_x = ((uint32_t)src_w << 16) / (uint32_t)dst_w;
+  uint32_t ratio_y = ((uint32_t)src_h << 16) / (uint32_t)dst_h;
+
+  uint16_t *fb = s_framebuffer;
+
+  for (int dy = start_y; dy < end_y; dy++) {
+    // Source Y position (fixed-point)
+    uint32_t sy = (dy * ratio_y) >> 16;
+    if (sy >= (uint32_t)src_h)
+      sy = src_h - 1;
+
+    for (int dx = start_x; dx < end_x; dx++) {
+      // Source X position (fixed-point)
+      uint32_t sx = (dx * ratio_x) >> 16;
+      if (sx >= (uint32_t)src_w)
+        sx = src_w - 1;
+
+      uint16_t color = data[sy * src_w + sx];
+      
+      // Skip transparent pixels
+      if (transparent_color != 0 && color == transparent_color)
+        continue;
+      
+      // Byte-swap for big-endian framebuffer
+      fb[(draw_y + dy) * FB_WIDTH + (draw_x + dx)] = (color >> 8) | (color << 8);
+    }
+  }
+}
+
+void display_set_transparent_color(uint16_t color) {
+  s_transparent_color = color;
+}
+
+uint16_t display_get_transparent_color(void) {
+  return s_transparent_color;
+}
+
+// When true, display_flush() blocks until DMA completes before returning.
+// Previously set for native PSRAM apps under the assumption that DMA and CPU
+// instruction fetches share the same bus.  In reality, DMA reads from SRAM
+// (AHB) while CPU fetches app code from PSRAM (QMI/XIP) — no contention.
+// Double buffering already prevents CPU/DMA conflicts on the framebuffer.
+// Left as a safety valve but no longer set by the native loader.
+bool g_display_flush_blocking = false;
+
 void display_flush(void) {
   if (s_dma_active) {
-    // Wait for previous DMA completion
+    // Wait for the previous frame's DMA to finish before starting the next.
     dma_channel_wait_for_finish_blocking(s_dma_chan);
-
-    // Ensure state machine is fully drained before deasserting CS
     lcd_spi_wait_idle();
-
     lcd_cs_high();
+    s_dma_active = false;
   }
 
   // Swap buffers
@@ -618,11 +801,20 @@ void display_flush(void) {
   lcd_cs_low();
   lcd_dc_data();
 
-  // DMA transfer: non-blocking, CPU-free framebuffer → SPI
   dma_channel_set_read_addr(s_dma_chan, s_framebuffers[front_buffer_idx],
                             false);
   dma_channel_set_trans_count(s_dma_chan, FB_SIZE, true); // start transfer
   s_dma_active = true;
+
+  if (g_display_flush_blocking) {
+    // Native PSRAM apps: must not return while DMA holds the SPI bus,
+    // or the CPU will hard-fault trying to fetch instructions from PSRAM.
+    dma_channel_wait_for_finish_blocking(s_dma_chan);
+    lcd_spi_wait_idle();
+    lcd_cs_high();
+    s_dma_active = false;
+  }
+  // Non-blocking path: DMA runs concurrently while CPU executes Lua/OS code.
 }
 
 void display_set_brightness(uint8_t brightness) {

@@ -1,5 +1,6 @@
 #pragma once
 #include <stdbool.h>
+#include <stdint.h>
 
 // ── App types ─────────────────────────────────────────────────────────────────
 
@@ -20,4 +21,5 @@ typedef struct {
     bool has_root_filesystem;      // "root-filesystem" requirement
     bool has_http;                 // "http" requirement
     bool has_audio;                // "audio" requirement
+    uint32_t system_clock_khz;     // Optional overclock (0 = use system default)
 } app_entry_t;

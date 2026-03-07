@@ -127,6 +127,23 @@ target_include_directories(image_decoders PUBLIC
 target_compile_definitions(image_decoders PUBLIC __LINUX__=1)
 
 
+# ── libmad (MP3 decoder) ─────────────────────────────────────────────────────
+set(LIBMAD_DIR ${CMAKE_SOURCE_DIR}/third_party/libmad)
+add_library(libmad STATIC
+    ${LIBMAD_DIR}/bit.c
+    ${LIBMAD_DIR}/fixed.c
+    ${LIBMAD_DIR}/frame.c
+    ${LIBMAD_DIR}/huffman.c
+    ${LIBMAD_DIR}/layer3.c
+    ${LIBMAD_DIR}/stream.c
+    ${LIBMAD_DIR}/synth.c
+    ${LIBMAD_DIR}/timer.c
+    ${LIBMAD_DIR}/version.c
+)
+target_include_directories(libmad PUBLIC ${LIBMAD_DIR})
+target_compile_definitions(libmad PRIVATE PROGMEM=)
+target_compile_options(libmad PRIVATE -O2 -Wno-unused-parameter -Wno-unused-variable)
+
 # ── Main firmware target ───────────────────────────────────────────────────────
 
 add_executable(picocalc_os
@@ -146,6 +163,7 @@ add_executable(picocalc_os
     src/os/lua_bridge_ui.c
     src/os/lua_bridge_audio.c
     src/os/lua_bridge_sound.c
+    src/os/lua_bridge_repl.c
     src/os/lua_psram_alloc.c
     src/os/system_menu.c
     src/os/screenshot.c
@@ -168,21 +186,6 @@ add_executable(picocalc_os
     src/drivers/wifi.c
     src/drivers/http.c
     third_party/mongoose/mongoose.c
-    third_party/picomp3lib/src/bitstream.c
-    third_party/picomp3lib/src/buffers.c
-    third_party/picomp3lib/src/dct32.c
-    third_party/picomp3lib/src/dequant.c
-    third_party/picomp3lib/src/dqchan.c
-    third_party/picomp3lib/src/huffman.c
-    third_party/picomp3lib/src/hufftabs.c
-    third_party/picomp3lib/src/imdct.c
-    third_party/picomp3lib/src/mp3dec.c
-    third_party/picomp3lib/src/mp3tabs.c
-    third_party/picomp3lib/src/polyphase.c
-    third_party/picomp3lib/src/scalfact.c
-    third_party/picomp3lib/src/stproc.c
-    third_party/picomp3lib/src/subband.c
-    third_party/picomp3lib/src/trigtabs.c
     third_party/umm_malloc/src/umm_malloc.c
 )
 
@@ -193,8 +196,7 @@ target_include_directories(picocalc_os PRIVATE
     src/drivers/
     third_party/mongoose/
     third_party/umm_malloc/src/
-    third_party/picomp3lib/src/
-    third_party/picomp3lib/interface/
+    third_party/libmad/
 )
 
 target_link_libraries(picocalc_os
@@ -211,6 +213,7 @@ target_link_libraries(picocalc_os
     tinyusb_device
     lua
     fatfs
+    libmad
     image_decoders
 )
 
@@ -259,7 +262,6 @@ target_compile_definitions(picocalc_os PRIVATE
     PICO_RP2350=1
     PICO_STACK_SIZE=4096  # Reduced to 4KB to fit in SCRATCH_X/Y
     MG_ENABLE_MBEDTLS=1
-    __ARMEL__=1            # For picomp3lib MP3 decoder
     # Re-enable pico_stdio_usb features that get auto-disabled when
     # tinyusb_device is linked directly. We provide our own descriptors
     # (tusb_config.h + usb_descriptors.c with CDC+MSC) but still want

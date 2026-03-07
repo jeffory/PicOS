@@ -35,6 +35,7 @@ typedef struct {
 } fileplayer_t;
 
 void fileplayer_init(void);
+void fileplayer_reset(void);
 fileplayer_t *fileplayer_create(void);
 void fileplayer_destroy(fileplayer_t *player);
 bool fileplayer_load(fileplayer_t *player, const char *path);
