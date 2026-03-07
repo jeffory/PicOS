@@ -179,6 +179,7 @@ add_executable(picocalc_os
     src/os/lua_bridge_audio.c
     src/os/lua_bridge_sound.c
     src/os/lua_bridge_repl.c
+    src/os/lua_bridge_video.c
     src/os/lua_psram_alloc.c
     src/os/system_menu.c
     src/os/screenshot.c
@@ -196,6 +197,7 @@ add_executable(picocalc_os
     src/drivers/sound.c
     src/drivers/fileplayer.c
     src/drivers/mp3_player.c
+    src/drivers/video_player.cpp
     src/drivers/keyboard.c
     src/drivers/sdcard.c
     src/drivers/wifi.c
