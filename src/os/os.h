@@ -164,6 +164,48 @@ typedef struct {
     bool          (*isAvailable)(void);
 } picocalc_wifi_t;
 
+// --- TCP Sockets ------------------------------------------------------------
+
+typedef void* pctcp_t;   // opaque TCP connection handle
+
+typedef enum {
+    TCP_CB_CONNECT  = (1 << 0),
+    TCP_CB_READ     = (1 << 1),
+    TCP_CB_WRITE    = (1 << 2),
+    TCP_CB_CLOSED   = (1 << 3),
+    TCP_CB_FAILED   = (1 << 4),
+} tcp_event_t;
+
+typedef struct {
+    // Open a TCP connection to host:port. Non-blocking.
+    pctcp_t (*connect)(const char *host, uint16_t port, bool use_ssl);
+    // Write data to the connection. Returns bytes sent or <0 on error.
+    int     (*write)(pctcp_t c, const void *buf, int len);
+    // Read data from the connection. Returns bytes read or 0 if none available.
+    int     (*read)(pctcp_t c, void *buf, int len);
+    // Close the connection.
+    void    (*close)(pctcp_t c);
+    // Returns number of bytes available for reading.
+    int     (*available)(pctcp_t c);
+    // Returns the last error string, or NULL.
+    const char * (*getError)(pctcp_t c);
+    // Returns bitmask of pending events (TCP_CB_*).
+    uint32_t (*getEvents)(pctcp_t c);
+} picocalc_tcp_t;
+
+// --- UI Widgets -------------------------------------------------------------
+
+typedef struct {
+    // Modal text input with title bar. Returns true on Enter, false on Esc.
+    bool (*textInput)(const char *title, const char *prompt,
+                      const char *initial, char *out, int out_len);
+    // Simpler text input (no title bar). Returns true on Enter, false on Esc.
+    bool (*textInputSimple)(const char *prompt, const char *default_val,
+                            char *out_buf, int out_len);
+    // Yes/no confirmation dialog. Returns true on Enter/Y, false on Esc/N.
+    bool (*confirm)(const char *message);
+} picocalc_ui_t;
+
 // --- The complete OS API struct ---------------------------------------------
 // This is what gets passed to every Lua environment and future C app loaders.
 
@@ -174,6 +216,8 @@ typedef struct PicoCalcAPI {
     const picocalc_sys_t     *sys;
     const picocalc_audio_t   *audio;
     const picocalc_wifi_t    *wifi;
+    const picocalc_tcp_t     *tcp;
+    const picocalc_ui_t      *ui;
 } PicoCalcAPI;
 
 // The global API instance, populated during os_init()

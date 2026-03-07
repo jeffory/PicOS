@@ -31,7 +31,7 @@
 
 #define MAX_APPS 32
 
-static app_entry_t s_apps[MAX_APPS];
+static app_entry_t *s_apps = NULL;
 static int s_app_count = 0;
 
 // Tiny JSON parser — just enough to pull "name", "description", "version"
@@ -388,6 +388,14 @@ static bool run_app(int idx) {
 // ──────────────────────────────────────────────────────────
 
 void launcher_run(void) {
+  if (!s_apps) {
+    s_apps = umm_malloc(sizeof(app_entry_t) * MAX_APPS);
+    if (!s_apps) {
+      printf("[LAUNCHER] FATAL: failed to alloc s_apps in PSRAM\n");
+      return;
+    }
+    memset(s_apps, 0, sizeof(app_entry_t) * MAX_APPS);
+  }
   scan_apps();
   draw_launcher();
 

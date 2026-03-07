@@ -129,6 +129,22 @@ target_compile_definitions(image_decoders PUBLIC __LINUX__=1)
 
 # ── libmad (MP3 decoder) ─────────────────────────────────────────────────────
 set(LIBMAD_DIR ${CMAKE_SOURCE_DIR}/third_party/libmad)
+
+# Hot path — placed in SRAM via .time_critical section rename.
+# synth.c (~4.9KB) is the final PCM synthesis step that runs every frame
+# on Core 1; keeping it in SRAM eliminates XIP cache thrashing with
+# Core 0's Lua VM.  layer3.c (~11.6KB) stays in flash — it's called less
+# frequently and would exhaust the SRAM heap if included.
+add_library(libmad_ram STATIC
+    ${LIBMAD_DIR}/synth.c
+)
+target_include_directories(libmad_ram PUBLIC ${LIBMAD_DIR})
+target_compile_definitions(libmad_ram PRIVATE PROGMEM=)
+# Place all code in .time_critical section via -fno-function-sections (single .text)
+# then rename via objcopy post-build.  -O2 for speed-critical decode path.
+target_compile_options(libmad_ram PRIVATE -O2 -fno-function-sections -Wno-unused-parameter -Wno-unused-variable)
+
+# Cold path — stays in Flash
 add_library(libmad STATIC
     ${LIBMAD_DIR}/bit.c
     ${LIBMAD_DIR}/fixed.c
@@ -136,7 +152,6 @@ add_library(libmad STATIC
     ${LIBMAD_DIR}/huffman.c
     ${LIBMAD_DIR}/layer3.c
     ${LIBMAD_DIR}/stream.c
-    ${LIBMAD_DIR}/synth.c
     ${LIBMAD_DIR}/timer.c
     ${LIBMAD_DIR}/version.c
 )
@@ -185,6 +200,7 @@ add_executable(picocalc_os
     src/drivers/sdcard.c
     src/drivers/wifi.c
     src/drivers/http.c
+    src/drivers/tcp.c
     third_party/mongoose/mongoose.c
     third_party/umm_malloc/src/umm_malloc.c
 )
@@ -213,8 +229,21 @@ target_link_libraries(picocalc_os
     tinyusb_device
     lua
     fatfs
+    libmad_ram
     libmad
     image_decoders
+)
+
+# Rename .text sections in libmad_ram objects to .time_critical.libmad
+# so the SDK linker script places them in SRAM (the default RP2350 linker
+# has *(.time_critical*) in the .data output section → RAM).
+# objcopy on a .a archive processes each member object.
+add_custom_command(TARGET libmad_ram POST_BUILD
+    COMMAND ${CMAKE_OBJCOPY}
+        --rename-section .text=.time_critical.libmad
+        $<TARGET_FILE:libmad_ram>
+    COMMENT "Renaming libmad_ram .text -> .time_critical.libmad (SRAM)"
+    VERBATIM
 )
 
 # ── WiFi support (Pico W / Pimoroni Pico Plus 2W boards) ─────────────────────

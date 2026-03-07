@@ -2,6 +2,7 @@
 #include "audio.h"
 #include "../hardware.h"
 #include "sdcard.h"
+#include "pico/platform.h"
 #include "hardware/gpio.h"
 #include "hardware/pwm.h"
 #include "hardware/dma.h"
@@ -58,16 +59,16 @@ static uint8_t *s_pcm_ring = NULL;
 static volatile size_t s_ring_rd = 0;
 static volatile size_t s_ring_wr = 0;
 
-static inline size_t ring_available(void) {
+static inline size_t __time_critical_func(ring_available)(void) {
     size_t wr = s_ring_wr, rd = s_ring_rd;
     return (wr >= rd) ? (wr - rd) : (PCM_RING_SIZE - rd + wr);
 }
 
-static inline size_t ring_free(void) {
+static inline size_t __time_critical_func(ring_free)(void) {
     return PCM_RING_SIZE - 1 - ring_available();
 }
 
-static void ring_write(const uint8_t *data, size_t len) {
+static void __time_critical_func(ring_write)(const uint8_t *data, size_t len) {
     while (len > 0) {
         size_t wr = s_ring_wr;
         size_t free_space = ring_free();
@@ -101,7 +102,7 @@ static volatile bool s_dma_start_pending = false;
 static bool          s_irq_on_core1 = false;
 
 // ── Fill one DMA buffer from the PCM ring (called from DMA ISR) ─────────────
-static void fill_dma_buffer(uint32_t *buf, int count) {
+static void __time_critical_func(fill_dma_buffer)(uint32_t *buf, int count) {
     size_t bytes_per_pair = (s_pcm_channels > 1) ? 4 : 2;
     uint32_t vol = s_player.volume;
 

@@ -12,6 +12,7 @@
 #include "hardware/xip_cache.h"
 
 #include <stdint.h>
+#include <stdlib.h>
 #include <string.h>
 #include <stdio.h>
 
@@ -101,6 +102,7 @@ typedef struct {
 #define EM_ARM   40
 #define PT_LOAD  1
 #define PT_DYNAMIC 2
+#define PF_X     0x1u   // Executable segment flag
 #define DT_NULL  0
 #define DT_REL   17
 #define DT_RELSZ 18
@@ -220,6 +222,7 @@ static bool native_run(const app_entry_t *app) {
 
   bool ok = false;
   uint8_t *load_base = NULL;
+  uint8_t *code_buf = NULL;
 
   int file_len = 0;
   uint8_t *file_buf = (uint8_t *)sdcard_read_file(elf_path, &file_len);
@@ -266,6 +269,11 @@ static bool native_run(const app_entry_t *app) {
   Elf32_Addr mem_max = 0;
   bool found_load = false;
 
+  // Also identify code vs data segments for split loading
+  int code_seg_idx = -1;  // PT_LOAD with PF_X
+  Elf32_Addr code_vaddr = 0, code_vend = 0;
+  uint32_t code_memsz = 0;
+
   for (int i = 0; i < ehdr->e_phnum; i++) {
     const Elf32_Phdr *ph = &phdr_table[i];
     if (ph->p_type != PT_LOAD || ph->p_memsz == 0)
@@ -280,6 +288,13 @@ static bool native_run(const app_entry_t *app) {
     if (seg_end > mem_max)
       mem_max = seg_end;
     found_load = true;
+
+    if ((ph->p_flags & PF_X) && code_seg_idx < 0) {
+      code_seg_idx = i;
+      code_vaddr = ph->p_vaddr;
+      code_vend  = seg_end;
+      code_memsz = ph->p_memsz;
+    }
   }
 
   if (!found_load) {
@@ -297,44 +312,72 @@ static bool native_run(const app_entry_t *app) {
     goto out;
   }
 
-  // ── 4. Allocate load image in PSRAM ──────────────────────────────────────
-  load_base = (uint8_t *)umm_malloc(image_size);
-  if (!load_base) {
-    show_error("ELF: out of PSRAM", NULL);
-    goto out;
+  // ── 4. Split allocation: code in SRAM, data/BSS in PSRAM ────────────────
+  //
+  // If the code segment fits in SRAM (malloc), place it there for fast
+  // instruction fetch without XIP cache pressure.  Data/BSS stays in PSRAM.
+  // If SRAM malloc fails, fall back to the original all-PSRAM path.
+  bool split_mode = false;
+
+  // Only attempt SRAM split for small code segments.  The SRAM heap is
+  // ~28KB and the SDK malloc panics (instead of returning NULL) on failure,
+  // so we must not speculatively call malloc() for large allocations.
+  #define MAX_SRAM_CODE_SIZE  (16u * 1024)
+  if (code_seg_idx >= 0 && code_memsz > 0 && code_memsz <= MAX_SRAM_CODE_SIZE) {
+    code_buf = malloc(code_memsz);
+    if (code_buf) {
+      split_mode = true;
+      printf("[NATIVE] Split mode: code %lu bytes in SRAM @ %p\n",
+             (unsigned long)code_memsz, (void *)code_buf);
+    } else {
+      printf("[NATIVE] SRAM alloc failed for code (%lu bytes), using all-PSRAM\n",
+             (unsigned long)code_memsz);
+    }
+  }
+
+  // PSRAM allocation: in split mode, only data/BSS; otherwise entire image
+  uint32_t psram_size = split_mode ? (image_size - code_memsz) : image_size;
+  // data_vaddr_start: first vaddr byte NOT in the code segment
+  Elf32_Addr data_vaddr_start = split_mode ? code_vend : mem_min;
+
+  if (psram_size > 0) {
+    load_base = (uint8_t *)umm_malloc(psram_size);
+    if (!load_base) {
+      if (split_mode) { free(code_buf); code_buf = NULL; }
+      show_error("ELF: out of PSRAM", NULL);
+      goto out;
+    }
   }
 
   // ── 4a'. Flush dirty cache lines from umm_malloc ─────────────────────────
-  // umm_malloc modifies PSRAM heap metadata through the cached alias,
-  // creating dirty cache lines.  We must flush them to PSRAM *before*
-  // writing app data through the uncached alias (step 5), otherwise:
-  //   - dirty metadata lines can conflict with uncached writes when they
-  //     share the same 8-byte cache line (write-back eviction overwrites
-  //     the uncached data → app code corruption)
-  //   - the final xip_cache_invalidate_all (step 7) would discard unflushed
-  //     metadata → stale heap state → subsequent umm_malloc calls (e.g.
-  //     inside sdcard_list_dir) return overlapping pointers → crash
   __asm volatile ("dsb sy");
   xip_cache_clean_all();
   __asm volatile ("isb sy");
 
-  // ── 4b. Compute uncached alias for writes ──────────────────────────────────
-  // umm_malloc returns a cached alias (0x11xxxxxx).  Writing code through the
-  // XIP write-back cache risks stale instruction fetches, so all writes go
-  // through the uncached alias (0x15xxxxxx) to guarantee data reaches PSRAM.
-  // After writing, the XIP cache is invalidated (step 7) and execution uses
-  // the cached alias — the 16KB XIP cache serves most fetches, avoiding the
-  // IBUSERR/PRECISERR faults caused by hammering QMI with every fetch.
+  // ── 4b. Compute uncached alias for PSRAM writes ───────────────────────────
   uint8_t *exec_base = load_base;
-  if ((uintptr_t)load_base >= PSRAM_CS1_CACHED_BASE &&
+  if (load_base &&
+      (uintptr_t)load_base >= PSRAM_CS1_CACHED_BASE &&
       (uintptr_t)load_base <  PSRAM_CS1_CACHED_END) {
     exec_base = load_base + PSRAM_CACHED_TO_UNCACHED;
   }
-  printf("[NATIVE] load_base %p  exec_base %p\n",
-         (void *)load_base, (void *)exec_base);
 
-  // ── 5. Zero image (covers BSS), copy PT_LOAD segments ─────────────────────
-  memset(exec_base, 0, image_size);
+  if (split_mode) {
+    printf("[NATIVE] code_buf %p (SRAM)  load_base %p  exec_base %p (PSRAM data)\n",
+           (void *)code_buf, (void *)load_base, (void *)exec_base);
+  } else {
+    printf("[NATIVE] load_base %p  exec_base %p\n",
+           (void *)load_base, (void *)exec_base);
+  }
+
+  // ── 5. Zero and copy PT_LOAD segments ─────────────────────────────────────
+  if (split_mode) {
+    memset(code_buf, 0, code_memsz);
+    if (psram_size > 0)
+      memset(exec_base, 0, psram_size);
+  } else {
+    memset(exec_base, 0, image_size);
+  }
 
   for (int i = 0; i < ehdr->e_phnum; i++) {
     const Elf32_Phdr *ph = &phdr_table[i];
@@ -344,105 +387,188 @@ static bool native_run(const app_entry_t *app) {
       show_error("ELF: segment data out of bounds", NULL);
       goto out;
     }
-    if (ph->p_vaddr - mem_min + ph->p_memsz > image_size) {
-      show_error("ELF: segment exceeds image", NULL);
-      goto out;
+
+    const uint8_t *src = file_buf + ph->p_offset;
+
+    if (split_mode && i == code_seg_idx) {
+      // Code segment → SRAM (direct write)
+      if (ph->p_vaddr - code_vaddr + ph->p_filesz > code_memsz) {
+        show_error("ELF: code segment exceeds buffer", NULL);
+        goto out;
+      }
+      memcpy(code_buf + (ph->p_vaddr - code_vaddr), src, ph->p_filesz);
+    } else if (split_mode) {
+      // Data segment → PSRAM (uncached write)
+      uint32_t off = ph->p_vaddr - data_vaddr_start;
+      if (off + ph->p_memsz > psram_size) {
+        show_error("ELF: data segment exceeds buffer", NULL);
+        goto out;
+      }
+      memcpy(exec_base + off, src, ph->p_filesz);
+    } else {
+      // Fallback: everything → PSRAM
+      if (ph->p_vaddr - mem_min + ph->p_memsz > image_size) {
+        show_error("ELF: segment exceeds image", NULL);
+        goto out;
+      }
+      memcpy(exec_base + (ph->p_vaddr - mem_min), src, ph->p_filesz);
     }
-    uint8_t *dest       = exec_base + (ph->p_vaddr - mem_min);
-    const uint8_t *src  = file_buf + ph->p_offset;
-    memcpy(dest, src, ph->p_filesz);
   }
 
-  // ── 6. Apply relocations ──────────────────────────────────────────────────
-  // Load bias: add this to any virtual address to get the runtime address.
-  // Use load_base (cached alias) so relocated pointers point into the cached
-  // address space where the app will execute.  The writes themselves go
-  // through exec_base (uncached) to ensure they reach physical PSRAM.
-  uint32_t load_bias = (uint32_t)load_base - mem_min;
+  // ── 6. Apply relocations (dual-bias for split mode) ───────────────────────
+  //
+  // For split mode, each relocated pointer needs the correct bias depending
+  // on which segment the *pointed-to* address falls in:
+  //   - vaddr in [code_vaddr, code_vend) → code_bias (SRAM address)
+  //   - vaddr in [data_vaddr_start, ...)  → data_bias (PSRAM cached address)
+  //
+  // For fallback mode, a single load_bias covers everything (same as before).
 
-  for (int i = 0; i < ehdr->e_phnum; i++) {
-    const Elf32_Phdr *ph = &phdr_table[i];
-    if (ph->p_type != PT_DYNAMIC)
-      continue;
+  {
+    // Bias for converting vaddrs to runtime addresses
+    uint32_t code_bias = split_mode ? (uint32_t)code_buf - code_vaddr : 0;
+    uint32_t data_bias = split_mode ? (uint32_t)load_base - data_vaddr_start
+                                    : (uint32_t)load_base - mem_min;
+    uint32_t fallback_bias = split_mode ? 0 : (uint32_t)load_base - mem_min;
 
-    const Elf32_Dyn *dyn =
-        (const Elf32_Dyn *)(exec_base + (ph->p_vaddr - mem_min));
+    for (int i = 0; i < ehdr->e_phnum; i++) {
+      const Elf32_Phdr *ph = &phdr_table[i];
+      if (ph->p_type != PT_DYNAMIC)
+        continue;
 
-    Elf32_Addr rel_addr = 0;  Elf32_Word rel_size = 0;
-    Elf32_Addr rela_addr = 0; Elf32_Word rela_size = 0;
-
-    for (const Elf32_Dyn *d = dyn; d->d_tag != DT_NULL; d++) {
-      switch (d->d_tag) {
-        case DT_REL:    rel_addr  = d->d_un.d_ptr; break;
-        case DT_RELSZ:  rel_size  = d->d_un.d_val; break;
-        case DT_RELA:   rela_addr = d->d_un.d_ptr; break;
-        case DT_RELASZ: rela_size = d->d_un.d_val; break;
-        default: break;
+      // Read PT_DYNAMIC from whichever buffer it lives in
+      const Elf32_Dyn *dyn;
+      if (split_mode && ph->p_vaddr >= code_vaddr && ph->p_vaddr < code_vend) {
+        dyn = (const Elf32_Dyn *)(code_buf + (ph->p_vaddr - code_vaddr));
+      } else if (split_mode) {
+        dyn = (const Elf32_Dyn *)(exec_base + (ph->p_vaddr - data_vaddr_start));
+      } else {
+        dyn = (const Elf32_Dyn *)(exec_base + (ph->p_vaddr - mem_min));
       }
-    }
 
-    // Elf32_Rel — implicit addend: *target += load_bias
-    if (rel_addr && rel_size) {
-      const Elf32_Rel *rel =
-          (const Elf32_Rel *)(exec_base + (rel_addr - mem_min));
-      uint32_t count = rel_size / sizeof(Elf32_Rel);
-      for (uint32_t j = 0; j < count; j++) {
-        if (ELF32_R_TYPE(rel[j].r_info) == R_ARM_RELATIVE) {
-          uint32_t roff = rel[j].r_offset - mem_min;
-          if (roff + sizeof(uint32_t) > image_size) continue;
-          uint32_t *target = (uint32_t *)(exec_base + roff);
-          *target += load_bias;
+      Elf32_Addr rel_addr = 0;  Elf32_Word rel_size = 0;
+      Elf32_Addr rela_addr = 0; Elf32_Word rela_size = 0;
+
+      for (const Elf32_Dyn *d = dyn; d->d_tag != DT_NULL; d++) {
+        switch (d->d_tag) {
+          case DT_REL:    rel_addr  = d->d_un.d_ptr; break;
+          case DT_RELSZ:  rel_size  = d->d_un.d_val; break;
+          case DT_RELA:   rela_addr = d->d_un.d_ptr; break;
+          case DT_RELASZ: rela_size = d->d_un.d_val; break;
+          default: break;
         }
       }
-    }
 
-    // Elf32_Rela — explicit addend: *target = load_bias + r_addend
-    if (rela_addr && rela_size) {
-      const Elf32_Rela *rela =
-          (const Elf32_Rela *)(exec_base + (rela_addr - mem_min));
-      uint32_t count = rela_size / sizeof(Elf32_Rela);
-      for (uint32_t j = 0; j < count; j++) {
-        if (ELF32_R_TYPE(rela[j].r_info) == R_ARM_RELATIVE) {
-          uint32_t roff = rela[j].r_offset - mem_min;
-          if (roff + sizeof(uint32_t) > image_size) continue;
-          uint32_t *target = (uint32_t *)(exec_base + roff);
-          *target = load_bias + (uint32_t)rela[j].r_addend;
+      // Helper: resolve a vaddr to the write pointer and the appropriate bias
+      // for the value being relocated.
+      #define RESOLVE_TARGET(vaddr, write_ptr, target_ok) do { \
+        if (split_mode) { \
+          if ((vaddr) >= code_vaddr && (vaddr) < code_vend) { \
+            uint32_t _off = (vaddr) - code_vaddr; \
+            if (_off + sizeof(uint32_t) <= code_memsz) { \
+              write_ptr = (uint32_t *)(code_buf + _off); \
+              target_ok = true; \
+            } \
+          } else { \
+            uint32_t _off = (vaddr) - data_vaddr_start; \
+            if (_off + sizeof(uint32_t) <= psram_size) { \
+              write_ptr = (uint32_t *)(exec_base + _off); \
+              target_ok = true; \
+            } \
+          } \
+        } else { \
+          uint32_t _off = (vaddr) - mem_min; \
+          if (_off + sizeof(uint32_t) <= image_size) { \
+            write_ptr = (uint32_t *)(exec_base + _off); \
+            target_ok = true; \
+          } \
+        } \
+      } while(0)
+
+      // Select bias based on which segment a runtime vaddr points into
+      #define SELECT_BIAS(pointed_vaddr) \
+        (split_mode ? ((pointed_vaddr) >= code_vaddr && (pointed_vaddr) < code_vend \
+                       ? code_bias : data_bias) \
+                    : fallback_bias)
+
+      // Elf32_Rel — implicit addend: *target += bias
+      if (rel_addr && rel_size) {
+        const Elf32_Rel *rel;
+        if (split_mode && rel_addr >= code_vaddr && rel_addr < code_vend)
+          rel = (const Elf32_Rel *)(code_buf + (rel_addr - code_vaddr));
+        else if (split_mode)
+          rel = (const Elf32_Rel *)(exec_base + (rel_addr - data_vaddr_start));
+        else
+          rel = (const Elf32_Rel *)(exec_base + (rel_addr - mem_min));
+
+        uint32_t count = rel_size / sizeof(Elf32_Rel);
+        for (uint32_t j = 0; j < count; j++) {
+          if (ELF32_R_TYPE(rel[j].r_info) == R_ARM_RELATIVE) {
+            uint32_t *target = NULL;
+            bool target_ok = false;
+            RESOLVE_TARGET(rel[j].r_offset, target, target_ok);
+            if (!target_ok) continue;
+            // *target contains the original vaddr — pick bias based on where it points
+            uint32_t pointed_vaddr = *target;
+            *target = pointed_vaddr + SELECT_BIAS(pointed_vaddr);
+          }
         }
       }
-    }
 
-    break; // Only one PT_DYNAMIC segment expected
+      // Elf32_Rela — explicit addend: *target = bias + r_addend
+      if (rela_addr && rela_size) {
+        const Elf32_Rela *rela;
+        if (split_mode && rela_addr >= code_vaddr && rela_addr < code_vend)
+          rela = (const Elf32_Rela *)(code_buf + (rela_addr - code_vaddr));
+        else if (split_mode)
+          rela = (const Elf32_Rela *)(exec_base + (rela_addr - data_vaddr_start));
+        else
+          rela = (const Elf32_Rela *)(exec_base + (rela_addr - mem_min));
+
+        uint32_t count = rela_size / sizeof(Elf32_Rela);
+        for (uint32_t j = 0; j < count; j++) {
+          if (ELF32_R_TYPE(rela[j].r_info) == R_ARM_RELATIVE) {
+            uint32_t *target = NULL;
+            bool target_ok = false;
+            RESOLVE_TARGET(rela[j].r_offset, target, target_ok);
+            if (!target_ok) continue;
+            uint32_t pointed_vaddr = (uint32_t)rela[j].r_addend;
+            *target = pointed_vaddr + SELECT_BIAS(pointed_vaddr);
+          }
+        }
+      }
+
+      #undef RESOLVE_TARGET
+      #undef SELECT_BIAS
+      break; // Only one PT_DYNAMIC segment expected
+    }
   }
 
   // ── 7. Flush XIP cache and compute entry point ──────────────────────────
-  // All code/data was written through the uncached alias (exec_base) so it
-  // is committed to physical PSRAM.  The cache was cleaned in step 4a' so
-  // there are no dirty lines to lose.  Invalidate the XIP cache so that
-  // instruction fetches and data reads from the cached alias (load_base)
-  // will pull fresh data from PSRAM and cache it.
-  __asm volatile ("dsb sy");  // ensure all uncached writes complete
+  __asm volatile ("dsb sy");
   xip_cache_invalidate_all();
-  __asm volatile ("isb sy");  // sync pipeline after cache invalidation
+  __asm volatile ("isb sy");
 
   // e_entry may have the Thumb bit set (bit 0 = 1); strip it for the offset
   // calculation, then re-apply for the function pointer call convention.
-  // Entry point uses load_base (cached alias) — NOT exec_base (uncached).
-  uintptr_t entry_voff = (ehdr->e_entry & ~1u) - mem_min;
-  if (entry_voff >= image_size) {
-    show_error("ELF: entry point out of bounds", NULL);
-    goto out;
+  uintptr_t entry_voff_raw = ehdr->e_entry & ~1u;
+  uintptr_t entry_addr;
+  if (split_mode && entry_voff_raw >= code_vaddr && entry_voff_raw < code_vend) {
+    entry_addr = (uintptr_t)code_buf + (entry_voff_raw - code_vaddr);
+  } else if (split_mode) {
+    entry_addr = (uintptr_t)load_base + (entry_voff_raw - data_vaddr_start);
+  } else {
+    uintptr_t entry_voff = entry_voff_raw - mem_min;
+    if (entry_voff >= image_size) {
+      show_error("ELF: entry point out of bounds", NULL);
+      goto out;
+    }
+    entry_addr = (uintptr_t)load_base + entry_voff;
   }
-  uintptr_t entry_addr = (uintptr_t)load_base + entry_voff;
   entry_addr |= 1u; // Thumb mode
 
-  printf("[NATIVE] Entry %p (thumb, cached)\n", (void *)entry_addr);
-
-  // Sanity-check: print first 16 bytes via cached alias to verify the
-  // XIP cache serves correct data after invalidation.
-  printf("[NATIVE] load_base[0..15]:");
-  for (int i = 0; i < 16; i++)
-    printf(" %02x", load_base[i]);
-  printf("\n");
+  printf("[NATIVE] Entry %p (thumb%s)\n", (void *)entry_addr,
+         split_mode ? ", SRAM" : ", cached PSRAM");
 
   // Clear any stale keyboard state from the launcher before starting the app.
   // This matches what lua_bridge.c does before running Lua apps.
@@ -490,6 +616,8 @@ out:
   // ── 9. Cleanup and resume Core 1 ──────────────────────────────────────────
   audio_stop_stream();   // ensure audio streaming is stopped on exit/crash
   audio_stop_tone();
+  if (code_buf)
+    free(code_buf);
   if (load_base)
     umm_free(load_base);
   if (file_buf)

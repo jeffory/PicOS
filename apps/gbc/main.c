@@ -19,9 +19,10 @@ static uint8_t s_rom[ROM_MAX_SIZE];
 static int     s_rom_size = 0;
 static uint8_t s_ram[CART_RAM_SIZE];
 // AUDIO_SAMPLES (~738) involves float division and isn't a constant expression,
-// so use a fixed-size buffer.  748 > 738 gives slight headroom.
+// so use a fixed-size buffer.  748 > 738 gives slight headroom per frame.
+// 4 frames per display flush × stereo (2 channels) × int16_t.
 #define GBC_AUDIO_BUF_FRAMES 748
-static int16_t s_audio_buf[GBC_AUDIO_BUF_FRAMES * 2 * 2];
+static int16_t s_audio_buf[GBC_AUDIO_BUF_FRAMES * 2 * 4];
 
 static struct gb_s s_gb;
 static GBCDisplay s_display;
@@ -215,6 +216,12 @@ void picos_main(const PicoCalcAPI *api,
         }
     }
     
+    // Wire direct ROM/RAM pointers for inlined access in __gb_read/__gb_write
+    s_gb.rom = s_rom;
+    s_gb.rom_size = s_rom_size;
+    s_gb.cart_ram_data = s_ram;
+    s_gb.cart_ram_data_size = CART_RAM_SIZE;
+
     gb_init_lcd(&s_gb, &lcd_draw_line);
     s_gb.direct.frame_skip = 1;
     s_display.cgb_mode = s_gb.cgb.cgbMode;
@@ -266,7 +273,7 @@ void picos_main(const PicoCalcAPI *api,
             break;
         }
 
-        for (int f = 0; f < 2 && running; f++) {
+        for (int f = 0; f < 4 && running; f++) {
             if (sys->shouldExit()) {
                 running = false;
                 break;
@@ -283,7 +290,7 @@ void picos_main(const PicoCalcAPI *api,
         }
 
         if (running) {
-            api->audio->pushSamples(s_audio_buf, AUDIO_SAMPLES * 2);
+            api->audio->pushSamples(s_audio_buf, AUDIO_SAMPLES * 2 * 4);
         }
 
         if (running) {
