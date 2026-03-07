@@ -99,6 +99,11 @@ uint16_t display_get_transparent_color(void);
 void display_flush(void);
 extern bool g_display_flush_blocking;
 
+// Flush only rows y0..y1 (inclusive, full width) from the back buffer to the
+// LCD. Does NOT swap buffers — call display_flush() for that.  Useful for
+// partial screen updates (status bars, emulator viewports, etc.).
+void display_flush_rows(int y0, int y1);
+
 // Brightness via backlight PWM (0-255)
 void display_set_brightness(uint8_t brightness);
 

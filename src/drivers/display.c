@@ -817,6 +817,35 @@ void display_flush(void) {
   // Non-blocking path: DMA runs concurrently while CPU executes Lua/OS code.
 }
 
+void display_flush_rows(int y0, int y1) {
+  // Clamp to valid range
+  if (y0 < 0) y0 = 0;
+  if (y1 >= FB_HEIGHT) y1 = FB_HEIGHT - 1;
+  if (y0 > y1) return;
+
+  // Wait for any previous DMA transfer to complete
+  if (s_dma_active) {
+    dma_channel_wait_for_finish_blocking(s_dma_chan);
+    lcd_spi_wait_idle();
+    lcd_cs_high();
+    s_dma_active = false;
+  }
+
+  // Target only the row band on the LCD
+  lcd_set_window(0, y0, FB_WIDTH - 1, y1);
+
+  lcd_cs_low();
+  lcd_dc_data();
+
+  int row_count = y1 - y0 + 1;
+  dma_channel_set_read_addr(s_dma_chan,
+                            &s_framebuffer[y0 * FB_WIDTH], false);
+  dma_channel_set_trans_count(s_dma_chan,
+                              row_count * FB_WIDTH * sizeof(uint16_t), true);
+  s_dma_active = true;
+  // Non-blocking: no buffer swap — caller uses display_flush() for that.
+}
+
 void display_set_brightness(uint8_t brightness) {
   // Backlight is controlled by the STM32 keyboard MCU (kbd_set_backlight).
   // This function is a no-op on PicoCalc v2.0.
