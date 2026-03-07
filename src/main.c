@@ -204,6 +204,7 @@ static picocalc_display_t s_display_impl = {
     .getHeight = display_get_height_fn,
     .setBrightness = display_set_brightness,
     .drawImageNN = display_draw_image_nn,
+    .flushRows = display_flush_rows,
 };
 
 static uint32_t sys_getTimeMs(void) {
