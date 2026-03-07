@@ -1,0 +1,12 @@
+{
+    "id": "com.picos.gbc",
+    "name": "GBC Emulator",
+    "description": "Game Boy Color emulator - play GB and GBC games",
+    "version": "0.1",
+    "author": "PicOS",
+    "system_clock_khz": 300000,
+    "requirements": [
+        "filesystem",
+        "audio"
+    ]
+}

@@ -4,6 +4,8 @@
 #include "../drivers/wifi.h"
 #include "../splash_logo.h"
 #include "clock.h"
+#include "os.h"    // BTN_* constants
+#include "pico/stdlib.h"
 
 #include <stdio.h>
 #include <string.h>
@@ -183,4 +185,149 @@ void ui_draw_splash(const char *status, const char *subtext) {
 #endif
 
   display_flush();
+}
+
+// ── Shared dialog style ───────────────────────────────────────────────────────
+
+#define DLG_BG      RGB565(20, 28, 50)
+#define DLG_BORDER  RGB565(80, 100, 150)
+#define DLG_FIELD   RGB565(10, 14, 30)
+#define DLG_DIM     RGB565(100, 100, 100)
+#define DLG_W       280
+#define DLG_X       ((FB_WIDTH  - DLG_W) / 2)
+
+// Draw a wrapped message into a dialog box at (x, y_start).
+// Returns the y coordinate after the last line drawn.
+static int dlg_draw_message(int x, int y, int w, const char *msg, uint16_t bg) {
+  if (!msg || !msg[0]) return y;
+  const int COLS = w / 6; // chars that fit (6px font)
+  while (*msg) {
+    int avail = strlen(msg);
+    int take  = avail > COLS ? COLS : avail;
+    // Try to break at a word boundary
+    if (avail > COLS) {
+      for (int k = take - 1; k > 0; k--) {
+        if (msg[k] == ' ' || msg[k] == '/') { take = k; break; }
+      }
+    }
+    char line[64];
+    int n = take < (int)sizeof(line) - 1 ? take : (int)sizeof(line) - 1;
+    memcpy(line, msg, n);
+    line[n] = '\0';
+    display_draw_text(x, y, line, COLOR_WHITE, bg);
+    y += 12;
+    msg += take;
+    if (*msg == ' ') msg++; // skip leading space on next line
+  }
+  return y;
+}
+
+// ── ui_text_input ─────────────────────────────────────────────────────────────
+
+bool ui_text_input(const char *prompt, const char *default_val,
+                   char *out_buf, int out_len) {
+  // Layout
+  const int DH = 90;
+  const int DY = (FB_HEIGHT - DH) / 2;
+  const int FX = DLG_X + 8;
+  const int FY = DY + 30;
+  const int FW = DLG_W - 16;
+  const int FH = 18;
+
+  // Draw dialog (once)
+  display_darken();
+  display_fill_rect(DLG_X, DY, DLG_W, DH, DLG_BG);
+  display_draw_rect(DLG_X, DY, DLG_W, DH, DLG_BORDER);
+  display_draw_text(DLG_X + 10, DY + 10,
+                    prompt ? prompt : "Input:", COLOR_WHITE, DLG_BG);
+  display_fill_rect(FX, FY, FW, FH, DLG_FIELD);
+  display_draw_rect(FX, FY, FW, FH, DLG_BORDER);
+  const char *hint = "Enter=OK  Esc=Cancel";
+  int hw = display_text_width(hint);
+  display_draw_text(DLG_X + (DLG_W - hw) / 2, DY + DH - 14,
+                    hint, DLG_DIM, DLG_BG);
+  display_flush();
+
+  // Input buffer
+  const int MAX_CHARS = 127;
+  char buf[128] = "";
+  int len = 0;
+  if (default_val) {
+    strncpy(buf, default_val, MAX_CHARS);
+    buf[MAX_CHARS] = '\0';
+    len = strlen(buf);
+  }
+
+  bool accepted = false;
+  bool dirty    = true;
+  while (true) {
+    kbd_poll();
+    uint32_t btns = kbd_get_buttons_pressed();
+    char c        = kbd_get_char();
+
+    if (btns & BTN_ESC) break;
+    if (c == '\n') { accepted = true; break; }  // Enter = 0x0A
+    if (c == '\b') {
+      if (len > 0) { len--; dirty = true; }
+    } else if (c >= 32 && c < 127 && len < MAX_CHARS) {
+      buf[len++] = c;
+      dirty = true;
+    }
+    buf[len] = '\0';
+
+    if (dirty) {
+      // Redraw only the input field interior
+      display_fill_rect(FX + 1, FY + 1, FW - 2, FH - 2, DLG_FIELD);
+      // Scroll: show only the last N chars that fit
+      const int VCOLS = (FW - 8) / 6;
+      const char *view = (len > VCOLS) ? (buf + len - VCOLS) : buf;
+      char dbuf[66];
+      snprintf(dbuf, sizeof(dbuf), "%.*s_", VCOLS, view);
+      display_draw_text(FX + 4, FY + 5, dbuf, COLOR_WHITE, DLG_FIELD);
+      display_flush();
+      dirty = false;
+    }
+    sleep_ms(20);
+  }
+
+  if (accepted && out_buf && out_len > 0) {
+    strncpy(out_buf, buf, out_len - 1);
+    out_buf[out_len - 1] = '\0';
+  }
+  return accepted;
+}
+
+// ── ui_confirm ────────────────────────────────────────────────────────────────
+
+bool ui_confirm(const char *message) {
+  // Measure how many lines the message needs (up to 2)
+  const int COLS = (DLG_W - 20) / 6;
+  int msg_len = message ? strlen(message) : 0;
+  int lines   = msg_len == 0 ? 1 : (msg_len + COLS - 1) / COLS;
+  if (lines > 2) lines = 2;
+
+  const int DH = 44 + lines * 12 + 18; // border + text lines + hint
+  const int DY = (FB_HEIGHT - DH) / 2;
+
+  display_darken();
+  display_fill_rect(DLG_X, DY, DLG_W, DH, DLG_BG);
+  display_draw_rect(DLG_X, DY, DLG_W, DH, DLG_BORDER);
+
+  dlg_draw_message(DLG_X + 10, DY + 14, DLG_W - 20,
+                   message ? message : "Are you sure?", DLG_BG);
+
+  const char *hint = "Enter=Yes  Esc=No";
+  int hw = display_text_width(hint);
+  display_draw_text(DLG_X + (DLG_W - hw) / 2, DY + DH - 14,
+                    hint, DLG_DIM, DLG_BG);
+  display_flush();
+
+  while (true) {
+    kbd_poll();
+    uint32_t btns = kbd_get_buttons_pressed();
+    char c        = kbd_get_char();
+    if (btns & BTN_ESC || c == 'n' || c == 'N') return false;
+    if (c == '\n'       || c == 'y' || c == 'Y') return true;
+    sleep_ms(20);
+  }
 }

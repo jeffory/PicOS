@@ -16,6 +16,7 @@
 #include "lua.h"
 
 #include "hardware/watchdog.h"
+#include "hardware/clocks.h"
 #include "pico/stdlib.h"
 
 #include <stdio.h>
@@ -120,7 +121,6 @@ static int show_wifi_submenu(void) {
     }
 
     kbd_poll();
-    wifi_poll();
     uint32_t pressed = kbd_get_buttons_pressed();
 
     if ((pressed & BTN_UP) && sel > 0) {
@@ -286,6 +286,12 @@ static void draw_panel(const flat_item_t *items, int count, int sel, int px,
   display_fill_rect(px + 1, footer_y, PANEL_W - 2, FOOTER_H, C_TITLE_BG);
   display_draw_text(px + 4, footer_y + 2, "Enter:select  Esc:close", COLOR_GRAY,
                     C_TITLE_BG);
+
+  // Show current clock speed in bottom-left corner
+  char clk_buf[16];
+  uint32_t clk_hz = clock_get_hz(clk_sys);
+  snprintf(clk_buf, sizeof(clk_buf), "%lu MHz", (unsigned long)(clk_hz / 1000000));
+  display_draw_text(4, FB_HEIGHT - 12, clk_buf, COLOR_GREEN, 0);
 }
 
 // ── Public API
@@ -358,7 +364,6 @@ void system_menu_show(lua_State *L) {
     }
 
     kbd_poll();
-    wifi_poll();
     uint32_t pressed = kbd_get_buttons_pressed();
 
     if (pressed & BTN_UP) {
@@ -451,6 +456,7 @@ void system_menu_show(lua_State *L) {
       }
       case ITEM_USB_MSC: {
         usb_msc_enter_mode();
+        kbd_clear_state(); // discard the ESC that exited MSC mode
         if (L == NULL)
           launcher_refresh_apps();
         need_redraw = true;
@@ -482,4 +488,126 @@ void system_menu_show(lua_State *L) {
     sleep_ms(16);
   }
   // Return normally — the Lua hook returns, Lua execution resumes
+}
+
+bool system_menu_show_for_native(void) {
+  // Build flat item list: app items first, then built-ins with Exit App.
+  flat_item_t items[SYSMENU_MAX_APP_ITEMS + 8];
+  int count = 0;
+
+  for (int i = 0; i < s_app_item_count; i++) {
+    items[count].type = ITEM_APP_CB;
+    items[count].app_idx = i;
+    count++;
+  }
+  items[count++] = (flat_item_t){ITEM_BRIGHTNESS, 0};
+  items[count++] = (flat_item_t){ITEM_BATTERY, 0};
+  items[count++] = (flat_item_t){ITEM_WIFI, 0};
+  items[count++] = (flat_item_t){ITEM_RAM_INFO, 0};
+  items[count++] = (flat_item_t){ITEM_TIMEZONE, 0};
+  items[count++] = (flat_item_t){ITEM_REMOUNT_SD, 0};
+  items[count++] = (flat_item_t){ITEM_SCREENSHOT, 0};
+  items[count++] = (flat_item_t){ITEM_REBOOT, 0};
+  items[count++] = (flat_item_t){ITEM_EXIT, 0};
+
+  int panel_h = 32 + count * ITEM_H;
+  int panel_x = (FB_WIDTH - PANEL_W) / 2;
+  int panel_y = (FB_HEIGHT - panel_h) / 2;
+
+  int bat = kbd_get_battery_percent();
+
+  display_darken();
+
+  int sel = 0;
+  bool running = true;
+  bool need_redraw = true;
+  bool exit_requested = false;
+
+  while (running) {
+    if (need_redraw) {
+      draw_panel(items, count, sel, panel_x, panel_y, panel_h, bat);
+      display_flush();
+      need_redraw = false;
+    }
+
+    kbd_poll();
+    uint32_t pressed = kbd_get_buttons_pressed();
+
+    if (pressed & BTN_UP) {
+      if (sel > 0) { sel--; need_redraw = true; }
+    }
+    if (pressed & BTN_DOWN) {
+      if (sel < count - 1) { sel++; need_redraw = true; }
+    }
+    if ((pressed & BTN_LEFT) && items[sel].type == ITEM_BRIGHTNESS) {
+      s_brightness = (s_brightness >= 16) ? s_brightness - 16 : 0;
+      kbd_set_backlight(s_brightness);
+      need_redraw = true;
+    }
+    if ((pressed & BTN_RIGHT) && items[sel].type == ITEM_BRIGHTNESS) {
+      s_brightness = (s_brightness <= 239) ? s_brightness + 16 : 255;
+      kbd_set_backlight(s_brightness);
+      need_redraw = true;
+    }
+
+    if (pressed & BTN_ENTER) {
+      switch (items[sel].type) {
+      case ITEM_APP_CB:
+        s_app_items[items[sel].app_idx].callback(
+            s_app_items[items[sel].app_idx].user);
+        running = false;
+        break;
+      case ITEM_BRIGHTNESS:
+        s_brightness = (s_brightness <= 239) ? s_brightness + 16 : 0;
+        kbd_set_backlight(s_brightness);
+        need_redraw = true;
+        break;
+      case ITEM_BATTERY:
+      case ITEM_RAM_INFO:
+        break;
+      case ITEM_WIFI:
+        if (wifi_is_available()) {
+          if (wifi_get_status() == WIFI_STATUS_CONNECTED) {
+            int choice = show_wifi_submenu();
+            if (choice == 1) run_wifi_config();
+            else if (choice == 2) wifi_disconnect();
+          } else {
+            run_wifi_config();
+          }
+          need_redraw = true;
+        }
+        break;
+      case ITEM_TIMEZONE:
+        tz_picker_show();
+        need_redraw = true;
+        break;
+      case ITEM_REMOUNT_SD:
+        need_redraw = true;
+        break;
+      case ITEM_USB_MSC:
+        break;
+      case ITEM_SCREENSHOT:
+        screenshot_schedule(250);
+        kbd_clear_state();
+        running = false;
+        break;
+      case ITEM_REBOOT:
+        watchdog_enable(1, true);
+        for (;;) tight_loop_contents();
+        break;
+      case ITEM_EXIT:
+        system_menu_clear_items();
+        exit_requested = true;
+        running = false;
+        break;
+      }
+    }
+
+    if (pressed & BTN_ESC)
+      running = false;
+
+    sleep_ms(16);
+  }
+  kbd_clear_state();
+  return exit_requested;
 }

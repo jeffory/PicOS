@@ -238,10 +238,13 @@ bool decode_jpeg_file(const char *path, image_decode_result_t *result) {
     int scale_div = 1;
     int scale_opt = 0;
 
-    // Use JPEG sub-sampling to natively shrink 4K/8K images without fully
-    // decoding them into PSRAM! We target a maximum of ~1-2 megapixel buffer
-    // footprints
-    while ((size_t)(w / scale_div) * (size_t)(h / scale_div) > 1000000 &&
+    // Use JPEG sub-sampling to natively shrink large images without fully
+    // decoding them into PSRAM.  Target ~360K pixels (≈2× display area in each
+    // dimension) — enough for sharp rendering on the 320×320 screen while
+    // keeping allocations well under 1 MB.  The old 1 000 000-pixel threshold
+    // allowed 960×960 (921 600 px → 1.84 MB) and 640×1136 (726 400 px →
+    // 1.45 MB) through without downscaling, causing PSRAM OOM.
+    while ((size_t)(w / scale_div) * (size_t)(h / scale_div) > 360000 &&
            scale_div < 8) {
       if (scale_div == 1) {
         scale_div = 2;
@@ -390,4 +393,23 @@ extern "C" void tgx_draw_image_scaled(uint16_t *dst_fb, int dst_w, int dst_h,
   // center point
   dst_im.blitScaledRotated(src_im, {src_w / 2.0f, src_h / 2.0f},
                            {(float)dst_x, (float)dst_y}, scale, angle);
+}
+
+extern "C" void tgx_draw_image_scaled_masked(uint16_t *dst_fb, int dst_w, int dst_h,
+                                            const uint16_t *src_data, int src_w,
+                                            int src_h, int dst_x, int dst_y,
+                                            float scale, float angle,
+                                            uint16_t transparent_color) {
+  if (!dst_fb || !src_data)
+    return;
+
+  tgx::Image<tgx::RGB565> dst_im(dst_fb, dst_w, dst_h);
+  tgx::Image<tgx::RGB565> src_im((uint16_t *)src_data, src_w, src_h);
+
+  // Anchor at the center of the source image to draw it at the (dst_x, dst_y)
+  // center point, with transparency
+  tgx::RGB565 mask_color(transparent_color);
+  dst_im.blitScaledRotatedMasked(src_im, mask_color,
+                                 {src_w / 2.0f, src_h / 2.0f},
+                                 {(float)dst_x, (float)dst_y}, scale, angle);
 }

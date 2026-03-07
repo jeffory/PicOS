@@ -19,6 +19,7 @@ typedef struct {
 } mp3_player_t;
 
 bool mp3_player_init(void);
+void mp3_player_reset(void);
 mp3_player_t *mp3_player_create(void);
 void mp3_player_destroy(mp3_player_t *player);
 bool mp3_player_load(mp3_player_t *player, const char *path);
@@ -32,4 +33,5 @@ uint32_t mp3_player_get_length(const mp3_player_t *player);
 void mp3_player_set_volume(mp3_player_t *player, uint8_t volume);
 uint8_t mp3_player_get_volume(const mp3_player_t *player);
 void mp3_player_set_loop(mp3_player_t *player, bool loop);
+uint32_t mp3_player_get_sample_rate(const mp3_player_t *player);
 void mp3_player_update(void);

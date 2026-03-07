@@ -10,6 +10,8 @@ static int s_perf_index = 0;
 static uint32_t s_perf_frame_start = 0;
 static uint32_t s_perf_last_frame_time = 0;
 static int s_perf_fps = 0;
+static uint32_t s_perf_target_fps = 0;       // 0 = no limit
+static uint32_t s_perf_target_frame_ms = 0;  // precomputed 1000/fps
 
 // Start timing a frame. Call at the beginning of your game loop.
 static int l_perf_beginFrame(lua_State *L) {
@@ -25,7 +27,6 @@ static int l_perf_beginFrame(lua_State *L) {
 
 // End timing a frame and calculate FPS. Call at the end of your game loop.
 static int l_perf_endFrame(lua_State *L) {
-  (void)L;
   uint32_t now = to_ms_since_boot(get_absolute_time());
 
   if (s_perf_frame_start != 0) {
@@ -50,9 +51,26 @@ static int l_perf_endFrame(lua_State *L) {
     s_perf_fps = (avg_frame_time > 0) ? (1000 / avg_frame_time) : 0;
   }
 
+  // FPS limiter: sleep remainder of target frame time
+  if (s_perf_target_fps > 0) {
+    uint32_t elapsed = to_ms_since_boot(get_absolute_time()) - s_perf_frame_start;
+    if (elapsed < s_perf_target_frame_ms) {
+      uint32_t end_ms = to_ms_since_boot(get_absolute_time()) +
+                        (s_perf_target_frame_ms - elapsed);
+      while (true) {
+        uint32_t t = to_ms_since_boot(get_absolute_time());
+        if (t >= end_ms)
+          break;
+        http_lua_fire_pending(L);
+        uint32_t remaining = end_ms - t;
+        sleep_ms(remaining < 10 ? remaining : 10);
+      }
+    }
+  }
+
   // Anchor the start of the next measurement to *now*, capturing any
-  // sys.sleep() block or loop overhead that occurs outside of begin/end.
-  s_perf_frame_start = now;
+  // sleep or loop overhead that occurs outside of begin/end.
+  s_perf_frame_start = to_ms_since_boot(get_absolute_time());
 
   return 0;
 }
@@ -86,10 +104,21 @@ static int l_perf_drawFPS(lua_State *L) {
   return 0;
 }
 
+// Set target FPS for automatic frame pacing (0 = no limit)
+static int l_perf_setTargetFPS(lua_State *L) {
+  int fps = (int)luaL_checkinteger(L, 1);
+  if (fps < 0)
+    fps = 0;
+  s_perf_target_fps = (uint32_t)fps;
+  s_perf_target_frame_ms = (fps > 0) ? (1000 / (uint32_t)fps) : 0;
+  return 0;
+}
+
 static const luaL_Reg l_perf_lib[] = {
     {"beginFrame", l_perf_beginFrame}, {"endFrame", l_perf_endFrame},
     {"getFPS", l_perf_getFPS},         {"getFrameTime", l_perf_getFrameTime},
-    {"drawFPS", l_perf_drawFPS},       {NULL, NULL}};
+    {"drawFPS", l_perf_drawFPS},       {"setTargetFPS", l_perf_setTargetFPS},
+    {NULL, NULL}};
 
 
 void lua_bridge_perf_init(lua_State *L) {
@@ -98,6 +127,8 @@ void lua_bridge_perf_init(lua_State *L) {
   s_perf_index = 0;
   s_perf_fps = 0;
   s_perf_last_frame_time = 0;
+  s_perf_target_fps = 0;
+  s_perf_target_frame_ms = 0;
   memset(s_perf_frame_times, 0, sizeof(s_perf_frame_times));
 
 register_subtable(L, "perf", l_perf_lib);

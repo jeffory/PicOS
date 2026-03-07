@@ -32,3 +32,7 @@ void system_menu_clear_items(void);
 // May raise a Lua error (via luaL_error) when "Exit App" is selected —
 // this propagates to lua_pcall in launcher.c exactly like picocalc.sys.exit().
 void system_menu_show(lua_State *L);
+
+// Show the menu for native (non-Lua) apps. Blocks until dismissed.
+// Returns true if the user selected "Exit App".
+bool system_menu_show_for_native(void);

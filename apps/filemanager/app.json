@@ -1,0 +1,11 @@
+{
+  "id": "com.picocalc.filemanager",
+  "name": "File Manager",
+  "description": "Dual-panel Norton Commander-style file manager",
+  "version": "1.0",
+  "author": "PicOS",
+  "requirements": [
+    "root-filesystem",
+    "audio"
+  ]
+}
