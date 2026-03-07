@@ -61,6 +61,7 @@ typedef struct {
     void (*setBrightness)(uint8_t brightness);
     void (*drawImageNN)(int x, int y, const uint16_t *data,
                         int src_w, int src_h, int scale);
+    void (*flushRows)(int y0, int y1);
 } picocalc_display_t;
 
 // --- Filesystem --------------------------------------------------------------
