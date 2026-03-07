@@ -73,6 +73,9 @@ typedef struct {
     // Input data in host byte order (RGB565). Ideal for emulator blits.
     void (*drawImageNN)(int x, int y, const uint16_t *data,
                         int src_w, int src_h, int scale);
+    // Flush only rows y0..y1 (inclusive, full width) from the back buffer.
+    // Does NOT swap buffers. Useful for partial screen updates.
+    void (*flushRows)(int y0, int y1);
 } picocalc_display_t;
 
 // --- Filesystem (SD card) ---------------------------------------------------

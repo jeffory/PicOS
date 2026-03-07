@@ -358,6 +358,23 @@ end
 | `save()` | Persist to `/system/config.json` |
 | `load()` | Reload from disk |
 
+#### `picocalc.audio`
+| Function | Description |
+|---|---|
+| `playTone(freq, duration_ms)` | Play a square wave tone (duration_ms 0 = play indefinitely) |
+| `stopTone()` | Stop tone playback |
+| `setVolume(vol)` | Set system audio volume |
+
+#### `picocalc.sound`
+| Function | Description |
+|---|---|
+| `sample(path)` | Load a sound sample from SD card |
+| `sampleplayer()` | Create a new sample player |
+| `fileplayer()` | Create a new file player (WAV/raw) |
+| `mp3player()` | Create a new MP3 player |
+| `getCurrentTime()` | Get current audio playback time |
+| `resetTime()` | Reset audio playback time |
+
 #### `picocalc.perf`
 | Function | Description |
 |---|---|
@@ -366,6 +383,7 @@ end
 | `getFPS()` | Get current FPS (averaged over 30 frames) |
 | `getFrameTime()` | Get last frame time in milliseconds |
 | `drawFPS([x, y])` | Draw color-coded FPS counter (default: 250, 8) |
+| `setTargetFPS(fps)` | Set target FPS for automatic frame pacing (0 = no limit) |
 
 **Example:**
 ```lua
@@ -391,8 +409,8 @@ end
 - [x] HTTP client (`picocalc.network.http.*`) with async callbacks
 - [x] Performance monitoring (`picocalc.perf.*`)
 - [x] Standard UI components (`picocalc.ui.drawHeader/drawFooter`)
-- [ ] Audio API (`picocalc.audio.playTone`)
-- [ ] Native C app loader (binary relocation into PSRAM for performance-critical apps)
+- [x] Audio API (`picocalc.audio.playTone`)
+- [x] Native C app loader (binary relocation into PSRAM for performance-critical apps)
 
 ---
 
