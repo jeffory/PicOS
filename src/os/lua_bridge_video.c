@@ -1,0 +1,157 @@
+#include "lua_bridge_internal.h"
+#include "../drivers/video_player.h"
+
+#define VIDEO_USERDATA "video_player"
+
+static video_player_t *check_video(lua_State *L, int idx) {
+    video_player_t **ud = luaL_checkudata(L, idx, VIDEO_USERDATA);
+    return *ud;
+}
+
+static int l_video_new(lua_State *L) {
+    video_player_t *player = video_player_create();
+    if (!player) {
+        lua_pushnil(L);
+        lua_pushstring(L, "failed to create video player");
+        return 2;
+    }
+    video_player_t **ud = lua_newuserdata(L, sizeof(video_player_t *));
+    *ud = player;
+    luaL_setmetatable(L, VIDEO_USERDATA);
+    return 1;
+}
+
+static int l_video_load(lua_State *L) {
+    video_player_t *player = check_video(L, 1);
+    const char *path = luaL_checkstring(L, 2);
+    if (video_player_load(player, path)) {
+        lua_pushboolean(L, true);
+        return 1;
+    }
+    lua_pushboolean(L, false);
+    return 1;
+}
+
+static int l_video_play(lua_State *L) {
+    video_player_t *player = check_video(L, 1);
+    video_player_play(player);
+    return 0;
+}
+
+static int l_video_pause(lua_State *L) {
+    video_player_t *player = check_video(L, 1);
+    video_player_pause(player);
+    return 0;
+}
+
+static int l_video_resume(lua_State *L) {
+    video_player_t *player = check_video(L, 1);
+    video_player_resume(player);
+    return 0;
+}
+
+static int l_video_stop(lua_State *L) {
+    video_player_t *player = check_video(L, 1);
+    video_player_stop(player);
+    return 0;
+}
+
+static int l_video_update(lua_State *L) {
+    video_player_t *player = check_video(L, 1);
+    lua_pushboolean(L, video_player_update(player));
+    return 1;
+}
+
+static int l_video_isPlaying(lua_State *L) {
+    video_player_t *player = check_video(L, 1);
+    lua_pushboolean(L, player->playing && !player->paused);
+    return 1;
+}
+
+static int l_video_isPaused(lua_State *L) {
+    video_player_t *player = check_video(L, 1);
+    lua_pushboolean(L, player->paused);
+    return 1;
+}
+
+static int l_video_seek(lua_State *L) {
+    video_player_t *player = check_video(L, 1);
+    uint32_t frame = (uint32_t)luaL_checkinteger(L, 2);
+    video_player_seek(player, frame);
+    return 0;
+}
+
+static int l_video_getFPS(lua_State *L) {
+    video_player_t *player = check_video(L, 1);
+    lua_pushnumber(L, video_player_get_fps(player));
+    return 1;
+}
+
+static int l_video_getSize(lua_State *L) {
+    video_player_t *player = check_video(L, 1);
+    lua_pushinteger(L, player->width);
+    lua_pushinteger(L, player->height);
+    return 2;
+}
+
+static int l_video_getInfo(lua_State *L) {
+    video_player_t *player = check_video(L, 1);
+    lua_newtable(L);
+    lua_pushinteger(L, player->width); lua_setfield(L, -2, "width");
+    lua_pushinteger(L, player->height); lua_setfield(L, -2, "height");
+    lua_pushinteger(L, player->frame_count); lua_setfield(L, -2, "frames");
+    lua_pushinteger(L, player->current_frame); lua_setfield(L, -2, "current_frame");
+    return 1;
+}
+
+static int l_video_setLoop(lua_State *L) {
+    video_player_t *player = check_video(L, 1);
+    player->loop = lua_toboolean(L, 2);
+    return 0;
+}
+
+static int l_video_setAutoFlush(lua_State *L) {
+    video_player_t *player = check_video(L, 1);
+    player->auto_flush = lua_toboolean(L, 2);
+    return 0;
+}
+
+static int l_video_gc(lua_State *L) {
+    video_player_t *player = check_video(L, 1);
+    video_player_destroy(player);
+    return 0;
+}
+
+static const luaL_Reg video_methods[] = {
+    {"load", l_video_load},
+    {"play", l_video_play},
+    {"pause", l_video_pause},
+    {"resume", l_video_resume},
+    {"stop", l_video_stop},
+    {"update", l_video_update},
+    {"seek", l_video_seek},
+    {"isPlaying", l_video_isPlaying},
+    {"isPaused", l_video_isPaused},
+    {"getFPS", l_video_getFPS},
+    {"getSize", l_video_getSize},
+    {"getInfo", l_video_getInfo},
+    {"setLoop", l_video_setLoop},
+    {"setAutoFlush", l_video_setAutoFlush},
+    {"__gc", l_video_gc},
+    {NULL, NULL}
+};
+
+static const luaL_Reg video_funcs[] = {
+    {"player", l_video_new},
+    {NULL, NULL}
+};
+
+void lua_bridge_video_init(lua_State *L) {
+    luaL_newmetatable(L, VIDEO_USERDATA);
+    lua_pushvalue(L, -1);
+    lua_setfield(L, -2, "__index");
+    luaL_setfuncs(L, video_methods, 0);
+    lua_pop(L, 1);
+
+    register_subtable(L, "video", video_funcs);
+}

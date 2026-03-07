@@ -35,12 +35,13 @@ local FOOT_BG   = disp.rgb(30, 30, 30)   -- footer background
 local HELP_BG   = disp.rgb(0,  0,  40)   -- help screen background
 
 -- ── State machine ─────────────────────────────────────────────────────────────
-local ST = {BROWSE=1, IMG_VIEW=2, TXT_VIEW=3, HELP=4, MP3_VIEW=5}
+local ST = {BROWSE=1, IMG_VIEW=2, TXT_VIEW=3, HELP=4, MP3_VIEW=5, VIDEO_VIEW=6}
 
 -- ── File-type extension sets ──────────────────────────────────────────────────
 -- Image extensions trigger the image viewer; everything else uses the text viewer
 local IMG_EXT = {jpg=true,jpeg=true,png=true,bmp=true,gif=true}
 local MP3_EXT = {mp3=true}
+local VID_EXT = {avi=true}
 
 -- ── App state ────────────────────────────────────────────────────────────────
 local state  = ST.BROWSE
@@ -65,6 +66,10 @@ local mp3_player      = nil
 local mp3_name        = ""
 local mp3_vol         = 80    -- default 80% (scale 0-100)
 local mp3_sample_rate = 44100 -- updated after load; used to convert samples→seconds
+
+-- Video player
+local vid_player = nil
+local vid_name   = ""
 
 -- Text viewer
 local TXT_COLS = 53   -- 320 / 6 = 53 chars
@@ -392,6 +397,75 @@ local function draw_mp3_view()
     pad("Space/Enter:Play/Pause  Up/Dn:Vol  Esc:Stop", 53), GRAY, FOOT_BG)
 end
 
+-- ── Drawing: Video player ────────────────────────────────────────────────────
+local function draw_vid_view()
+  if not vid_player then return end
+
+  local paused = vid_player:isPaused()
+
+  if paused then
+    -- Full header when paused
+    disp.fillRect(0, 0, SW, HDR_H, HDR_ACT)
+    disp.drawText(1, 2, pad("Video: " .. vid_name, 53), WHITE, HDR_ACT)
+    disp.drawText(140, 150, "PAUSED", YELLOW, BG)
+  end
+
+  -- FPS counter always visible (small dark background for readability)
+  local fps = vid_player:getFPS()
+  local fps_str = string.format("%.1f FPS", fps)
+  local fw = #fps_str * CHAR_W
+  local fx = SW - fw - 2
+  disp.fillRect(fx, 0, fw + 2, CHAR_H + 2, BG)
+  disp.drawText(fx + 1, 1, fps_str, YELLOW, BG)
+end
+
+local function open_vid_view(path, fname)
+  if vid_player then vid_player:stop(); vid_player = nil end
+  local v = pc.video.player()
+  if not v:load(path) then
+    set_status("Cannot load video: " .. fname)
+    return
+  end
+  v:setLoop(true)
+  v:setAutoFlush(true)
+  v:play()
+  vid_player = v
+  vid_name   = fname
+  state = ST.VIDEO_VIEW
+end
+
+local function handle_vid_view(pressed)
+  if not vid_player then state = ST.BROWSE; return end
+  
+  local ch = input.getChar()
+  if pressed & input.BTN_ESC ~= 0 then
+    vid_player:stop(); vid_player = nil; state = ST.BROWSE; return
+  end
+  
+  if pressed & input.BTN_ENTER ~= 0 or pressed & input.BTN_F3 ~= 0 or ch == " " then
+    if vid_player:isPaused() then
+      vid_player:resume()
+    else
+      vid_player:pause()
+    end
+  end
+
+  local info = vid_player:getInfo()
+  -- Calculate frames for 5 seconds (assuming file metadata is correct)
+  local skip_frames = math.floor(5 * (info.frames / (info.frames * (1/20)))) -- Default to 20fps if unknown
+  -- Better: use the actual frame duration if we had it, but info.frames / duration is fine
+  -- For now let's assume ~20fps -> 100 frames
+  skip_frames = 100 
+
+  if pressed & input.BTN_RIGHT ~= 0 then
+    vid_player:seek(info.current_frame + skip_frames)
+  elseif pressed & input.BTN_LEFT ~= 0 then
+    local target = info.current_frame - skip_frames
+    if target < 0 then target = 0 end
+    vid_player:seek(target)
+  end
+end
+
 -- ── Commands ─────────────────────────────────────────────────────────────────
 local function cmd_copy()
   local p = panels[active]
@@ -585,6 +659,8 @@ local function cmd_view()
     open_img_view(path, e.name)
   elseif MP3_EXT[file_ext(e.name)] then
     open_mp3_view(path, e.name)
+  elseif VID_EXT[file_ext(e.name)] then
+    open_vid_view(path, e.name)
   else
     open_txt_view(path, e.name)
   end
@@ -621,6 +697,8 @@ local function cmd_open()
       open_img_view(path, e.name)
     elseif MP3_EXT[file_ext(e.name)] then
       open_mp3_view(path, e.name)
+    elseif VID_EXT[file_ext(e.name)] then
+      open_vid_view(path, e.name)
     else
       open_txt_view(path, e.name)
     end
@@ -814,6 +892,13 @@ while running do
   elseif state == ST.TXT_VIEW then handle_txt_view(pressed)
   elseif state == ST.HELP     then handle_help(pressed)
   elseif state == ST.MP3_VIEW then handle_mp3_view(pressed)
+  elseif state == ST.VIDEO_VIEW then handle_vid_view(pressed)
+  end
+
+  -- Video update
+  local vid_updated = false
+  if state == ST.VIDEO_VIEW and vid_player then
+    vid_updated = vid_player:update()
   end
 
   -- Status timer
@@ -831,10 +916,18 @@ while running do
     draw_help()
   elseif state == ST.MP3_VIEW then
     draw_mp3_view()
+  elseif state == ST.VIDEO_VIEW then
+    draw_vid_view()
   else
     draw_browse()
   end
 
-  disp.flush()
-  sys.sleep(16)
+  if not (state == ST.VIDEO_VIEW and vid_updated) then
+    disp.flush()
+  end
+  if state == ST.VIDEO_VIEW then
+    sys.sleep(1)
+  else
+    sys.sleep(16)
+  end
 end

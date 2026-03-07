@@ -707,6 +707,37 @@ void display_draw_image_nn(int x, int y, const uint16_t *data,
   }
 }
 
+void display_blit_be(int x, int y, const uint16_t *data, int w, int h) {
+  if (!data || w <= 0 || h <= 0)
+    return;
+
+  // Early reject if entirely off-screen
+  if (x >= FB_WIDTH || y >= FB_HEIGHT || x + w <= 0 || y + h <= 0)
+    return;
+
+  // Clip source region
+  int src_x0 = 0, src_y0 = 0;
+  int src_x1 = w, src_y1 = h;
+  int dst_x = x, dst_y = y;
+
+  if (dst_x < 0) { src_x0 = -dst_x; dst_x = 0; }
+  if (dst_y < 0) { src_y0 = -dst_y; dst_y = 0; }
+  if (dst_x + (src_x1 - src_x0) > FB_WIDTH)  src_x1 = src_x0 + (FB_WIDTH - dst_x);
+  if (dst_y + (src_y1 - src_y0) > FB_HEIGHT) src_y1 = src_y0 + (FB_HEIGHT - dst_y);
+
+  int copy_w = src_x1 - src_x0;
+  int copy_h = src_y1 - src_y0;
+  if (copy_w <= 0 || copy_h <= 0)
+    return;
+
+  uint16_t *fb = s_framebuffer;
+  for (int row = 0; row < copy_h; row++) {
+    memcpy(&fb[(dst_y + row) * FB_WIDTH + dst_x],
+           &data[(src_y0 + row) * w + src_x0],
+           copy_w * sizeof(uint16_t));
+  }
+}
+
 void display_draw_image_scaled_nn(int x, int y, const uint16_t *data,
                                    int src_w, int src_h, int dst_w, int dst_h,
                                    uint16_t transparent_color) {
@@ -815,6 +846,50 @@ void display_flush(void) {
     s_dma_active = false;
   }
   // Non-blocking path: DMA runs concurrently while CPU executes Lua/OS code.
+}
+
+void display_flush_region(int y0, int y1) {
+  // Clamp to valid range
+  if (y0 < 0) y0 = 0;
+  if (y1 >= FB_HEIGHT) y1 = FB_HEIGHT - 1;
+  if (y0 > y1) return;
+
+  // Wait for previous DMA
+  if (s_dma_active) {
+    dma_channel_wait_for_finish_blocking(s_dma_chan);
+    lcd_spi_wait_idle();
+    lcd_cs_high();
+    s_dma_active = false;
+  }
+
+  // Swap buffers (same as display_flush)
+  int front_buffer_idx = s_back_buffer_idx;
+  s_back_buffer_idx = 1 - s_back_buffer_idx;
+  s_framebuffer = s_framebuffers[s_back_buffer_idx];
+
+  // Set partial window
+  lcd_set_window(0, y0, FB_WIDTH - 1, y1);
+
+  lcd_cs_low();
+  lcd_dc_data();
+
+  int row_count = y1 - y0 + 1;
+  dma_channel_set_read_addr(s_dma_chan,
+                            &s_framebuffers[front_buffer_idx][y0 * FB_WIDTH],
+                            false);
+  dma_channel_set_trans_count(s_dma_chan,
+                              row_count * FB_WIDTH * sizeof(uint16_t), true);
+  s_dma_active = true;
+
+  // Copy the flushed region to the new back buffer so both buffers stay in
+  // sync.  Without this, the back buffer has stale content from 2 frames ago,
+  // causing visible flickering when overlays (header, FPS) are drawn after
+  // the flush, or when the next iteration does a full display_flush().
+  // DMA reads the front buffer via AHB; this memcpy also reads it — no
+  // conflict (both are reads from SRAM).
+  memcpy(&s_framebuffers[s_back_buffer_idx][y0 * FB_WIDTH],
+         &s_framebuffers[front_buffer_idx][y0 * FB_WIDTH],
+         row_count * FB_WIDTH * sizeof(uint16_t));
 }
 
 void display_flush_rows(int y0, int y1) {

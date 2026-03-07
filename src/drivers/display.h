@@ -87,6 +87,11 @@ void display_draw_image_scaled_nn(int x, int y, const uint16_t *data,
 void display_draw_image_nn(int x, int y, const uint16_t *data,
                            int src_w, int src_h, int scale);
 
+// Blit pre-swapped (big-endian) RGB565 pixels directly to the framebuffer.
+// No byte-swap is performed — data is memcpy'd row by row.
+// Ideal for JPEGDEC with setPixelType(RGB565_BIG_ENDIAN).
+void display_blit_be(int x, int y, const uint16_t *data, int w, int h);
+
 // Transparent color key support (0 = disabled)
 void display_set_transparent_color(uint16_t color);
 uint16_t display_get_transparent_color(void);
@@ -98,6 +103,11 @@ uint16_t display_get_transparent_color(void);
 // PSRAM (QMI/XIP) — separate buses.  Double buffering prevents conflicts.
 void display_flush(void);
 extern bool g_display_flush_blocking;
+
+// Flush rows y0..y1 (inclusive) with a buffer swap, like display_flush() but
+// only transfers the specified row range.  Useful for video playback where the
+// content occupies a sub-region of the 320×320 screen.
+void display_flush_region(int y0, int y1);
 
 // Flush only rows y0..y1 (inclusive, full width) from the back buffer to the
 // LCD. Does NOT swap buffers — call display_flush() for that.  Useful for
