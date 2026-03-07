@@ -39,7 +39,7 @@ These are fully implemented in C but missing from `lua_bridge.c`. All are quick 
 The Lua bridge calls C functions directly so Lua is unaffected, but the C app loader
 (future) will need this populated.
 
-- [ ] Wire `g_api.fs = &s_fs_impl` once a `picocalc_fs_t` struct is built
+- [x] Wire `g_api.fs = &s_fs_impl` — already implemented in `main.c`
 - [x] Wire `g_api.audio` — implemented in this commit
 - [x] Wire `g_api.wifi` — was already implemented
 

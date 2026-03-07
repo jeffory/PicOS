@@ -21,4 +21,13 @@
 	url = https://github.com/jeffory/PicOS.wiki.git
 [submodule "apps/gbc/RP2350-GBC"]
 	path = apps/gbc/RP2350-GBC
-	url = git@github.com:peterk268/RP2350-GBC
+	url = https://github.com/peterk268/RP2350-GBC.git
+[submodule "apps/ssh/wolfssh"]
+	path = apps/ssh/wolfssh
+	url = https://github.com/wolfSSL/wolfssh.git
+[submodule "apps/ssh/wolfcrypt"]
+	path = apps/ssh/wolfcrypt
+	url = https://github.com/wolfSSL/wolfcrypt.git
+[submodule "third_party/wolfssl"]
+	path = third_party/wolfssl
+	url = https://github.com/wolfSSL/wolfssl.git

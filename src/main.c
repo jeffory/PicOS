@@ -165,6 +165,7 @@ void __attribute__((naked)) isr_hardfault(void) {
 #include "drivers/sound.h"
 #include "drivers/display.h"
 #include "drivers/http.h"
+#include "drivers/tcp.h"
 #include "drivers/keyboard.h"
 #include "drivers/sdcard.h"
 #include "drivers/wifi.h"
@@ -174,6 +175,7 @@ void __attribute__((naked)) isr_hardfault(void) {
 #include "os/lua_psram_alloc.h"
 #include "os/os.h"
 #include "os/system_menu.h"
+#include "os/text_input.h"
 #include "os/ui.h"
 
 // ── OS API implementation stubs (wiring the function pointer table)
@@ -182,6 +184,16 @@ void __attribute__((naked)) isr_hardfault(void) {
 // reference.
 
 PicoCalcAPI g_api;
+
+static picocalc_tcp_t s_tcp_impl = {
+    .connect = (pctcp_t (*)(const char *, uint16_t, bool))tcp_connect,
+    .write = (int (*)(pctcp_t, const void *, int))tcp_write,
+    .read = (int (*)(pctcp_t, void *, int))tcp_read,
+    .close = (void (*)(pctcp_t))tcp_close,
+    .available = (int (*)(pctcp_t))tcp_bytes_available,
+    .getError = (const char *(*)(pctcp_t))tcp_get_error,
+    .getEvents = (uint32_t (*)(pctcp_t))tcp_take_pending,
+};
 
 static picocalc_input_t s_input_impl = {
     .getButtons = kbd_get_buttons,
@@ -322,6 +334,12 @@ static int fs_list_dir(const char *path,
     return sdcard_list_dir(path, fs_list_dir_callback, NULL);
 }
 
+static const picocalc_ui_t s_ui_impl = {
+    .textInput       = text_input_show,
+    .textInputSimple = ui_text_input,
+    .confirm         = ui_confirm,
+};
+
 static picocalc_fs_t s_fs_impl = {
     .open = fs_open,
     .read = fs_read,
@@ -370,7 +388,7 @@ int main(void) {
   // NOTE: If the keyboard fails to initialise reliably, try commenting this
   // out to test at the default 125 MHz — it isolates whether the overclock
   // is affecting I2C timing.
-  set_sys_clock_khz(200000, true);
+  set_sys_clock_khz(200000, false);
 
   // Configure peripheral clock to 125 MHz (enables 62.5 MHz SPI for LCD)
   // clk_peri drives UART, SPI, I2C, PWM — ST7789 rated max is 62.5 MHz
@@ -397,6 +415,8 @@ int main(void) {
   g_api.sys = &s_sys_impl;
   g_api.wifi = &s_wifi_impl;
   g_api.audio = &s_audio_impl;
+  g_api.tcp = &s_tcp_impl;
+  g_api.ui = &s_ui_impl;
   // fs wired after SD card init
 
   // Explicitly configure PSRAM hardware pins and XIP write logic for the Pico
@@ -473,6 +493,7 @@ int main(void) {
   ui_draw_splash("Initialising WiFi...", NULL);
   wifi_init();
   http_init();
+  tcp_init();
   
   // Debug: check free size after WiFi/HTTP init
   extern size_t lua_psram_alloc_free_size(void);

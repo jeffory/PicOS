@@ -70,15 +70,20 @@ bool wifi_get_http_required(void);
 typedef enum {
     CONN_REQ_HTTP_START,      // new TCP conn (or reuse keep-alive) + send request
     CONN_REQ_HTTP_CLOSE,      // mark nc->is_closing = 1
+    CONN_REQ_TCP_CONNECT,     // new generic TCP conn
+    CONN_REQ_TCP_WRITE,       // send data over TCP
+    CONN_REQ_TCP_CLOSE,       // close generic TCP
     CONN_REQ_WIFI_CONNECT,    // mg_wifi_connect()
     CONN_REQ_WIFI_DISCONNECT, // mg_wifi_disconnect()
 } conn_req_type_t;
 
 typedef struct {
     conn_req_type_t  type;
-    http_conn_t     *conn;       // NULL for wifi ops
+    http_conn_t     *conn;       // NULL for wifi ops; tcp_conn_t* for tcp ops
     char             ssid[64];   // used by CONN_REQ_WIFI_CONNECT
     char             pass[64];
+    void            *data;       // used by CONN_REQ_TCP_WRITE (malloc'd)
+    uint32_t         data_len;
 } conn_req_t;
 
 // Push a request from Core 0 to the Core 1 queue.

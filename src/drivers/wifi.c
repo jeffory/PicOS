@@ -1,4 +1,5 @@
 #include "wifi.h"
+#include "tcp.h"
 #include "../os/clock.h"
 #include "../os/config.h"
 #include "display.h"
@@ -204,6 +205,44 @@ static void drain_requests(void) {
         struct mg_connection *nc = (struct mg_connection *)c->pcb;
         nc->is_closing = 1;
         c->pcb = NULL;
+        break;
+      }
+
+      case CONN_REQ_TCP_CONNECT: {
+        tcp_conn_t *tc = (tcp_conn_t *)req.conn;
+        if (tc) {
+          char url[320];
+          snprintf(url, sizeof(url), "%s://%s:%u",
+                   tc->use_ssl ? "tls" : "tcp", tc->host, tc->port);
+          printf("[TCP] Connecting to %s (SSL=%d)...\n", url, tc->use_ssl);
+          tc->state = TCP_STATE_CONNECTING;
+          struct mg_connection *nc = mg_connect(&s_mgr, url, tcp_ev_fn, tc);
+          if (!nc) {
+            printf("[TCP] mg_connect failed\n");
+            tc->state = TCP_STATE_FAILED;
+            snprintf(tc->err, sizeof(tc->err), "mg_connect failed");
+            break;
+          }
+          tc->pcb = (void *)nc;
+        }
+        break;
+      }
+
+      case CONN_REQ_TCP_WRITE: {
+        tcp_conn_t *tc = (tcp_conn_t *)req.conn;
+        if (tc && tc->pcb && req.data) {
+          mg_send((struct mg_connection *)tc->pcb, req.data, req.data_len);
+        }
+        if (req.data) umm_free(req.data);
+        break;
+      }
+
+      case CONN_REQ_TCP_CLOSE: {
+        tcp_conn_t *tc = (tcp_conn_t *)req.conn;
+        if (tc && tc->pcb) {
+          ((struct mg_connection *)tc->pcb)->is_closing = 1;
+          tc->pcb = NULL;
+        }
         break;
       }
 
