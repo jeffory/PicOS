@@ -81,8 +81,6 @@ function init_game()
     for y = 1, FIELD_HEIGHT do
         playfield[y] = {}
     end
-    pc.graphics.drawGrid(PLAYFIELD_X, PLAYFIELD_Y, BLOCK_SIZE, BLOCK_SIZE, FIELD_WIDTH, FIELD_HEIGHT, C.GRID)
-
     next_piece_idx = math.random(1, #TETROMINOES)
     spawn_new_piece()
 end
@@ -305,16 +303,9 @@ function draw_block(grid_x, grid_y, color, offset_x, offset_y)
 end
 
 function draw_playfield()
-    -- Draw the grid background (single C call instead of 200 drawRect calls)
-    pc.graphics.drawGrid(PLAYFIELD_X, PLAYFIELD_Y, BLOCK_SIZE, BLOCK_SIZE, FIELD_WIDTH, FIELD_HEIGHT, C.GRID)
-    -- Draw the locked blocks
-    for y = 1, FIELD_HEIGHT do
-        for x = 1, FIELD_WIDTH do
-            if playfield[y][x] then
-                draw_block(x, y, playfield[y][x])
-            end
-        end
-    end
+    -- Single C call: draws grid lines + all locked blocks in one pass.
+    -- Replaces drawGrid + up to 200 fillBorderedRect calls per frame.
+    pc.graphics.drawPlayfield(playfield, PLAYFIELD_X, PLAYFIELD_Y, BLOCK_SIZE, FIELD_WIDTH, FIELD_HEIGHT, C.GRID)
 end
 
 function draw_piece(piece)
