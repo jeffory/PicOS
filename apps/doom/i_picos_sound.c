@@ -1,6 +1,12 @@
 // PicOS sound module for DOOM
 // Software mixer: decodes DMX lumps, mixes 8 channels, outputs stereo PCM
 // via pushSamples() at 11025 Hz.
+//
+// Audio production is fully autonomous on Core 1 via doom_audio_worker(),
+// registered as the native audio callback.  The worker uses wall-clock time
+// (getTimeUs) to decide how many samples to produce each call, completely
+// decoupled from the game's frame rate on Core 0.  Core 0 writes channel
+// state (start/stop/params); Core 1 snapshots and mixes independently.
 
 #include <string.h>
 #include <stdlib.h>
@@ -23,8 +29,12 @@ extern const PicoCalcAPI *g_picos_api;
 #define MIX_RATE        11025
 #define MIX_CHANNELS    8
 
-// Samples per batch (~28ms per game tic at 35 Hz)
+// Chunk size for inner mix loop (reuses existing buffer)
 #define MIX_BATCH       (MIX_RATE / 35)   // ~315
+// Maximum samples per worker call (~100ms worth, safety cap)
+#define MIX_BATCH_MAX   (MIX_RATE / 10)   // ~1102
+
+#define MUS_RATE        140  // MUS sequencer ticks per second
 
 // --- DMX lump header ---
 #define DMX_MAGIC       0x0003
@@ -50,7 +60,15 @@ typedef struct {
 } mix_channel_t;
 
 static mix_channel_t s_channels[MIX_CHANNELS];
+
+// Core 1 owns this snapshot — copied from s_channels each worker call.
+static mix_channel_t s_channels_snapshot[MIX_CHANNELS];
+
 static int16_t s_mix_buf[MIX_BATCH * 2];  // stereo interleaved
+
+// Time-based worker state
+static uint32_t s_last_mix_us = 0;        // wall-clock time of last mix
+static uint32_t s_mus_tick_accum = 0;     // fractional MUS tick accumulator (µs)
 
 // --- Volume/pan helpers ---
 
@@ -62,47 +80,33 @@ static void compute_volumes(int vol, int sep, int *left, int *right)
     *right = (sep * vol) / 127;
 }
 
-// --- Sound module callbacks ---
+// --- Core 1 audio worker ---
+// Called every 5ms from core1_entry().  Produces audio autonomously based on
+// wall-clock time, completely decoupled from the game's frame rate.
+//
+// IMPORTANT: mus_tick_n() and mus_render() MUST run on the same core because
+// they both access the OPL emulator state (s_mus.opl).  mus_tick_n() writes
+// OPL registers via OPL3_WriteRegBuffered, and mus_render() reads them via
+// OPL3_GenerateBatch.  Running these on different cores corrupts the OPL
+// state.  picos_mus_poll() is therefore a no-op; we call mus_tick_n() here.
 
-static boolean picos_snd_init(boolean use_sfx_prefix)
+static void mix_chunk(int n)
 {
-    memset(s_channels, 0, sizeof(s_channels));
-    g_picos_api->audio->startStream(MIX_RATE);
-    return true;
-}
-
-static void picos_snd_shutdown(void)
-{
-    g_picos_api->audio->stopStream();
-}
-
-static int picos_snd_get_sfx_lump_num(sfxinfo_t *sfxinfo)
-{
-    char namebuf[16];
-    snprintf(namebuf, sizeof(namebuf), "ds%s", sfxinfo->name);
-
-    // W_GetNumForName calls I_Error if not found; use W_CheckNumForName
-    // which returns -1 on miss.
-    int lump = W_CheckNumForName(namebuf);
-    return lump;
-}
-
-static void picos_snd_update(void)
-{
-    int n = MIX_BATCH;
     int16_t *out = s_mix_buf;
 
     for (int i = 0; i < n; i++) {
         int32_t left = 0, right = 0;
 
         for (int ch = 0; ch < MIX_CHANNELS; ch++) {
-            mix_channel_t *c = &s_channels[ch];
+            mix_channel_t *c = &s_channels_snapshot[ch];
             if (!c->active)
                 continue;
 
             uint32_t idx = c->pos >> 16;
             if (idx >= c->length) {
                 c->active = false;
+                // Write back completion so Core 0 sees it
+                s_channels[ch].active = false;
                 continue;
             }
 
@@ -137,6 +141,89 @@ static void picos_snd_update(void)
     }
 
     g_picos_api->audio->pushSamples(s_mix_buf, n);
+}
+
+static void doom_audio_worker(void)
+{
+    uint32_t now = (uint32_t)g_picos_api->sys->getTimeUs();
+
+    // First call: seed the timestamp and return
+    if (s_last_mix_us == 0) {
+        s_last_mix_us = now;
+        return;
+    }
+
+    uint32_t elapsed_us = now - s_last_mix_us;
+    if (elapsed_us < 1000)  // <1ms, nothing to do
+        return;
+
+    // How many PCM samples to produce for this elapsed period
+    uint32_t samples = (elapsed_us * MIX_RATE) / 1000000;
+    if (samples == 0)
+        return;
+    if (samples > MIX_BATCH_MAX)
+        samples = MIX_BATCH_MAX;
+
+    s_last_mix_us = now;
+
+    // Advance MUS sequencer based on elapsed time (140Hz ticks)
+    s_mus_tick_accum += elapsed_us;
+    uint32_t mus_ticks = (s_mus_tick_accum * MUS_RATE) / 1000000;
+    if (mus_ticks > 0) {
+        s_mus_tick_accum -= (mus_ticks * 1000000) / MUS_RATE;
+        mus_tick_n(mus_ticks);
+    }
+
+    // Snapshot channel state from Core 0
+    memcpy(s_channels_snapshot, s_channels, sizeof(s_channels));
+
+    // Mix in chunks of MIX_BATCH (reuses s_mix_buf)
+    while (samples > 0) {
+        int n = (samples > MIX_BATCH) ? MIX_BATCH : (int)samples;
+        mix_chunk(n);
+        samples -= n;
+    }
+}
+
+// --- Sound module callbacks ---
+
+static boolean picos_snd_init(boolean use_sfx_prefix)
+{
+    memset(s_channels, 0, sizeof(s_channels));
+    memset(s_channels_snapshot, 0, sizeof(s_channels_snapshot));
+    s_last_mix_us = 0;
+    s_mus_tick_accum = 0;
+    g_picos_api->audio->startStream(MIX_RATE);
+
+    // Register our worker on Core 1
+    g_picos_api->sys->setAudioCallback(doom_audio_worker);
+
+    return true;
+}
+
+static void picos_snd_shutdown(void)
+{
+    g_picos_api->sys->setAudioCallback(NULL);
+    s_last_mix_us = 0;
+    g_picos_api->audio->stopStream();
+}
+
+static int picos_snd_get_sfx_lump_num(sfxinfo_t *sfxinfo)
+{
+    char namebuf[16];
+    snprintf(namebuf, sizeof(namebuf), "ds%s", sfxinfo->name);
+
+    // W_GetNumForName calls I_Error if not found; use W_CheckNumForName
+    // which returns -1 on miss.
+    int lump = W_CheckNumForName(namebuf);
+    return lump;
+}
+
+// Called on Core 0 every game tick (35Hz).  No-op: audio production is
+// autonomous on Core 1 via doom_audio_worker(), driven by wall-clock time.
+static void picos_snd_update(void)
+{
+    // Nothing to do — Core 1 snapshots channels and mixes autonomously.
 }
 
 static void picos_snd_update_params(int channel, int vol, int sep)
@@ -309,7 +396,8 @@ static boolean picos_mus_is_playing(void)
 
 static void picos_mus_poll(void)
 {
-    mus_tick();
+    // No-op: mus_tick() is called from doom_audio_worker() on Core 1
+    // to keep all OPL access on a single core (see comment above worker).
 }
 
 static snddevice_t picos_mus_devices[] = { SNDDEVICE_SB, SNDDEVICE_ADLIB, SNDDEVICE_GENMIDI };

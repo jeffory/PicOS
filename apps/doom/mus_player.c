@@ -733,13 +733,12 @@ int mus_is_playing(void)
     return s_mus.playing && !s_mus.paused;
 }
 
-void mus_tick(void)
+void mus_tick_n(int n)
 {
     if (!s_mus.playing || s_mus.paused || !s_mus.current_song)
         return;
 
-    // Run 4 MUS ticks per game tick (140Hz / 35Hz = 4)
-    for (int t = 0; t < MUS_TICKS_PER_GAME; t++) {
+    for (int t = 0; t < n; t++) {
         // Consume delay
         if (s_mus.delay > 0) {
             s_mus.delay--;
@@ -768,6 +767,11 @@ void mus_tick(void)
     }
 }
 
+void mus_tick(void)
+{
+    mus_tick_n(MUS_TICKS_PER_GAME);
+}
+
 void mus_render(int16_t *buf, int count)
 {
     if (!s_mus.playing || s_mus.paused || !s_mus.initialized) {
@@ -775,11 +779,6 @@ void mus_render(int16_t *buf, int count)
         return;
     }
 
-    // OPL runs at OUTPUT_RATE — 1:1, no resampling needed
-    for (int i = 0; i < count; i++) {
-        int16_t opl_buf[2];
-        OPL3_Generate(&s_mus.opl, opl_buf);
-        buf[i * 2]     = opl_buf[0];
-        buf[i * 2 + 1] = opl_buf[1];
-    }
+    // OPL runs at OUTPUT_RATE — 1:1, batch for performance
+    OPL3_GenerateBatch(&s_mus.opl, buf, count);
 }

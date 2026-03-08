@@ -167,7 +167,8 @@ static void OPL3_EnvelopeUpdateRate(struct opl_slot *slot,
     }
 }
 
-static void OPL3_EnvelopeGenerate(opl3_chip *chip, struct opl_slot *slot)
+__attribute__((always_inline))
+static inline void OPL3_EnvelopeGenerate(opl3_chip *chip, struct opl_slot *slot)
 {
     uint8_t rate_h, rate_l;
     uint8_t inc = 0;
@@ -245,7 +246,8 @@ static void OPL3_EnvelopeGenerate(opl3_chip *chip, struct opl_slot *slot)
 
 // --- Phase Generator ---
 
-static void OPL3_PhaseGenerate(opl3_chip *chip, struct opl_slot *slot)
+__attribute__((always_inline))
+static inline void OPL3_PhaseGenerate(opl3_chip *chip, struct opl_slot *slot)
 {
     uint16_t f_num;
     uint32_t basefreq;
@@ -283,7 +285,8 @@ static void OPL3_PhaseGenerate(opl3_chip *chip, struct opl_slot *slot)
 
 // --- Operator Output ---
 
-static int16_t OPL3_SlotOutput(struct opl_slot *slot, int16_t modulation)
+__attribute__((always_inline))
+static inline int16_t OPL3_SlotOutput(struct opl_slot *slot, int16_t modulation)
 {
     uint16_t phase = (uint16_t)((slot->pg_phase_out + modulation) & 0x3ff);
     uint16_t neg = phase & 0x200;
@@ -447,6 +450,96 @@ void OPL3_Generate(opl3_chip *chip, int16_t *buf)
     if (accm < -32768) accm = -32768;
     buf[0] = (int16_t)accm;  // Left
     buf[1] = (int16_t)accm;  // Right (mono for OPL2)
+}
+
+// Batch generation: process 'count' mono samples into interleaved stereo buf
+void OPL3_GenerateBatch(opl3_chip *chip, int16_t *buf, int count)
+{
+    // Precompute active channel mask (channels where at least one slot is not OFF)
+    uint16_t active_mask = 0;
+    for (int ch = 0; ch < 9; ch++) {
+        struct opl_channel *chan = &chip->channel[ch];
+        if (chan->slots[0]->eg_gen != EG_OFF || chan->slots[1]->eg_gen != EG_OFF)
+            active_mask |= (1 << ch);
+    }
+
+    for (int i = 0; i < count; i++) {
+        int32_t accm = 0;
+
+        // Advance tremolo
+        chip->tremolopos++;
+        if (chip->tremolopos >= 210)
+            chip->tremolopos = 0;
+        chip->tremolo = (uint8_t)((chip->tremolopos < 105 ?
+                        chip->tremolopos : (210 - chip->tremolopos))
+                        >> chip->tremoloshift);
+
+        // Advance vibrato
+        chip->vibpos = (chip->vibpos + 1) & 31;
+
+        // Advance envelope timer
+        chip->eg_timer++;
+        chip->eg_add = 1;
+
+        // Advance noise
+        if (chip->noise & 1)
+            chip->noise ^= 0x800302;
+        chip->noise >>= 1;
+
+        // Process only active channels
+        uint16_t mask = active_mask;
+        while (mask) {
+            int ch = __builtin_ctz(mask);
+            mask &= mask - 1;
+
+            struct opl_channel *chan = &chip->channel[ch];
+            struct opl_slot *s0 = chan->slots[0];
+            struct opl_slot *s1 = chan->slots[1];
+
+            // Phase generation (inlined)
+            OPL3_PhaseGenerate(chip, s0);
+            OPL3_PhaseGenerate(chip, s1);
+
+            // Envelope generation (inlined)
+            OPL3_EnvelopeGenerate(chip, s0);
+            OPL3_EnvelopeGenerate(chip, s1);
+
+            // Check if channel became inactive after envelope update
+            if (s0->eg_gen == EG_OFF && s1->eg_gen == EG_OFF) {
+                active_mask &= ~(1 << ch);
+                continue;
+            }
+
+            // Operator output (inlined)
+            int16_t fb = 0;
+            if (chan->fb) {
+                fb = (s0->out + s0->fbmod) >> (9 - chan->fb);
+            }
+
+            int16_t op0_out = OPL3_SlotOutput(s0, fb);
+            s0->fbmod = s0->out;
+            s0->out = op0_out;
+
+            int16_t out;
+            if (chan->con) {
+                int16_t op1_out = OPL3_SlotOutput(s1, 0);
+                s1->out = op1_out;
+                out = op0_out + op1_out;
+            } else {
+                int16_t op1_out = OPL3_SlotOutput(s1, op0_out);
+                s1->out = op1_out;
+                out = op1_out;
+            }
+
+            accm += out;
+        }
+
+        // Clamp to 16-bit
+        if (accm > 32767)  accm = 32767;
+        if (accm < -32768) accm = -32768;
+        buf[i * 2]     = (int16_t)accm;  // Left
+        buf[i * 2 + 1] = (int16_t)accm;  // Right (mono for OPL2)
+    }
 }
 
 // Register write handler

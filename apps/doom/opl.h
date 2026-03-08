@@ -105,4 +105,7 @@ void OPL3_GenerateResampled(opl3_chip *chip, int16_t *buf);
 // Direct generation at native rate
 void OPL3_Generate(opl3_chip *chip, int16_t *buf);
 
+// Batch generation: process 'count' samples into interleaved stereo buf
+void OPL3_GenerateBatch(opl3_chip *chip, int16_t *buf, int count);
+
 #endif // OPL_H

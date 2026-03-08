@@ -142,6 +142,7 @@ void picos_main(const PicoCalcAPI *api,
     // of spinning forever in _exit()'s while(1).
     int exit_code = setjmp(g_exit_jmp);
     if (exit_code != 0) {
+        api->sys->setAudioCallback(NULL);  // stop Core 1 mixing
         api->sys->log("DOOM: exit() called, returning to launcher");
         return;
     }
@@ -158,5 +159,6 @@ void picos_main(const PicoCalcAPI *api,
         doomgeneric_Tick();
     }
 
+    api->sys->setAudioCallback(NULL);  // stop Core 1 mixing
     api->sys->log("DOOM: Exiting...");
 }

@@ -49,6 +49,9 @@ int         mus_is_playing(void);
 // Internally runs 4 MUS ticks per call (MUS rate = 140Hz)
 void        mus_tick(void);
 
+// Advance the MUS sequencer by exactly n individual 140Hz ticks
+void        mus_tick_n(int n);
+
 // Render PCM samples into buffer (stereo interleaved int16_t)
 // count = number of stereo sample pairs
 // Called from picos_snd_update() before pushSamples
