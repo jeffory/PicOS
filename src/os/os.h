@@ -90,6 +90,9 @@ typedef struct {
     void     (*close)(pcfile_t f);
     bool     (*exists)(const char *path);
     int      (*size)(const char *path);
+    int      (*fsize)(pcfile_t f);
+    bool     (*seek)(pcfile_t f, uint32_t offset);
+    uint32_t (*tell)(pcfile_t f);
     // List directory. Calls callback for each entry. Returns entry count.
     int      (*listDir)(const char *path,
                         void (*callback)(const char *name, bool is_dir, void *user),

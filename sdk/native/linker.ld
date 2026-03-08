@@ -52,6 +52,16 @@ SECTIONS {
      * Carries DT_REL / DT_RELA / DT_RELASZ entries that our loader reads. */
     .dynamic : { *(.dynamic) } :load :dyn
 
+    /* ── ARM exception index (needed by libgcc unwinder if setjmp/longjmp
+     *    is used).  __exidx_start/end must be defined or the link fails.
+     *    Placed before .data so it doesn't end up after .bss and inflate
+     *    the file with padding.                                           */
+    .ARM.exidx : {
+        __exidx_start = .;
+        *(.ARM.exidx* .ARM.extab*)
+        __exidx_end = .;
+    } :load
+
     /* ── Initialised data ────────────────────────────────────────────────── */
     .data : {
         *(.data .data.*)
@@ -70,7 +80,6 @@ SECTIONS {
         *(.comment)
         *(.note .note.*)
         *(.ARM.attributes)
-        *(.ARM.exidx* .ARM.extab*)
         *(.debug_*)
     }
 }

@@ -178,6 +178,14 @@ int sdcard_fsize(const char *path) {
     return size;
 }
 
+int sdcard_fsize_handle(sdfile_t f) {
+    if (!f) return -1;
+    recursive_mutex_enter_blocking(&g_sdcard_mutex);
+    int size = (int)f_size((FIL *)f);
+    recursive_mutex_exit(&g_sdcard_mutex);
+    return size;
+}
+
 bool sdcard_mkdir(const char *path) {
     if (!s_mounted) return false;
     recursive_mutex_enter_blocking(&g_sdcard_mutex);

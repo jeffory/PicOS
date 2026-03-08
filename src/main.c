@@ -307,6 +307,15 @@ static bool fs_exists(const char *path) {
 static int fs_size(const char *path) {
     return sdcard_fsize(path);
 }
+static int fs_fsize(pcfile_t f) {
+    return sdcard_fsize_handle((sdfile_t)f);
+}
+static bool fs_seek(pcfile_t f, uint32_t offset) {
+    return sdcard_fseek((sdfile_t)f, offset);
+}
+static uint32_t fs_tell(pcfile_t f) {
+    return sdcard_ftell((sdfile_t)f);
+}
 
 // Static-global callback state avoids passing a stack-allocated pointer
 // through the deep FatFS call chain (f_opendir → f_readdir → ...).
@@ -347,6 +356,9 @@ static picocalc_fs_t s_fs_impl = {
     .close = fs_close,
     .exists = fs_exists,
     .size = fs_size,
+    .fsize = fs_fsize,
+    .seek = fs_seek,
+    .tell = fs_tell,
     .listDir = fs_list_dir,
 };
 

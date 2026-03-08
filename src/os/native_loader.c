@@ -30,8 +30,8 @@
 
 // Maximum virtual address range accepted for a native app image.
 // Rejects malformed or malicious ELFs before attempting a heap allocation.
-// 2 MB is generous — real apps are well under 512 KB.
-#define NATIVE_MAX_IMAGE_SIZE (2u * 1024u * 1024u)
+// 5 MB is generous — real apps are well under 512 KB, but DOOM needs ~4MB.
+#define NATIVE_MAX_IMAGE_SIZE (5u * 1024u * 1024u)
 
 // =============================================================================
 // Minimal ELF32 type definitions
@@ -308,7 +308,7 @@ static bool native_run(const app_entry_t *app) {
          (unsigned long)mem_min, (unsigned long)mem_max);
 
   if (image_size > NATIVE_MAX_IMAGE_SIZE) {
-    show_error("ELF: image too large (>2MB)", NULL);
+    show_error("ELF: image too large (>5MB)", NULL);
     goto out;
   }
 
@@ -544,6 +544,12 @@ static bool native_run(const app_entry_t *app) {
     }
   }
 
+  // ── 6a. Free file buffer — no longer needed after relocation ───────────
+  // Save e_entry before freeing, since ehdr points into file_buf.
+  Elf32_Addr saved_entry = ehdr->e_entry;
+  umm_free(file_buf);
+  file_buf = NULL;
+
   // ── 7. Flush XIP cache and compute entry point ──────────────────────────
   __asm volatile ("dsb sy");
   xip_cache_invalidate_all();
@@ -551,7 +557,7 @@ static bool native_run(const app_entry_t *app) {
 
   // e_entry may have the Thumb bit set (bit 0 = 1); strip it for the offset
   // calculation, then re-apply for the function pointer call convention.
-  uintptr_t entry_voff_raw = ehdr->e_entry & ~1u;
+  uintptr_t entry_voff_raw = saved_entry & ~1u;
   uintptr_t entry_addr;
   if (split_mode && entry_voff_raw >= code_vaddr && entry_voff_raw < code_vend) {
     entry_addr = (uintptr_t)code_buf + (entry_voff_raw - code_vaddr);
