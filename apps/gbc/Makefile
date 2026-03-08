@@ -11,6 +11,7 @@ CFLAGS  = -mcpu=cortex-m33 -mthumb \
           -fpie -fno-plt -ffunction-sections -fdata-sections \
           -O3 -flto -Wall -Wextra -Wno-unused-parameter \
           -I. \
+          -I../../sdk/native \
           -IRP2350-GBC/inc \
           -IRP2350-GBC/ext/minigb_apu \
           -DPEANUT_GB_HIGH_LCD_ACCURACY=0 \
@@ -37,7 +38,7 @@ TARGET  = main.elf
 
 all: $(TARGET)
 
-$(TARGET): $(SRCS) linker.ld RP2350-GBC/inc/peanut_gb.h RP2350-GBC/ext/minigb_apu/minigb_apu.h os.h app_abi.h
+$(TARGET): $(SRCS) linker.ld RP2350-GBC/inc/peanut_gb.h RP2350-GBC/ext/minigb_apu/minigb_apu.h ../../sdk/native/os.h ../../sdk/native/app_abi.h
 	$(CC) $(CFLAGS) $(SRCS) $(LDFLAGS) -o $@
 	arm-none-eabi-size $@
 
