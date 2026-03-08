@@ -2,6 +2,7 @@
 #include "audio.h"
 #include "../hardware.h"
 #include "sdcard.h"
+#include "ff.h"       // direct FatFS calls for non-blocking SD reads
 #include "hardware/pwm.h"
 #include "hardware/clocks.h"
 #include "pico/stdlib.h"
@@ -308,7 +309,11 @@ bool fileplayer_play(fileplayer_t *player, uint8_t repeat_count) {
 
     if (!s_timer_active) {
         int interval_us = 1000000 / s_sample_rate;
-        add_repeating_timer_us(-interval_us, playback_callback, NULL, &s_playback_timer);
+        // Runs on Core 0 (default pool). Cannot use Core 1 alarm pool because
+        // at 44.1kHz the ISR interrupts CYW43 SPI1 transfers mid-transaction,
+        // causing WiFi header mismatch errors (0xffff reads).
+        add_repeating_timer_us(-interval_us, playback_callback, NULL,
+                               &s_playback_timer);
         s_timer_active = true;
     }
 
@@ -420,12 +425,16 @@ void fileplayer_update(void) {
 
     size_t space = s_ring_buffer.size - ring_buffer_available(&s_ring_buffer);
     if (space > 256) {
-        // Limit read size per update to avoid monopolizing the SD card mutex
-        size_t to_read = (space > 1024) ? 1024 : space;
-        int bytes_read = sdcard_fread(s_current_file, s_wav_buffer, to_read);
-        if (bytes_read > 0) {
-            ring_buffer_write(&s_ring_buffer, s_wav_buffer, bytes_read);
-        } else {
+        // Non-blocking: skip if Core 0 owns the SD card
+        if (!recursive_mutex_try_enter(&g_sdcard_mutex, NULL))
+            return;
+        size_t to_read = (space > 4096) ? 4096 : space;
+        UINT br = 0;
+        FRESULT res = f_read((FIL *)s_current_file, s_wav_buffer, to_read, &br);
+        recursive_mutex_exit(&g_sdcard_mutex);
+        if (res == FR_OK && br > 0) {
+            ring_buffer_write(&s_ring_buffer, s_wav_buffer, br);
+        } else if (res != FR_OK || br == 0) {
             if (s_active_player->loop) {
                 sdcard_fseek(s_current_file, 44);
                 s_active_player->position = 0;

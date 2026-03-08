@@ -296,29 +296,34 @@ static void launcher_apply_clock(uint32_t khz) {
   // 4. Apply the new system clock
   bool ok = set_sys_clock_khz(khz, false);
 
-  if (ok) {
-    // 5. Re-configure peripheral clock so SPI/I2C/UART/PWM stay stable.
-    clock_configure(
-        clk_peri,
-        0,
-        CLOCKS_CLK_PERI_CTRL_AUXSRC_VALUE_CLKSRC_PLL_SYS,
-        khz * 1000,
-        khz * 1000);
-
-    // 6. Update display PIO divider for new clk_sys frequency
-    display_apply_clock();
-
-    // 7. Update keyboard I2C divider for new clk_peri frequency
-    kbd_apply_clock();
-
-    // 8. Re-init UART baud rate (depends on clk_peri)
-#if LIB_PICO_STDIO_UART
-    uart_init(uart0, 115200);
-#endif
+  if (!ok) {
+    printf("[LAUNCHER] Clock change to %lu MHz failed (PLL cannot produce this frequency)\n",
+           (unsigned long)(khz / 1000));
+    g_core1_pause = false;
+    return;
   }
 
+  // 5. Re-configure peripheral clock so SPI/I2C/UART/PWM stay stable.
+  clock_configure(
+      clk_peri,
+      0,
+      CLOCKS_CLK_PERI_CTRL_AUXSRC_VALUE_CLKSRC_PLL_SYS,
+      khz * 1000,
+      khz * 1000);
+
+  // 6. Update display PIO divider for new clk_sys frequency
+  display_apply_clock();
+
+  // 7. Update keyboard I2C divider for new clk_peri frequency
+  kbd_apply_clock();
+
+  // 8. Re-init UART baud rate (depends on clk_peri)
+#if LIB_PICO_STDIO_UART
+  uart_init(uart0, 115200);
+#endif
+
   // 9. Down-clocking: Lower voltage AFTER decreasing frequency
-  if (khz < current_khz && ok) {
+  if (khz < current_khz) {
     enum vreg_voltage v = VREG_VOLTAGE_DEFAULT;
     if (khz >= 400000)
       v = VREG_VOLTAGE_1_25;

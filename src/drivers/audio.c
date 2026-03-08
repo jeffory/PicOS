@@ -6,6 +6,11 @@
 #include "pico/time.h"
 
 #include <math.h>
+#include <stdio.h>
+
+// Alarm pool created on Core 1 — all audio timer ISRs fire on Core 1,
+// keeping Core 0 free for the app/game loop.
+static alarm_pool_t *s_core1_alarm_pool = NULL;
 
 #define MIN_FREQ 20
 #define MAX_FREQ 20000
@@ -42,6 +47,19 @@ void audio_init(void) {
   pwm_init(s_pwm_slice_r, &cfg, false);
 
   audio_set_volume(100);
+}
+
+void audio_core1_init(void) {
+  // Hardware alarm 2 (default pool uses 3). 4 slots covers all audio
+  // timers: tone, sound sample, fileplayer, PCM stream.
+  s_core1_alarm_pool = alarm_pool_create(2, 4);
+  if (!s_core1_alarm_pool) {
+    printf("[AUDIO] WARNING: failed to create Core 1 alarm pool\n");
+  }
+}
+
+alarm_pool_t *audio_get_core1_alarm_pool(void) {
+  return s_core1_alarm_pool;
 }
 
 void audio_pwm_setup(uint32_t sample_rate) {
@@ -124,7 +142,12 @@ void audio_play_tone(uint32_t freq_hz, uint32_t duration_ms) {
 
   if (duration_ms > 0) {
     s_end_time_us = time_us_64() + (duration_ms * 1000);
-    add_repeating_timer_us(-1000, audio_timer_callback, NULL, &s_timer);
+    if (s_core1_alarm_pool) {
+      alarm_pool_add_repeating_timer_us(s_core1_alarm_pool, -1000,
+                                        audio_timer_callback, NULL, &s_timer);
+    } else {
+      add_repeating_timer_us(-1000, audio_timer_callback, NULL, &s_timer);
+    }
   } else {
     s_end_time_us = 0;
   }
@@ -201,7 +224,12 @@ void audio_start_stream(uint32_t sample_rate) {
 
   // Negative period = fixed interval regardless of callback duration
   int32_t period_us = -(int32_t)(1000000 / sample_rate);
-  add_repeating_timer_us(period_us, audio_stream_tick, NULL, &s_stream_timer);
+  if (s_core1_alarm_pool) {
+    alarm_pool_add_repeating_timer_us(s_core1_alarm_pool, period_us,
+                                      audio_stream_tick, NULL, &s_stream_timer);
+  } else {
+    add_repeating_timer_us(period_us, audio_stream_tick, NULL, &s_stream_timer);
+  }
 }
 
 void audio_stop_stream(void) {

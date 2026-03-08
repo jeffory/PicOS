@@ -2,6 +2,7 @@
 #include "audio.h"
 #include "../hardware.h"
 #include "sdcard.h"
+#include "ff.h"       // direct FatFS calls for non-blocking SD reads
 #include "pico/platform.h"
 #include "hardware/gpio.h"
 #include "hardware/pwm.h"
@@ -53,6 +54,7 @@ static int         s_buffer_pos = 0;
 static mp3_player_t s_player;
 static bool         s_initialized = false;
 static mutex_t      s_mp3_mutex;   // protects decode state from Core 0/1 races
+#define MAX_ERRORS_PER_UPDATE  32   // bail out of decode loop after this many recoverable errors
 
 // ── PCM ring buffer (PSRAM — written by decode, read by DMA ISR) ────────────
 static uint8_t *s_pcm_ring = NULL;
@@ -183,7 +185,7 @@ static void dma_audio_irq_handler(void) {
     s_dma_active_buf = next_buf;
 }
 
-// ── Refill compressed-data buffer from SD card ──────────────────────────────
+// ── Refill compressed-data buffer from SD card (non-blocking) ────────────────
 static bool refill_decode_buffer(void) {
     if (!s_file) return false;
 
@@ -195,13 +197,18 @@ static bool refill_decode_buffer(void) {
 
     int space = (int)MP3_DECODE_BUFFER_SIZE - s_bytes_in_buffer - MAD_BUFFER_GUARD;
     if (space > 0) {
-        // Limit read size to avoid monopolizing the SD card mutex
-        int to_read = (space > 1024) ? 1024 : space;
-        int rd = sdcard_fread(s_file, s_decode_buffer + s_bytes_in_buffer, to_read);
-        if (rd > 0)
-            s_bytes_in_buffer += rd;
+        // Non-blocking: skip if Core 0 owns the SD card
+        if (!recursive_mutex_try_enter(&g_sdcard_mutex, NULL))
+            goto pad;
+        int to_read = (space > 4096) ? 4096 : space;
+        UINT br = 0;
+        FRESULT res = f_read((FIL *)s_file, s_decode_buffer + s_bytes_in_buffer, to_read, &br);
+        recursive_mutex_exit(&g_sdcard_mutex);
+        if (res == FR_OK && br > 0)
+            s_bytes_in_buffer += (int)br;
     }
 
+pad:
     // Zero-pad guard bytes for libmad
     memset(s_decode_buffer + s_bytes_in_buffer, 0, MAD_BUFFER_GUARD);
 
@@ -217,6 +224,7 @@ static void decode_fill_ring(void) {
     // 1 frame = 1152 samples = ~26ms of audio — 5× the 5ms update interval,
     // so the ring buffer stays comfortably full even if updates are skipped.
     int frames_decoded = 0;
+    int errors_this_update = 0;
     while (frames_decoded < 1 && ring_free() >= 1152 * 2 * 2) {
         mad_stream_buffer(s_mad_stream, s_decode_buffer + s_buffer_pos, s_bytes_in_buffer + MAD_BUFFER_GUARD);
 
@@ -249,6 +257,10 @@ static void decode_fill_ring(void) {
             }
 
             if (MAD_RECOVERABLE(s_mad_stream->error)) {
+                if (++errors_this_update >= MAX_ERRORS_PER_UPDATE) {
+                    // Too many errors this update — release mutex, try again next cycle
+                    break;
+                }
                 continue;
             }
 
@@ -343,6 +355,7 @@ void mp3_player_reset(void) {
     s_bytes_in_buffer = 0;
     s_buffer_pos = 0;
     s_pcm_channels = 2;
+
     s_ring_rd = s_ring_wr = 0;
     if (s_mad_stream) mad_stream_init(s_mad_stream);
     if (s_mad_frame)  mad_frame_init(s_mad_frame);
@@ -429,6 +442,7 @@ bool mp3_player_load(mp3_player_t *player, const char *path) {
     }
     s_bytes_in_buffer = rd;
     s_buffer_pos = 0;
+
     s_ring_rd = s_ring_wr = 0;
 
     // Zero-pad guard bytes

@@ -380,6 +380,11 @@ static void core1_entry(void) {
   __asm volatile ("dsb sy" ::: "memory");
   __asm volatile ("isb sy" ::: "memory");
 
+  // Create audio alarm pool on Core 1 so all audio timer ISRs
+  // (tone, sound sample, fileplayer, PCM stream) fire here
+  // instead of interrupting the app/game loop on Core 0.
+  audio_core1_init();
+
   while (true) {
     if (g_core1_pause) {
       sleep_ms(1);

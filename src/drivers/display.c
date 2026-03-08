@@ -260,17 +260,13 @@ void display_apply_clock(void) {
   }
 
   uint32_t clk_hz = clock_get_hz(clk_sys);
-  float clkdiv;
-  
-  if (clk_hz == 300000000) {
-    // At 300MHz, a 100MHz SPI target gives a 1.5 divider (fractional).
-    // PIO fractional dividers jitter (alternating cycles), which ST7365P
-    // does not like. Use an integer divider of 2.0 -> 75MHz SPI.
-    clkdiv = 2.0f;
-  } else {
-    clkdiv = (float)clk_hz / (LCD_SPI_BAUD * 2);
-  }
-  
+  // Always use integer divider to avoid PIO jitter from fractional dividers.
+  // Round up so SPI clock never exceeds LCD_SPI_BAUD.
+  uint32_t target = LCD_SPI_BAUD * 2;
+  uint32_t int_div = (clk_hz + target - 1) / target;
+  if (int_div < 1) int_div = 1;
+  float clkdiv = (float)int_div;
+
   pio_sm_set_clkdiv(LCD_PIO, s_pio_sm, clkdiv);
 }
 
@@ -283,8 +279,10 @@ void display_init(void) {
   // Disable auto-pull. Manual PULL fetches new word. Shift from MSB.
   sm_config_set_out_shift(&cfg_pio, false, false, 32);
   sm_config_set_fifo_join(&cfg_pio, PIO_FIFO_JOIN_TX);
-  float clkdiv = (float)clock_get_hz(clk_sys) / (LCD_SPI_BAUD * 2);
-  sm_config_set_clkdiv(&cfg_pio, clkdiv);
+  uint32_t init_target = LCD_SPI_BAUD * 2;
+  uint32_t init_div = (clock_get_hz(clk_sys) + init_target - 1) / init_target;
+  if (init_div < 1) init_div = 1;
+  sm_config_set_clkdiv(&cfg_pio, (float)init_div);
 
   s_pio_sm = pio_claim_unused_sm(LCD_PIO, true);
   pio_sm_init(LCD_PIO, s_pio_sm, offset, &cfg_pio);
