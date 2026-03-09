@@ -172,7 +172,7 @@ void audio_set_volume(uint8_t volume) {
 
 // --- PCM sample streaming via ring buffer + repeating timer -----------------
 
-#define AUDIO_RING_SIZE 4096 // must be power of 2
+#define AUDIO_RING_SIZE 8192 // must be power of 2
 #define AUDIO_RING_MASK (AUDIO_RING_SIZE - 1)
 
 static uint8_t s_ring_l[AUDIO_RING_SIZE];

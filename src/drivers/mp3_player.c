@@ -23,7 +23,10 @@
 #include <stdlib.h>
 
 #define MP3_DECODE_BUFFER_SIZE (8192 + MAD_BUFFER_GUARD)
-#define PCM_RING_SIZE          16384  // bytes — ~4096 stereo samples (~170ms @ 24kHz)
+#define PCM_RING_SIZE          32768  // bytes — ~8192 stereo samples (~340ms @ 24kHz)
+                                      // Doubled from 16384 to give decode more headroom
+                                      // if Core 1 misses a 5ms update cycle.
+                                      // Costs 16KB of PSRAM from the Lua heap.
 #define DMA_BUF_SAMPLES        256   // samples per DMA buffer (~10.7ms @ 24kHz)
 
 #define PWM_WRAP  2047
@@ -56,10 +59,19 @@ static bool         s_initialized = false;
 static mutex_t      s_mp3_mutex;   // protects decode state from Core 0/1 races
 #define MAX_ERRORS_PER_UPDATE  32   // bail out of decode loop after this many recoverable errors
 
-// ── PCM ring buffer (PSRAM — written by decode, read by DMA ISR) ────────────
+// ── PCM ring buffer ─────────────────────────────────────────────────────────
+// Always uses QMI PSRAM via umm_malloc. PIO PSRAM's 27-byte chunk limit makes
+// it ~70x slower than memcpy for the 4608-byte writes each decode frame needs.
 static uint8_t *s_pcm_ring = NULL;
 static volatile size_t s_ring_rd = 0;
 static volatile size_t s_ring_wr = 0;
+
+// Staging buffer for the DMA ISR — sits in SRAM for fast access.
+// 4KB ≈ 21ms @ 48kHz stereo — enough headroom to survive a full decode cycle.
+#define STAGING_BUF_SIZE  (DMA_BUF_SAMPLES * 4 * 4)  // 4096 bytes
+static uint8_t  s_staging_buf[STAGING_BUF_SIZE] __attribute__((aligned(4)));
+static size_t   s_staging_avail = 0;  // bytes available in staging buf
+static size_t   s_staging_pos   = 0;  // read position in staging buf
 
 static inline size_t __time_critical_func(ring_available)(void) {
     size_t wr = s_ring_wr, rd = s_ring_rd;
@@ -70,7 +82,7 @@ static inline size_t __time_critical_func(ring_free)(void) {
     return PCM_RING_SIZE - 1 - ring_available();
 }
 
-static void __time_critical_func(ring_write)(const uint8_t *data, size_t len) {
+static void ring_write(const uint8_t *data, size_t len) {
     while (len > 0) {
         size_t wr = s_ring_wr;
         size_t free_space = ring_free();
@@ -78,11 +90,12 @@ static void __time_critical_func(ring_write)(const uint8_t *data, size_t len) {
 
         size_t chunk = (len < free_space) ? len : free_space;
         size_t to_end = PCM_RING_SIZE - wr;
+
         if (chunk <= to_end) {
             memcpy(s_pcm_ring + wr, data, chunk);
         } else {
-            memcpy(s_pcm_ring, data + to_end, chunk - to_end);
             memcpy(s_pcm_ring + wr, data, to_end);
+            memcpy(s_pcm_ring, data + to_end, chunk - to_end);
         }
         s_ring_wr = (wr + chunk) % PCM_RING_SIZE;
         data += chunk;
@@ -103,7 +116,40 @@ static unsigned int s_pwm_slice = 0;
 static volatile bool s_dma_start_pending = false;
 static bool          s_irq_on_core1 = false;
 
-// ── Fill one DMA buffer from the PCM ring (called from DMA ISR) ─────────────
+// ── Refill the SRAM staging buffer from the PCM ring ────────────────────────
+// Called from mp3_player_update() (Core 1, non-ISR context) to keep the
+// staging buffer topped up before the decode cycle begins.
+static void refill_staging_buf(void) {
+    if (s_staging_avail >= STAGING_BUF_SIZE / 2)
+        return;  // still half full, no need to refill yet
+
+    // Compact: move unconsumed data to front
+    if (s_staging_pos > 0 && s_staging_avail > 0) {
+        memmove(s_staging_buf, s_staging_buf + s_staging_pos, s_staging_avail);
+    }
+    s_staging_pos = 0;
+
+    size_t space = STAGING_BUF_SIZE - s_staging_avail;
+    size_t avail = ring_available();
+    size_t to_read = (space < avail) ? space : avail;
+    if (to_read == 0) return;
+
+    size_t rd = s_ring_rd;
+    size_t to_end = PCM_RING_SIZE - rd;
+
+    if (to_read <= to_end) {
+        memcpy(s_staging_buf + s_staging_avail, s_pcm_ring + rd, to_read);
+    } else {
+        memcpy(s_staging_buf + s_staging_avail, s_pcm_ring + rd, to_end);
+        memcpy(s_staging_buf + s_staging_avail + to_end, s_pcm_ring,
+               to_read - to_end);
+    }
+    s_ring_rd = (rd + to_read) % PCM_RING_SIZE;
+    s_staging_avail += to_read;
+}
+
+// ── Fill one DMA buffer from the staging buffer (called from DMA ISR) ───────
+// Reads only from SRAM (s_staging_buf) — never touches PIO PSRAM directly.
 static void __time_critical_func(fill_dma_buffer)(uint32_t *buf, int count) {
     size_t bytes_per_pair = (s_pcm_channels > 1) ? 4 : 2;
     uint32_t vol = s_player.volume;
@@ -111,17 +157,14 @@ static void __time_critical_func(fill_dma_buffer)(uint32_t *buf, int count) {
     for (int i = 0; i < count; i++) {
         int32_t lv, rv;
 
-        if (ring_available() < bytes_per_pair) {
+        if (s_staging_avail < bytes_per_pair) {
             lv = PWM_MID;
             rv = PWM_MID;
         } else {
             uint8_t raw[4];
-            size_t rd = s_ring_rd;
-            for (size_t j = 0; j < bytes_per_pair; j++) {
-                raw[j] = s_pcm_ring[rd];
-                rd = (rd + 1) % PCM_RING_SIZE;
-            }
-            s_ring_rd = rd;
+            memcpy(raw, s_staging_buf + s_staging_pos, bytes_per_pair);
+            s_staging_pos   += bytes_per_pair;
+            s_staging_avail -= bytes_per_pair;
 
             int16_t left, right;
             memcpy(&left, raw, 2);
@@ -220,12 +263,18 @@ static void decode_fill_ring(void) {
     if (!s_player.playing || s_player.paused || !s_mad_stream || !s_file)
         return;
 
-    // Decode 1 frame per update to minimize PSRAM bus contention with Core 0.
-    // 1 frame = 1152 samples = ~26ms of audio — 5× the 5ms update interval,
-    // so the ring buffer stays comfortably full even if updates are skipped.
+    // Batch decode: only decode when ring buffer is below 50% capacity,
+    // then decode up to 3 frames to refill quickly.  This creates bursty
+    // PSRAM access (~10ms decode burst, ~30-40ms idle) instead of constant
+    // pressure every 5ms, reducing QMI contention with Core 0's XIP cache.
+    size_t avail = ring_available();
+    if (avail > PCM_RING_SIZE / 2)
+        return;  // ring buffer is >50% full, skip this cycle
+
+    int max_frames = 3;
     int frames_decoded = 0;
     int errors_this_update = 0;
-    while (frames_decoded < 1 && ring_free() >= 1152 * 2 * 2) {
+    while (frames_decoded < max_frames && ring_free() >= 1152 * 2 * 2) {
         mad_stream_buffer(s_mad_stream, s_decode_buffer + s_buffer_pos, s_bytes_in_buffer + MAD_BUFFER_GUARD);
 
         if (mad_frame_decode(s_mad_frame, s_mad_stream) != 0) {
@@ -357,6 +406,8 @@ void mp3_player_reset(void) {
     s_pcm_channels = 2;
 
     s_ring_rd = s_ring_wr = 0;
+    s_staging_avail = 0;
+    s_staging_pos = 0;
     if (s_mad_stream) mad_stream_init(s_mad_stream);
     if (s_mad_frame)  mad_frame_init(s_mad_frame);
     if (s_mad_synth)  mad_synth_init(s_mad_synth);
@@ -397,6 +448,7 @@ bool mp3_player_init(void) {
             printf("[MP3] FAILED to alloc ring buffer\n");
             return false;
         }
+        printf("[MP3] PCM ring buffer → QMI PSRAM (umm_malloc, %d bytes)\n", PCM_RING_SIZE);
     }
 
     memset(&s_player, 0, sizeof(s_player));
@@ -556,7 +608,10 @@ bool mp3_player_play(mp3_player_t *player, uint8_t repeat_count) {
 
     // Pre-fill ring buffer before starting playback
     s_ring_rd = s_ring_wr = 0;
+    s_staging_avail = 0;
+    s_staging_pos = 0;
     decode_fill_ring();
+    refill_staging_buf();
 
     setup_playback_hw();
 
@@ -592,6 +647,8 @@ void mp3_player_stop(mp3_player_t *player) {
     s_bytes_in_buffer = 0;
     s_buffer_pos = 0;
     s_ring_rd = s_ring_wr = 0;
+    s_staging_avail = 0;
+    s_staging_pos = 0;
 
     mutex_exit(&s_mp3_mutex);
 }
@@ -665,6 +722,7 @@ void mp3_player_update(void) {
     }
 
     if (s_player.playing && !s_player.paused) {
+        refill_staging_buf();
         decode_fill_ring();
     }
     mutex_exit(&s_mp3_mutex);

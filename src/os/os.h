@@ -104,6 +104,8 @@ typedef struct {
 typedef struct {
     // Milliseconds since boot
     uint32_t (*getTimeMs)(void);
+    // Microseconds since boot (64-bit, for high-precision timing)
+    uint64_t (*getTimeUs)(void);
     // Trigger a system reboot
     void     (*reboot)(void);
     // Battery level 0-100 (from STM32 via I2C). -1 = unknown/USB powered.
@@ -125,6 +127,10 @@ typedef struct {
     // menu.  Native apps should check this each frame and return from
     // picos_main() when it fires.
     bool     (*shouldExit)(void);
+    // Register a callback to be called on Core 1 every 5ms, alongside
+    // audio updates.  Used by native apps (e.g. DOOM) to offload audio
+    // mixing from Core 0.  Pass NULL to deregister.
+    void     (*setAudioCallback)(void (*cb)(void));
 } picocalc_sys_t;
 
 // --- Audio ------------------------------------------------------------------
@@ -209,6 +215,27 @@ typedef struct {
     bool (*confirm)(const char *message);
 } picocalc_ui_t;
 
+// --- PSRAM Benchmark ---------------------------------------------------------
+
+typedef struct {
+    // Check if PIO PSRAM (mainboard) is available
+    bool (*pioAvailable)(void);
+    // Check if PIO PSRAM bulk driver is available
+    bool (*pioBulkAvailable)(void);
+    // Read from PIO PSRAM (original driver, 27B chunks)
+    void (*pioRead)(uint32_t addr, uint8_t *dst, uint32_t len);
+    // Write to PIO PSRAM (original driver, 27B chunks)
+    void (*pioWrite)(uint32_t addr, const uint8_t *src, uint32_t len);
+    // Read from PIO PSRAM (bulk driver, 8KB chunks)
+    void (*pioBulkRead)(uint32_t addr, uint8_t *dst, uint32_t len);
+    // Write to PIO PSRAM (bulk driver, 8KB chunks)
+    void (*pioBulkWrite)(uint32_t addr, const uint8_t *src, uint32_t len);
+    // Allocate memory in QMI PSRAM (via umm_malloc)
+    void *(*qmiAlloc)(uint32_t size);
+    // Free memory from QMI PSRAM (via umm_free)
+    void (*qmiFree)(void *ptr);
+} picocalc_psram_t;
+
 // --- The complete OS API struct ---------------------------------------------
 // This is what gets passed to every Lua environment and future C app loaders.
 
@@ -221,7 +248,13 @@ typedef struct PicoCalcAPI {
     const picocalc_wifi_t    *wifi;
     const picocalc_tcp_t     *tcp;
     const picocalc_ui_t      *ui;
+    const picocalc_psram_t   *psram;
 } PicoCalcAPI;
 
 // The global API instance, populated during os_init()
 extern PicoCalcAPI g_api;
+
+// Optional audio callback for native apps that need Core 1 mixing.
+// Set by the native app at startup, cleared on exit. Called every 5ms
+// from core1_entry() alongside mp3_player_update()/fileplayer_update().
+extern void (*g_native_audio_callback)(void);

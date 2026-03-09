@@ -83,6 +83,8 @@ static void menu_lua_hook(lua_State *L, lua_Debug *ar) {
 }
 
 
+void lua_bridge_game_init(lua_State *L);
+
 void lua_bridge_register(lua_State *L) {
   printf("[LUA] lua_bridge_register start, PSRAM free=%lu\n",
          (unsigned long)umm_free_heap_size());
@@ -138,6 +140,8 @@ void lua_bridge_register(lua_State *L) {
   lua_bridge_repl_init(L);
   printf("[LUA] registering video...\n");
   lua_bridge_video_init(L);
+  printf("[LUA] registering game...\n");
+  lua_bridge_game_init(L);
   printf("[LUA] all modules done, PSRAM free=%lu\n",
          (unsigned long)umm_free_heap_size());
   // Set as global

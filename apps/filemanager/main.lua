@@ -399,24 +399,28 @@ end
 
 -- ── Drawing: Video player ────────────────────────────────────────────────────
 local function draw_vid_view()
-  if not vid_player then return end
+    if not vid_player then return end
 
-  local paused = vid_player:isPaused()
+    local paused = vid_player:isPaused()
 
-  if paused then
-    -- Full header when paused
-    disp.fillRect(0, 0, SW, HDR_H, HDR_ACT)
-    disp.drawText(1, 2, pad("Video: " .. vid_name, 53), WHITE, HDR_ACT)
-    disp.drawText(140, 150, "PAUSED", YELLOW, BG)
-  end
+    if paused then
+        disp.fillRect(0, 0, SW, HDR_H, HDR_ACT)
+        disp.drawText(1, 2, pad("Video: " .. vid_name, 53), WHITE, HDR_ACT)
+        disp.drawText(140, 150, "PAUSED", YELLOW, BG)
+    end
 
-  -- FPS counter always visible (small dark background for readability)
-  local fps = vid_player:getFPS()
-  local fps_str = string.format("%.1f FPS", fps)
-  local fw = #fps_str * CHAR_W
-  local fx = SW - fw - 2
-  disp.fillRect(fx, 0, fw + 2, CHAR_H + 2, BG)
-  disp.drawText(fx + 1, 1, fps_str, YELLOW, BG)
+    local fps = vid_player:getFPS()
+    local fps_str = string.format("%.1f FPS", fps)
+    local fw = #fps_str * CHAR_W
+    local fx = SW - fw - 2
+    disp.fillRect(fx, 0, fw + 2, CHAR_H + 2, BG)
+    disp.drawText(fx + 1, 1, fps_str, YELLOW, BG)
+
+    local info = vid_player:getInfo()
+    local drop_str = string.format("Drop:%d", info.dropped_frames or 0)
+    local dw = #drop_str * CHAR_W
+    disp.fillRect(0, 0, dw + 2, CHAR_H + 2, BG)
+    disp.drawText(1, 1, drop_str, info.dropped_frames > 50 and disp.RED or CYAN, BG)
 end
 
 local function open_vid_view(path, fname)
@@ -435,35 +439,35 @@ local function open_vid_view(path, fname)
 end
 
 local function handle_vid_view(pressed)
-  if not vid_player then state = ST.BROWSE; return end
-  
-  local ch = input.getChar()
-  if pressed & input.BTN_ESC ~= 0 then
-    vid_player:stop(); vid_player = nil; state = ST.BROWSE; return
-  end
-  
-  if pressed & input.BTN_ENTER ~= 0 or pressed & input.BTN_F3 ~= 0 or ch == " " then
-    if vid_player:isPaused() then
-      vid_player:resume()
-    else
-      vid_player:pause()
+    if not vid_player then state = ST.BROWSE; return end
+
+    local ch = input.getChar()
+    if pressed & input.BTN_ESC ~= 0 then
+        vid_player:stop(); vid_player = nil; state = ST.BROWSE; return
     end
-  end
 
-  local info = vid_player:getInfo()
-  -- Calculate frames for 5 seconds (assuming file metadata is correct)
-  local skip_frames = math.floor(5 * (info.frames / (info.frames * (1/20)))) -- Default to 20fps if unknown
-  -- Better: use the actual frame duration if we had it, but info.frames / duration is fine
-  -- For now let's assume ~20fps -> 100 frames
-  skip_frames = 100 
+    if pressed & input.BTN_ENTER ~= 0 or pressed & input.BTN_F3 ~= 0 or ch == " " then
+        if vid_player:isPaused() then
+            vid_player:resume()
+        else
+            vid_player:pause()
+        end
+    end
 
-  if pressed & input.BTN_RIGHT ~= 0 then
-    vid_player:seek(info.current_frame + skip_frames)
-  elseif pressed & input.BTN_LEFT ~= 0 then
-    local target = info.current_frame - skip_frames
-    if target < 0 then target = 0 end
-    vid_player:seek(target)
-  end
+    local info = vid_player:getInfo()
+    local fps = info.frames > 0 and (info.frames / (info.frames * (info.frames / 100))) or 20
+    local skip_frames = math.floor(3 * fps)
+    skip_frames = math.max(60, skip_frames)
+
+    if pressed & input.BTN_RIGHT ~= 0 then
+        vid_player:seek(info.current_frame + skip_frames)
+        vid_player:resetStats()
+    elseif pressed & input.BTN_LEFT ~= 0 then
+        local target = info.current_frame - skip_frames
+        if target < 0 then target = 0 end
+        vid_player:seek(target)
+        vid_player:resetStats()
+    end
 end
 
 -- ── Commands ─────────────────────────────────────────────────────────────────

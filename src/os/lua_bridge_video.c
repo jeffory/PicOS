@@ -101,7 +101,20 @@ static int l_video_getInfo(lua_State *L) {
     lua_pushinteger(L, player->height); lua_setfield(L, -2, "height");
     lua_pushinteger(L, player->frame_count); lua_setfield(L, -2, "frames");
     lua_pushinteger(L, player->current_frame); lua_setfield(L, -2, "current_frame");
+    lua_pushinteger(L, video_player_get_dropped_frames(player)); lua_setfield(L, -2, "dropped_frames");
     return 1;
+}
+
+static int l_video_getDroppedFrames(lua_State *L) {
+    video_player_t *player = check_video(L, 1);
+    lua_pushinteger(L, video_player_get_dropped_frames(player));
+    return 1;
+}
+
+static int l_video_resetStats(lua_State *L) {
+    video_player_t *player = check_video(L, 1);
+    video_player_reset_stats(player);
+    return 0;
 }
 
 static int l_video_setLoop(lua_State *L) {
@@ -135,6 +148,8 @@ static const luaL_Reg video_methods[] = {
     {"getFPS", l_video_getFPS},
     {"getSize", l_video_getSize},
     {"getInfo", l_video_getInfo},
+    {"getDroppedFrames", l_video_getDroppedFrames},
+    {"resetStats", l_video_resetStats},
     {"setLoop", l_video_setLoop},
     {"setAutoFlush", l_video_setAutoFlush},
     {"__gc", l_video_gc},

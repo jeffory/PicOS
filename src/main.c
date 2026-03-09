@@ -162,6 +162,8 @@ void __attribute__((naked)) isr_hardfault(void) {
 #include "drivers/audio.h"
 #include "drivers/fileplayer.h"
 #include "drivers/mp3_player.h"
+#include "drivers/pio_psram.h"
+#include "drivers/pio_psram_bulk.h"
 #include "drivers/sound.h"
 #include "drivers/display.h"
 #include "drivers/http.h"
@@ -177,6 +179,7 @@ void __attribute__((naked)) isr_hardfault(void) {
 #include "os/system_menu.h"
 #include "os/text_input.h"
 #include "os/ui.h"
+#include "umm_malloc.h"
 
 // ── OS API implementation stubs (wiring the function pointer table)
 // ─────────── Full implementations live in each driver. This wires them all
@@ -222,6 +225,9 @@ static picocalc_display_t s_display_impl = {
 static uint32_t sys_getTimeMs(void) {
   return to_ms_since_boot(get_absolute_time());
 }
+static uint64_t sys_getTimeUs(void) {
+  return time_us_64();
+}
 static void sys_reboot(void) {
   watchdog_enable(1, true);
   for (;;)
@@ -259,8 +265,13 @@ static bool sys_shouldExit(void) {
   return v;
 }
 
+static void sys_setAudioCallback(void (*cb)(void)) {
+  g_native_audio_callback = cb;
+}
+
 static picocalc_sys_t s_sys_impl = {
     .getTimeMs = sys_getTimeMs,
+    .getTimeUs = sys_getTimeUs,
     .reboot = sys_reboot,
     .getBatteryPercent = kbd_get_battery_percent,
     .isUSBPowered = sys_isUSBPowered,
@@ -269,6 +280,7 @@ static picocalc_sys_t s_sys_impl = {
     .log = sys_log,
     .poll = sys_poll,
     .shouldExit = sys_shouldExit,
+    .setAudioCallback = sys_setAudioCallback,
 };
 
 static picocalc_wifi_t s_wifi_impl = {
@@ -349,6 +361,27 @@ static const picocalc_ui_t s_ui_impl = {
     .confirm         = ui_confirm,
 };
 
+// PSRAM wrapper functions
+static bool psram_pio_available(void) { return pio_psram_available(); }
+static bool psram_pio_bulk_available(void) { return pio_psram_bulk_available(); }
+static void psram_pio_read(uint32_t addr, uint8_t *dst, uint32_t len) { pio_psram_read(addr, dst, len); }
+static void psram_pio_write(uint32_t addr, const uint8_t *src, uint32_t len) { pio_psram_write(addr, src, len); }
+static void psram_pio_bulk_read(uint32_t addr, uint8_t *dst, uint32_t len) { pio_psram_bulk_read_large(addr, dst, len); }
+static void psram_pio_bulk_write(uint32_t addr, const uint8_t *src, uint32_t len) { pio_psram_bulk_write_large(addr, src, len); }
+static void *psram_qmi_alloc(uint32_t size) { return umm_malloc(size); }
+static void psram_qmi_free(void *ptr) { umm_free(ptr); }
+
+static const picocalc_psram_t s_psram_impl = {
+    .pioAvailable     = psram_pio_available,
+    .pioBulkAvailable = psram_pio_bulk_available,
+    .pioRead          = psram_pio_read,
+    .pioWrite         = psram_pio_write,
+    .pioBulkRead      = psram_pio_bulk_read,
+    .pioBulkWrite     = psram_pio_bulk_write,
+    .qmiAlloc         = psram_qmi_alloc,
+    .qmiFree          = psram_qmi_free,
+};
+
 static picocalc_fs_t s_fs_impl = {
     .open = fs_open,
     .read = fs_read,
@@ -373,6 +406,10 @@ static picocalc_fs_t s_fs_impl = {
 // Core 1's umm_malloc/umm_free and the ELF loader on Core 0.
 volatile bool g_core1_pause = false;
 
+// Optional audio callback for native apps (e.g. DOOM) that offload mixing
+// to Core 1.  Set by the app at startup, cleared on exit.
+void (*g_native_audio_callback)(void) = NULL;
+
 static void core1_entry(void) {
   // Clear UNALIGN_TRP on Core 1 (each core has its own SCB/CCR)
   volatile uint32_t *scb_ccr = (volatile uint32_t *)(0xE000ED14);
@@ -392,8 +429,11 @@ static void core1_entry(void) {
     }
     wifi_poll();
     http_fire_c_pending();
+
     mp3_player_update();
     fileplayer_update();
+    if (g_native_audio_callback)
+      g_native_audio_callback();
     sleep_ms(5);
   }
 }
@@ -434,6 +474,7 @@ int main(void) {
   g_api.audio = &s_audio_impl;
   g_api.tcp = &s_tcp_impl;
   g_api.ui = &s_ui_impl;
+  g_api.psram = &s_psram_impl;
   // fs wired after SD card init
 
   // Explicitly configure PSRAM hardware pins and XIP write logic for the Pico
@@ -448,6 +489,15 @@ int main(void) {
 
   // Initialise display first so we can show progress
   display_init();
+
+  // Initialise mainboard PIO PSRAM (8MB on PIO1, independent of QMI PSRAM).
+  // Non-fatal if chip not present (some boards may not have it).
+  pio_psram_init();
+
+  // Initialise bulk transfer driver (up to 8187 bytes per transaction).
+  // DISABLED: conflicts with original driver on PIO1.
+  // pio_psram_bulk_init();
+
   sound_init();
   audio_init();
   ui_draw_splash("Initialising keyboard...", NULL);

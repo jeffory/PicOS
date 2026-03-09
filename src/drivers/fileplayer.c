@@ -3,10 +3,7 @@
 #include "../hardware.h"
 #include "sdcard.h"
 #include "ff.h"       // direct FatFS calls for non-blocking SD reads
-#include "hardware/pwm.h"
-#include "hardware/clocks.h"
 #include "pico/stdlib.h"
-#include "pico/time.h"
 #include "mp3_player.h"
 #include "umm_malloc.h"
 
@@ -16,82 +13,15 @@
 
 #define WAV_BUFFER_SIZE FILEPLAYER_BUFFER_SIZE
 
-typedef struct {
-    uint8_t *buffer;
-    volatile size_t read_pos;
-    volatile size_t write_pos;
-    size_t size;
-    volatile bool underflow;
-} ring_buffer_t;
-
-static ring_buffer_t s_ring_buffer;
 static fileplayer_t s_players[FILEPLAYER_MAX_INSTANCES];
 static fileplayer_t *s_active_player = NULL;
-static repeating_timer_t s_playback_timer;
-static bool s_timer_active = false;
 static uint32_t s_sample_rate = 44100;
 static uint8_t s_volume_l = 100;
 static uint8_t s_volume_r = 100;
 static bool s_initialized = false;
 static sdfile_t s_current_file = NULL;
 static uint8_t *s_wav_buffer = NULL;
-
-static void ring_buffer_init(ring_buffer_t *rb, size_t size) {
-    rb->buffer = umm_malloc(size);
-    rb->size = size;
-    rb->read_pos = 0;
-    rb->write_pos = 0;
-    rb->underflow = false;
-}
-
-static size_t ring_buffer_write(ring_buffer_t *rb, const uint8_t *data, size_t len) {
-    size_t written = 0;
-    for (size_t i = 0; i < len; i++) {
-        size_t next = (rb->write_pos + 1) % rb->size;
-        if (next == rb->read_pos) {
-            break;
-        }
-        rb->buffer[rb->write_pos] = data[i];
-        rb->write_pos = next;
-        written++;
-    }
-    return written;
-}
-
-static size_t ring_buffer_read(ring_buffer_t *rb, uint8_t *data, size_t len) {
-    size_t available = (rb->write_pos >= rb->read_pos) ?
-        (rb->write_pos - rb->read_pos) :
-        (rb->size - rb->read_pos + rb->write_pos);
-    
-    if (available == 0) {
-        rb->underflow = true;
-        return 0;
-    }
-
-    size_t to_read = (len < available) ? len : available;
-    size_t first = (rb->size - rb->read_pos);
-    if (first >= to_read) {
-        memcpy(data, rb->buffer + rb->read_pos, to_read);
-        rb->read_pos = (rb->read_pos + to_read) % rb->size;
-    } else {
-        memcpy(data, rb->buffer + rb->read_pos, first);
-        memcpy(data + first, rb->buffer, to_read - first);
-        rb->read_pos = to_read - first;
-    }
-
-    if (available > 0) {
-        rb->underflow = false;
-    }
-
-    return to_read;
-}
-
-static size_t ring_buffer_available(ring_buffer_t *rb) {
-    if (rb->write_pos >= rb->read_pos) {
-        return rb->write_pos - rb->read_pos;
-    }
-    return rb->size - rb->read_pos + rb->write_pos;
-}
+static volatile bool s_underflow = false;
 
 static bool parse_wav_header(sdfile_t f, uint32_t *sample_rate, uint16_t *channels, uint16_t *bits_per_sample, uint32_t *data_size) {
     uint8_t header[44];
@@ -127,7 +57,7 @@ static bool parse_wav_header(sdfile_t f, uint32_t *sample_rate, uint16_t *channe
 static fileplayer_type_t detect_file_type(sdfile_t f) {
     uint8_t header[16];
     memset(header, 0, sizeof(header));
-    
+
     if (sdcard_fread(f, header, sizeof(header)) < (int)sizeof(header)) {
         return FILEPLAYER_TYPE_UNKNOWN;
     }
@@ -151,72 +81,22 @@ static fileplayer_type_t detect_file_type(sdfile_t f) {
     return FILEPLAYER_TYPE_UNKNOWN;
 }
 
-static bool playback_callback(repeating_timer_t *rt) {
-    (void)rt;
-
-    if (!s_active_player || s_active_player->state != FILEPLAYER_STATE_PLAYING) {
-        return true;
-    }
-
-    size_t bytes_per_sample = 2 * s_active_player->channels;
-    size_t to_read = bytes_per_sample;
-
-    if (ring_buffer_available(&s_ring_buffer) < to_read) {
-        return true;
-    }
-
-    uint8_t sample_buf[8];
-    if (ring_buffer_read(&s_ring_buffer, sample_buf, to_read) < to_read) {
-        return true;
-    }
-
-    int16_t left = *(int16_t *)sample_buf;
-    int16_t right = (s_active_player->channels >= 2) ?
-        *(int16_t *)(sample_buf + 2) : left;
-
-    int32_t left_val = ((int32_t)left + 32768) * s_volume_l / 100;
-    int32_t right_val = ((int32_t)right + 32768) * s_volume_r / 100;
-
-    left_val = ((uint64_t)left_val * 128) / 255;
-    right_val = ((uint64_t)right_val * 128) / 255;
-
-    if (left_val > 255) left_val = 255;
-    if (right_val > 255) right_val = 255;
-
-    pwm_set_gpio_level(AUDIO_PIN_L, (uint8_t)left_val);
-    pwm_set_gpio_level(AUDIO_PIN_R, (uint8_t)right_val);
-
-    s_active_player->position += to_read;
-
-    return true;
-}
-
 void fileplayer_reset(void) {
     if (!s_initialized) return;
-    if (s_timer_active) {
-        cancel_repeating_timer(&s_playback_timer);
-        s_timer_active = false;
-    }
+    if (s_active_player && s_active_player->state == FILEPLAYER_STATE_PLAYING)
+        audio_stop_stream();
     if (s_current_file) {
         sdcard_fclose(s_current_file);
         s_current_file = NULL;
     }
     memset(s_players, 0, sizeof(s_players));
     s_active_player = NULL;
-    s_ring_buffer.read_pos = 0;
-    s_ring_buffer.write_pos = 0;
-    s_ring_buffer.underflow = false;
-    pwm_set_gpio_level(AUDIO_PIN_L, 0);
-    pwm_set_gpio_level(AUDIO_PIN_R, 0);
+    s_underflow = false;
 }
 
 void fileplayer_init(void) {
     if (s_initialized) return;
 
-    printf("[FILEPLAYER] Allocating ring buffer (%d bytes)...\n", WAV_BUFFER_SIZE);
-    ring_buffer_init(&s_ring_buffer, WAV_BUFFER_SIZE);
-    printf("[FILEPLAYER] Ring buffer allocated\n");
-    
     printf("[FILEPLAYER] Allocating WAV buffer (%d bytes)...\n", WAV_BUFFER_SIZE);
     s_wav_buffer = umm_malloc(WAV_BUFFER_SIZE);
     printf("[FILEPLAYER] WAV buffer allocated: %s\n", s_wav_buffer ? "OK" : "FAILED");
@@ -305,17 +185,9 @@ bool fileplayer_play(fileplayer_t *player, uint8_t repeat_count) {
     player->state = FILEPLAYER_STATE_PLAYING;
     s_active_player = player;
 
-    audio_pwm_setup(s_sample_rate);
-
-    if (!s_timer_active) {
-        int interval_us = 1000000 / s_sample_rate;
-        // Runs on Core 0 (default pool). Cannot use Core 1 alarm pool because
-        // at 44.1kHz the ISR interrupts CYW43 SPI1 transfers mid-transaction,
-        // causing WiFi header mismatch errors (0xffff reads).
-        add_repeating_timer_us(-interval_us, playback_callback, NULL,
-                               &s_playback_timer);
-        s_timer_active = true;
-    }
+    // Use the PCM streaming API — its ISR runs on Core 1 via s_core1_alarm_pool,
+    // eliminating the 44.1kHz timer ISR that used to preempt Core 0.
+    audio_start_stream(s_sample_rate);
 
     sdcard_fseek(s_current_file, 44);
     player->position = 0;
@@ -341,18 +213,13 @@ void fileplayer_stop(fileplayer_t *player) {
         }
     }
 
-    if (!any_playing && s_timer_active) {
-        cancel_repeating_timer(&s_playback_timer);
-        s_timer_active = false;
-    }
+    if (!any_playing)
+        audio_stop_stream();
 
     if (s_current_file) {
         sdcard_fclose(s_current_file);
         s_current_file = NULL;
     }
-
-    pwm_set_gpio_level(AUDIO_PIN_L, 0);
-    pwm_set_gpio_level(AUDIO_PIN_R, 0);
 }
 
 void fileplayer_pause(fileplayer_t *player) {
@@ -417,36 +284,84 @@ uint32_t fileplayer_get_offset(const fileplayer_t *player) {
     return player->position / 4 / s_sample_rate;
 }
 
+// Called from Core 1 every 5ms. Reads WAV data from SD, converts to
+// stereo int16_t, and pushes into the PCM stream ring buffer.
 void fileplayer_update(void) {
     if (!s_initialized) return;
     if (!s_current_file || !s_active_player ||
         s_active_player->state != FILEPLAYER_STATE_PLAYING)
         return;
 
-    size_t space = s_ring_buffer.size - ring_buffer_available(&s_ring_buffer);
-    if (space > 256) {
-        // Non-blocking: skip if Core 0 owns the SD card
-        if (!recursive_mutex_try_enter(&g_sdcard_mutex, NULL))
-            return;
-        size_t to_read = (space > 4096) ? 4096 : space;
-        UINT br = 0;
-        FRESULT res = f_read((FIL *)s_current_file, s_wav_buffer, to_read, &br);
-        recursive_mutex_exit(&g_sdcard_mutex);
-        if (res == FR_OK && br > 0) {
-            ring_buffer_write(&s_ring_buffer, s_wav_buffer, br);
-        } else if (res != FR_OK || br == 0) {
-            if (s_active_player->loop) {
-                sdcard_fseek(s_current_file, 44);
-                s_active_player->position = 0;
-            } else {
-                s_active_player->state = FILEPLAYER_STATE_STOPPED;
-                if (s_active_player->finish_callback)
-                    s_active_player->finish_callback(s_active_player->finish_callback_arg);
+    // Non-blocking: skip if Core 0 owns the SD card
+    if (!recursive_mutex_try_enter(&g_sdcard_mutex, NULL))
+        return;
+
+    // Read a chunk of WAV data
+    size_t to_read = 4096;
+    UINT br = 0;
+    FRESULT res = f_read((FIL *)s_current_file, s_wav_buffer, to_read, &br);
+    recursive_mutex_exit(&g_sdcard_mutex);
+
+    if (res == FR_OK && br > 0) {
+        // WAV data is 16-bit signed PCM. Convert to stereo int16_t pairs
+        // and push into the PCM stream ring buffer.
+        int16_t *pcm = (int16_t *)s_wav_buffer;
+        uint32_t num_samples = br / 2;  // 16-bit samples
+
+        if (s_active_player->channels == 1) {
+            // Mono: duplicate to both channels via a temp buffer
+            // Process in-place backwards to avoid overwrite
+            int16_t stereo_buf[512];  // 256 stereo frames at a time
+            uint32_t pos = 0;
+            while (pos < num_samples) {
+                uint32_t chunk = num_samples - pos;
+                if (chunk > 256) chunk = 256;
+                for (uint32_t i = 0; i < chunk; i++) {
+                    int32_t s = ((int32_t)pcm[pos + i] * s_volume_l) / 100;
+                    if (s > 32767) s = 32767;
+                    if (s < -32768) s = -32768;
+                    stereo_buf[i * 2] = (int16_t)s;
+                    stereo_buf[i * 2 + 1] = (int16_t)s;
+                }
+                audio_push_samples(stereo_buf, chunk);
+                pos += chunk;
             }
+            s_active_player->position += br;
+        } else {
+            // Stereo: apply volume and push directly
+            uint32_t num_frames = num_samples / 2;
+            int16_t stereo_buf[512];  // 256 stereo frames at a time
+            uint32_t pos = 0;
+            while (pos < num_frames) {
+                uint32_t chunk = num_frames - pos;
+                if (chunk > 256) chunk = 256;
+                for (uint32_t i = 0; i < chunk; i++) {
+                    int32_t l = ((int32_t)pcm[(pos + i) * 2] * s_volume_l) / 100;
+                    int32_t r = ((int32_t)pcm[(pos + i) * 2 + 1] * s_volume_r) / 100;
+                    if (l > 32767) l = 32767;
+                    if (l < -32768) l = -32768;
+                    if (r > 32767) r = 32767;
+                    if (r < -32768) r = -32768;
+                    stereo_buf[i * 2] = (int16_t)l;
+                    stereo_buf[i * 2 + 1] = (int16_t)r;
+                }
+                audio_push_samples(stereo_buf, chunk);
+                pos += chunk;
+            }
+            s_active_player->position += br;
+        }
+    } else if (res != FR_OK || br == 0) {
+        if (s_active_player->loop) {
+            sdcard_fseek(s_current_file, 44);
+            s_active_player->position = 0;
+        } else {
+            s_active_player->state = FILEPLAYER_STATE_STOPPED;
+            if (s_active_player->finish_callback)
+                s_active_player->finish_callback(s_active_player->finish_callback_arg);
         }
     }
 }
 
 bool fileplayer_did_underrun(void) {
-    return s_ring_buffer.underflow;
+    return s_underflow;
 }

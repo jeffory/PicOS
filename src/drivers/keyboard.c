@@ -1,6 +1,7 @@
 #include "keyboard.h"
 #include "../hardware.h"
 #include "../os/os.h"
+#include "wifi.h"
 
 #include "hardware/gpio.h"
 #include "hardware/i2c.h"
@@ -351,15 +352,16 @@ void kbd_poll(void) {
   // Track consecutive I2C failures for diagnostics.
   if (!poll_ok) {
     s_i2c_fail_count++;
-    if (s_i2c_fail_count == 3)
-      printf("[KBD] warning: %d consecutive I2C failures — bus recovery active\n",
-             s_i2c_fail_count);
-    // After 5 failures, back off 500ms before the next recovery attempt.
-    // This keeps the frame loop fast even when the STM32 is unresponsive.
-    if (s_i2c_fail_count > 5)
-      s_i2c_backoff_ms = to_ms_since_boot(get_absolute_time()) + 500;
+    if (s_i2c_fail_count == 5)
+      printf("[KBD] warning: %d consecutive I2C failures (wifi=%d)\n",
+             s_i2c_fail_count, wifi_get_status());
+    // After 10 failures, back off 100ms before the next recovery attempt.
+    // Shorter than original 500ms to keep keyboard responsive during WiFi
+    // connect, which can cause transient I2C glitches on the power rail.
+    if (s_i2c_fail_count > 10)
+      s_i2c_backoff_ms = to_ms_since_boot(get_absolute_time()) + 100;
   } else {
-    if (s_i2c_fail_count > 5)
+    if (s_i2c_fail_count > 10)
       printf("[KBD] I2C recovered after %d failures\n", s_i2c_fail_count);
     s_i2c_fail_count = 0;
     s_i2c_backoff_ms = 0;

@@ -601,6 +601,13 @@ static bool native_run(const app_entry_t *app) {
     guard[i] = NATIVE_STACK_CANARY;
 
   uint32_t stack_top = (uint32_t)(s_native_stack + NATIVE_STACK_SIZE);
+
+  // Resume Core 1 before launching the app.  The pause was only needed to
+  // prevent PSRAM heap contention during ELF loading/relocation above.
+  // Native apps (e.g. DOOM) register audio callbacks that run on Core 1,
+  // so it must be active during app execution.
+  g_core1_pause = false;
+
   launch_on_psp(stack_top, entry_fn,
                 (const PicoCalcAPI *)&g_api, app->path, app->id, app->name);
 
@@ -619,7 +626,12 @@ static bool native_run(const app_entry_t *app) {
   ok = true;
 
 out:
-  // ── 9. Cleanup and resume Core 1 ──────────────────────────────────────────
+  // ── 9. Cleanup ─────────────────────────────────────────────────────────────
+  // Re-pause Core 1 while we free PSRAM buffers to avoid contention,
+  // then unpause after cleanup is done.
+  g_native_audio_callback = NULL;  // stop app's Core 1 callback before freeing code
+  g_core1_pause = true;
+  sleep_ms(10);  // let any in-flight Core 1 iteration finish
   audio_stop_stream();   // ensure audio streaming is stopped on exit/crash
   audio_stop_tone();
   if (code_buf)
