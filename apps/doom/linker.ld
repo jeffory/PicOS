@@ -80,6 +80,5 @@ SECTIONS {
         *(.comment)
         *(.note .note.*)
         *(.ARM.attributes)
-        *(.debug_*)
     }
 }

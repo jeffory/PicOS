@@ -12,6 +12,7 @@
 
 #include <string.h>
 #include <stdlib.h>
+#include <stdio.h>
 
 #include "doomfeatures.h"
 
@@ -161,6 +162,12 @@ static void doom_audio_worker(void)
     }
 
     uint32_t elapsed_us = now - s_last_mix_us;
+    
+    // Debug: warn if audio timing gaps are too large
+    if (elapsed_us > 50000) {  // > 50ms gap
+        printf("[AUDIO] Large gap: %u us\n", elapsed_us);
+    }
+    
     if (elapsed_us < 1000)  // <1ms, nothing to do
         return;
 

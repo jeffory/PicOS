@@ -9,6 +9,7 @@
 
 #include <string.h>
 #include <stdlib.h>
+#include <stdio.h>
 
 #include "doomtype.h"
 #include "w_wad.h"
@@ -16,6 +17,9 @@
 
 #include "mus_player.h"
 #include "opl.h"
+
+// Debug: enable voice allocation logging
+#define MUS_DEBUG_VOICE
 
 // --- Constants ---
 
@@ -106,6 +110,8 @@ typedef struct {
     uint8_t  velocity;      // Note velocity
     uint32_t age;           // Allocation age counter (for voice stealing)
     uint8_t  released;      // Key has been released (in release phase)
+    uint16_t f_num;         // OPL frequency number (for key_off)
+    uint8_t  block;         // OPL block/octave (for key_off)
 } opl_voice_t;
 
 // --- Player state ---
@@ -204,6 +210,9 @@ static int alloc_voice(uint8_t mus_channel)
     // 1. Find a free voice
     for (int i = 0; i < NUM_OPL_VOICES; i++) {
         if (!s_mus.voices[i].active) {
+#ifdef MUS_DEBUG_VOICE
+            printf("[MUS] alloc_voice: ch=%d -> voice=%d (free)\n", mus_channel, i);
+#endif
             return i;
         }
     }
@@ -217,8 +226,13 @@ static int alloc_voice(uint8_t mus_channel)
             oldest_idx = i;
         }
     }
-    if (oldest_idx >= 0)
+    if (oldest_idx >= 0) {
+#ifdef MUS_DEBUG_VOICE
+        printf("[MUS] alloc_voice: ch=%d -> voice=%d (steal released, age=%u)\n", 
+               mus_channel, oldest_idx, oldest_age);
+#endif
         return oldest_idx;
+    }
 
     // 3. Steal oldest active voice
     oldest_age = UINT32_MAX;
@@ -228,6 +242,10 @@ static int alloc_voice(uint8_t mus_channel)
             oldest_idx = i;
         }
     }
+#ifdef MUS_DEBUG_VOICE
+    printf("[MUS] alloc_voice: ch=%d -> voice=%d (steal active, age=%u)\n", 
+           mus_channel, oldest_idx, oldest_age);
+#endif
     return oldest_idx >= 0 ? oldest_idx : 0;
 }
 
@@ -235,11 +253,43 @@ static int alloc_voice(uint8_t mus_channel)
 
 static void voice_key_off(int voice)
 {
+    // Use the stored f_num/block from when this voice was configured,
+    // NOT the current channel values which may have been overwritten
+    opl_voice_t *v = &s_mus.voices[voice];
+    uint8_t val = ((v->f_num >> 8) & 3) | (v->block << 2);
+    opl_write(0xB0 + voice, val);
+    v->released = 1;
+#ifdef MUS_DEBUG_VOICE
+    printf("[MUS] voice_key_off: voice=%d\n", voice);
+#endif
+}
+
+// Force a voice to silence by resetting its envelope state
+// This ensures a stolen voice doesn't bleed into the new note
+static void voice_force_silence(int voice)
+{
+#ifdef MUS_DEBUG_VOICE
+    printf("[MUS] voice_force_silence: voice=%d (was active=%d, released=%d)\n", 
+           voice, s_mus.voices[voice].active, s_mus.voices[voice].released);
+#endif
+
     struct opl_channel *chan = &s_mus.opl.channel[voice];
-    // Write 0xB0+voice with key-on bit cleared
+    uint8_t mod_off = slot_offsets[voice];
+    uint8_t car_off = mod_off + 3;
+
+    // Force key off
     uint8_t val = ((chan->f_num >> 8) & 3) | (chan->block << 2);
     opl_write(0xB0 + voice, val);
-    s_mus.voices[voice].released = 1;
+
+    // Force FAST release instead of cutting off completely
+    // This prevents clicks/pops while still silencing quickly
+    // Set release rate to maximum (0x0F) for both modulator and carrier
+    opl_write(0x80 + mod_off, 0x0F);  // Max release on modulator
+    opl_write(0x80 + car_off, 0x0F);  // Max release on carrier
+    
+    // Also set total levels to maximum attenuation for immediate silence
+    opl_write(0x40 + mod_off, 0x3F);  // Max attenuation on modulator
+    opl_write(0x40 + car_off, 0x3F);  // Max attenuation on carrier
 }
 
 static void voice_configure(int voice, const genmidi_instr_t *instr,
@@ -249,8 +299,18 @@ static void voice_configure(int voice, const genmidi_instr_t *instr,
     uint8_t mod_off = slot_offsets[voice];
     uint8_t car_off = mod_off + 3;
 
-    // Key off first (in case voice is being stolen)
-    voice_key_off(voice);
+    // Save old f_num/block for pending key_off if voice is being stolen
+    uint16_t old_f_num = 0;
+    uint8_t old_block = 0;
+    if (s_mus.voices[voice].active) {
+        old_f_num = s_mus.voices[voice].f_num;
+        old_block = s_mus.voices[voice].block;
+        // Only force silence if NOT already in release phase
+        // If already released, the envelope is already decaying naturally
+        if (!s_mus.voices[voice].released) {
+            voice_force_silence(voice);
+        }
+    }
 
     // Configure modulator
     opl_write(0x20 + mod_off, instr->modulator.tremolo_vib);
@@ -320,6 +380,13 @@ static void voice_configure(int voice, const genmidi_instr_t *instr,
     v->velocity = velocity;
     v->age = s_mus.voice_age++;
     v->released = 0;
+    v->f_num = f_num;
+    v->block = block;
+    // If there was an old note being released, preserve its values for key_off
+    if (old_f_num != 0 || old_block != 0) {
+        v->f_num = old_f_num;
+        v->block = old_block;
+    }
 }
 
 // --- GENMIDI loading ---
@@ -778,6 +845,17 @@ void mus_render(int16_t *buf, int count)
         memset(buf, 0, count * 2 * sizeof(int16_t));
         return;
     }
+
+    // Debug: count active voices
+#ifdef MUS_DEBUG_VOICE
+    int active = 0;
+    for (int i = 0; i < NUM_OPL_VOICES; i++) {
+        if (s_mus.voices[i].active) active++;
+    }
+    if (active > 6) {
+        printf("[MUS] render: %d active voices\n", active);
+    }
+#endif
 
     // OPL runs at OUTPUT_RATE — 1:1, batch for performance
     OPL3_GenerateBatch(&s_mus.opl, buf, count);
