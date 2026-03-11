@@ -523,3 +523,44 @@ void launcher_run(void) {
     sleep_ms(16); // ~60 Hz polling
   }
 }
+
+// ── Dev command support ─────────────────────────────────────────────────────
+
+void launcher_list_apps(void) {
+  printf("[DEV] Available apps:\n");
+  for (int i = 0; i < s_app_count; i++) {
+    printf("  %s\n", s_apps[i].name);
+  }
+  printf("[DEV] Total: %d apps\n", s_app_count);
+}
+
+bool launcher_launch_by_name(const char *name) {
+  if (!name || !name[0]) {
+    printf("[DEV] Error: no app name provided\n");
+    return false;
+  }
+
+  // Find the app by name
+  int app_idx = -1;
+  for (int i = 0; i < s_app_count; i++) {
+    if (strcmp(s_apps[i].name, name) == 0) {
+      app_idx = i;
+      break;
+    }
+  }
+
+  if (app_idx < 0) {
+    printf("[DEV] Error: app '%s' not found\n", name);
+    return false;
+  }
+
+  printf("[DEV] Launching app: %s\n", name);
+  // TODO: Actually launch the app
+  // For now, just return true - actual launching would be done by the caller
+  return true;
+}
+
+const char* launcher_get_running_app_name(void) {
+  // This would need to be tracked - for now return NULL
+  return NULL;
+}

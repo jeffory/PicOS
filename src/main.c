@@ -7,6 +7,10 @@
 
 #include <stdarg.h>
 #include <stdio.h>
+#include <stdlib.h>
+
+#include "dev_commands.h"
+#include "usb/usb_msc.h"
 
 // Forward declarations for display functions used in hardfault_c below.
 // The full #include "drivers/display.h" appears later in the file after other
@@ -248,6 +252,9 @@ static void sys_log(const char *fmt, ...) {
 // consumed by sys_shouldExit() which the app checks each frame.
 static volatile bool s_native_exit = false;
 
+// Pending app launch from serial command
+static const char* s_pending_launch = NULL;
+
 // Native-app tick: poll keyboard, fire pending C HTTP callbacks, and
 // check the Sym (Menu) key to show the system menu overlay.
 static void sys_poll(void) {
@@ -257,6 +264,26 @@ static void sys_poll(void) {
     if (system_menu_show_for_native())
       s_native_exit = true;
   }
+
+  // Poll for serial commands
+  dev_commands_poll();
+  
+  // Process serial commands that need to run from this context
+  // (usb, reboot need to be in non-app context)
+  if (dev_commands_process()) {
+    // Check what command was processed and handle appropriately
+    // The dev_commands_process() handles echo, we need to act on specific commands
+  }
+}
+
+// Check if there's a pending launch request (from serial command)
+// Returns app name if pending, NULL otherwise
+const char* sys_get_pending_launch(void) {
+  return s_pending_launch;
+}
+
+void sys_clear_pending_launch(void) {
+  s_pending_launch = NULL;
 }
 
 static bool sys_shouldExit(void) {
@@ -410,31 +437,45 @@ volatile bool g_core1_pause = false;
 // to Core 1.  Set by the app at startup, cleared on exit.
 void (*g_native_audio_callback)(void) = NULL;
 
+static repeating_timer_t s_core1_timer;
+static volatile bool s_core1_tick_pending = false;
+
+static bool core1_timer_callback(repeating_timer_t *rt) {
+  (void)rt;
+  s_core1_tick_pending = true;
+  return true;
+}
+
 static void core1_entry(void) {
-  // Clear UNALIGN_TRP on Core 1 (each core has its own SCB/CCR)
   volatile uint32_t *scb_ccr = (volatile uint32_t *)(0xE000ED14);
   *scb_ccr &= ~(1u << 3);
   __asm volatile ("dsb sy" ::: "memory");
   __asm volatile ("isb sy" ::: "memory");
 
-  // Create audio alarm pool on Core 1 so all audio timer ISRs
-  // (tone, sound sample, fileplayer, PCM stream) fire here
-  // instead of interrupting the app/game loop on Core 0.
   audio_core1_init();
+
+  alarm_pool_t *pool = audio_get_core1_alarm_pool();
+  alarm_pool_add_repeating_timer_ms(pool, -1, core1_timer_callback, NULL, &s_core1_timer);
 
   while (true) {
     if (g_core1_pause) {
       sleep_ms(1);
       continue;
     }
-    wifi_poll();
-    http_fire_c_pending();
 
-    mp3_player_update();
-    fileplayer_update();
-    if (g_native_audio_callback)
-      g_native_audio_callback();
-    sleep_ms(5);
+    if (s_core1_tick_pending) {
+      s_core1_tick_pending = false;
+
+      wifi_poll();
+      http_fire_c_pending();
+
+      mp3_player_update();
+      fileplayer_update();
+      if (g_native_audio_callback)
+        g_native_audio_callback();
+    }
+
+    __wfi();
   }
 }
 
@@ -492,11 +533,8 @@ int main(void) {
 
   // Initialise mainboard PIO PSRAM (8MB on PIO1, independent of QMI PSRAM).
   // Non-fatal if chip not present (some boards may not have it).
+  // Uses bulk driver internally for 8KB transfers (300x faster than 27-byte chunks).
   pio_psram_init();
-
-  // Initialise bulk transfer driver (up to 8187 bytes per transaction).
-  // DISABLED: conflicts with original driver on PIO1.
-  // pio_psram_bulk_init();
 
   sound_init();
   audio_init();

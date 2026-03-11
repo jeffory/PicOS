@@ -6,7 +6,9 @@
 // registered as the native audio callback.  The worker uses wall-clock time
 // (getTimeUs) to decide how many samples to produce each call, completely
 // decoupled from the game's frame rate on Core 0.  Core 0 writes channel
-// state (start/stop/params); Core 1 snapshots and mixes independently.
+// state (start/stop/params) with a per-channel sequence number; Core 1 only
+// picks up new channel state when the seq changes, preserving its own
+// playback positions between calls.
 
 #include <string.h>
 #include <stdlib.h>
@@ -57,12 +59,17 @@ typedef struct {
     uint32_t        step;     // 16.16 fixed-point step
     int             left_vol;
     int             right_vol;
+    uint32_t        seq;      // sequence number — incremented on each new sound start
 } mix_channel_t;
 
 static mix_channel_t s_channels[MIX_CHANNELS];
 
-// Core 1 owns this snapshot — copied from s_channels each worker call.
+// Core 1 owns this snapshot — selectively updated via sequence numbers.
 static mix_channel_t s_channels_snapshot[MIX_CHANNELS];
+
+// Per-channel sequence tracking: Core 1's last-seen seq per channel
+static uint32_t s_channel_seq[MIX_CHANNELS];
+static uint32_t s_next_seq = 1;  // global monotonic counter
 
 static int16_t s_mix_buf[MIX_BATCH * 2];  // stereo interleaved
 
@@ -174,8 +181,19 @@ static void doom_audio_worker(void)
         mus_tick_n(mus_ticks);
     }
 
-    // Snapshot channel state from Core 0
-    memcpy(s_channels_snapshot, s_channels, sizeof(s_channels));
+    // Selective snapshot: only pick up channels that Core 0 has changed
+    for (int ch = 0; ch < MIX_CHANNELS; ch++) {
+        uint32_t seq = s_channels[ch].seq;
+        if (seq != s_channel_seq[ch]) {
+            // Core 0 started/stopped a new sound on this channel
+            s_channels_snapshot[ch] = s_channels[ch];
+            s_channel_seq[ch] = seq;
+        } else if (s_channels_snapshot[ch].active) {
+            // Pick up live volume changes without resetting position
+            s_channels_snapshot[ch].left_vol = s_channels[ch].left_vol;
+            s_channels_snapshot[ch].right_vol = s_channels[ch].right_vol;
+        }
+    }
 
     // Mix in chunks of MIX_BATCH (reuses s_mix_buf)
     while (samples > 0) {
@@ -191,6 +209,8 @@ static boolean picos_snd_init(boolean use_sfx_prefix)
 {
     memset(s_channels, 0, sizeof(s_channels));
     memset(s_channels_snapshot, 0, sizeof(s_channels_snapshot));
+    memset(s_channel_seq, 0, sizeof(s_channel_seq));
+    s_next_seq = 1;
     s_last_mix_us = 0;
     s_mus_tick_accum = 0;
     g_picos_api->audio->startStream(MIX_RATE);
@@ -302,13 +322,17 @@ static int picos_snd_start(sfxinfo_t *sfxinfo, int channel, int vol, int sep)
 
     compute_volumes(vol, sep, &c->left_vol, &c->right_vol);
 
+    c->seq = s_next_seq++;
+
     return channel;
 }
 
 static void picos_snd_stop(int channel)
 {
-    if (channel >= 0 && channel < MIX_CHANNELS)
+    if (channel >= 0 && channel < MIX_CHANNELS) {
         s_channels[channel].active = false;
+        s_channels[channel].seq = s_next_seq++;
+    }
 }
 
 static boolean picos_snd_is_playing(int channel)

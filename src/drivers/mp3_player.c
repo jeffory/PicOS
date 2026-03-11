@@ -11,6 +11,7 @@
 #include "hardware/irq.h"
 #include "pico/mutex.h"
 #include "pico/time.h"
+#include "pio_psram.h"
 
 #define FPM_DEFAULT
 #include "mad.h"
@@ -23,16 +24,13 @@
 #include <stdlib.h>
 
 #define MP3_DECODE_BUFFER_SIZE (8192 + MAD_BUFFER_GUARD)
-#define PCM_RING_SIZE          32768  // bytes — ~8192 stereo samples (~340ms @ 24kHz)
-                                      // Doubled from 16384 to give decode more headroom
-                                      // if Core 1 misses a 5ms update cycle.
-                                      // Costs 16KB of PSRAM from the Lua heap.
-#define DMA_BUF_SAMPLES        256   // samples per DMA buffer (~10.7ms @ 24kHz)
+#define PCM_RING_SIZE          32768
+#define DMA_BUF_SAMPLES        256
 
 #define PWM_WRAP  2047
-#define PWM_MID   (PWM_WRAP / 2)     // 1023 — true silence for AC-coupled output
+#define PWM_MID   (PWM_WRAP / 2)
 
-#define FADE_SAMPLES 64              // ~1.5ms at 44.1kHz — inaudible transition
+#define FADE_SAMPLES 64
 
 typedef enum {
     FADE_NONE,
@@ -44,7 +42,6 @@ static volatile fade_state_t s_fade_state = FADE_NONE;
 static volatile int          s_fade_pos   = 0;
 static volatile bool         s_stop_after_fade = false;
 
-// ── Compressed-data state ───────────────────────────────────────────────────
 static struct mad_stream *s_mad_stream = NULL;
 static struct mad_frame  *s_mad_frame  = NULL;
 static struct mad_synth  *s_mad_synth  = NULL;
@@ -53,25 +50,23 @@ static uint8_t     s_decode_buffer[MP3_DECODE_BUFFER_SIZE] __attribute__((aligne
 static int         s_bytes_in_buffer = 0;
 static int         s_buffer_pos = 0;
 
-// ── Player state ────────────────────────────────────────────────────────────
 static mp3_player_t s_player;
 static bool         s_initialized = false;
-static mutex_t      s_mp3_mutex;   // protects decode state from Core 0/1 races
-#define MAX_ERRORS_PER_UPDATE  32   // bail out of decode loop after this many recoverable errors
+static mutex_t      s_mp3_mutex;
+#define MAX_ERRORS_PER_UPDATE  32
 
-// ── PCM ring buffer ─────────────────────────────────────────────────────────
-// Always uses QMI PSRAM via umm_malloc. PIO PSRAM's 27-byte chunk limit makes
-// it ~70x slower than memcpy for the 4608-byte writes each decode frame needs.
 static uint8_t *s_pcm_ring = NULL;
 static volatile size_t s_ring_rd = 0;
 static volatile size_t s_ring_wr = 0;
+static bool s_use_pio_psram = false;
+static uint32_t s_pio_psram_base = 0;
 
-// Staging buffer for the DMA ISR — sits in SRAM for fast access.
-// 4KB ≈ 21ms @ 48kHz stereo — enough headroom to survive a full decode cycle.
-#define STAGING_BUF_SIZE  (DMA_BUF_SAMPLES * 4 * 4)  // 4096 bytes
+#define STAGING_BUF_SIZE  (DMA_BUF_SAMPLES * 4 * 4)
 static uint8_t  s_staging_buf[STAGING_BUF_SIZE] __attribute__((aligned(4)));
-static size_t   s_staging_avail = 0;  // bytes available in staging buf
-static size_t   s_staging_pos   = 0;  // read position in staging buf
+static size_t   s_staging_avail = 0;
+static size_t   s_staging_pos   = 0;
+
+static uint8_t s_pio_read_buf[STAGING_BUF_SIZE] __attribute__((aligned(4)));
 
 static inline size_t __time_critical_func(ring_available)(void) {
     size_t wr = s_ring_wr, rd = s_ring_rd;
@@ -91,11 +86,20 @@ static void ring_write(const uint8_t *data, size_t len) {
         size_t chunk = (len < free_space) ? len : free_space;
         size_t to_end = PCM_RING_SIZE - wr;
 
-        if (chunk <= to_end) {
-            memcpy(s_pcm_ring + wr, data, chunk);
+        if (s_use_pio_psram) {
+            if (chunk <= to_end) {
+                pio_psram_write(s_pio_psram_base + wr, data, chunk);
+            } else {
+                pio_psram_write(s_pio_psram_base + wr, data, to_end);
+                pio_psram_write(s_pio_psram_base, data + to_end, chunk - to_end);
+            }
         } else {
-            memcpy(s_pcm_ring + wr, data, to_end);
-            memcpy(s_pcm_ring, data + to_end, chunk - to_end);
+            if (chunk <= to_end) {
+                memcpy(s_pcm_ring + wr, data, chunk);
+            } else {
+                memcpy(s_pcm_ring + wr, data, to_end);
+                memcpy(s_pcm_ring, data + to_end, chunk - to_end);
+            }
         }
         s_ring_wr = (wr + chunk) % PCM_RING_SIZE;
         data += chunk;
@@ -121,9 +125,8 @@ static bool          s_irq_on_core1 = false;
 // staging buffer topped up before the decode cycle begins.
 static void refill_staging_buf(void) {
     if (s_staging_avail >= STAGING_BUF_SIZE / 2)
-        return;  // still half full, no need to refill yet
+        return;
 
-    // Compact: move unconsumed data to front
     if (s_staging_pos > 0 && s_staging_avail > 0) {
         memmove(s_staging_buf, s_staging_buf + s_staging_pos, s_staging_avail);
     }
@@ -137,12 +140,20 @@ static void refill_staging_buf(void) {
     size_t rd = s_ring_rd;
     size_t to_end = PCM_RING_SIZE - rd;
 
-    if (to_read <= to_end) {
-        memcpy(s_staging_buf + s_staging_avail, s_pcm_ring + rd, to_read);
+    if (s_use_pio_psram) {
+        if (to_read <= to_end) {
+            pio_psram_read(s_pio_psram_base + rd, s_staging_buf + s_staging_avail, to_read);
+        } else {
+            pio_psram_read(s_pio_psram_base + rd, s_staging_buf + s_staging_avail, to_end);
+            pio_psram_read(s_pio_psram_base, s_staging_buf + s_staging_avail + to_end, to_read - to_end);
+        }
     } else {
-        memcpy(s_staging_buf + s_staging_avail, s_pcm_ring + rd, to_end);
-        memcpy(s_staging_buf + s_staging_avail + to_end, s_pcm_ring,
-               to_read - to_end);
+        if (to_read <= to_end) {
+            memcpy(s_staging_buf + s_staging_avail, s_pcm_ring + rd, to_read);
+        } else {
+            memcpy(s_staging_buf + s_staging_avail, s_pcm_ring + rd, to_end);
+            memcpy(s_staging_buf + s_staging_avail + to_end, s_pcm_ring, to_read - to_end);
+        }
     }
     s_ring_rd = (rd + to_read) % PCM_RING_SIZE;
     s_staging_avail += to_read;
@@ -442,13 +453,21 @@ bool mp3_player_init(void) {
            (unsigned)sizeof(struct mad_frame),
            (unsigned)sizeof(struct mad_synth));
 
-    if (!s_pcm_ring) {
-        s_pcm_ring = umm_malloc(PCM_RING_SIZE);
-        if (!s_pcm_ring) {
-            printf("[MP3] FAILED to alloc ring buffer\n");
-            return false;
+    if (!s_pcm_ring && !s_use_pio_psram) {
+        if (pio_psram_available()) {
+            s_use_pio_psram = true;
+            s_pio_psram_base = PIO_PSRAM_MP3_RING_BASE;
+            printf("[MP3] PCM ring buffer → PIO PSRAM @ 0x%lx (%d bytes, 8KB bulk xfers)\n",
+                   (unsigned long)s_pio_psram_base, PCM_RING_SIZE);
+        } else {
+            s_pcm_ring = umm_malloc(PCM_RING_SIZE);
+            if (!s_pcm_ring) {
+                printf("[MP3] FAILED to alloc ring buffer\n");
+                return false;
+            }
+            s_use_pio_psram = false;
+            printf("[MP3] PCM ring buffer → QMI PSRAM (umm_malloc, %d bytes)\n", PCM_RING_SIZE);
         }
-        printf("[MP3] PCM ring buffer → QMI PSRAM (umm_malloc, %d bytes)\n", PCM_RING_SIZE);
     }
 
     memset(&s_player, 0, sizeof(s_player));

@@ -20,18 +20,13 @@ typedef struct {
 } frame_index_entry_t;
 
 typedef struct {
-    uint8_t *buffer;       // QMI PSRAM buffer (always allocated for JPEGDEC input)
-    uint32_t pio_addr;     // PIO PSRAM address (0 = not using PIO PSRAM)
+    uint8_t *buffer;
+    uint32_t pio_addr;
     uint32_t capacity;
     uint32_t size;
     bool in_use;
-    bool on_pio;           // true if frame data is staged in PIO PSRAM
+    bool on_pio;
 } buffer_pool_entry_t;
-
-// PIO PSRAM layout for video:
-// PCM ring uses 0 .. 32KB-1 (from mp3_player).
-// Video buffer pool starts after that.
-#define VIDEO_PIO_BASE  (32 * 1024)  // skip past PCM ring
 
 typedef struct {
     sdfile_t file;

@@ -159,10 +159,37 @@ target_include_directories(libmad PUBLIC ${LIBMAD_DIR})
 target_compile_definitions(libmad PRIVATE PROGMEM=)
 target_compile_options(libmad PRIVATE -O2 -Wno-unused-parameter -Wno-unused-variable)
 
+# ── PIO PSRAM (mainboard 8MB PSRAM via PIO1 SPI) ─────────────────────────────
+# Uses the polpo rp2040-psram library (third_party/rp2040-psram/).
+# Pin defines are passed via compile definitions so the library source
+# stays unmodified.  PIO1 is used (PIO0 is the LCD).
+set(PIO_PSRAM_DIR ${CMAKE_SOURCE_DIR}/third_party/rp2040-psram)
+
+add_library(pio_psram_lib STATIC
+    ${PIO_PSRAM_DIR}/psram_spi.c
+)
+target_include_directories(pio_psram_lib PUBLIC ${PIO_PSRAM_DIR})
+target_compile_definitions(pio_psram_lib PUBLIC
+    PSRAM_PIN_CS=20
+    PSRAM_PIN_SCK=21
+    PSRAM_PIN_MOSI=2
+    PSRAM_PIN_MISO=3
+    PSRAM_MUTEX=1
+)
+target_link_libraries(pio_psram_lib
+    pico_stdlib
+    hardware_pio
+    hardware_dma
+    hardware_gpio
+)
+target_compile_options(pio_psram_lib PRIVATE -O2)
+pico_generate_pio_header(pio_psram_lib ${PIO_PSRAM_DIR}/psram_spi.pio)
+
 # ── Main firmware target ───────────────────────────────────────────────────────
 
 add_executable(picocalc_os
     src/main.c
+    src/dev_commands.c
     src/os/launcher.c
     src/os/lua_runner.c
     src/os/native_loader.c
@@ -180,6 +207,10 @@ add_executable(picocalc_os
     src/os/lua_bridge_sound.c
     src/os/lua_bridge_repl.c
     src/os/lua_bridge_video.c
+    src/os/lua_bridge_game.c
+    src/os/lua_bridge_game_camera.c
+    src/os/lua_bridge_game_scene.c
+    src/os/lua_bridge_game_save.c
     src/os/lua_psram_alloc.c
     src/os/system_menu.c
     src/os/screenshot.c
@@ -203,6 +234,8 @@ add_executable(picocalc_os
     src/drivers/wifi.c
     src/drivers/http.c
     src/drivers/tcp.c
+    src/drivers/pio_psram.c
+    src/drivers/pio_psram_bulk.c
     third_party/mongoose/mongoose.c
     third_party/umm_malloc/src/umm_malloc.c
 )
@@ -234,7 +267,13 @@ target_link_libraries(picocalc_os
     libmad_ram
     libmad
     image_decoders
+    pio_psram_lib
 )
+
+# ── PIO PSRAM Bulk Transfer (improved driver with 16-bit counters) ─────────────
+# Supports up to 8187 bytes per transaction (vs 27 bytes in polpo library).
+# Uses a custom PIO program in src/drivers/pio_psram_bulk.pio.
+pico_generate_pio_header(picocalc_os ${CMAKE_SOURCE_DIR}/src/drivers/pio_psram_bulk.pio)
 
 # Rename .text sections in libmad_ram objects to .time_critical.libmad
 # so the SDK linker script places them in SRAM (the default RP2350 linker

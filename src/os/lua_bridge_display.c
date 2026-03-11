@@ -9,37 +9,37 @@ static int l_display_clear(lua_State *L) {
 }
 
 static int l_display_setPixel(lua_State *L) {
-  int x = luaL_checkinteger(L, 1);
-  int y = luaL_checkinteger(L, 2);
+  int x = (int)luaL_checknumber(L, 1);
+  int y = (int)luaL_checknumber(L, 2);
   uint16_t c = l_checkcolor(L, 3);
   display_set_pixel(x, y, c);
   return 0;
 }
 
 static int l_display_fillRect(lua_State *L) {
-  display_fill_rect(luaL_checkinteger(L, 1), luaL_checkinteger(L, 2),
-                    luaL_checkinteger(L, 3), luaL_checkinteger(L, 4),
+  display_fill_rect((int)luaL_checknumber(L, 1), (int)luaL_checknumber(L, 2),
+                    (int)luaL_checknumber(L, 3), (int)luaL_checknumber(L, 4),
                     l_checkcolor(L, 5));
   return 0;
 }
 
 static int l_display_drawRect(lua_State *L) {
-  display_draw_rect(luaL_checkinteger(L, 1), luaL_checkinteger(L, 2),
-                    luaL_checkinteger(L, 3), luaL_checkinteger(L, 4),
+  display_draw_rect((int)luaL_checknumber(L, 1), (int)luaL_checknumber(L, 2),
+                    (int)luaL_checknumber(L, 3), (int)luaL_checknumber(L, 4),
                     l_checkcolor(L, 5));
   return 0;
 }
 
 static int l_display_drawLine(lua_State *L) {
-  display_draw_line(luaL_checkinteger(L, 1), luaL_checkinteger(L, 2),
-                    luaL_checkinteger(L, 3), luaL_checkinteger(L, 4),
+  display_draw_line((int)luaL_checknumber(L, 1), (int)luaL_checknumber(L, 2),
+                    (int)luaL_checknumber(L, 3), (int)luaL_checknumber(L, 4),
                     l_checkcolor(L, 5));
   return 0;
 }
 
 static int l_display_drawText(lua_State *L) {
-  int x = luaL_checkinteger(L, 1);
-  int y = luaL_checkinteger(L, 2);
+  int x = (int)luaL_checknumber(L, 1);
+  int y = (int)luaL_checknumber(L, 2);
   const char *text = luaL_checkstring(L, 3);
   uint16_t fg = l_checkcolor(L, 4);
   uint16_t bg = (lua_gettop(L) >= 5) ? l_checkcolor(L, 5) : COLOR_BLACK;
