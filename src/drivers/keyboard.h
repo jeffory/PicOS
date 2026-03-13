@@ -95,3 +95,7 @@ bool kbd_consume_screenshot_press(void);
 // Clear all keyboard state. Call this after an app exits to prevent
 // button presses in the launcher from being "inherited" by the next app.
 void kbd_clear_state(void);
+
+// Force I2C bus recovery — useful after USB MSC mode or other bus-corrupting events.
+// Pulses SCL 9 times to clear stuck STM32 state and reinitializes I2C peripheral.
+void kbd_recover_i2c_bus(void);

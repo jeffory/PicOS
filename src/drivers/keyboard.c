@@ -51,7 +51,7 @@ static uint32_t s_i2c_backoff_ms = 0; // when to next attempt recovery
 //   3. Issuing an explicit STOP if SDA is still stuck low
 //   4. Re-initing the I2C peripheral
 // Safe to call during kbd_init() (before first i2c_init) and at runtime.
-static void kbd_recover_i2c_bus(void) {
+void kbd_recover_i2c_bus(void) {
   // Release the I2C peripheral so we can drive the pins manually.
   i2c_deinit(KBD_I2C_PORT);
 

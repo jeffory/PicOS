@@ -116,6 +116,13 @@ void usb_msc_enter_mode(void) {
   printf("[USB MSC] Remounting FatFS...\n");
   sdcard_remount();
 
+  // Recover I2C bus — heavy SPI traffic during MSC can corrupt I2C state
+  printf("[USB MSC] Recovering I2C bus...\n");
+  kbd_recover_i2c_bus();
+
+  // Clear keyboard state (discard the ESC that exited MSC mode)
+  kbd_clear_state();
+
   // Reconnect WiFi if we were connected before
   if (was_connected) {
     const char *ssid = config_get("wifi_ssid");
@@ -182,14 +189,18 @@ bool tud_msc_start_stop_cb(uint8_t lun, uint8_t power_condition, bool start,
 }
 
 int32_t tud_msc_read10_cb(uint8_t lun, uint32_t lba, uint32_t offset,
-                          void *buffer, uint32_t bufsize) {
+                           void *buffer, uint32_t bufsize) {
   (void)lun;
   (void)offset;
 
   if (!s_msc_active)
     return -1;
 
-  if (disk_read(0, (BYTE *)buffer, lba, bufsize / msc_block_size) != RES_OK) {
+  recursive_mutex_enter_blocking(&g_sdcard_mutex);
+  DRESULT res = disk_read(0, (BYTE *)buffer, lba, bufsize / msc_block_size);
+  recursive_mutex_exit(&g_sdcard_mutex);
+
+  if (res != RES_OK) {
     printf("[USB MSC] Read error at LBA %lu\n", (unsigned long)lba);
     return -1;
   }
@@ -203,15 +214,18 @@ bool tud_msc_is_writable_cb(uint8_t lun) {
 }
 
 int32_t tud_msc_write10_cb(uint8_t lun, uint32_t lba, uint32_t offset,
-                           uint8_t *buffer, uint32_t bufsize) {
+                            uint8_t *buffer, uint32_t bufsize) {
   (void)lun;
   (void)offset;
 
   if (!s_msc_active)
     return -1;
 
-  if (disk_write(0, (const BYTE *)buffer, lba, bufsize / msc_block_size) !=
-      RES_OK) {
+  recursive_mutex_enter_blocking(&g_sdcard_mutex);
+  DRESULT res = disk_write(0, (const BYTE *)buffer, lba, bufsize / msc_block_size);
+  recursive_mutex_exit(&g_sdcard_mutex);
+
+  if (res != RES_OK) {
     printf("[USB MSC] Write error at LBA %lu\n", (unsigned long)lba);
     return -1;
   }
