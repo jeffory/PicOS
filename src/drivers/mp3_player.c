@@ -317,10 +317,27 @@ static void decode_fill_ring(void) {
             }
 
             if (MAD_RECOVERABLE(s_mad_stream->error)) {
-                if (++errors_this_update >= MAX_ERRORS_PER_UPDATE) {
-                    // Too many errors this update — release mutex, try again next cycle
-                    break;
+                // For LOSTSYNC with low buffer, try to refill first
+                if (s_mad_stream->error == MAD_ERROR_LOSTSYNC && s_bytes_in_buffer < 256) {
+                    if (!refill_decode_buffer()) {
+                        if (s_player.loop) {
+                            sdcard_fseek(s_file, 0);
+                            s_bytes_in_buffer = 0;
+                            s_buffer_pos = 0;
+                            refill_decode_buffer();
+                            mad_stream_init(s_mad_stream);
+                            mad_frame_init(s_mad_frame);
+                            mad_synth_init(s_mad_synth);
+                            continue;
+                        }
+                        s_player.playing = false;
+                        break;
+                    }
+                    continue;
                 }
+                
+                // Allow more recoverable errors - don't count toward the error limit
+                // just continue to next frame
                 continue;
             }
 
