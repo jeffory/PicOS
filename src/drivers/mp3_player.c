@@ -161,9 +161,14 @@ static void refill_staging_buf(void) {
 
 // ── Fill one DMA buffer from the staging buffer (called from DMA ISR) ───────
 // Reads only from SRAM (s_staging_buf) — never touches PIO PSRAM directly.
+// Precomputed volume scale: vol_scale = volume * 256 / 100, so
+// (sample * vol_scale) >> 8  ≈  sample * volume / 100
+// Updated whenever mp3_player_set_volume() is called.
+static uint32_t s_vol_scale = 256;  // 256 = 100%
+
 static void __time_critical_func(fill_dma_buffer)(uint32_t *buf, int count) {
     size_t bytes_per_pair = (s_pcm_channels > 1) ? 4 : 2;
-    uint32_t vol = s_player.volume;
+    uint32_t vol_scale = s_vol_scale;
 
     for (int i = 0; i < count; i++) {
         int32_t lv, rv;
@@ -184,24 +189,26 @@ static void __time_critical_func(fill_dma_buffer)(uint32_t *buf, int count) {
             else
                 right = left;
 
-            // 16-bit signed → 11-bit unsigned (0–2047)
+            // 16-bit signed → 11-bit unsigned (0–2047), then apply volume
+            // via multiply+shift instead of division (~1 cycle vs ~8 cycles)
             lv = (int32_t)((left  + 32768) >> 5);
             rv = (int32_t)((right + 32768) >> 5);
-            lv = lv * vol / 100;
-            rv = rv * vol / 100;
+            lv = (lv * vol_scale) >> 8;
+            rv = (rv * vol_scale) >> 8;
             if (lv > PWM_WRAP) lv = PWM_WRAP;
             if (rv > PWM_WRAP) rv = PWM_WRAP;
         }
 
         // Apply fade envelope
+        // FADE_SAMPLES=64, so *256/64 == *4 == <<2 (no division needed)
         if (s_fade_state == FADE_IN) {
-            int32_t gain = (s_fade_pos * 256) / FADE_SAMPLES;
+            int32_t gain = s_fade_pos << 2;
             lv = PWM_MID + (((lv - PWM_MID) * gain) >> 8);
             rv = PWM_MID + (((rv - PWM_MID) * gain) >> 8);
             if (++s_fade_pos >= FADE_SAMPLES)
                 s_fade_state = FADE_NONE;
         } else if (s_fade_state == FADE_OUT) {
-            int32_t gain = ((FADE_SAMPLES - s_fade_pos) * 256) / FADE_SAMPLES;
+            int32_t gain = (FADE_SAMPLES - s_fade_pos) << 2;
             lv = PWM_MID + (((lv - PWM_MID) * gain) >> 8);
             rv = PWM_MID + (((rv - PWM_MID) * gain) >> 8);
             if (++s_fade_pos >= FADE_SAMPLES) {
@@ -429,6 +436,7 @@ void mp3_player_reset(void) {
     if (s_file) { sdcard_fclose(s_file); s_file = NULL; }
     memset(&s_player, 0, sizeof(s_player));
     s_player.volume = 100;
+    s_vol_scale = 256;
     s_bytes_in_buffer = 0;
     s_buffer_pos = 0;
     s_pcm_channels = 2;
@@ -503,6 +511,7 @@ bool mp3_player_init(void) {
 
     memset(&s_player, 0, sizeof(s_player));
     s_player.volume = 100;
+    s_vol_scale = 256;
     s_initialized = true;
 
     return true;
@@ -737,6 +746,7 @@ void mp3_player_set_volume(mp3_player_t *player, uint8_t volume) {
     if (!player) return;
     if (volume > 100) volume = 100;
     player->volume = volume;
+    s_vol_scale = (uint32_t)volume * 256 / 100;
 }
 
 uint8_t mp3_player_get_volume(const mp3_player_t *player) {

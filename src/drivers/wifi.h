@@ -88,4 +88,10 @@ typedef struct {
 
 // Push a request from Core 0 to the Core 1 queue.
 // Returns false (and does nothing) if the 8-slot queue is full.
+// On success, rings a doorbell to wake Core 1 immediately (<1us latency
+// vs. the previous 5ms polling interval).
 bool wifi_req_push(const conn_req_t *req);
+
+// Doorbell number used for Core 0 → Core 1 IPC wake-up.
+// Claimed in wifi_init(); Core 1 registers the ISR in core1_entry().
+#define WIFI_IPC_DOORBELL 0

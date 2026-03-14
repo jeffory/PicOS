@@ -7,6 +7,7 @@
 
 #include "mongoose.h"
 #include "hardware/sync.h"
+#include "pico/multicore.h"
 #include "pico/stdlib.h"
 
 #include <stdio.h>
@@ -50,6 +51,11 @@ bool wifi_req_push(const conn_req_t *req) {
   s_req_queue[s_req_head] = *req;
   s_req_head = next;
   spin_unlock(s_req_lock, save);
+
+  // Ring doorbell to wake Core 1 immediately (<1us) instead of waiting
+  // for the 5ms polling timer.  Core 1's doorbell ISR sets the tick flag.
+  multicore_doorbell_set_other_core(WIFI_IPC_DOORBELL);
+
   return true;
 }
 
@@ -268,6 +274,9 @@ void wifi_init(void) {
   s_req_lock = spin_lock_instance(lock_num);
   s_req_head = 0;
   s_req_tail = 0;
+
+  // Claim doorbell for IPC wake-up (Core 0 rings, Core 1 handles)
+  multicore_doorbell_claim(WIFI_IPC_DOORBELL, 0x3);  // both cores
 
   mg_mgr_init(&s_mgr);
 

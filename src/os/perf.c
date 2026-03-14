@@ -1,5 +1,7 @@
 #include "perf.h"
 #include "pico/stdlib.h"
+#include "hardware/structs/xip.h"
+#include <stdio.h>
 #include <string.h>
 
 #define PERF_SAMPLES 30
@@ -71,4 +73,34 @@ uint32_t perf_get_frame_time(void) {
 void perf_set_target_fps(uint32_t fps) {
     s_perf_target_fps = fps;
     s_perf_target_frame_ms = (fps > 0) ? (1000 / fps) : 0;
+}
+
+// ── XIP cache performance counters ──────────────────────────────────────────
+// RP2350 XIP controller has two counters:
+//   ctr_acc — total cache accesses (reads from XIP address space)
+//   ctr_hit — cache hits (served from cache without flash/PSRAM fetch)
+// Both are 32-bit and auto-reset on read of ctr_acc.
+
+void perf_xip_cache_reset(void) {
+    // Reading ctr_acc clears both counters (datasheet §10.4)
+    (void)xip_ctrl_hw->ctr_acc;
+}
+
+int perf_xip_cache_hit_rate(void) {
+    uint32_t hits = xip_ctrl_hw->ctr_hit;
+    uint32_t total = xip_ctrl_hw->ctr_acc;  // clears both
+    if (total == 0) return -1;
+    return (int)((uint64_t)hits * 100 / total);
+}
+
+void perf_xip_cache_report(void) {
+    uint32_t hits = xip_ctrl_hw->ctr_hit;
+    uint32_t total = xip_ctrl_hw->ctr_acc;  // clears both
+    if (total == 0) {
+        printf("[XIP] No cache accesses recorded\n");
+        return;
+    }
+    int rate = (int)((uint64_t)hits * 100 / total);
+    printf("[XIP] Cache: %lu accesses, %lu hits (%d%% hit rate)\n",
+           (unsigned long)total, (unsigned long)hits, rate);
 }

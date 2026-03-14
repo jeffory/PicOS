@@ -5,7 +5,6 @@
 #include "hardware/clocks.h"
 #include "pico/time.h"
 
-#include <math.h>
 #include <stdio.h>
 
 // Alarm pool created on Core 1 — all audio timer ISRs fire on Core 1,
@@ -106,19 +105,32 @@ static void audio_configure_freq(uint32_t freq_hz) {
   pwm_set_gpio_level(AUDIO_PIN_R, level);
 }
 
+// Logarithmic volume curve: lut[i] = round((10^(i/100) - 1) / 9 * 128), i=0..100
+// Replaces runtime exp()/log() with a compile-time table (~5 cycles vs ~100+).
+// Values are 0..128 (half of PWM_WRAP+1=256), matching max_level = (PWM_WRAP+1)/2.
+static const uint8_t s_log_volume_lut[101] = {
+    0,   0,   1,   1,   1,   2,   2,   2,   3,   3,   //  0-  9
+    4,   4,   5,   5,   5,   6,   6,   7,   7,   8,   // 10- 19
+    8,   9,   9,  10,  10,  11,  12,  12,  13,  14,   // 20- 29
+   14,  15,  15,  16,  17,  18,  18,  19,  20,  21,   // 30- 39
+   22,  22,  23,  24,  25,  26,  27,  28,  29,  30,   // 40- 49
+   31,  32,  33,  34,  35,  36,  37,  39,  40,  41,   // 50- 59
+   42,  44,  45,  46,  48,  49,  51,  52,  54,  55,   // 60- 69
+   57,  59,  60,  62,  64,  66,  68,  70,  71,  73,   // 70- 79
+   76,  78,  80,  82,  84,  86,  89,  91,  94,  96,   // 80- 89
+   99, 101, 104, 107, 110, 113, 115, 119, 122, 125,   // 90- 99
+  128                                                   // 100
+};
+
 static void audio_apply_volume(void) {
   if (!s_playing)
     return;
 
-  uint16_t max_level = (PWM_WRAP + 1) / 2;
   if (s_volume == 0) {
     pwm_set_gpio_level(AUDIO_PIN_L, 0);
     pwm_set_gpio_level(AUDIO_PIN_R, 0);
   } else {
-    double log_vol = (exp(s_volume / 100.0 * log(10)) - 1) / 9.0;
-    uint16_t level = (uint16_t)(max_level * log_vol);
-    if (level > max_level)
-      level = max_level;
+    uint16_t level = s_log_volume_lut[s_volume];
     pwm_set_gpio_level(AUDIO_PIN_L, level);
     pwm_set_gpio_level(AUDIO_PIN_R, level);
   }
@@ -241,6 +253,11 @@ void audio_stop_stream(void) {
   pwm_set_enabled(s_pwm_slice_l, false);
   pwm_set_enabled(s_pwm_slice_r, false);
   s_streaming = false;
+}
+
+void audio_stream_poll(void) {
+  // No-op: timer-based streaming doesn't need deferred start.
+  // Kept for API compatibility with Core 1 loop in main.c.
 }
 
 void audio_push_samples(const int16_t *samples, int count) {

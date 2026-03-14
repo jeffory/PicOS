@@ -466,6 +466,14 @@ static bool core1_timer_callback(repeating_timer_t *rt) {
   return true;
 }
 
+// Doorbell ISR: Core 0 rings WIFI_IPC_DOORBELL after pushing to the IPC
+// queue.  This wakes Core 1 from __wfi() immediately (<1us latency)
+// instead of waiting for the 5ms polling timer.
+static void core1_doorbell_isr(void) {
+  multicore_doorbell_clear_current_core(WIFI_IPC_DOORBELL);
+  s_core1_tick_pending = true;
+}
+
 static void core1_entry(void) {
   volatile uint32_t *scb_ccr = (volatile uint32_t *)(0xE000ED14);
   *scb_ccr &= ~(1u << 3);
@@ -473,6 +481,11 @@ static void core1_entry(void) {
   __asm volatile ("isb sy" ::: "memory");
 
   audio_core1_init();
+
+  // Register doorbell ISR for instant IPC wake-up from Core 0
+  uint doorbell_irq = multicore_doorbell_irq_num(WIFI_IPC_DOORBELL);
+  irq_set_exclusive_handler(doorbell_irq, core1_doorbell_isr);
+  irq_set_enabled(doorbell_irq, true);
 
   alarm_pool_t *pool = audio_get_core1_alarm_pool();
   alarm_pool_add_repeating_timer_ms(pool, -1, core1_timer_callback, NULL, &s_core1_timer);
@@ -489,6 +502,7 @@ static void core1_entry(void) {
       wifi_poll();
       http_fire_c_pending();
 
+      audio_stream_poll();
       mp3_player_update();
       fileplayer_update();
       if (g_native_audio_callback)
@@ -517,6 +531,16 @@ int main(void) {
                                                         // (200MHz)
       200 * MHZ,                                        // Input frequency
       200 * MHZ); // Output: 200 MHz → SPI can reach 100 MHz
+
+  // Enable lazy floating-point context save.  Without this, any ISR that
+  // *might* touch FP registers stacks the full 32-register FP context (128
+  // bytes) on every entry.  With LSPEN+ASPEN the context is only saved if
+  // the ISR actually executes an FP instruction, saving ~12 cycles on ISR
+  // entry for the common case (audio DMA, keyboard, etc.).
+  // FPCCR: bit 31 = ASPEN (automatic state preservation),
+  //        bit 30 = LSPEN (lazy stacking enable)
+  volatile uint32_t *fpccr = (volatile uint32_t *)0xE000EF34u;
+  *fpccr |= (1u << 31) | (1u << 30);
 
   stdio_init_all();
 
