@@ -1,5 +1,6 @@
 #include "lua_bridge_internal.h"
 #include "../drivers/sdcard.h"
+#include "umm_malloc.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -163,7 +164,7 @@ static int l_save_get(lua_State *L) {
         }
     }
     
-    free(data);
+    umm_free(data);
     return 1;
 }
 
