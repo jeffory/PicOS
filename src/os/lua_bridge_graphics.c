@@ -553,6 +553,66 @@ static int l_graphics_fillBorderedRect(lua_State *L) {
   return 0;
 }
 
+// drawPlayfield(playfield, x, y, block_size, cols, rows, grid_color)
+//
+// playfield    : 2-D Lua table playfield[row][col] — values are RGB565 color
+//                integers for filled cells, nil for empty cells.
+//                row 1 = top, indexed 1..rows; col 1 = left, indexed 1..cols.
+// x, y         : pixel coordinate of the top-left corner of the field
+// block_size   : size of each cell in pixels (square)
+// cols, rows   : field dimensions (number of columns and rows)
+// grid_color   : RGB565 color for the grid lines and block borders
+//
+// In a single C call this function:
+//   1. Draws the grid background (same as drawGrid)
+//   2. Iterates every cell; for non-nil values draws a fillBorderedRect
+//
+// Replaces the Lua draw_playfield() loop which made up to 200 Lua→C calls
+// per frame (one fillBorderedRect per filled cell) plus the drawGrid call.
+static int l_graphics_drawPlayfield(lua_State *L) {
+  luaL_checktype(L, 1, LUA_TTABLE);
+  int      ox         = luaL_checkinteger(L, 2);
+  int      oy         = luaL_checkinteger(L, 3);
+  int      block_size = luaL_checkinteger(L, 4);
+  int      cols       = luaL_checkinteger(L, 5);
+  int      rows       = luaL_checkinteger(L, 6);
+  uint16_t grid_color = l_checkcolor(L, 7);
+
+  if (rows <= 0 || cols <= 0) return 0;
+
+  int total_w = cols * block_size;
+  int total_h = rows * block_size;
+
+  // ── 1. Draw grid lines ────────────────────────────────────────────────────
+  for (int r = 0; r <= rows; r++)
+    display_fill_rect(ox, oy + r * block_size, total_w, 1, grid_color);
+  for (int c = 0; c <= cols; c++)
+    display_fill_rect(ox + c * block_size, oy, 1, total_h, grid_color);
+
+  // ── 2. Draw filled cells ──────────────────────────────────────────────────
+  for (int row = 1; row <= rows; row++) {
+    lua_rawgeti(L, 1, row);          // push playfield[row]
+    if (!lua_istable(L, -1)) {
+      lua_pop(L, 1);
+      continue;
+    }
+    int py = oy + (row - 1) * block_size;
+    for (int col = 1; col <= cols; col++) {
+      lua_rawgeti(L, -1, col);       // push playfield[row][col]
+      if (!lua_isnil(L, -1)) {
+        uint16_t fill = (uint16_t)lua_tointeger(L, -1);
+        int px = ox + (col - 1) * block_size;
+        display_fill_rect(px, py, block_size, block_size, fill);
+        display_draw_rect(px, py, block_size, block_size, grid_color);
+      }
+      lua_pop(L, 1);                 // pop playfield[row][col]
+    }
+    lua_pop(L, 1);                   // pop playfield[row]
+  }
+
+  return 0;
+}
+
 // updateDrawParticles(flat_array, delta_s) -> live_count
 //
 // flat_array is a Lua sequence with 6 values per particle:
@@ -2178,6 +2238,7 @@ static const luaL_Reg l_graphics_lib[] = {
     {"clear", l_graphics_clear},
     {"drawGrid", l_graphics_drawGrid},
     {"fillBorderedRect", l_graphics_fillBorderedRect},
+    {"drawPlayfield", l_graphics_drawPlayfield},
     {"updateDrawParticles", l_graphics_updateDrawParticles},
     {"draw3DWireframe", l_graphics_draw3DWireframe},
     {NULL, NULL}};

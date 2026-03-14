@@ -1,4 +1,5 @@
 #include "wifi.h"
+#include "tcp.h"
 #include "../os/clock.h"
 #include "../os/config.h"
 #include "display.h"
@@ -6,6 +7,7 @@
 
 #include "mongoose.h"
 #include "hardware/sync.h"
+#include "pico/multicore.h"
 #include "pico/stdlib.h"
 
 #include <stdio.h>
@@ -49,6 +51,11 @@ bool wifi_req_push(const conn_req_t *req) {
   s_req_queue[s_req_head] = *req;
   s_req_head = next;
   spin_unlock(s_req_lock, save);
+
+  // Ring doorbell to wake Core 1 immediately (<1us) instead of waiting
+  // for the 5ms polling timer.  Core 1's doorbell ISR sets the tick flag.
+  multicore_doorbell_set_other_core(WIFI_IPC_DOORBELL);
+
   return true;
 }
 
@@ -207,6 +214,44 @@ static void drain_requests(void) {
         break;
       }
 
+      case CONN_REQ_TCP_CONNECT: {
+        tcp_conn_t *tc = (tcp_conn_t *)req.conn;
+        if (tc) {
+          char url[320];
+          snprintf(url, sizeof(url), "%s://%s:%u",
+                   tc->use_ssl ? "tls" : "tcp", tc->host, tc->port);
+          printf("[TCP] Connecting to %s (SSL=%d)...\n", url, tc->use_ssl);
+          tc->state = TCP_STATE_CONNECTING;
+          struct mg_connection *nc = mg_connect(&s_mgr, url, tcp_ev_fn, tc);
+          if (!nc) {
+            printf("[TCP] mg_connect failed\n");
+            tc->state = TCP_STATE_FAILED;
+            snprintf(tc->err, sizeof(tc->err), "mg_connect failed");
+            break;
+          }
+          tc->pcb = (void *)nc;
+        }
+        break;
+      }
+
+      case CONN_REQ_TCP_WRITE: {
+        tcp_conn_t *tc = (tcp_conn_t *)req.conn;
+        if (tc && tc->pcb && req.data) {
+          mg_send((struct mg_connection *)tc->pcb, req.data, req.data_len);
+        }
+        if (req.data) umm_free(req.data);
+        break;
+      }
+
+      case CONN_REQ_TCP_CLOSE: {
+        tcp_conn_t *tc = (tcp_conn_t *)req.conn;
+        if (tc && tc->pcb) {
+          ((struct mg_connection *)tc->pcb)->is_closing = 1;
+          tc->pcb = NULL;
+        }
+        break;
+      }
+
       case CONN_REQ_WIFI_CONNECT:
         s_driver_data.wifi.ssid = s_ssid;
         s_driver_data.wifi.pass = s_pass;
@@ -229,6 +274,9 @@ void wifi_init(void) {
   s_req_lock = spin_lock_instance(lock_num);
   s_req_head = 0;
   s_req_tail = 0;
+
+  // Claim doorbell for IPC wake-up (Core 0 rings, Core 1 handles)
+  multicore_doorbell_claim(WIFI_IPC_DOORBELL, 0x3);  // both cores
 
   mg_mgr_init(&s_mgr);
 

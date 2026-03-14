@@ -19,6 +19,7 @@ typedef struct {
 } mp3_player_t;
 
 bool mp3_player_init(void);
+void mp3_player_deinit(void);
 void mp3_player_reset(void);
 mp3_player_t *mp3_player_create(void);
 void mp3_player_destroy(mp3_player_t *player);

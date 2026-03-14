@@ -87,6 +87,15 @@ void usb_msc_enter_mode(void) {
       }
     }
 
+    // Check for ESC via CDC serial (for automated workflows)
+    uint8_t cdc_byte;
+    if (tud_cdc_read(&cdc_byte, 1) > 0) {
+      if (cdc_byte == 'x' || cdc_byte == 'X' || cdc_byte == 0x03) {
+        printf("[USB MSC] ESC via CDC, exiting\n");
+        break;
+      }
+    }
+
     // Exit if no host has mounted the device within HOST_TIMEOUT_MS.
     // Use wall time so the timeout is accurate regardless of loop body duration.
     if (!tud_mounted() && (now - loop_start_ms) > HOST_TIMEOUT_MS) {

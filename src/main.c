@@ -7,6 +7,10 @@
 
 #include <stdarg.h>
 #include <stdio.h>
+#include <stdlib.h>
+
+#include "dev_commands.h"
+#include "usb/usb_msc.h"
 
 // Forward declarations for display functions used in hardfault_c below.
 // The full #include "drivers/display.h" appears later in the file after other
@@ -162,9 +166,12 @@ void __attribute__((naked)) isr_hardfault(void) {
 #include "drivers/audio.h"
 #include "drivers/fileplayer.h"
 #include "drivers/mp3_player.h"
+#include "drivers/pio_psram.h"
+#include "drivers/pio_psram_bulk.h"
 #include "drivers/sound.h"
 #include "drivers/display.h"
 #include "drivers/http.h"
+#include "drivers/tcp.h"
 #include "drivers/keyboard.h"
 #include "drivers/sdcard.h"
 #include "drivers/wifi.h"
@@ -173,8 +180,11 @@ void __attribute__((naked)) isr_hardfault(void) {
 #include "os/launcher.h"
 #include "os/lua_psram_alloc.h"
 #include "os/os.h"
+#include "os/perf.h"
 #include "os/system_menu.h"
+#include "os/text_input.h"
 #include "os/ui.h"
+#include "umm_malloc.h"
 
 // ── OS API implementation stubs (wiring the function pointer table)
 // ─────────── Full implementations live in each driver. This wires them all
@@ -182,6 +192,16 @@ void __attribute__((naked)) isr_hardfault(void) {
 // reference.
 
 PicoCalcAPI g_api;
+
+static picocalc_tcp_t s_tcp_impl = {
+    .connect = (pctcp_t (*)(const char *, uint16_t, bool))tcp_connect,
+    .write = (int (*)(pctcp_t, const void *, int))tcp_write,
+    .read = (int (*)(pctcp_t, void *, int))tcp_read,
+    .close = (void (*)(pctcp_t))tcp_close,
+    .available = (int (*)(pctcp_t))tcp_bytes_available,
+    .getError = (const char *(*)(pctcp_t))tcp_get_error,
+    .getEvents = (uint32_t (*)(pctcp_t))tcp_take_pending,
+};
 
 static picocalc_input_t s_input_impl = {
     .getButtons = kbd_get_buttons,
@@ -205,10 +225,14 @@ static picocalc_display_t s_display_impl = {
     .setBrightness = display_set_brightness,
     .drawImageNN = display_draw_image_nn,
     .flushRows = display_flush_rows,
+    .flushRegion = display_flush_region,
 };
 
 static uint32_t sys_getTimeMs(void) {
   return to_ms_since_boot(get_absolute_time());
+}
+static uint64_t sys_getTimeUs(void) {
+  return time_us_64();
 }
 static void sys_reboot(void) {
   watchdog_enable(1, true);
@@ -230,6 +254,9 @@ static void sys_log(const char *fmt, ...) {
 // consumed by sys_shouldExit() which the app checks each frame.
 static volatile bool s_native_exit = false;
 
+// Pending app launch from serial command
+static const char* s_pending_launch = NULL;
+
 // Native-app tick: poll keyboard, fire pending C HTTP callbacks, and
 // check the Sym (Menu) key to show the system menu overlay.
 static void sys_poll(void) {
@@ -239,6 +266,26 @@ static void sys_poll(void) {
     if (system_menu_show_for_native())
       s_native_exit = true;
   }
+
+  // Poll for serial commands
+  dev_commands_poll();
+  
+  // Process serial commands that need to run from this context
+  // (usb, reboot need to be in non-app context)
+  if (dev_commands_process()) {
+    // Check what command was processed and handle appropriately
+    // The dev_commands_process() handles echo, we need to act on specific commands
+  }
+}
+
+// Check if there's a pending launch request (from serial command)
+// Returns app name if pending, NULL otherwise
+const char* sys_get_pending_launch(void) {
+  return s_pending_launch;
+}
+
+void sys_clear_pending_launch(void) {
+  s_pending_launch = NULL;
 }
 
 static bool sys_shouldExit(void) {
@@ -247,8 +294,13 @@ static bool sys_shouldExit(void) {
   return v;
 }
 
+static void sys_setAudioCallback(void (*cb)(void)) {
+  g_native_audio_callback = cb;
+}
+
 static picocalc_sys_t s_sys_impl = {
     .getTimeMs = sys_getTimeMs,
+    .getTimeUs = sys_getTimeUs,
     .reboot = sys_reboot,
     .getBatteryPercent = kbd_get_battery_percent,
     .isUSBPowered = sys_isUSBPowered,
@@ -257,6 +309,7 @@ static picocalc_sys_t s_sys_impl = {
     .log = sys_log,
     .poll = sys_poll,
     .shouldExit = sys_shouldExit,
+    .setAudioCallback = sys_setAudioCallback,
 };
 
 static picocalc_wifi_t s_wifi_impl = {
@@ -295,6 +348,15 @@ static bool fs_exists(const char *path) {
 static int fs_size(const char *path) {
     return sdcard_fsize(path);
 }
+static int fs_fsize(pcfile_t f) {
+    return sdcard_fsize_handle((sdfile_t)f);
+}
+static bool fs_seek(pcfile_t f, uint32_t offset) {
+    return sdcard_fseek((sdfile_t)f, offset);
+}
+static uint32_t fs_tell(pcfile_t f) {
+    return sdcard_ftell((sdfile_t)f);
+}
 
 // Static-global callback state avoids passing a stack-allocated pointer
 // through the deep FatFS call chain (f_opendir → f_readdir → ...).
@@ -322,6 +384,52 @@ static int fs_list_dir(const char *path,
     return sdcard_list_dir(path, fs_list_dir_callback, NULL);
 }
 
+static const picocalc_ui_t s_ui_impl = {
+    .textInput       = text_input_show,
+    .textInputSimple = ui_text_input,
+    .confirm         = ui_confirm,
+};
+
+// PSRAM wrapper functions
+static bool psram_pio_available(void) { return pio_psram_available(); }
+static bool psram_pio_bulk_available(void) { return pio_psram_bulk_available(); }
+static void psram_pio_read(uint32_t addr, uint8_t *dst, uint32_t len) { pio_psram_read(addr, dst, len); }
+static void psram_pio_write(uint32_t addr, const uint8_t *src, uint32_t len) { pio_psram_write(addr, src, len); }
+static void psram_pio_bulk_read(uint32_t addr, uint8_t *dst, uint32_t len) { pio_psram_bulk_read_large(addr, dst, len); }
+static void psram_pio_bulk_write(uint32_t addr, const uint8_t *src, uint32_t len) { pio_psram_bulk_write_large(addr, src, len); }
+static void *psram_qmi_alloc(uint32_t size) { return umm_malloc(size); }
+static void psram_qmi_free(void *ptr) { umm_free(ptr); }
+
+static const picocalc_psram_t s_psram_impl = {
+    .pioAvailable     = psram_pio_available,
+    .pioBulkAvailable = psram_pio_bulk_available,
+    .pioRead          = psram_pio_read,
+    .pioWrite         = psram_pio_write,
+    .pioBulkRead      = psram_pio_bulk_read,
+    .pioBulkWrite     = psram_pio_bulk_write,
+    .qmiAlloc         = psram_qmi_alloc,
+    .qmiFree          = psram_qmi_free,
+};
+
+static void perf_draw_fps_wrapper(int x, int y) {
+    int fps = perf_get_fps();
+    char buf[16];
+    snprintf(buf, sizeof(buf), "FPS: %d", fps);
+    uint16_t color = (fps >= 55)   ? COLOR_GREEN
+                     : (fps >= 30) ? COLOR_YELLOW
+                                   : COLOR_RED;
+    display_draw_text(x, y, buf, color, COLOR_BLACK);
+}
+
+static const picocalc_perf_t s_perf_impl = {
+    .beginFrame = perf_begin_frame,
+    .endFrame = perf_end_frame,
+    .getFPS = perf_get_fps,
+    .getFrameTime = perf_get_frame_time,
+    .drawFPS = perf_draw_fps_wrapper,
+    .setTargetFPS = perf_set_target_fps,
+};
+
 static picocalc_fs_t s_fs_impl = {
     .open = fs_open,
     .read = fs_read,
@@ -329,6 +437,9 @@ static picocalc_fs_t s_fs_impl = {
     .close = fs_close,
     .exists = fs_exists,
     .size = fs_size,
+    .fsize = fs_fsize,
+    .seek = fs_seek,
+    .tell = fs_tell,
     .listDir = fs_list_dir,
 };
 
@@ -343,23 +454,63 @@ static picocalc_fs_t s_fs_impl = {
 // Core 1's umm_malloc/umm_free and the ELF loader on Core 0.
 volatile bool g_core1_pause = false;
 
+// Optional audio callback for native apps (e.g. DOOM) that offload mixing
+// to Core 1.  Set by the app at startup, cleared on exit.
+void (*g_native_audio_callback)(void) = NULL;
+
+static repeating_timer_t s_core1_timer;
+static volatile bool s_core1_tick_pending = false;
+
+static bool core1_timer_callback(repeating_timer_t *rt) {
+  (void)rt;
+  s_core1_tick_pending = true;
+  return true;
+}
+
+// Doorbell ISR: Core 0 rings WIFI_IPC_DOORBELL after pushing to the IPC
+// queue.  This wakes Core 1 from __wfi() immediately (<1us latency)
+// instead of waiting for the 5ms polling timer.
+static void core1_doorbell_isr(void) {
+  multicore_doorbell_clear_current_core(WIFI_IPC_DOORBELL);
+  s_core1_tick_pending = true;
+}
+
 static void core1_entry(void) {
-  // Clear UNALIGN_TRP on Core 1 (each core has its own SCB/CCR)
   volatile uint32_t *scb_ccr = (volatile uint32_t *)(0xE000ED14);
   *scb_ccr &= ~(1u << 3);
   __asm volatile ("dsb sy" ::: "memory");
   __asm volatile ("isb sy" ::: "memory");
+
+  audio_core1_init();
+
+  // Register doorbell ISR for instant IPC wake-up from Core 0
+  uint doorbell_irq = multicore_doorbell_irq_num(WIFI_IPC_DOORBELL);
+  irq_set_exclusive_handler(doorbell_irq, core1_doorbell_isr);
+  irq_set_enabled(doorbell_irq, true);
+
+  alarm_pool_t *pool = audio_get_core1_alarm_pool();
+  alarm_pool_add_repeating_timer_ms(pool, -1, core1_timer_callback, NULL, &s_core1_timer);
 
   while (true) {
     if (g_core1_pause) {
       sleep_ms(1);
       continue;
     }
-    wifi_poll();
-    http_fire_c_pending();
-    mp3_player_update();
-    fileplayer_update();
-    sleep_ms(5);
+
+    if (s_core1_tick_pending) {
+      s_core1_tick_pending = false;
+
+      wifi_poll();
+      http_fire_c_pending();
+
+      audio_stream_poll();
+      mp3_player_update();
+      fileplayer_update();
+      if (g_native_audio_callback)
+        g_native_audio_callback();
+    }
+
+    __wfi();
   }
 }
 
@@ -370,7 +521,7 @@ int main(void) {
   // NOTE: If the keyboard fails to initialise reliably, try commenting this
   // out to test at the default 125 MHz — it isolates whether the overclock
   // is affecting I2C timing.
-  set_sys_clock_khz(200000, true);
+  set_sys_clock_khz(200000, false);
 
   // Configure peripheral clock to 125 MHz (enables 62.5 MHz SPI for LCD)
   // clk_peri drives UART, SPI, I2C, PWM — ST7789 rated max is 62.5 MHz
@@ -381,6 +532,16 @@ int main(void) {
                                                         // (200MHz)
       200 * MHZ,                                        // Input frequency
       200 * MHZ); // Output: 200 MHz → SPI can reach 100 MHz
+
+  // Enable lazy floating-point context save.  Without this, any ISR that
+  // *might* touch FP registers stacks the full 32-register FP context (128
+  // bytes) on every entry.  With LSPEN+ASPEN the context is only saved if
+  // the ISR actually executes an FP instruction, saving ~12 cycles on ISR
+  // entry for the common case (audio DMA, keyboard, etc.).
+  // FPCCR: bit 31 = ASPEN (automatic state preservation),
+  //        bit 30 = LSPEN (lazy stacking enable)
+  volatile uint32_t *fpccr = (volatile uint32_t *)0xE000EF34u;
+  *fpccr |= (1u << 31) | (1u << 30);
 
   stdio_init_all();
 
@@ -397,6 +558,10 @@ int main(void) {
   g_api.sys = &s_sys_impl;
   g_api.wifi = &s_wifi_impl;
   g_api.audio = &s_audio_impl;
+  g_api.tcp = &s_tcp_impl;
+  g_api.ui = &s_ui_impl;
+  g_api.psram = &s_psram_impl;
+  g_api.perf = &s_perf_impl;
   // fs wired after SD card init
 
   // Explicitly configure PSRAM hardware pins and XIP write logic for the Pico
@@ -411,6 +576,12 @@ int main(void) {
 
   // Initialise display first so we can show progress
   display_init();
+
+  // Initialise mainboard PIO PSRAM (8MB on PIO1, independent of QMI PSRAM).
+  // Non-fatal if chip not present (some boards may not have it).
+  // Uses bulk driver internally for 8KB transfers (300x faster than 27-byte chunks).
+  pio_psram_init();
+
   sound_init();
   audio_init();
   ui_draw_splash("Initialising keyboard...", NULL);
@@ -473,6 +644,7 @@ int main(void) {
   ui_draw_splash("Initialising WiFi...", NULL);
   wifi_init();
   http_init();
+  tcp_init();
   
   // Debug: check free size after WiFi/HTTP init
   extern size_t lua_psram_alloc_free_size(void);

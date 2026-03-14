@@ -6,6 +6,7 @@
 #include "../drivers/audio.h"
 #include "../drivers/display.h"
 #include "../drivers/keyboard.h"
+#include "../drivers/mp3_player.h"
 #include "../drivers/sdcard.h"
 #include "../drivers/wifi.h"
 
@@ -31,7 +32,7 @@
 
 #define MAX_APPS 32
 
-static app_entry_t s_apps[MAX_APPS];
+static app_entry_t *s_apps = NULL;
 static int s_app_count = 0;
 
 // Tiny JSON parser — just enough to pull "name", "description", "version"
@@ -296,29 +297,34 @@ static void launcher_apply_clock(uint32_t khz) {
   // 4. Apply the new system clock
   bool ok = set_sys_clock_khz(khz, false);
 
-  if (ok) {
-    // 5. Re-configure peripheral clock so SPI/I2C/UART/PWM stay stable.
-    clock_configure(
-        clk_peri,
-        0,
-        CLOCKS_CLK_PERI_CTRL_AUXSRC_VALUE_CLKSRC_PLL_SYS,
-        khz * 1000,
-        khz * 1000);
-
-    // 6. Update display PIO divider for new clk_sys frequency
-    display_apply_clock();
-
-    // 7. Update keyboard I2C divider for new clk_peri frequency
-    kbd_apply_clock();
-
-    // 8. Re-init UART baud rate (depends on clk_peri)
-#if LIB_PICO_STDIO_UART
-    uart_init(uart0, 115200);
-#endif
+  if (!ok) {
+    printf("[LAUNCHER] Clock change to %lu MHz failed (PLL cannot produce this frequency)\n",
+           (unsigned long)(khz / 1000));
+    g_core1_pause = false;
+    return;
   }
 
+  // 5. Re-configure peripheral clock so SPI/I2C/UART/PWM stay stable.
+  clock_configure(
+      clk_peri,
+      0,
+      CLOCKS_CLK_PERI_CTRL_AUXSRC_VALUE_CLKSRC_PLL_SYS,
+      khz * 1000,
+      khz * 1000);
+
+  // 6. Update display PIO divider for new clk_sys frequency
+  display_apply_clock();
+
+  // 7. Update keyboard I2C divider for new clk_peri frequency
+  kbd_apply_clock();
+
+  // 8. Re-init UART baud rate (depends on clk_peri)
+#if LIB_PICO_STDIO_UART
+  uart_init(uart0, 115200);
+#endif
+
   // 9. Down-clocking: Lower voltage AFTER decreasing frequency
-  if (khz < current_khz && ok) {
+  if (khz < current_khz) {
     enum vreg_voltage v = VREG_VOLTAGE_DEFAULT;
     if (khz >= 400000)
       v = VREG_VOLTAGE_1_25;
@@ -340,6 +346,10 @@ static bool run_app(int idx) {
     return false;
 
   app_entry_t *app = &s_apps[idx];
+
+  // Free any PSRAM used by the MP3 player (from a previous Lua app)
+  // so we have maximum memory for the next app.
+  mp3_player_deinit();
 
   printf("[LAUNCHER] Starting app %d '%s' (type=%s), PSRAM free: %zu\n",
          idx, app->name,
@@ -388,6 +398,14 @@ static bool run_app(int idx) {
 // ──────────────────────────────────────────────────────────
 
 void launcher_run(void) {
+  if (!s_apps) {
+    s_apps = umm_malloc(sizeof(app_entry_t) * MAX_APPS);
+    if (!s_apps) {
+      printf("[LAUNCHER] FATAL: failed to alloc s_apps in PSRAM\n");
+      return;
+    }
+    memset(s_apps, 0, sizeof(app_entry_t) * MAX_APPS);
+  }
   scan_apps();
   draw_launcher();
 
@@ -509,4 +527,45 @@ void launcher_run(void) {
 
     sleep_ms(16); // ~60 Hz polling
   }
+}
+
+// ── Dev command support ─────────────────────────────────────────────────────
+
+void launcher_list_apps(void) {
+  printf("[DEV] Available apps:\n");
+  for (int i = 0; i < s_app_count; i++) {
+    printf("  %s\n", s_apps[i].name);
+  }
+  printf("[DEV] Total: %d apps\n", s_app_count);
+}
+
+bool launcher_launch_by_name(const char *name) {
+  if (!name || !name[0]) {
+    printf("[DEV] Error: no app name provided\n");
+    return false;
+  }
+
+  // Find the app by name
+  int app_idx = -1;
+  for (int i = 0; i < s_app_count; i++) {
+    if (strcmp(s_apps[i].name, name) == 0) {
+      app_idx = i;
+      break;
+    }
+  }
+
+  if (app_idx < 0) {
+    printf("[DEV] Error: app '%s' not found\n", name);
+    return false;
+  }
+
+  printf("[DEV] Launching app: %s\n", name);
+  // TODO: Actually launch the app
+  // For now, just return true - actual launching would be done by the caller
+  return true;
+}
+
+const char* launcher_get_running_app_name(void) {
+  // This would need to be tracked - for now return NULL
+  return NULL;
 }

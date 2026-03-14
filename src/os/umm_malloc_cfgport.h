@@ -1,4 +1,8 @@
-#define UMM_BLOCK_BODY_SIZE 128
+// Block body size determines sizeof(umm_block) and thus max addressable heap.
+// Block indices are 15-bit (0x7FFF = 32767 max) because bit 15 is the free-
+// list flag.  With body_size=128 → sizeof(umm_block)=128 → max heap ~4MB.
+// At 200 bytes: sizeof(umm_block)=200, 6MB/200 = 31457 blocks — fits in 15 bits.
+#define UMM_BLOCK_BODY_SIZE 200
 #define UMM_INLINE_METRICS
 
 // ── Multi-core safety ─────────────────────────────────────────────────────────

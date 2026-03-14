@@ -76,6 +76,9 @@ typedef struct {
     // Flush only rows y0..y1 (inclusive, full width) from the back buffer.
     // Does NOT swap buffers. Useful for partial screen updates.
     void (*flushRows)(int y0, int y1);
+    // Flush rows y0..y1 (inclusive) with buffer swap. Like flush() but only
+    // transfers the specified row range. Useful for emulators with letterboxing.
+    void (*flushRegion)(int y0, int y1);
 } picocalc_display_t;
 
 // --- Filesystem (SD card) ---------------------------------------------------
@@ -90,6 +93,9 @@ typedef struct {
     void     (*close)(pcfile_t f);
     bool     (*exists)(const char *path);
     int      (*size)(const char *path);
+    int      (*fsize)(pcfile_t f);
+    bool     (*seek)(pcfile_t f, uint32_t offset);
+    uint32_t (*tell)(pcfile_t f);
     // List directory. Calls callback for each entry. Returns entry count.
     int      (*listDir)(const char *path,
                         void (*callback)(const char *name, bool is_dir, void *user),
@@ -101,6 +107,8 @@ typedef struct {
 typedef struct {
     // Milliseconds since boot
     uint32_t (*getTimeMs)(void);
+    // Microseconds since boot (64-bit, for high-precision timing)
+    uint64_t (*getTimeUs)(void);
     // Trigger a system reboot
     void     (*reboot)(void);
     // Battery level 0-100 (from STM32 via I2C). -1 = unknown/USB powered.
@@ -122,6 +130,10 @@ typedef struct {
     // menu.  Native apps should check this each frame and return from
     // picos_main() when it fires.
     bool     (*shouldExit)(void);
+    // Register a callback to be called on Core 1 every 5ms, alongside
+    // audio updates.  Used by native apps (e.g. DOOM) to offload audio
+    // mixing from Core 0.  Pass NULL to deregister.
+    void     (*setAudioCallback)(void (*cb)(void));
 } picocalc_sys_t;
 
 // --- Audio ------------------------------------------------------------------
@@ -164,6 +176,80 @@ typedef struct {
     bool          (*isAvailable)(void);
 } picocalc_wifi_t;
 
+// --- TCP Sockets ------------------------------------------------------------
+
+typedef void* pctcp_t;   // opaque TCP connection handle
+
+typedef enum {
+    TCP_CB_CONNECT  = (1 << 0),
+    TCP_CB_READ     = (1 << 1),
+    TCP_CB_WRITE    = (1 << 2),
+    TCP_CB_CLOSED   = (1 << 3),
+    TCP_CB_FAILED   = (1 << 4),
+} tcp_event_t;
+
+typedef struct {
+    // Open a TCP connection to host:port. Non-blocking.
+    pctcp_t (*connect)(const char *host, uint16_t port, bool use_ssl);
+    // Write data to the connection. Returns bytes sent or <0 on error.
+    int     (*write)(pctcp_t c, const void *buf, int len);
+    // Read data from the connection. Returns bytes read or 0 if none available.
+    int     (*read)(pctcp_t c, void *buf, int len);
+    // Close the connection.
+    void    (*close)(pctcp_t c);
+    // Returns number of bytes available for reading.
+    int     (*available)(pctcp_t c);
+    // Returns the last error string, or NULL.
+    const char * (*getError)(pctcp_t c);
+    // Returns bitmask of pending events (TCP_CB_*).
+    uint32_t (*getEvents)(pctcp_t c);
+} picocalc_tcp_t;
+
+// --- UI Widgets -------------------------------------------------------------
+
+typedef struct {
+    // Modal text input with title bar. Returns true on Enter, false on Esc.
+    bool (*textInput)(const char *title, const char *prompt,
+                      const char *initial, char *out, int out_len);
+    // Simpler text input (no title bar). Returns true on Enter, false on Esc.
+    bool (*textInputSimple)(const char *prompt, const char *default_val,
+                            char *out_buf, int out_len);
+    // Yes/no confirmation dialog. Returns true on Enter/Y, false on Esc/N.
+    bool (*confirm)(const char *message);
+} picocalc_ui_t;
+
+// --- PSRAM Benchmark ---------------------------------------------------------
+
+typedef struct {
+    // Check if PIO PSRAM (mainboard) is available
+    bool (*pioAvailable)(void);
+    // Check if PIO PSRAM bulk driver is available
+    bool (*pioBulkAvailable)(void);
+    // Read from PIO PSRAM (original driver, 27B chunks)
+    void (*pioRead)(uint32_t addr, uint8_t *dst, uint32_t len);
+    // Write to PIO PSRAM (original driver, 27B chunks)
+    void (*pioWrite)(uint32_t addr, const uint8_t *src, uint32_t len);
+    // Read from PIO PSRAM (bulk driver, 8KB chunks)
+    void (*pioBulkRead)(uint32_t addr, uint8_t *dst, uint32_t len);
+    // Write to PIO PSRAM (bulk driver, 8KB chunks)
+    void (*pioBulkWrite)(uint32_t addr, const uint8_t *src, uint32_t len);
+    // Allocate memory in QMI PSRAM (via umm_malloc)
+    void *(*qmiAlloc)(uint32_t size);
+    // Free memory from QMI PSRAM (via umm_free)
+    void (*qmiFree)(void *ptr);
+} picocalc_psram_t;
+
+// --- Performance -----------------------------------------------------------
+
+typedef struct {
+    void (*beginFrame)(void);
+    void (*endFrame)(void);
+    int  (*getFPS)(void);
+    uint32_t (*getFrameTime)(void);
+    void (*drawFPS)(int x, int y);
+    void (*setTargetFPS)(uint32_t fps);
+} picocalc_perf_t;
+
 // --- The complete OS API struct ---------------------------------------------
 // This is what gets passed to every Lua environment and future C app loaders.
 
@@ -174,7 +260,16 @@ typedef struct PicoCalcAPI {
     const picocalc_sys_t     *sys;
     const picocalc_audio_t   *audio;
     const picocalc_wifi_t    *wifi;
+    const picocalc_tcp_t     *tcp;
+    const picocalc_ui_t      *ui;
+    const picocalc_psram_t   *psram;
+    const picocalc_perf_t    *perf;
 } PicoCalcAPI;
 
 // The global API instance, populated during os_init()
 extern PicoCalcAPI g_api;
+
+// Optional audio callback for native apps that need Core 1 mixing.
+// Set by the native app at startup, cleared on exit. Called every 5ms
+// from core1_entry() alongside mp3_player_update()/fileplayer_update().
+extern void (*g_native_audio_callback)(void);

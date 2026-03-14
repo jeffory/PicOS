@@ -2,11 +2,11 @@
 
 An app platform for the ClockworkPi PicoCalc, built around a resident Lua runtime. Apps live on the SD card as directories containing `main.lua` and `app.json`. The OS owns all hardware; apps access everything through the `picocalc` Lua API.
 
+> [!IMPORTANT]
+> **Target hardware:** [Pimoroni Pico Plus 2 W](https://shop.pimoroni.com/products/pimoroni-pico-plus-2-w) in the [PicoCalc](https://www.clockworkpi.com/picocalc) device.
+> PicOS relies heavily on the PSRAM being accessible via XIP, other hardware support is untested currently.
+
 📖 **Documentation:** Full SDK reference and guides are available on the [PicOS Wiki](https://github.com/jeffory/PicOS/wiki).
-
-**Target hardware:** [Pimoroni Pico Plus 2 W](https://shop.pimoroni.com/products/pimoroni-pico-plus-2-w) in the [PicoCalc](https://www.clockworkpi.com/picocalc).
-
-Other hardware support is untested currently.
 
 ---
 

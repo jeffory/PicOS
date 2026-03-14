@@ -2,6 +2,8 @@
 #include "audio.h"
 #include "../hardware.h"
 #include "sdcard.h"
+#include "ff.h"       // direct FatFS calls for non-blocking SD reads
+#include "pico/platform.h"
 #include "hardware/gpio.h"
 #include "hardware/pwm.h"
 #include "hardware/dma.h"
@@ -9,6 +11,7 @@
 #include "hardware/irq.h"
 #include "pico/mutex.h"
 #include "pico/time.h"
+#include "pio_psram.h"
 
 #define FPM_DEFAULT
 #include "mad.h"
@@ -21,13 +24,13 @@
 #include <stdlib.h>
 
 #define MP3_DECODE_BUFFER_SIZE (8192 + MAD_BUFFER_GUARD)
-#define PCM_RING_SIZE          16384  // bytes — ~4096 stereo samples (~170ms @ 24kHz)
-#define DMA_BUF_SAMPLES        256   // samples per DMA buffer (~10.7ms @ 24kHz)
+#define PCM_RING_SIZE          32768
+#define DMA_BUF_SAMPLES        256
 
 #define PWM_WRAP  2047
-#define PWM_MID   (PWM_WRAP / 2)     // 1023 — true silence for AC-coupled output
+#define PWM_MID   (PWM_WRAP / 2)
 
-#define FADE_SAMPLES 64              // ~1.5ms at 44.1kHz — inaudible transition
+#define FADE_SAMPLES 64
 
 typedef enum {
     FADE_NONE,
@@ -39,7 +42,6 @@ static volatile fade_state_t s_fade_state = FADE_NONE;
 static volatile int          s_fade_pos   = 0;
 static volatile bool         s_stop_after_fade = false;
 
-// ── Compressed-data state ───────────────────────────────────────────────────
 static struct mad_stream *s_mad_stream = NULL;
 static struct mad_frame  *s_mad_frame  = NULL;
 static struct mad_synth  *s_mad_synth  = NULL;
@@ -48,22 +50,30 @@ static uint8_t     s_decode_buffer[MP3_DECODE_BUFFER_SIZE] __attribute__((aligne
 static int         s_bytes_in_buffer = 0;
 static int         s_buffer_pos = 0;
 
-// ── Player state ────────────────────────────────────────────────────────────
 static mp3_player_t s_player;
 static bool         s_initialized = false;
-static mutex_t      s_mp3_mutex;   // protects decode state from Core 0/1 races
+static mutex_t      s_mp3_mutex;
+#define MAX_ERRORS_PER_UPDATE  32
 
-// ── PCM ring buffer (PSRAM — written by decode, read by DMA ISR) ────────────
 static uint8_t *s_pcm_ring = NULL;
 static volatile size_t s_ring_rd = 0;
 static volatile size_t s_ring_wr = 0;
+static bool s_use_pio_psram = false;
+static uint32_t s_pio_psram_base = 0;
 
-static inline size_t ring_available(void) {
+#define STAGING_BUF_SIZE  (DMA_BUF_SAMPLES * 4 * 4)
+static uint8_t  s_staging_buf[STAGING_BUF_SIZE] __attribute__((aligned(4)));
+static size_t   s_staging_avail = 0;
+static size_t   s_staging_pos   = 0;
+
+static uint8_t s_pio_read_buf[STAGING_BUF_SIZE] __attribute__((aligned(4)));
+
+static inline size_t __time_critical_func(ring_available)(void) {
     size_t wr = s_ring_wr, rd = s_ring_rd;
     return (wr >= rd) ? (wr - rd) : (PCM_RING_SIZE - rd + wr);
 }
 
-static inline size_t ring_free(void) {
+static inline size_t __time_critical_func(ring_free)(void) {
     return PCM_RING_SIZE - 1 - ring_available();
 }
 
@@ -75,11 +85,21 @@ static void ring_write(const uint8_t *data, size_t len) {
 
         size_t chunk = (len < free_space) ? len : free_space;
         size_t to_end = PCM_RING_SIZE - wr;
-        if (chunk <= to_end) {
-            memcpy(s_pcm_ring + wr, data, chunk);
+
+        if (s_use_pio_psram) {
+            if (chunk <= to_end) {
+                pio_psram_write(s_pio_psram_base + wr, data, chunk);
+            } else {
+                pio_psram_write(s_pio_psram_base + wr, data, to_end);
+                pio_psram_write(s_pio_psram_base, data + to_end, chunk - to_end);
+            }
         } else {
-            memcpy(s_pcm_ring, data + to_end, chunk - to_end);
-            memcpy(s_pcm_ring + wr, data, to_end);
+            if (chunk <= to_end) {
+                memcpy(s_pcm_ring + wr, data, chunk);
+            } else {
+                memcpy(s_pcm_ring + wr, data, to_end);
+                memcpy(s_pcm_ring, data + to_end, chunk - to_end);
+            }
         }
         s_ring_wr = (wr + chunk) % PCM_RING_SIZE;
         data += chunk;
@@ -100,25 +120,67 @@ static unsigned int s_pwm_slice = 0;
 static volatile bool s_dma_start_pending = false;
 static bool          s_irq_on_core1 = false;
 
-// ── Fill one DMA buffer from the PCM ring (called from DMA ISR) ─────────────
-static void fill_dma_buffer(uint32_t *buf, int count) {
+// ── Refill the SRAM staging buffer from the PCM ring ────────────────────────
+// Called from mp3_player_update() (Core 1, non-ISR context) to keep the
+// staging buffer topped up before the decode cycle begins.
+static void refill_staging_buf(void) {
+    if (s_staging_avail >= STAGING_BUF_SIZE / 2)
+        return;
+
+    if (s_staging_pos > 0 && s_staging_avail > 0) {
+        memmove(s_staging_buf, s_staging_buf + s_staging_pos, s_staging_avail);
+    }
+    s_staging_pos = 0;
+
+    size_t space = STAGING_BUF_SIZE - s_staging_avail;
+    size_t avail = ring_available();
+    size_t to_read = (space < avail) ? space : avail;
+    if (to_read == 0) return;
+
+    size_t rd = s_ring_rd;
+    size_t to_end = PCM_RING_SIZE - rd;
+
+    if (s_use_pio_psram) {
+        if (to_read <= to_end) {
+            pio_psram_read(s_pio_psram_base + rd, s_staging_buf + s_staging_avail, to_read);
+        } else {
+            pio_psram_read(s_pio_psram_base + rd, s_staging_buf + s_staging_avail, to_end);
+            pio_psram_read(s_pio_psram_base, s_staging_buf + s_staging_avail + to_end, to_read - to_end);
+        }
+    } else {
+        if (to_read <= to_end) {
+            memcpy(s_staging_buf + s_staging_avail, s_pcm_ring + rd, to_read);
+        } else {
+            memcpy(s_staging_buf + s_staging_avail, s_pcm_ring + rd, to_end);
+            memcpy(s_staging_buf + s_staging_avail + to_end, s_pcm_ring, to_read - to_end);
+        }
+    }
+    s_ring_rd = (rd + to_read) % PCM_RING_SIZE;
+    s_staging_avail += to_read;
+}
+
+// ── Fill one DMA buffer from the staging buffer (called from DMA ISR) ───────
+// Reads only from SRAM (s_staging_buf) — never touches PIO PSRAM directly.
+// Precomputed volume scale: vol_scale = volume * 256 / 100, so
+// (sample * vol_scale) >> 8  ≈  sample * volume / 100
+// Updated whenever mp3_player_set_volume() is called.
+static uint32_t s_vol_scale = 256;  // 256 = 100%
+
+static void __time_critical_func(fill_dma_buffer)(uint32_t *buf, int count) {
     size_t bytes_per_pair = (s_pcm_channels > 1) ? 4 : 2;
-    uint32_t vol = s_player.volume;
+    uint32_t vol_scale = s_vol_scale;
 
     for (int i = 0; i < count; i++) {
         int32_t lv, rv;
 
-        if (ring_available() < bytes_per_pair) {
+        if (s_staging_avail < bytes_per_pair) {
             lv = PWM_MID;
             rv = PWM_MID;
         } else {
             uint8_t raw[4];
-            size_t rd = s_ring_rd;
-            for (size_t j = 0; j < bytes_per_pair; j++) {
-                raw[j] = s_pcm_ring[rd];
-                rd = (rd + 1) % PCM_RING_SIZE;
-            }
-            s_ring_rd = rd;
+            memcpy(raw, s_staging_buf + s_staging_pos, bytes_per_pair);
+            s_staging_pos   += bytes_per_pair;
+            s_staging_avail -= bytes_per_pair;
 
             int16_t left, right;
             memcpy(&left, raw, 2);
@@ -127,24 +189,26 @@ static void fill_dma_buffer(uint32_t *buf, int count) {
             else
                 right = left;
 
-            // 16-bit signed → 11-bit unsigned (0–2047)
+            // 16-bit signed → 11-bit unsigned (0–2047), then apply volume
+            // via multiply+shift instead of division (~1 cycle vs ~8 cycles)
             lv = (int32_t)((left  + 32768) >> 5);
             rv = (int32_t)((right + 32768) >> 5);
-            lv = lv * vol / 100;
-            rv = rv * vol / 100;
+            lv = (lv * vol_scale) >> 8;
+            rv = (rv * vol_scale) >> 8;
             if (lv > PWM_WRAP) lv = PWM_WRAP;
             if (rv > PWM_WRAP) rv = PWM_WRAP;
         }
 
         // Apply fade envelope
+        // FADE_SAMPLES=64, so *256/64 == *4 == <<2 (no division needed)
         if (s_fade_state == FADE_IN) {
-            int32_t gain = (s_fade_pos * 256) / FADE_SAMPLES;
+            int32_t gain = s_fade_pos << 2;
             lv = PWM_MID + (((lv - PWM_MID) * gain) >> 8);
             rv = PWM_MID + (((rv - PWM_MID) * gain) >> 8);
             if (++s_fade_pos >= FADE_SAMPLES)
                 s_fade_state = FADE_NONE;
         } else if (s_fade_state == FADE_OUT) {
-            int32_t gain = ((FADE_SAMPLES - s_fade_pos) * 256) / FADE_SAMPLES;
+            int32_t gain = (FADE_SAMPLES - s_fade_pos) << 2;
             lv = PWM_MID + (((lv - PWM_MID) * gain) >> 8);
             rv = PWM_MID + (((rv - PWM_MID) * gain) >> 8);
             if (++s_fade_pos >= FADE_SAMPLES) {
@@ -182,7 +246,7 @@ static void dma_audio_irq_handler(void) {
     s_dma_active_buf = next_buf;
 }
 
-// ── Refill compressed-data buffer from SD card ──────────────────────────────
+// ── Refill compressed-data buffer from SD card (non-blocking) ────────────────
 static bool refill_decode_buffer(void) {
     if (!s_file) return false;
 
@@ -194,13 +258,18 @@ static bool refill_decode_buffer(void) {
 
     int space = (int)MP3_DECODE_BUFFER_SIZE - s_bytes_in_buffer - MAD_BUFFER_GUARD;
     if (space > 0) {
-        // Limit read size to avoid monopolizing the SD card mutex
-        int to_read = (space > 1024) ? 1024 : space;
-        int rd = sdcard_fread(s_file, s_decode_buffer + s_bytes_in_buffer, to_read);
-        if (rd > 0)
-            s_bytes_in_buffer += rd;
+        // Non-blocking: skip if Core 0 owns the SD card
+        if (!recursive_mutex_try_enter(&g_sdcard_mutex, NULL))
+            goto pad;
+        int to_read = (space > 4096) ? 4096 : space;
+        UINT br = 0;
+        FRESULT res = f_read((FIL *)s_file, s_decode_buffer + s_bytes_in_buffer, to_read, &br);
+        recursive_mutex_exit(&g_sdcard_mutex);
+        if (res == FR_OK && br > 0)
+            s_bytes_in_buffer += (int)br;
     }
 
+pad:
     // Zero-pad guard bytes for libmad
     memset(s_decode_buffer + s_bytes_in_buffer, 0, MAD_BUFFER_GUARD);
 
@@ -212,11 +281,18 @@ static void decode_fill_ring(void) {
     if (!s_player.playing || s_player.paused || !s_mad_stream || !s_file)
         return;
 
-    // Decode 1 frame per update to minimize PSRAM bus contention with Core 0.
-    // 1 frame = 1152 samples = ~26ms of audio — 5× the 5ms update interval,
-    // so the ring buffer stays comfortably full even if updates are skipped.
+    // Batch decode: only decode when ring buffer is below 50% capacity,
+    // then decode up to 3 frames to refill quickly.  This creates bursty
+    // PSRAM access (~10ms decode burst, ~30-40ms idle) instead of constant
+    // pressure every 5ms, reducing QMI contention with Core 0's XIP cache.
+    size_t avail = ring_available();
+    if (avail > PCM_RING_SIZE / 2)
+        return;  // ring buffer is >50% full, skip this cycle
+
+    int max_frames = 3;
     int frames_decoded = 0;
-    while (frames_decoded < 1 && ring_free() >= 1152 * 2 * 2) {
+    int errors_this_update = 0;
+    while (frames_decoded < max_frames && ring_free() >= 1152 * 2 * 2) {
         mad_stream_buffer(s_mad_stream, s_decode_buffer + s_buffer_pos, s_bytes_in_buffer + MAD_BUFFER_GUARD);
 
         if (mad_frame_decode(s_mad_frame, s_mad_stream) != 0) {
@@ -248,6 +324,27 @@ static void decode_fill_ring(void) {
             }
 
             if (MAD_RECOVERABLE(s_mad_stream->error)) {
+                // For LOSTSYNC with low buffer, try to refill first
+                if (s_mad_stream->error == MAD_ERROR_LOSTSYNC && s_bytes_in_buffer < 256) {
+                    if (!refill_decode_buffer()) {
+                        if (s_player.loop) {
+                            sdcard_fseek(s_file, 0);
+                            s_bytes_in_buffer = 0;
+                            s_buffer_pos = 0;
+                            refill_decode_buffer();
+                            mad_stream_init(s_mad_stream);
+                            mad_frame_init(s_mad_frame);
+                            mad_synth_init(s_mad_synth);
+                            continue;
+                        }
+                        s_player.playing = false;
+                        break;
+                    }
+                    continue;
+                }
+                
+                // Allow more recoverable errors - don't count toward the error limit
+                // just continue to next frame
                 continue;
             }
 
@@ -339,13 +436,31 @@ void mp3_player_reset(void) {
     if (s_file) { sdcard_fclose(s_file); s_file = NULL; }
     memset(&s_player, 0, sizeof(s_player));
     s_player.volume = 100;
+    s_vol_scale = 256;
     s_bytes_in_buffer = 0;
     s_buffer_pos = 0;
     s_pcm_channels = 2;
+
     s_ring_rd = s_ring_wr = 0;
+    s_staging_avail = 0;
+    s_staging_pos = 0;
     if (s_mad_stream) mad_stream_init(s_mad_stream);
     if (s_mad_frame)  mad_frame_init(s_mad_frame);
     if (s_mad_synth)  mad_synth_init(s_mad_synth);
+    mutex_exit(&s_mp3_mutex);
+}
+
+void mp3_player_deinit(void) {
+    if (!s_initialized) return;
+    mutex_enter_blocking(&s_mp3_mutex);
+    stop_playback();
+    if (s_file) { sdcard_fclose(s_file); s_file = NULL; }
+    if (s_mad_stream) { umm_free(s_mad_stream); s_mad_stream = NULL; }
+    if (s_mad_frame)  { umm_free(s_mad_frame); s_mad_frame = NULL; }
+    if (s_mad_synth)  { umm_free(s_mad_synth); s_mad_synth = NULL; }
+    if (s_pcm_ring)   { umm_free(s_pcm_ring); s_pcm_ring = NULL; }
+    s_use_pio_psram = false;
+    s_initialized = false;
     mutex_exit(&s_mp3_mutex);
 }
 
@@ -377,16 +492,26 @@ bool mp3_player_init(void) {
            (unsigned)sizeof(struct mad_frame),
            (unsigned)sizeof(struct mad_synth));
 
-    if (!s_pcm_ring) {
-        s_pcm_ring = umm_malloc(PCM_RING_SIZE);
-        if (!s_pcm_ring) {
-            printf("[MP3] FAILED to alloc ring buffer\n");
-            return false;
+    if (!s_pcm_ring && !s_use_pio_psram) {
+        if (pio_psram_available()) {
+            s_use_pio_psram = true;
+            s_pio_psram_base = PIO_PSRAM_MP3_RING_BASE;
+            printf("[MP3] PCM ring buffer → PIO PSRAM @ 0x%lx (%d bytes, 8KB bulk xfers)\n",
+                   (unsigned long)s_pio_psram_base, PCM_RING_SIZE);
+        } else {
+            s_pcm_ring = umm_malloc(PCM_RING_SIZE);
+            if (!s_pcm_ring) {
+                printf("[MP3] FAILED to alloc ring buffer\n");
+                return false;
+            }
+            s_use_pio_psram = false;
+            printf("[MP3] PCM ring buffer → QMI PSRAM (umm_malloc, %d bytes)\n", PCM_RING_SIZE);
         }
     }
 
     memset(&s_player, 0, sizeof(s_player));
     s_player.volume = 100;
+    s_vol_scale = 256;
     s_initialized = true;
 
     return true;
@@ -428,6 +553,7 @@ bool mp3_player_load(mp3_player_t *player, const char *path) {
     }
     s_bytes_in_buffer = rd;
     s_buffer_pos = 0;
+
     s_ring_rd = s_ring_wr = 0;
 
     // Zero-pad guard bytes
@@ -541,7 +667,10 @@ bool mp3_player_play(mp3_player_t *player, uint8_t repeat_count) {
 
     // Pre-fill ring buffer before starting playback
     s_ring_rd = s_ring_wr = 0;
+    s_staging_avail = 0;
+    s_staging_pos = 0;
     decode_fill_ring();
+    refill_staging_buf();
 
     setup_playback_hw();
 
@@ -577,6 +706,8 @@ void mp3_player_stop(mp3_player_t *player) {
     s_bytes_in_buffer = 0;
     s_buffer_pos = 0;
     s_ring_rd = s_ring_wr = 0;
+    s_staging_avail = 0;
+    s_staging_pos = 0;
 
     mutex_exit(&s_mp3_mutex);
 }
@@ -615,6 +746,7 @@ void mp3_player_set_volume(mp3_player_t *player, uint8_t volume) {
     if (!player) return;
     if (volume > 100) volume = 100;
     player->volume = volume;
+    s_vol_scale = (uint32_t)volume * 256 / 100;
 }
 
 uint8_t mp3_player_get_volume(const mp3_player_t *player) {
@@ -650,6 +782,7 @@ void mp3_player_update(void) {
     }
 
     if (s_player.playing && !s_player.paused) {
+        refill_staging_buf();
         decode_fill_ring();
     }
     mutex_exit(&s_mp3_mutex);

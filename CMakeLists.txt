@@ -129,6 +129,22 @@ target_compile_definitions(image_decoders PUBLIC __LINUX__=1)
 
 # ── libmad (MP3 decoder) ─────────────────────────────────────────────────────
 set(LIBMAD_DIR ${CMAKE_SOURCE_DIR}/third_party/libmad)
+
+# Hot path — placed in SRAM via .time_critical section rename.
+# synth.c (~4.9KB) is the final PCM synthesis step that runs every frame
+# on Core 1; keeping it in SRAM eliminates XIP cache thrashing with
+# Core 0's Lua VM.  layer3.c (~11.6KB) stays in flash — it's called less
+# frequently and would exhaust the SRAM heap if included.
+add_library(libmad_ram STATIC
+    ${LIBMAD_DIR}/synth.c
+)
+target_include_directories(libmad_ram PUBLIC ${LIBMAD_DIR})
+target_compile_definitions(libmad_ram PRIVATE PROGMEM=)
+# Place all code in .time_critical section via -fno-function-sections (single .text)
+# then rename via objcopy post-build.  -O2 for speed-critical decode path.
+target_compile_options(libmad_ram PRIVATE -O2 -fno-function-sections -Wno-unused-parameter -Wno-unused-variable)
+
+# Cold path — stays in Flash
 add_library(libmad STATIC
     ${LIBMAD_DIR}/bit.c
     ${LIBMAD_DIR}/fixed.c
@@ -136,7 +152,6 @@ add_library(libmad STATIC
     ${LIBMAD_DIR}/huffman.c
     ${LIBMAD_DIR}/layer3.c
     ${LIBMAD_DIR}/stream.c
-    ${LIBMAD_DIR}/synth.c
     ${LIBMAD_DIR}/timer.c
     ${LIBMAD_DIR}/version.c
 )
@@ -144,10 +159,37 @@ target_include_directories(libmad PUBLIC ${LIBMAD_DIR})
 target_compile_definitions(libmad PRIVATE PROGMEM=)
 target_compile_options(libmad PRIVATE -O2 -Wno-unused-parameter -Wno-unused-variable)
 
+# ── PIO PSRAM (mainboard 8MB PSRAM via PIO1 SPI) ─────────────────────────────
+# Uses the polpo rp2040-psram library (third_party/rp2040-psram/).
+# Pin defines are passed via compile definitions so the library source
+# stays unmodified.  PIO1 is used (PIO0 is the LCD).
+set(PIO_PSRAM_DIR ${CMAKE_SOURCE_DIR}/third_party/rp2040-psram)
+
+add_library(pio_psram_lib STATIC
+    ${PIO_PSRAM_DIR}/psram_spi.c
+)
+target_include_directories(pio_psram_lib PUBLIC ${PIO_PSRAM_DIR})
+target_compile_definitions(pio_psram_lib PUBLIC
+    PSRAM_PIN_CS=20
+    PSRAM_PIN_SCK=21
+    PSRAM_PIN_MOSI=2
+    PSRAM_PIN_MISO=3
+    PSRAM_MUTEX=1
+)
+target_link_libraries(pio_psram_lib
+    pico_stdlib
+    hardware_pio
+    hardware_dma
+    hardware_gpio
+)
+target_compile_options(pio_psram_lib PRIVATE -O2)
+pico_generate_pio_header(pio_psram_lib ${PIO_PSRAM_DIR}/psram_spi.pio)
+
 # ── Main firmware target ───────────────────────────────────────────────────────
 
 add_executable(picocalc_os
     src/main.c
+    src/dev_commands.c
     src/os/launcher.c
     src/os/lua_runner.c
     src/os/native_loader.c
@@ -159,11 +201,17 @@ add_executable(picocalc_os
     src/os/lua_bridge_network.c
     src/os/lua_bridge_config.c
     src/os/lua_bridge_perf.c
+    src/os/perf.c
     src/os/lua_bridge_graphics.c
     src/os/lua_bridge_ui.c
     src/os/lua_bridge_audio.c
     src/os/lua_bridge_sound.c
     src/os/lua_bridge_repl.c
+    src/os/lua_bridge_video.c
+    src/os/lua_bridge_game.c
+    src/os/lua_bridge_game_camera.c
+    src/os/lua_bridge_game_scene.c
+    src/os/lua_bridge_game_save.c
     src/os/lua_psram_alloc.c
     src/os/system_menu.c
     src/os/screenshot.c
@@ -181,10 +229,14 @@ add_executable(picocalc_os
     src/drivers/sound.c
     src/drivers/fileplayer.c
     src/drivers/mp3_player.c
+    src/drivers/video_player.cpp
     src/drivers/keyboard.c
     src/drivers/sdcard.c
     src/drivers/wifi.c
     src/drivers/http.c
+    src/drivers/tcp.c
+    src/drivers/pio_psram.c
+    src/drivers/pio_psram_bulk.c
     third_party/mongoose/mongoose.c
     third_party/umm_malloc/src/umm_malloc.c
 )
@@ -213,8 +265,27 @@ target_link_libraries(picocalc_os
     tinyusb_device
     lua
     fatfs
+    libmad_ram
     libmad
     image_decoders
+    pio_psram_lib
+)
+
+# ── PIO PSRAM Bulk Transfer (improved driver with 16-bit counters) ─────────────
+# Supports up to 8187 bytes per transaction (vs 27 bytes in polpo library).
+# Uses a custom PIO program in src/drivers/pio_psram_bulk.pio.
+pico_generate_pio_header(picocalc_os ${CMAKE_SOURCE_DIR}/src/drivers/pio_psram_bulk.pio)
+
+# Rename .text sections in libmad_ram objects to .time_critical.libmad
+# so the SDK linker script places them in SRAM (the default RP2350 linker
+# has *(.time_critical*) in the .data output section → RAM).
+# objcopy on a .a archive processes each member object.
+add_custom_command(TARGET libmad_ram POST_BUILD
+    COMMAND ${CMAKE_OBJCOPY}
+        --rename-section .text=.time_critical.libmad
+        $<TARGET_FILE:libmad_ram>
+    COMMENT "Renaming libmad_ram .text -> .time_critical.libmad (SRAM)"
+    VERBATIM
 )
 
 # ── WiFi support (Pico W / Pimoroni Pico Plus 2W boards) ─────────────────────

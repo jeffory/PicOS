@@ -456,7 +456,8 @@ void system_menu_show(lua_State *L) {
       }
       case ITEM_USB_MSC: {
         usb_msc_enter_mode();
-        kbd_clear_state(); // discard the ESC that exited MSC mode
+        kbd_clear_state();
+        kbd_recover_i2c_bus();  // Defense in depth — ensure I2C is clean
         if (L == NULL)
           launcher_refresh_apps();
         need_redraw = true;

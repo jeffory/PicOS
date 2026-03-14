@@ -5,7 +5,11 @@
 #include "hardware/clocks.h"
 #include "pico/time.h"
 
-#include <math.h>
+#include <stdio.h>
+
+// Alarm pool created on Core 1 — all audio timer ISRs fire on Core 1,
+// keeping Core 0 free for the app/game loop.
+static alarm_pool_t *s_core1_alarm_pool = NULL;
 
 #define MIN_FREQ 20
 #define MAX_FREQ 20000
@@ -42,6 +46,19 @@ void audio_init(void) {
   pwm_init(s_pwm_slice_r, &cfg, false);
 
   audio_set_volume(100);
+}
+
+void audio_core1_init(void) {
+  // Hardware alarm 2 (default pool uses 3). 4 slots covers all audio
+  // timers: tone, sound sample, fileplayer, PCM stream.
+  s_core1_alarm_pool = alarm_pool_create(2, 4);
+  if (!s_core1_alarm_pool) {
+    printf("[AUDIO] WARNING: failed to create Core 1 alarm pool\n");
+  }
+}
+
+alarm_pool_t *audio_get_core1_alarm_pool(void) {
+  return s_core1_alarm_pool;
 }
 
 void audio_pwm_setup(uint32_t sample_rate) {
@@ -88,19 +105,32 @@ static void audio_configure_freq(uint32_t freq_hz) {
   pwm_set_gpio_level(AUDIO_PIN_R, level);
 }
 
+// Logarithmic volume curve: lut[i] = round((10^(i/100) - 1) / 9 * 128), i=0..100
+// Replaces runtime exp()/log() with a compile-time table (~5 cycles vs ~100+).
+// Values are 0..128 (half of PWM_WRAP+1=256), matching max_level = (PWM_WRAP+1)/2.
+static const uint8_t s_log_volume_lut[101] = {
+    0,   0,   1,   1,   1,   2,   2,   2,   3,   3,   //  0-  9
+    4,   4,   5,   5,   5,   6,   6,   7,   7,   8,   // 10- 19
+    8,   9,   9,  10,  10,  11,  12,  12,  13,  14,   // 20- 29
+   14,  15,  15,  16,  17,  18,  18,  19,  20,  21,   // 30- 39
+   22,  22,  23,  24,  25,  26,  27,  28,  29,  30,   // 40- 49
+   31,  32,  33,  34,  35,  36,  37,  39,  40,  41,   // 50- 59
+   42,  44,  45,  46,  48,  49,  51,  52,  54,  55,   // 60- 69
+   57,  59,  60,  62,  64,  66,  68,  70,  71,  73,   // 70- 79
+   76,  78,  80,  82,  84,  86,  89,  91,  94,  96,   // 80- 89
+   99, 101, 104, 107, 110, 113, 115, 119, 122, 125,   // 90- 99
+  128                                                   // 100
+};
+
 static void audio_apply_volume(void) {
   if (!s_playing)
     return;
 
-  uint16_t max_level = (PWM_WRAP + 1) / 2;
   if (s_volume == 0) {
     pwm_set_gpio_level(AUDIO_PIN_L, 0);
     pwm_set_gpio_level(AUDIO_PIN_R, 0);
   } else {
-    double log_vol = (exp(s_volume / 100.0 * log(10)) - 1) / 9.0;
-    uint16_t level = (uint16_t)(max_level * log_vol);
-    if (level > max_level)
-      level = max_level;
+    uint16_t level = s_log_volume_lut[s_volume];
     pwm_set_gpio_level(AUDIO_PIN_L, level);
     pwm_set_gpio_level(AUDIO_PIN_R, level);
   }
@@ -124,7 +154,12 @@ void audio_play_tone(uint32_t freq_hz, uint32_t duration_ms) {
 
   if (duration_ms > 0) {
     s_end_time_us = time_us_64() + (duration_ms * 1000);
-    add_repeating_timer_us(-1000, audio_timer_callback, NULL, &s_timer);
+    if (s_core1_alarm_pool) {
+      alarm_pool_add_repeating_timer_us(s_core1_alarm_pool, -1000,
+                                        audio_timer_callback, NULL, &s_timer);
+    } else {
+      add_repeating_timer_us(-1000, audio_timer_callback, NULL, &s_timer);
+    }
   } else {
     s_end_time_us = 0;
   }
@@ -149,7 +184,7 @@ void audio_set_volume(uint8_t volume) {
 
 // --- PCM sample streaming via ring buffer + repeating timer -----------------
 
-#define AUDIO_RING_SIZE 4096 // must be power of 2
+#define AUDIO_RING_SIZE 8192 // must be power of 2
 #define AUDIO_RING_MASK (AUDIO_RING_SIZE - 1)
 
 static uint8_t s_ring_l[AUDIO_RING_SIZE];
@@ -201,7 +236,12 @@ void audio_start_stream(uint32_t sample_rate) {
 
   // Negative period = fixed interval regardless of callback duration
   int32_t period_us = -(int32_t)(1000000 / sample_rate);
-  add_repeating_timer_us(period_us, audio_stream_tick, NULL, &s_stream_timer);
+  if (s_core1_alarm_pool) {
+    alarm_pool_add_repeating_timer_us(s_core1_alarm_pool, period_us,
+                                      audio_stream_tick, NULL, &s_stream_timer);
+  } else {
+    add_repeating_timer_us(period_us, audio_stream_tick, NULL, &s_stream_timer);
+  }
 }
 
 void audio_stop_stream(void) {
@@ -213,6 +253,11 @@ void audio_stop_stream(void) {
   pwm_set_enabled(s_pwm_slice_l, false);
   pwm_set_enabled(s_pwm_slice_r, false);
   s_streaming = false;
+}
+
+void audio_stream_poll(void) {
+  // No-op: timer-based streaming doesn't need deferred start.
+  // Kept for API compatibility with Core 1 loop in main.c.
 }
 
 void audio_push_samples(const int16_t *samples, int count) {
