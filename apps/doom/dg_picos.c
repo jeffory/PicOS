@@ -1,19 +1,29 @@
 #include "doomgeneric.h"
 #include "app_abi.h"
 #include "os.h"
+#include "opl_capture.h"
 #include <string.h>
 #include <stdlib.h>
 #include <stdio.h>
 #include <setjmp.h>
 
+// Doom's frame counter - declared in d_loop.c
+extern int gametic;
+
 // --- Global PicOS state ---
 const PicoCalcAPI *g_picos_api;
 char g_app_dir[128];
 static const PicoCalcAPI *s_api;
+static bool s_show_fps = false;
+static uint32_t s_last_gametic = 0;
 
 // longjmp target for _exit() — lets DOOM's exit()/I_Error() return to the
 // OS instead of spinning in while(1).
 jmp_buf g_exit_jmp;
+
+// Doom renders to rows 60-259 (200 rows) on 320x320 screen
+#define DOOM_Y_OFFSET 60
+#define DOOM_Y_END 259
 
 // --- Keys mapping ---
 typedef struct {
@@ -63,14 +73,34 @@ void DG_Init() {
 }
 
 void DG_DrawFrame() {
-    // DG_ScreenBuffer is already RGB565 (native endian) thanks to gfxmode rgb565
-    // PicOS drawImageNN expects native-endian pixels and handles the conversion
-    // to big-endian for the LCD.
+    // Only draw and flush when Doom has produced a new frame.
+    // This provides frame-skip: if rendering is slower than Doom's 35Hz tic rate,
+    // we skip the unnecessary display update and let Doom catch up.
+    if (gametic != s_last_gametic) {
+        s_last_gametic = gametic;
 
-    // Draw to center of 320x320 screen (y=60)
-    // Scale 1 (320x200 image)
-    s_api->display->drawImageNN(0, 60, (const uint16_t*)DG_ScreenBuffer, 320, 200, 1);
-    s_api->display->flush();
+        // Start timing from the beginning of the actual frame rendering.
+        s_api->perf->beginFrame();
+
+        // DG_ScreenBuffer is already RGB565 (native endian) thanks to gfxmode rgb565
+        // PicOS drawImageNN expects native-endian pixels and handles the conversion
+        // to big-endian for the LCD.
+
+        // Draw to center of 320x320 screen (y=60)
+        // Scale 1 (320x200 image)
+        s_api->display->drawImageNN(0, DOOM_Y_OFFSET, (const uint16_t*)DG_ScreenBuffer, 320, 200, 1);
+
+        if (s_show_fps) {
+            s_api->perf->drawFPS(250, 8);
+        }
+
+        // Flush only the active region (rows 59-260 with margin) instead of full 320x320.
+        // This reduces DMA transfer by ~38% (64K pixels vs 102K pixels).
+        s_api->display->flushRegion(DOOM_Y_OFFSET - 1, DOOM_Y_OFFSET + 200);
+
+        // End timing AFTER flush.
+        s_api->perf->endFrame();
+    }
 }
 
 void DG_SleepMs(uint32_t ms) {
@@ -142,6 +172,7 @@ void picos_main(const PicoCalcAPI *api,
     // of spinning forever in _exit()'s while(1).
     int exit_code = setjmp(g_exit_jmp);
     if (exit_code != 0) {
+        opl_capture_stop();
         api->sys->setAudioCallback(NULL);  // stop Core 1 mixing
         api->sys->log("DOOM: exit() called, returning to launcher");
         return;
@@ -156,9 +187,16 @@ void picos_main(const PicoCalcAPI *api,
     // Main game loop — doomgeneric expects the platform to drive ticks
     while (!api->sys->shouldExit()) {
         api->sys->poll();
+
+        // Toggle FPS with F3
+        if (api->input->getButtonsPressed() & BTN_F3) {
+            s_show_fps = !s_show_fps;
+        }
+
         doomgeneric_Tick();
     }
 
+    opl_capture_stop();
     api->sys->setAudioCallback(NULL);  // stop Core 1 mixing
     api->sys->log("DOOM: Exiting...");
 }

@@ -17,6 +17,7 @@
 
 #include "mus_player.h"
 #include "opl.h"
+#include "opl_capture.h"
 
 // Debug: enable voice allocation logging
 #define MUS_DEBUG_VOICE
@@ -157,6 +158,7 @@ static const uint8_t slot_offsets[9] = {
 static void opl_write(uint16_t reg, uint8_t val)
 {
     OPL3_WriteRegBuffered(&s_mus.opl, reg, val);
+    opl_capture_reg_write(reg & 0xFF, val);
 }
 
 // --- Frequency table ---
@@ -170,7 +172,7 @@ static const uint16_t fnum_table[12] = {
 // Convert MIDI note + pitch bend to OPL f_num and block
 // fnum_table values are for 49716Hz. Since OPL runs at 11025Hz, the phase
 // accumulator advances 49716/11025 ≈ 4.51× slower per sample. Compensate by
-// scaling f-num up by that ratio, then shift excess into block (octave).
+// scaling f-num up by that ratio, then normalize excess into block (octave).
 static void note_to_freq(uint8_t note, int16_t bend,
                          uint16_t *f_num, uint8_t *block)
 {
@@ -188,10 +190,8 @@ static void note_to_freq(uint8_t note, int16_t bend,
         freq = (uint32_t)((int32_t)freq + ((int32_t)freq * delta) / 768);
     }
 
-    // The scaled f-num is ~4.51× larger, which is ~2^2.17. Add 2 to octave
-    // to absorb most of the scaling, then normalize into 10-bit f-num range.
-    octave += 2;
-
+    // The scaled f-num is ~4.51× larger. Normalize into 10-bit f-num range
+    // by shifting excess bits into the block (octave) register.
     while (freq > 1023 && octave < 7) {
         freq >>= 1;
         octave++;
@@ -299,12 +299,8 @@ static void voice_configure(int voice, const genmidi_instr_t *instr,
     uint8_t mod_off = slot_offsets[voice];
     uint8_t car_off = mod_off + 3;
 
-    // Save old f_num/block for pending key_off if voice is being stolen
-    uint16_t old_f_num = 0;
-    uint8_t old_block = 0;
+    // If voice is being stolen, silence the old note first
     if (s_mus.voices[voice].active) {
-        old_f_num = s_mus.voices[voice].f_num;
-        old_block = s_mus.voices[voice].block;
         // Only force silence if NOT already in release phase
         // If already released, the envelope is already decaying naturally
         if (!s_mus.voices[voice].released) {
@@ -327,9 +323,18 @@ static void voice_configure(int voice, const genmidi_instr_t *instr,
     // Feedback / connection
     opl_write(0xC0 + voice, instr->feedback_con);
 
-    // Set volumes with velocity and channel volume scaling
+    // Set volumes with velocity and channel volume scaling.
+    // Compute effective volume as a 0-127 value.
+    // Use two-stage scaling (matching Chocolate Doom's DMX approach):
+    //   1. Combine velocity and channel volume: (vel * ch_vol * 2) / 127  → 0-254
+    //   2. Apply master volume: * master / 127  → 0-254
+    //   3. Convert to attenuation: (255 - vol) * 63 / 255  → 0-63
+    //   4. Add to instrument's base TL
     int ch_vol = s_mus.channels[mus_channel].volume;
-    int vol_scale = (velocity * ch_vol * s_mus.master_vol) / (127 * 127);
+    int full_vol = (velocity * ch_vol * 2) / 127;
+    full_vol = (full_vol * s_mus.master_vol) / 127;
+    if (full_vol > 254) full_vol = 254;
+    int vol_atten = ((255 - full_vol) * 63) / 255;
 
     // Modulator level: from instrument patch (0x40)
     // For FM mode (con=0): modulator TL stays as-is (controls modulation depth)
@@ -337,20 +342,16 @@ static void voice_configure(int voice, const genmidi_instr_t *instr,
     uint8_t mod_tl = (instr->modulator.scale | instr->modulator.level);
     if (instr->feedback_con & 1) {
         // Additive: scale modulator volume too
-        int mod_atten = mod_tl & 0x3F;
-        mod_atten = 63 - ((63 - mod_atten) * vol_scale / 127);
+        int mod_atten = (mod_tl & 0x3F) + vol_atten;
         if (mod_atten > 63) mod_atten = 63;
-        if (mod_atten < 0) mod_atten = 0;
         mod_tl = (mod_tl & 0xC0) | mod_atten;
     }
     opl_write(0x40 + mod_off, mod_tl);
 
-    // Carrier level: always volume-scaled
+    // Carrier level: always volume-scaled (add attenuation to base TL)
     uint8_t car_tl = (instr->carrier.scale | instr->carrier.level);
-    int car_atten = car_tl & 0x3F;
-    car_atten = 63 - ((63 - car_atten) * vol_scale / 127);
+    int car_atten = (car_tl & 0x3F) + vol_atten;
     if (car_atten > 63) car_atten = 63;
-    if (car_atten < 0) car_atten = 0;
     opl_write(0x40 + car_off, (car_tl & 0xC0) | car_atten);
 
     // Set frequency and key-on
@@ -382,11 +383,6 @@ static void voice_configure(int voice, const genmidi_instr_t *instr,
     v->released = 0;
     v->f_num = f_num;
     v->block = block;
-    // If there was an old note being released, preserve its values for key_off
-    if (old_f_num != 0 || old_block != 0) {
-        v->f_num = old_f_num;
-        v->block = old_block;
-    }
 }
 
 // --- GENMIDI loading ---
@@ -438,23 +434,25 @@ static int load_genmidi(void)
         inst->carrier.scale        = p[15];
         inst->carrier.level        = p[16];
         // p[17] = padding
-        inst->note_offset1 = (int16_t)(p[18] | (p[19] << 8));
 
-        // Voice 1 (offset 20, 16 bytes) - skip for OPL2
-        inst->modulator2.tremolo_vib  = p[20];
-        inst->modulator2.attack_decay = p[21];
-        inst->modulator2.sustain_rel  = p[22];
-        inst->modulator2.waveform     = p[23];
-        inst->modulator2.scale        = p[24];
-        inst->modulator2.level        = p[25];
-        inst->feedback_con2           = p[26];
-        inst->carrier2.tremolo_vib  = p[27];
-        inst->carrier2.attack_decay = p[28];
-        inst->carrier2.sustain_rel  = p[29];
-        inst->carrier2.waveform     = p[30];
-        inst->carrier2.scale        = p[31];
-        inst->carrier2.level        = p[32];
-        // p[33] = padding
+        // Voice 1 (offset 18, 13 bytes + padding) - unused for OPL2
+        inst->modulator2.tremolo_vib  = p[18];
+        inst->modulator2.attack_decay = p[19];
+        inst->modulator2.sustain_rel  = p[20];
+        inst->modulator2.waveform     = p[21];
+        inst->modulator2.scale        = p[22];
+        inst->modulator2.level        = p[23];
+        inst->feedback_con2           = p[24];
+        inst->carrier2.tremolo_vib  = p[25];
+        inst->carrier2.attack_decay = p[26];
+        inst->carrier2.sustain_rel  = p[27];
+        inst->carrier2.waveform     = p[28];
+        inst->carrier2.scale        = p[29];
+        inst->carrier2.level        = p[30];
+        // p[31] = padding
+
+        // Note offsets (offset 32, 2x int16_t LE)
+        inst->note_offset1 = (int16_t)(p[32] | (p[33] << 8));
         inst->note_offset2 = (int16_t)(p[34] | (p[35] << 8));
 
         // Skip remaining padding to reach 36 bytes
@@ -597,26 +595,24 @@ static int process_mus_event(void)
                     if (instr_idx >= 128 && mus_chan != MUS_PERCUSSION_CHAN)
                         instr_idx = 0;
                     const genmidi_instr_t *instr = &s_mus.instruments[instr_idx];
-                    int vol_scale = (s_mus.voices[i].velocity * value * s_mus.master_vol)
-                                  / (127 * 127);
+                    int fv = (s_mus.voices[i].velocity * value * 2) / 127;
+                    fv = (fv * s_mus.master_vol) / 127;
+                    if (fv > 254) fv = 254;
+                    int va = ((255 - fv) * 63) / 255;
 
                     // Update carrier volume
                     uint8_t car_off = slot_offsets[i] + 3;
                     uint8_t car_tl = (instr->carrier.scale | instr->carrier.level);
-                    int car_atten = car_tl & 0x3F;
-                    car_atten = 63 - ((63 - car_atten) * vol_scale / 127);
+                    int car_atten = (car_tl & 0x3F) + va;
                     if (car_atten > 63) car_atten = 63;
-                    if (car_atten < 0) car_atten = 0;
                     opl_write(0x40 + car_off, (car_tl & 0xC0) | car_atten);
 
                     // If additive, update modulator too
                     if (instr->feedback_con & 1) {
                         uint8_t mod_off = slot_offsets[i];
                         uint8_t mod_tl = (instr->modulator.scale | instr->modulator.level);
-                        int mod_atten = mod_tl & 0x3F;
-                        mod_atten = 63 - ((63 - mod_atten) * vol_scale / 127);
+                        int mod_atten = (mod_tl & 0x3F) + va;
                         if (mod_atten > 63) mod_atten = 63;
-                        if (mod_atten < 0) mod_atten = 0;
                         opl_write(0x40 + mod_off, (mod_tl & 0xC0) | mod_atten);
                     }
                 }
@@ -668,6 +664,9 @@ void mus_init(void)
     memset(&s_mus, 0, sizeof(s_mus));
 
     OPL3_Reset(&s_mus.opl, OPL_RATE);
+
+    // Start capture before any register writes so all state is recorded
+    opl_capture_init();
 
     // Enable waveform select (register 0x01 bit 5)
     opl_write(0x01, 0x20);
@@ -858,5 +857,6 @@ void mus_render(int16_t *buf, int count)
 #endif
 
     // OPL runs at OUTPUT_RATE — 1:1, batch for performance
+    opl_capture_advance(count);
     OPL3_GenerateBatch(&s_mus.opl, buf, count);
 }

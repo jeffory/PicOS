@@ -8,7 +8,8 @@ CFLAGS  = -mcpu=cortex-m33 -mthumb -std=gnu99 \
           -I../../sdk/native \
           -Isrc/doomgeneric \
           -DDOOMGENERIC_RESX=320 \
-          -DDOOMGENERIC_RESY=200
+          -DDOOMGENERIC_RESY=200 \
+          -DOPL_CAPTURE
 LDFLAGS = -T linker.ld \
           -Wl,--entry=picos_main \
           -Wl,-pie \
@@ -26,7 +27,7 @@ EXCLUDE_SRCS = src/doomgeneric/doomgeneric_%.c \
                src/doomgeneric/i_joystick.c
 
 DOOM_SRCS = $(filter-out $(EXCLUDE_SRCS), $(wildcard src/doomgeneric/*.c))
-SRCS    = dg_picos.c stubs.c i_picos_sound.c opl.c mus_player.c $(DOOM_SRCS)
+SRCS    = dg_picos.c stubs.c i_picos_sound.c opl.c mus_player.c opl_capture.c $(DOOM_SRCS)
 
 TARGET  = main.elf
 
@@ -36,6 +37,7 @@ all: $(TARGET)
 
 $(TARGET): $(SRCS) linker.ld ../../sdk/native/os.h ../../sdk/native/app_abi.h
 	$(CC) $(CFLAGS) $(SRCS) $(LDFLAGS) -o $@
+	arm-none-eabi-strip $@
 	arm-none-eabi-size $@
 
 clean:

@@ -136,12 +136,16 @@ static void mix_chunk(int n)
         *out++ = (int16_t)right;
     }
 
-    // Mix in music PCM if playing
+    // Mix in music PCM if playing.
+    // OPL2 emulator at 11025Hz produces very low amplitude output (~400 peak)
+    // because the phase accumulator runs 4.51× slower than native 49716Hz.
+    // Amplify by 24× to bring music into audible range alongside SFX.
     if (mus_is_playing()) {
         int16_t music_buf[MIX_BATCH * 2];
         mus_render(music_buf, n);
         for (int j = 0; j < n * 2; j++) {
-            int32_t mixed = (int32_t)s_mix_buf[j] + (int32_t)music_buf[j];
+            int32_t music = (int32_t)music_buf[j] * 24;
+            int32_t mixed = (int32_t)s_mix_buf[j] + music;
             if (mixed > 32767) mixed = 32767;
             else if (mixed < -32768) mixed = -32768;
             s_mix_buf[j] = (int16_t)mixed;
