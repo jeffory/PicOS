@@ -180,6 +180,7 @@ void __attribute__((naked)) isr_hardfault(void) {
 #include "os/launcher.h"
 #include "os/lua_psram_alloc.h"
 #include "os/os.h"
+#include "os/perf.h"
 #include "os/system_menu.h"
 #include "os/text_input.h"
 #include "os/ui.h"
@@ -409,6 +410,25 @@ static const picocalc_psram_t s_psram_impl = {
     .qmiFree          = psram_qmi_free,
 };
 
+static void perf_draw_fps_wrapper(int x, int y) {
+    int fps = perf_get_fps();
+    char buf[16];
+    snprintf(buf, sizeof(buf), "FPS: %d", fps);
+    uint16_t color = (fps >= 55)   ? COLOR_GREEN
+                     : (fps >= 30) ? COLOR_YELLOW
+                                   : COLOR_RED;
+    display_draw_text(x, y, buf, color, COLOR_BLACK);
+}
+
+static const picocalc_perf_t s_perf_impl = {
+    .beginFrame = perf_begin_frame,
+    .endFrame = perf_end_frame,
+    .getFPS = perf_get_fps,
+    .getFrameTime = perf_get_frame_time,
+    .drawFPS = perf_draw_fps_wrapper,
+    .setTargetFPS = perf_set_target_fps,
+};
+
 static picocalc_fs_t s_fs_impl = {
     .open = fs_open,
     .read = fs_read,
@@ -516,6 +536,7 @@ int main(void) {
   g_api.tcp = &s_tcp_impl;
   g_api.ui = &s_ui_impl;
   g_api.psram = &s_psram_impl;
+  g_api.perf = &s_perf_impl;
   // fs wired after SD card init
 
   // Explicitly configure PSRAM hardware pins and XIP write logic for the Pico

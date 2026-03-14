@@ -442,6 +442,20 @@ void mp3_player_reset(void) {
     mutex_exit(&s_mp3_mutex);
 }
 
+void mp3_player_deinit(void) {
+    if (!s_initialized) return;
+    mutex_enter_blocking(&s_mp3_mutex);
+    stop_playback();
+    if (s_file) { sdcard_fclose(s_file); s_file = NULL; }
+    if (s_mad_stream) { umm_free(s_mad_stream); s_mad_stream = NULL; }
+    if (s_mad_frame)  { umm_free(s_mad_frame); s_mad_frame = NULL; }
+    if (s_mad_synth)  { umm_free(s_mad_synth); s_mad_synth = NULL; }
+    if (s_pcm_ring)   { umm_free(s_pcm_ring); s_pcm_ring = NULL; }
+    s_use_pio_psram = false;
+    s_initialized = false;
+    mutex_exit(&s_mp3_mutex);
+}
+
 bool mp3_player_init(void) {
     if (s_initialized) return true;
 

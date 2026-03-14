@@ -216,21 +216,24 @@ static bool native_run(const app_entry_t *app) {
   g_core1_pause = true;
   sleep_ms(10); // let any in-flight Core 1 umm operation complete
 
-  // ── 1. Read ELF from SD card ──────────────────────────────────────────────
+  // ── 1. Open ELF from SD card ──────────────────────────────────────────────
   char elf_path[160];
   snprintf(elf_path, sizeof(elf_path), "%s/main.elf", app->path);
 
   bool ok = false;
   uint8_t *load_base = NULL;
   uint8_t *code_buf = NULL;
+  sdfile_t f = NULL;
+  Elf32_Phdr *phdr_table = NULL;
 
-  int file_len = 0;
-  uint8_t *file_buf = (uint8_t *)sdcard_read_file(elf_path, &file_len);
-  if (!file_buf) {
-    show_error("Failed to load native app:", elf_path);
+  f = sdcard_fopen(elf_path, "rb");
+  if (!f) {
+    show_error("Failed to open native app:", elf_path);
     goto out;
   }
-  printf("[NATIVE] ELF: %d bytes\n", file_len);
+
+  int file_len = sdcard_fsize_handle(f);
+  printf("[NATIVE] ELF: %d bytes (streaming)\n", file_len);
 
   // ── 2. Validate ELF header ────────────────────────────────────────────────
   if (file_len < (int)sizeof(Elf32_Ehdr)) {
@@ -238,32 +241,44 @@ static bool native_run(const app_entry_t *app) {
     goto out;
   }
 
-  const Elf32_Ehdr *ehdr = (const Elf32_Ehdr *)file_buf;
+  Elf32_Ehdr ehdr;
+  if (sdcard_fread(f, &ehdr, sizeof(ehdr)) != sizeof(ehdr)) {
+    show_error("ELF: failed to read header", NULL);
+    goto out;
+  }
 
-  if (ehdr->e_ident[0] != ELFMAG0 || ehdr->e_ident[1] != ELFMAG1 ||
-      ehdr->e_ident[2] != ELFMAG2 || ehdr->e_ident[3] != ELFMAG3) {
+  if (ehdr.e_ident[0] != ELFMAG0 || ehdr.e_ident[1] != ELFMAG1 ||
+      ehdr.e_ident[2] != ELFMAG2 || ehdr.e_ident[3] != ELFMAG3) {
     show_error("ELF: bad magic", NULL);
     goto out;
   }
-  if (ehdr->e_type != ET_DYN) {
+  if (ehdr.e_type != ET_DYN) {
     show_error("ELF: must be PIE (ET_DYN)", NULL);
     goto out;
   }
-  if (ehdr->e_machine != EM_ARM) {
+  if (ehdr.e_machine != EM_ARM) {
     show_error("ELF: must be ARM", NULL);
     goto out;
   }
 
   // ── 3. Measure PT_LOAD virtual address range ──────────────────────────────
-  uint32_t phdr_end = (uint32_t)ehdr->e_phoff +
-                      (uint32_t)ehdr->e_phentsize * (uint32_t)ehdr->e_phnum;
-  if (phdr_end > (uint32_t)file_len) {
+  uint32_t phdr_table_size = (uint32_t)ehdr.e_phentsize * (uint32_t)ehdr.e_phnum;
+  if (ehdr.e_phoff + phdr_table_size > (uint32_t)file_len) {
     show_error("ELF: phdr table out of bounds", NULL);
     goto out;
   }
 
-  const Elf32_Phdr *phdr_table =
-      (const Elf32_Phdr *)(file_buf + ehdr->e_phoff);
+  phdr_table = (Elf32_Phdr *)umm_malloc(phdr_table_size);
+  if (!phdr_table) {
+    show_error("ELF: out of memory for phdr", NULL);
+    goto out;
+  }
+
+  if (!sdcard_fseek(f, ehdr.e_phoff) ||
+      sdcard_fread(f, phdr_table, phdr_table_size) != (int)phdr_table_size) {
+    show_error("ELF: failed to read phdr table", NULL);
+    goto out;
+  }
 
   Elf32_Addr mem_min = 0xFFFFFFFFu;
   Elf32_Addr mem_max = 0;
@@ -274,7 +289,7 @@ static bool native_run(const app_entry_t *app) {
   Elf32_Addr code_vaddr = 0, code_vend = 0;
   uint32_t code_memsz = 0;
 
-  for (int i = 0; i < ehdr->e_phnum; i++) {
+  for (int i = 0; i < ehdr.e_phnum; i++) {
     const Elf32_Phdr *ph = &phdr_table[i];
     if (ph->p_type != PT_LOAD || ph->p_memsz == 0)
       continue;
@@ -313,15 +328,8 @@ static bool native_run(const app_entry_t *app) {
   }
 
   // ── 4. Split allocation: code in SRAM, data/BSS in PSRAM ────────────────
-  //
-  // If the code segment fits in SRAM (malloc), place it there for fast
-  // instruction fetch without XIP cache pressure.  Data/BSS stays in PSRAM.
-  // If SRAM malloc fails, fall back to the original all-PSRAM path.
   bool split_mode = false;
 
-  // Only attempt SRAM split for small code segments.  The SRAM heap is
-  // ~28KB and the SDK malloc panics (instead of returning NULL) on failure,
-  // so we must not speculatively call malloc() for large allocations.
   #define MAX_SRAM_CODE_SIZE  (16u * 1024)
   if (code_seg_idx >= 0 && code_memsz > 0 && code_memsz <= MAX_SRAM_CODE_SIZE) {
     code_buf = malloc(code_memsz);
@@ -337,7 +345,6 @@ static bool native_run(const app_entry_t *app) {
 
   // PSRAM allocation: in split mode, only data/BSS; otherwise entire image
   uint32_t psram_size = split_mode ? (image_size - code_memsz) : image_size;
-  // data_vaddr_start: first vaddr byte NOT in the code segment
   Elf32_Addr data_vaddr_start = split_mode ? code_vend : mem_min;
 
   if (psram_size > 0) {
@@ -362,14 +369,6 @@ static bool native_run(const app_entry_t *app) {
     exec_base = load_base + PSRAM_CACHED_TO_UNCACHED;
   }
 
-  if (split_mode) {
-    printf("[NATIVE] code_buf %p (SRAM)  load_base %p  exec_base %p (PSRAM data)\n",
-           (void *)code_buf, (void *)load_base, (void *)exec_base);
-  } else {
-    printf("[NATIVE] load_base %p  exec_base %p\n",
-           (void *)load_base, (void *)exec_base);
-  }
-
   // ── 5. Zero and copy PT_LOAD segments ─────────────────────────────────────
   if (split_mode) {
     memset(code_buf, 0, code_memsz);
@@ -379,7 +378,7 @@ static bool native_run(const app_entry_t *app) {
     memset(exec_base, 0, image_size);
   }
 
-  for (int i = 0; i < ehdr->e_phnum; i++) {
+  for (int i = 0; i < ehdr.e_phnum; i++) {
     const Elf32_Phdr *ph = &phdr_table[i];
     if (ph->p_type != PT_LOAD || ph->p_filesz == 0)
       continue;
@@ -388,55 +387,54 @@ static bool native_run(const app_entry_t *app) {
       goto out;
     }
 
-    const uint8_t *src = file_buf + ph->p_offset;
+    if (!sdcard_fseek(f, ph->p_offset)) {
+      show_error("ELF: failed to seek to segment", NULL);
+      goto out;
+    }
 
     if (split_mode && i == code_seg_idx) {
-      // Code segment → SRAM (direct write)
       if (ph->p_vaddr - code_vaddr + ph->p_filesz > code_memsz) {
         show_error("ELF: code segment exceeds buffer", NULL);
         goto out;
       }
-      memcpy(code_buf + (ph->p_vaddr - code_vaddr), src, ph->p_filesz);
+      if (sdcard_fread(f, code_buf + (ph->p_vaddr - code_vaddr), ph->p_filesz) != (int)ph->p_filesz) {
+        show_error("ELF: failed to read code segment", NULL);
+        goto out;
+      }
     } else if (split_mode) {
-      // Data segment → PSRAM (uncached write)
       uint32_t off = ph->p_vaddr - data_vaddr_start;
       if (off + ph->p_memsz > psram_size) {
         show_error("ELF: data segment exceeds buffer", NULL);
         goto out;
       }
-      memcpy(exec_base + off, src, ph->p_filesz);
+      if (sdcard_fread(f, exec_base + off, ph->p_filesz) != (int)ph->p_filesz) {
+        show_error("ELF: failed to read data segment", NULL);
+        goto out;
+      }
     } else {
-      // Fallback: everything → PSRAM
       if (ph->p_vaddr - mem_min + ph->p_memsz > image_size) {
         show_error("ELF: segment exceeds image", NULL);
         goto out;
       }
-      memcpy(exec_base + (ph->p_vaddr - mem_min), src, ph->p_filesz);
+      if (sdcard_fread(f, exec_base + (ph->p_vaddr - mem_min), ph->p_filesz) != (int)ph->p_filesz) {
+        show_error("ELF: failed to read segment", NULL);
+        goto out;
+      }
     }
   }
 
   // ── 6. Apply relocations (dual-bias for split mode) ───────────────────────
-  //
-  // For split mode, each relocated pointer needs the correct bias depending
-  // on which segment the *pointed-to* address falls in:
-  //   - vaddr in [code_vaddr, code_vend) → code_bias (SRAM address)
-  //   - vaddr in [data_vaddr_start, ...)  → data_bias (PSRAM cached address)
-  //
-  // For fallback mode, a single load_bias covers everything (same as before).
-
   {
-    // Bias for converting vaddrs to runtime addresses
     uint32_t code_bias = split_mode ? (uint32_t)code_buf - code_vaddr : 0;
     uint32_t data_bias = split_mode ? (uint32_t)load_base - data_vaddr_start
                                     : (uint32_t)load_base - mem_min;
     uint32_t fallback_bias = split_mode ? 0 : (uint32_t)load_base - mem_min;
 
-    for (int i = 0; i < ehdr->e_phnum; i++) {
+    for (int i = 0; i < ehdr.e_phnum; i++) {
       const Elf32_Phdr *ph = &phdr_table[i];
       if (ph->p_type != PT_DYNAMIC)
         continue;
 
-      // Read PT_DYNAMIC from whichever buffer it lives in
       const Elf32_Dyn *dyn;
       if (split_mode && ph->p_vaddr >= code_vaddr && ph->p_vaddr < code_vend) {
         dyn = (const Elf32_Dyn *)(code_buf + (ph->p_vaddr - code_vaddr));
@@ -459,8 +457,6 @@ static bool native_run(const app_entry_t *app) {
         }
       }
 
-      // Helper: resolve a vaddr to the write pointer and the appropriate bias
-      // for the value being relocated.
       #define RESOLVE_TARGET(vaddr, write_ptr, target_ok) do { \
         if (split_mode) { \
           if ((vaddr) >= code_vaddr && (vaddr) < code_vend) { \
@@ -485,13 +481,11 @@ static bool native_run(const app_entry_t *app) {
         } \
       } while(0)
 
-      // Select bias based on which segment a runtime vaddr points into
       #define SELECT_BIAS(pointed_vaddr) \
         (split_mode ? ((pointed_vaddr) >= code_vaddr && (pointed_vaddr) < code_vend \
                        ? code_bias : data_bias) \
                     : fallback_bias)
 
-      // Elf32_Rel — implicit addend: *target += bias
       if (rel_addr && rel_size) {
         const Elf32_Rel *rel;
         if (split_mode && rel_addr >= code_vaddr && rel_addr < code_vend)
@@ -508,14 +502,12 @@ static bool native_run(const app_entry_t *app) {
             bool target_ok = false;
             RESOLVE_TARGET(rel[j].r_offset, target, target_ok);
             if (!target_ok) continue;
-            // *target contains the original vaddr — pick bias based on where it points
             uint32_t pointed_vaddr = *target;
             *target = pointed_vaddr + SELECT_BIAS(pointed_vaddr);
           }
         }
       }
 
-      // Elf32_Rela — explicit addend: *target = bias + r_addend
       if (rela_addr && rela_size) {
         const Elf32_Rela *rela;
         if (split_mode && rela_addr >= code_vaddr && rela_addr < code_vend)
@@ -540,24 +532,16 @@ static bool native_run(const app_entry_t *app) {
 
       #undef RESOLVE_TARGET
       #undef SELECT_BIAS
-      break; // Only one PT_DYNAMIC segment expected
+      break; 
     }
   }
-
-  // ── 6a. Free file buffer — no longer needed after relocation ───────────
-  // Save e_entry before freeing, since ehdr points into file_buf.
-  Elf32_Addr saved_entry = ehdr->e_entry;
-  umm_free(file_buf);
-  file_buf = NULL;
 
   // ── 7. Flush XIP cache and compute entry point ──────────────────────────
   __asm volatile ("dsb sy");
   xip_cache_invalidate_all();
   __asm volatile ("isb sy");
 
-  // e_entry may have the Thumb bit set (bit 0 = 1); strip it for the offset
-  // calculation, then re-apply for the function pointer call convention.
-  uintptr_t entry_voff_raw = saved_entry & ~1u;
+  uintptr_t entry_voff_raw = ehdr.e_entry & ~1u;
   uintptr_t entry_addr;
   if (split_mode && entry_voff_raw >= code_vaddr && entry_voff_raw < code_vend) {
     entry_addr = (uintptr_t)code_buf + (entry_voff_raw - code_vaddr);
@@ -576,43 +560,25 @@ static bool native_run(const app_entry_t *app) {
   printf("[NATIVE] Entry %p (thumb%s)\n", (void *)entry_addr,
          split_mode ? ", SRAM" : ", cached PSRAM");
 
-  // Clear any stale keyboard state from the launcher before starting the app.
-  // This matches what lua_bridge.c does before running Lua apps.
   kbd_clear_state();
 
   // ── 8. Launch app ─────────────────────────────────────────────────────────
-  // Non-blocking flush is safe: DMA reads from SRAM framebuffers (AHB) while
-  // the CPU fetches app code from PSRAM (QMI/XIP) — separate buses, no
-  // contention.  Double buffering prevents CPU/DMA framebuffer conflicts.
-
   display_clear(C_BG);
   display_flush();
 
   picos_app_entry_t entry_fn = (picos_app_entry_t)entry_addr;
 
-  // Run the app on PSP so interrupt handlers keep using MSP.
-  // See launch_on_psp() above for the full rationale.
-
-  // Plant canary words at the bottom (low-address end) of the stack buffer.
-  // If the app overflows the stack downward far enough to reach this zone the
-  // corruption will be visible after the app returns.
   uint32_t *guard = (uint32_t *)s_native_stack;
   for (int i = 0; i < NATIVE_STACK_GUARD_WORDS; i++)
     guard[i] = NATIVE_STACK_CANARY;
 
   uint32_t stack_top = (uint32_t)(s_native_stack + NATIVE_STACK_SIZE);
 
-  // Resume Core 1 before launching the app.  The pause was only needed to
-  // prevent PSRAM heap contention during ELF loading/relocation above.
-  // Native apps (e.g. DOOM) register audio callbacks that run on Core 1,
-  // so it must be active during app execution.
   g_core1_pause = false;
 
   launch_on_psp(stack_top, entry_fn,
                 (const PicoCalcAPI *)&g_api, app->path, app->id, app->name);
 
-  // Check canary after app returns.  A corrupted word means the stack grew
-  // past the guard zone — report it so developers know to investigate.
   for (int i = 0; i < NATIVE_STACK_GUARD_WORDS; i++) {
     if (guard[i] != NATIVE_STACK_CANARY) {
       printf("[NATIVE] WARNING: stack overflow detected in '%s' "
@@ -627,19 +593,19 @@ static bool native_run(const app_entry_t *app) {
 
 out:
   // ── 9. Cleanup ─────────────────────────────────────────────────────────────
-  // Re-pause Core 1 while we free PSRAM buffers to avoid contention,
-  // then unpause after cleanup is done.
-  g_native_audio_callback = NULL;  // stop app's Core 1 callback before freeing code
+  g_native_audio_callback = NULL;
   g_core1_pause = true;
-  sleep_ms(10);  // let any in-flight Core 1 iteration finish
-  audio_stop_stream();   // ensure audio streaming is stopped on exit/crash
+  sleep_ms(10);
+  audio_stop_stream();
   audio_stop_tone();
   if (code_buf)
     free(code_buf);
   if (load_base)
     umm_free(load_base);
-  if (file_buf)
-    umm_free(file_buf);
+  if (phdr_table)
+    umm_free(phdr_table);
+  if (f)
+    sdcard_fclose(f);
   g_core1_pause = false;
 
   return ok;

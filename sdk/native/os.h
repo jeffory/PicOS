@@ -228,6 +228,17 @@ typedef struct {
     void (*qmiFree)(void *ptr);
 } picocalc_psram_t;
 
+// --- Performance -----------------------------------------------------------
+
+typedef struct {
+    void (*beginFrame)(void);
+    void (*endFrame)(void);
+    int  (*getFPS)(void);
+    uint32_t (*getFrameTime)(void);
+    void (*drawFPS)(int x, int y);
+    void (*setTargetFPS)(uint32_t fps);
+} picocalc_perf_t;
+
 // --- The complete OS API struct ---------------------------------------------
 // This is what gets passed to every Lua environment and future C app loaders.
 
@@ -241,6 +252,7 @@ typedef struct PicoCalcAPI {
     const picocalc_tcp_t     *tcp;
     const picocalc_ui_t      *ui;
     const picocalc_psram_t   *psram;
+    const picocalc_perf_t    *perf;
 } PicoCalcAPI;
 
 // The global API instance, populated during os_init()

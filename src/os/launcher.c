@@ -6,6 +6,7 @@
 #include "../drivers/audio.h"
 #include "../drivers/display.h"
 #include "../drivers/keyboard.h"
+#include "../drivers/mp3_player.h"
 #include "../drivers/sdcard.h"
 #include "../drivers/wifi.h"
 
@@ -345,6 +346,10 @@ static bool run_app(int idx) {
     return false;
 
   app_entry_t *app = &s_apps[idx];
+
+  // Free any PSRAM used by the MP3 player (from a previous Lua app)
+  // so we have maximum memory for the next app.
+  mp3_player_deinit();
 
   printf("[LAUNCHER] Starting app %d '%s' (type=%s), PSRAM free: %zu\n",
          idx, app->name,
