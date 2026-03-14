@@ -890,6 +890,7 @@ void display_flush_region(int y0, int y1) {
          row_count * FB_WIDTH * sizeof(uint16_t));
 }
 
+
 void display_flush_rows(int y0, int y1) {
   // Clamp to valid range
   if (y0 < 0) y0 = 0;
@@ -955,6 +956,8 @@ void display_darken(void) {
 }
 
 const uint16_t *display_get_framebuffer(void) { return s_framebuffer; }
+
+uint16_t *display_get_back_buffer(void) { return s_framebuffer; }
 
 const uint16_t *display_get_front_buffer(void) {
   return s_framebuffers[1 - s_back_buffer_idx];

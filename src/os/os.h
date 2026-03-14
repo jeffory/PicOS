@@ -79,6 +79,9 @@ typedef struct {
     // Flush rows y0..y1 (inclusive) with buffer swap. Like flush() but only
     // transfers the specified row range. Useful for emulators with letterboxing.
     void (*flushRegion)(int y0, int y1);
+    // Get writable pointer to the current back buffer (320x320 RGB565,
+    // big-endian / byte-swapped). For direct framebuffer writes.
+    uint16_t* (*getBackBuffer)(void);
 } picocalc_display_t;
 
 // --- Filesystem (SD card) ---------------------------------------------------

@@ -226,6 +226,7 @@ static picocalc_display_t s_display_impl = {
     .drawImageNN = display_draw_image_nn,
     .flushRows = display_flush_rows,
     .flushRegion = display_flush_region,
+    .getBackBuffer = display_get_back_buffer,
 };
 
 static uint32_t sys_getTimeMs(void) {
