@@ -76,6 +76,9 @@ typedef struct {
     // Flush only rows y0..y1 (inclusive, full width) from the back buffer.
     // Does NOT swap buffers. Useful for partial screen updates.
     void (*flushRows)(int y0, int y1);
+    // Flush rows y0..y1 (inclusive) with buffer swap. Like flush() but only
+    // transfers the specified row range. Useful for emulators with letterboxing.
+    void (*flushRegion)(int y0, int y1);
 } picocalc_display_t;
 
 // --- Filesystem (SD card) ---------------------------------------------------
