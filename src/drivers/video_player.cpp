@@ -271,6 +271,14 @@ bool video_player_load(video_player_t *player, const char *path) {
     player->current_frame = 0;
 
     int vh = (int)player->height;
+    int vw = (int)player->width;
+    // Account for auto-downscaling in decode_frame_at
+    if (vw > 640 || vh > 640) {
+        vh /= 4;
+    } else if (vw > 320 || vh > 320) {
+        vh /= 2;
+    }
+    if (vh < 1) vh = 1;
     if (vh > 320) vh = 320;
     player->y_offset = (uint16_t)((320 - vh) / 2);
     player->visible_height = (uint16_t)vh;
@@ -349,9 +357,19 @@ static bool decode_frame_at(video_player_t *player, video_priv_t *priv, uint32_t
         priv->jpeg.setPixelType(RGB565_BIG_ENDIAN);
         int vw = priv->jpeg.getWidth();
         int vh = priv->jpeg.getHeight();
-        int x = (vw > 320) ? -(vw - 320) / 2 : (320 - vw) / 2;
-        int y = (vh > 320) ? -(vh - 320) / 2 : (320 - vh) / 2;
-        priv->jpeg.decode(x, y, 0);
+        int scale = 0;
+        if (vw > 640 || vh > 640) {
+            scale = JPEG_SCALE_QUARTER;
+            vw /= 4; vh /= 4;
+        } else if (vw > 320 || vh > 320) {
+            scale = JPEG_SCALE_HALF;
+            vw /= 2; vh /= 2;
+        }
+        if (vw < 1) vw = 1;
+        if (vh < 1) vh = 1;
+        int x = (320 - vw) / 2;
+        int y = (320 - vh) / 2;
+        priv->jpeg.decode(x, y, scale);
         priv->jpeg.close();
         success = true;
 

@@ -10,6 +10,12 @@
 // Doom's frame counter - declared in d_loop.c
 extern int gametic;
 
+// Doom's palette-indexed screen buffer (320x200 bytes) - declared in i_video.c
+extern unsigned char *I_VideoBuffer;
+
+// Big-endian RGB565 palette LUT - built by I_SetPalette in i_video.c
+extern uint16_t rgb565_be_palette[256];
+
 // --- Global PicOS state ---
 const PicoCalcAPI *g_picos_api;
 char g_app_dir[128];
@@ -79,16 +85,51 @@ void DG_DrawFrame() {
     if (gametic != s_last_gametic) {
         s_last_gametic = gametic;
 
-        // Start timing from the beginning of the actual frame rendering.
+        // I_VideoBuffer is NULL before I_InitGraphics allocates it, and may be
+        // NULL on second launch if the zone allocator hasn't re-allocated yet.
+        if (!I_VideoBuffer) {
+            static bool s_logged_null = false;
+            if (!s_logged_null) {
+                s_api->sys->log("DOOM: I_VideoBuffer is NULL, skipping frame");
+                s_logged_null = true;
+            }
+            return;
+        }
+
         s_api->perf->beginFrame();
 
-        // DG_ScreenBuffer is already RGB565 (native endian) thanks to gfxmode rgb565
-        // PicOS drawImageNN expects native-endian pixels and handles the conversion
-        // to big-endian for the LCD.
+        // One-pass palette→framebuffer: convert I_VideoBuffer (palette indices)
+        // directly to big-endian RGB565 in the SRAM framebuffer using the LUT.
+        // This eliminates the intermediate DG_ScreenBuffer and the drawImageNN
+        // byte-swap, saving ~128KB of PSRAM reads/writes per frame.
+        uint16_t *fb = s_api->display->getBackBuffer();
+        if (!fb) {
+            s_api->perf->endFrame();
+            return;
+        }
 
-        // Draw to center of 320x320 screen (y=60)
-        // Scale 1 (320x200 image)
-        s_api->display->drawImageNN(0, DOOM_Y_OFFSET, (const uint16_t*)DG_ScreenBuffer, 320, 200, 1);
+        static bool s_first_frame = true;
+        if (s_first_frame) {
+            s_first_frame = false;
+            char msg[80];
+            snprintf(msg, sizeof(msg), "DOOM: fb=%p src=%p pal=%p",
+                     (void*)fb, (void*)I_VideoBuffer, (void*)rgb565_be_palette);
+            s_api->sys->log(msg);
+        }
+
+        const unsigned char *src = I_VideoBuffer;
+        const uint16_t *pal = rgb565_be_palette;
+
+        for (int y = 0; y < 200; y++) {
+            uint16_t *dst = &fb[(y + DOOM_Y_OFFSET) * 320];
+            const unsigned char *row = &src[y * 320];
+            for (int x = 0; x < 320; x += 4) {
+                dst[x]     = pal[row[x]];
+                dst[x + 1] = pal[row[x + 1]];
+                dst[x + 2] = pal[row[x + 2]];
+                dst[x + 3] = pal[row[x + 3]];
+            }
+        }
 
         if (s_show_fps) {
             s_api->perf->drawFPS(250, 8);
@@ -98,7 +139,6 @@ void DG_DrawFrame() {
         // This reduces DMA transfer by ~38% (64K pixels vs 102K pixels).
         s_api->display->flushRegion(DOOM_Y_OFFSET - 1, DOOM_Y_OFFSET + 200);
 
-        // End timing AFTER flush.
         s_api->perf->endFrame();
     }
 }

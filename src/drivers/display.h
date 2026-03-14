@@ -128,6 +128,10 @@ void display_darken(void);
 const uint16_t *display_get_framebuffer(void);
 const uint16_t *display_get_front_buffer(void);
 
+// Get writable pointer to the current back buffer for direct pixel writes.
+// Pixels must be in big-endian RGB565 (byte-swapped from host order).
+uint16_t *display_get_back_buffer(void);
+
 // Wait for any ongoing DMA transfer to complete and return a pointer to the
 // buffer that is currently visible on screen. This ensures screenshots capture
 // the actual displayed frame, not a buffer still being transferred.

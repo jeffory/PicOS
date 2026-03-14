@@ -426,12 +426,22 @@ static const luaL_Reg l_pool_methods[] = {
 };
 
 void lua_bridge_game_scene_init(lua_State *L) {
+    // Reset all static state from previous app launch — registry refs are
+    // invalid in the new lua_State and must not be luaL_unref'd.
+    s_scene_count = 0;
+    s_stack_depth = 0;
+    s_pool_count = 0;
+    s_globals_ref = LUA_NOREF;
+    memset(s_scenes, 0, sizeof(s_scenes));
+    memset(s_scene_stack, 0, sizeof(s_scene_stack));
+    memset(s_pools, 0, sizeof(s_pools));
+
     luaL_newmetatable(L, "picocalc.game.scene.pool");
     lua_pushvalue(L, -1);
     lua_setfield(L, -2, "__index");
     luaL_setfuncs(L, l_pool_methods, 0);
     lua_pop(L, 1);
-    
+
     lua_newtable(L);
     luaL_setfuncs(L, l_scene_lib, 0);
 }
