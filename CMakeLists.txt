@@ -125,6 +125,7 @@ target_include_directories(image_decoders PUBLIC
 )
 
 target_compile_definitions(image_decoders PUBLIC __LINUX__=1)
+target_compile_options(image_decoders PRIVATE -O2)
 
 
 # ── libmad (MP3 decoder) ─────────────────────────────────────────────────────
