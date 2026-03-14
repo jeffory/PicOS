@@ -417,10 +417,11 @@ local function draw_vid_view()
     disp.drawText(fx + 1, 1, fps_str, YELLOW, BG)
 
     local info = vid_player:getInfo()
-    local drop_str = string.format("Drop:%d", info.dropped_frames or 0)
+    local dropped = info.dropped_frames or 0
+    local drop_str = string.format("Drop:%d", dropped)
     local dw = #drop_str * CHAR_W
     disp.fillRect(0, 0, dw + 2, CHAR_H + 2, BG)
-    disp.drawText(1, 1, drop_str, info.dropped_frames > 50 and disp.RED or CYAN, BG)
+    disp.drawText(1, 1, drop_str, dropped > 50 and disp.RED or CYAN, BG)
 end
 
 local function open_vid_view(path, fname)
@@ -454,11 +455,11 @@ local function handle_vid_view(pressed)
         end
     end
 
-    local info = vid_player:getInfo()
-    local fps = info.frames > 0 and (info.frames / (info.frames * (info.frames / 100))) or 20
-    local skip_frames = math.floor(3 * fps)
-    skip_frames = math.max(60, skip_frames)
+    local fps = vid_player:getFPS()
+    if fps < 1 then fps = 20 end
+    local skip_frames = math.max(60, math.floor(3 * fps))
 
+    local info = vid_player:getInfo()
     if pressed & input.BTN_RIGHT ~= 0 then
         vid_player:seek(info.current_frame + skip_frames)
         vid_player:resetStats()
@@ -470,43 +471,85 @@ local function handle_vid_view(pressed)
     end
 end
 
+-- ── Batch selection helper ───────────────────────────────────────────────────
+local function get_marked_or_cursor(p)
+  local files = {}
+  for idx, marked in pairs(p.marks) do
+    if marked and p.entries[idx] and p.entries[idx].name ~= ".." then
+      files[#files + 1] = p.entries[idx]
+    end
+  end
+  if #files == 0 then
+    local e = p.entries[p.cursor]
+    if e and e.name ~= ".." then
+      files[1] = e
+    end
+  end
+  return files
+end
+
 -- ── Commands ─────────────────────────────────────────────────────────────────
 local function cmd_copy()
   local p = panels[active]
-  if #p.entries == 0 then return end
-  local e = p.entries[p.cursor]
-  if e.name == ".." or e.is_dir then set_status("Cannot copy directories"); return end
+  local files = get_marked_or_cursor(p)
+  if #files == 0 then return end
 
-  local src     = path_join(p.path, e.name)
+  -- Filter out directories
+  local copyable = {}
+  for _, e in ipairs(files) do
+    if not e.is_dir then copyable[#copyable + 1] = e end
+  end
+  if #copyable == 0 then set_status("Cannot copy directories"); return end
+
   local other   = (active == 1) and 2 or 1
   local dst_dir = panels[other].path
-  local dst     = path_join(dst_dir, e.name)
-  if src == dst then set_status("Source = destination; skipped"); return end
 
-  if not ui.confirm("Copy " .. e.name .. "\nto: " .. dst_dir .. "?") then return end
+  -- Confirm
+  local msg
+  if #copyable == 1 then
+    msg = "Copy " .. copyable[1].name .. "\nto: " .. dst_dir .. "?"
+  else
+    msg = string.format("Copy %d files\nto: %s?", #copyable, dst_dir)
+  end
+  if not ui.confirm(msg) then return end
 
-  -- Restore browse view before blocking copy
-  set_status("Copying: " .. e.name)
+  -- Restore browse view before blocking copy (fill both framebuffers)
+  set_status("Copying...")
+  draw_browse(); disp.flush()
   draw_browse(); disp.flush()
 
-  local last_pct = -1
-  local function on_progress(done, total)
-    if total == 0 then return end
-    local pct = done * 100 // total
-    if pct == last_pct then return end
-    last_pct = pct
-    status_msg = string.format("Copying %d%%: %s", pct, e.name)
-    status_ttl = 5
-    draw_footer(); disp.flush()
+  local copied, failed = 0, 0
+  for _, e in ipairs(copyable) do
+    local src = path_join(p.path, e.name)
+    local dst = path_join(dst_dir, e.name)
+    if src == dst then
+      -- skip same-path copies silently
+    else
+      local last_pct = -1
+      local function on_progress(done, total)
+        if total == 0 then return end
+        local pct = done * 100 // total
+        if pct == last_pct then return end
+        last_pct = pct
+        status_msg = string.format("Copying %d%%: %s", pct, e.name)
+        status_ttl = 5
+        draw_footer(); disp.flush()
+        draw_footer(); disp.flush()
+      end
+
+      local ok, err = fs.copy(src, dst, on_progress)
+      if ok then copied = copied + 1 else failed = failed + 1 end
+    end
   end
 
-  local ok, err = fs.copy(src, dst, on_progress)
-  if ok then
-    set_status("Copied: " .. e.name)
-    load_dir(panels[other])
+  if #copyable == 1 then
+    if copied == 1 then set_status("Copied: " .. copyable[1].name)
+    else set_status("Copy failed") end
   else
-    set_status("Copy failed: " .. (err or "?"))
+    set_status(string.format("Copied %d/%d files", copied, #copyable))
   end
+  p.marks = {}
+  load_dir(panels[other])
 end
 
 local function cmd_mkdir()
@@ -541,18 +584,34 @@ end
 
 local function cmd_delete()
   local p = panels[active]
-  if #p.entries == 0 then return end
-  local e = p.entries[p.cursor]
-  if e.name == ".." then return end
-  local kind = e.is_dir and "directory" or "file"
-  if not ui.confirm("Delete " .. kind .. ":\n" .. e.name) then return end
-  local ok, err = fs.delete(path_join(p.path, e.name))
-  if ok then
-    if p.cursor > 1 then p.cursor = p.cursor - 1 end
-    set_status("Deleted: " .. e.name); load_dir(p)
+  local files = get_marked_or_cursor(p)
+  if #files == 0 then return end
+
+  -- Confirm
+  local msg
+  if #files == 1 then
+    local kind = files[1].is_dir and "directory" or "file"
+    msg = "Delete " .. kind .. ":\n" .. files[1].name
   else
-    set_status("Delete failed: " .. (err or "?"))
+    msg = string.format("Delete %d files/directories?", #files)
   end
+  if not ui.confirm(msg) then return end
+
+  local deleted, failed = 0, 0
+  for _, e in ipairs(files) do
+    local ok, err = fs.delete(path_join(p.path, e.name))
+    if ok then deleted = deleted + 1 else failed = failed + 1 end
+  end
+
+  if p.cursor > 1 then p.cursor = p.cursor - 1 end
+  if #files == 1 then
+    if deleted == 1 then set_status("Deleted: " .. files[1].name)
+    else set_status("Delete failed") end
+  else
+    set_status(string.format("Deleted %d/%d items", deleted, #files))
+  end
+  p.marks = {}
+  load_dir(p)
 end
 
 local function open_img_view(path, fname)
