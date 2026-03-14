@@ -331,6 +331,7 @@ target_compile_options(picocalc_os PRIVATE
 # On standard Pico 2 the attribute is silently ignored and FB goes in SRAM.
 target_compile_definitions(picocalc_os PRIVATE
     PICO_RP2350=1
+    PICO_MALLOC_PANIC=0   # Return NULL on SRAM OOM instead of HardFault
     PICO_STACK_SIZE=4096  # Reduced to 4KB to fit in SCRATCH_X/Y
     MG_ENABLE_MBEDTLS=1
     # Re-enable pico_stdio_usb features that get auto-disabled when

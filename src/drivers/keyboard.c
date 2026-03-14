@@ -346,6 +346,8 @@ void kbd_poll(void) {
         s_last_char = (char)keycode;
       if (keycode == KEY_BKSPC)
         s_last_char = (char)KEY_BKSPC;
+      if (keycode == KEY_ENTER)
+        s_last_char = '\n';
     }
   }
 

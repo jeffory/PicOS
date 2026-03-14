@@ -248,6 +248,17 @@ bool ui_text_input(const char *prompt, const char *default_val,
                     hint, DLG_DIM, DLG_BG);
   display_flush();
 
+  // Second pass: draw dialog chrome on the other buffer too (double-buffering)
+  display_fill_rect(DLG_X, DY, DLG_W, DH, DLG_BG);
+  display_draw_rect(DLG_X, DY, DLG_W, DH, DLG_BORDER);
+  display_draw_text(DLG_X + 10, DY + 10,
+                    prompt ? prompt : "Input:", COLOR_WHITE, DLG_BG);
+  display_fill_rect(FX, FY, FW, FH, DLG_FIELD);
+  display_draw_rect(FX, FY, FW, FH, DLG_BORDER);
+  display_draw_text(DLG_X + (DLG_W - hw) / 2, DY + DH - 14,
+                    hint, DLG_DIM, DLG_BG);
+  display_flush();
+
   // Input buffer
   const int MAX_CHARS = 127;
   char buf[128] = "";
