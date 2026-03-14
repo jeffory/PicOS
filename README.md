@@ -66,6 +66,82 @@ local data = pc.fs.readFile("/data/mygame/save.json")
 
 ---
 
+## Memory Architecture
+
+The RP2350 has a small amount of on-chip SRAM supplemented by two independent 8MB PSRAM banks accessed over different buses (One on the PicoCalc mainboard, slower with no XIP, and the other on the Pico Plus 2 W). Understanding which memory is used for what is critical — mixing allocators or DMA sources causes hard-to-debug crashes.
+
+```
+┌─────────────────────────────────────────────────────────────────────┐
+│                         RP2350 SoC                                  │
+│                                                                     │
+│  ┌───────────────────────────────────────┐                          │
+│  │           SRAM  (~520KB)              │                          │
+│  │                                       │                          │
+│  │  BSS/Data ──────────── ~491KB         │  ◄── Framebuffers live   │
+│  │    s_framebuffers[2][320×320]         │      here (400KB)        │
+│  │    libmad synth.c (.time_critical)    │                          │
+│  │    DMA ISR staging buffers            │                          │
+│  │                                       │                          │
+│  │  Heap (malloc/free) ── ~29KB          │  ◄── Tiny! Free promptly │
+│  │    Temp buffers, FatFS workarea       │                          │
+│  │                                       │                          │
+│  │  Stack (MSP) ────────── 4KB           │  ◄── SCRATCH memory      │
+│  │    OS + ISR context                   │      0x20081000-20082000 │
+│  │                                       │                          │
+│  │  Native app stack (PSP) ── 8KB        │  ◄── Static SRAM buffer  │
+│  │    ELF apps run on Process SP         │      (s_native_stack)    │
+│  └───────────────────────────────────────┘                          │
+│           │ AHB bus (fast, single-cycle)                            │
+│           ▼                                                         │
+│  ┌─────────────────┐                                                │
+│  │   DMA engine    │  Reads SRAM framebuffers for display flush     │
+│  └─────────────────┘  (independent of PSRAM — no bus contention)    │
+│                                                                     │
+└─────────────────────────────────────────────────────────────────────┘
+          │                                    │
+          │ QMI bus (XIP cache)                │ PIO1 SPI
+          ▼                                    ▼
+┌────────────────────────────┐    ┌───────────────────────────┐
+│  QMI PSRAM  (on-module)    │    │  PIO PSRAM  (mainboard)   │
+│  8MB — Pico Plus 2 W       │    │  8MB — PicoCalc v2.0      │
+│                            │    │                           │
+│  0x11000000 (cached)       │    │  Accessed via             │
+│  0x15000000 (uncached)     │    │  pio_psram_read/write()   │
+│                            │    │                           │
+│  ┌──────────────────────┐  │    │  ┌────────────────────┐    │
+│  │ Lua heap (umm_malloc)│  │    │  │ 0x0000: MP3 PCM    │    │
+│  │ Base: 0x11200000     │  │    │  │ ring buffer (32KB) │    │
+│  │ ~6MB for Lua VM      │  │    │  ├────────────────────┤    │
+│  │                      │  │    │  │ 0x8000: Video      │    │
+│  │ ⚠ umm_malloc/free   │  │    │  │ buffer pool        │    │
+│  │   only! Never use    │  │    │  │ 3×96KB JPEG frames │    │
+│  │   standard malloc.   │  │    │  ├────────────────────┤    │
+│  ├──────────────────────┤  │    │  │ (rest unused)      │    │
+│  │ ELF app data/BSS     │  │    │  └────────────────────┘    │
+│  │ (umm_malloc'd)       │  │    │                           │
+│  ├──────────────────────┤  │    │  Non-fatal if absent —    │
+│  │ ELF app code         │  │    │  MP3/video degrade        │
+│  │ (SRAM preferred,     │  │    │  gracefully               │
+│  │  PSRAM fallback)     │  │    │                           │
+│  └──────────────────────┘  │    └───────────────────────────┘
+│                            │
+│  XIP cache (16KB) serves   │
+│  most instruction fetches  │
+│  from PSRAM — avoids       │
+│  hammering QMI on every    │
+│  CPU fetch cycle           │
+└────────────────────────────┘
+```
+
+### Key rules
+
+- **Never mix allocators.** `malloc()`/`free()` → SRAM heap. `umm_malloc()`/`umm_free()` → QMI PSRAM heap. Crossing them corrupts both heaps.
+- **DMA reads SRAM only.** Framebuffers are in SRAM so DMA flush is on the AHB bus, completely independent of PSRAM access. This is why `display_flush()` is non-blocking even while CPU fetches code from PSRAM.
+- **ELF code uses XIP cache.** Native app code is written through the uncached alias (`0x15xxxxxx`), then executed from the cached alias (`0x11xxxxxx`). The 16KB XIP cache eliminates most QMI bus traffic.
+- **PIO PSRAM is a separate bus.** The mainboard's second PSRAM bank uses PIO1 SPI on its own pins — no contention with QMI PSRAM, flash, or the display's PIO0 SPI.
+
+---
+
 ## Hardware Pin Reference
 All pins are defined in `src/hardware.h`. Verify against [clockwork_Mainboard_V2.0_Schematic.pdf](https://github.com/clockworkpi/PicoCalc/blob/master/clockwork_Mainboard_V2.0_Schematic.pdf).
 
