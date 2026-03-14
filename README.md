@@ -4,7 +4,7 @@ An app platform for the ClockworkPi PicoCalc, built around a resident Lua runtim
 
 > [!IMPORTANT]
 > **Target hardware:** [Pimoroni Pico Plus 2 W](https://shop.pimoroni.com/products/pimoroni-pico-plus-2-w) in the [PicoCalc](https://www.clockworkpi.com/picocalc) device.
-> PicOS relies heavilty on the PSRAM being accessible via XIP, other hardware support is untested currently.
+> PicOS relies heavily on the PSRAM being accessible via XIP, other hardware support is untested currently.
 
 📖 **Documentation:** Full SDK reference and guides are available on the [PicOS Wiki](https://github.com/jeffory/PicOS/wiki).
 
