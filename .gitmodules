@@ -31,6 +31,6 @@
 [submodule "third_party/wolfssl"]
 	path = third_party/wolfssl
 	url = https://github.com/wolfSSL/wolfssl.git
-[submodule "apps/doom/src/doomgeneric"]
-	path = apps/doom/src/doomgeneric
+[submodule "apps/doom/src"]
+	path = apps/doom/src
 	url = https://github.com/ozkl/doomgeneric.git
