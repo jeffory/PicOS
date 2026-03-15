@@ -12,6 +12,14 @@ bool dev_commands_process(void);
 
 void dev_commands_send_screenshot(void);
 
+bool dev_commands_wants_exit(void);
+
+void dev_commands_clear_exit(void);
+
+bool dev_commands_wants_usb(void);
+
+void dev_commands_clear_usb(void);
+
 bool dev_commands_wants_list(void);
 
 void dev_commands_clear_list(void);

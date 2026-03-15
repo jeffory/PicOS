@@ -39,6 +39,9 @@ static bool s_screenshot_pressed =
 static int s_i2c_fail_count = 0;      // consecutive kbd_poll() I2C failures
 static uint32_t s_i2c_backoff_ms = 0; // when to next attempt recovery
 
+static uint32_t s_injected_buttons = 0; // buttons injected via kbd_inject_buttons()
+static char s_injected_char = 0;         // character injected via kbd_inject_char()
+
 // ── Public API
 // ────────────────────────────────────────────────────────────────
 
@@ -220,6 +223,7 @@ void kbd_poll(void) {
   s_buttons_prev = s_buttons_curr;
   s_last_char = 0;
   s_last_raw_key = 0;
+  s_injected_buttons = 0; // consume after one poll cycle
 
   // Poll REG_FIF (0x09) directly — up to 8 events per frame.
   // Each read returns 2 bytes: [state, keycode].
@@ -381,14 +385,18 @@ done_polling:;
     s_screenshot_pressed = true;
 }
 
-char kbd_get_char(void) { return s_last_char; }
+char kbd_get_char(void) {
+  char c = s_last_char ? s_last_char : s_injected_char;
+  s_injected_char = 0; // consume injected char
+  return c;
+}
 
 uint8_t kbd_get_raw_key(void) { return s_last_raw_key; }
 
-uint32_t kbd_get_buttons(void) { return s_buttons_curr; }
+uint32_t kbd_get_buttons(void) { return s_buttons_curr | s_injected_buttons; }
 
 uint32_t kbd_get_buttons_pressed(void) {
-  return (s_buttons_curr & ~s_buttons_prev);
+  return (s_buttons_curr & ~s_buttons_prev) | s_injected_buttons;
 }
 
 uint32_t kbd_get_buttons_released(void) {
@@ -447,4 +455,12 @@ void kbd_clear_state(void) {
   s_buttons_curr = 0;
   s_last_char = 0;
   s_last_raw_key = 0;
+}
+
+void kbd_inject_buttons(uint32_t buttons) {
+  s_injected_buttons = buttons;
+}
+
+void kbd_inject_char(char c) {
+  s_injected_char = c;
 }

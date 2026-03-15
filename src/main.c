@@ -2,6 +2,7 @@
 #include "hardware/gpio.h"
 #include "hardware/structs/xip.h"
 #include "hardware/watchdog.h"
+#include "pico/bootrom.h"
 #include "pico/multicore.h"
 #include "pico/stdlib.h"
 
@@ -272,12 +273,23 @@ static void sys_poll(void) {
 
   // Poll for serial commands
   dev_commands_poll();
-  
-  // Process serial commands that need to run from this context
-  // (usb, reboot need to be in non-app context)
-  if (dev_commands_process()) {
-    // Check what command was processed and handle appropriately
-    // The dev_commands_process() handles echo, we need to act on specific commands
+  dev_commands_process();
+
+  if (dev_commands_wants_exit()) {
+    s_native_exit = true;
+    dev_commands_clear_exit();
+  }
+  if (dev_commands_wants_reboot()) {
+    printf("[DEV] Rebooting...\n");
+    stdio_flush();
+    sleep_ms(100);
+    watchdog_reboot(0, 0, 0);
+  }
+  if (dev_commands_wants_reboot_flash()) {
+    printf("[DEV] Rebooting to BOOTSEL mode...\n");
+    stdio_flush();
+    sleep_ms(100);
+    reset_usb_boot(0, 0);
   }
 }
 
