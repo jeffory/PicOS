@@ -18,10 +18,13 @@
 #include "ui.h"
 #include "umm_malloc.h"
 
+#include "../dev_commands.h"
 #include "pico/stdlib.h"
 #include "hardware/clocks.h"
 #include "hardware/uart.h"
 #include "hardware/vreg.h"
+#include "hardware/watchdog.h"
+#include "pico/bootrom.h"
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -413,7 +416,37 @@ void launcher_run(void) {
     kbd_poll();
     // wifi_poll() is now driven by Core 1 — do not call from Core 0
 
+    // Poll serial dev commands (ping, screenshot, exit, launch, etc.)
+    dev_commands_poll();
+    dev_commands_process();
+
     bool dirty = false;
+
+    // Handle dev command flags
+    if (dev_commands_wants_list()) {
+      launcher_list_apps();
+      dev_commands_clear_list();
+    }
+    if (dev_commands_get_pending_launch()) {
+      if (launcher_launch_by_name(dev_commands_get_pending_launch())) {
+        kbd_clear_state();
+        scan_apps();
+        dirty = true;
+      }
+      dev_commands_clear_pending_launch();
+    }
+    if (dev_commands_wants_reboot()) {
+      printf("[DEV] Rebooting...\n");
+      stdio_flush();
+      sleep_ms(100);
+      watchdog_reboot(0, 0, 0);
+    }
+    if (dev_commands_wants_reboot_flash()) {
+      printf("[DEV] Rebooting to BOOTSEL mode...\n");
+      stdio_flush();
+      sleep_ms(100);
+      reset_usb_boot(0, 0);
+    }
 
     if (kbd_consume_menu_press()) {
       system_menu_show(NULL);
@@ -560,8 +593,7 @@ bool launcher_launch_by_name(const char *name) {
   }
 
   printf("[DEV] Launching app: %s\n", name);
-  // TODO: Actually launch the app
-  // For now, just return true - actual launching would be done by the caller
+  run_app(app_idx);
   return true;
 }
 

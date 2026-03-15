@@ -182,6 +182,8 @@ void __attribute__((naked)) isr_hardfault(void) {
 #include "os/os.h"
 #include "os/perf.h"
 #include "os/system_menu.h"
+#include "os/terminal.h"
+#include "os/terminal_render.h"
 #include "os/text_input.h"
 #include "os/ui.h"
 #include "umm_malloc.h"
@@ -431,6 +433,33 @@ static const picocalc_perf_t s_perf_impl = {
     .setTargetFPS = perf_set_target_fps,
 };
 
+static picocalc_terminal_t s_terminal_impl = {
+    .create = terminal_new,
+    .free = terminal_free,
+    .clear = terminal_clear,
+    .write = terminal_putString,
+    .putChar = terminal_putChar,
+    .setCursor = terminal_setCursor,
+    .getCursor = terminal_getCursor,
+    .setColors = terminal_setColors,
+    .getColors = terminal_getColors,
+    .scroll = terminal_scroll,
+    .render = terminal_render,
+    .renderDirty = terminal_renderDirty,
+    .getCols = terminal_getCols,
+    .getRows = terminal_getRows,
+    .setCursorVisible = terminal_setCursorVisible,
+    .setCursorBlink = terminal_setCursorBlink,
+    .markAllDirty = terminal_markAllDirty,
+    .isFullDirty = terminal_isFullDirty,
+    .getDirtyRange = terminal_getDirtyRange,
+    .getScrollbackCount = terminal_getScrollbackCount,
+    .setScrollbackOffset = terminal_setScrollbackOffset,
+    .getScrollbackOffset = terminal_getScrollbackOffset,
+    .getScrollbackLine = terminal_getScrollbackLine,
+    .getScrollbackLineColors = terminal_getScrollbackLineColors,
+};
+
 static picocalc_fs_t s_fs_impl = {
     .open = fs_open,
     .read = fs_read,
@@ -563,6 +592,7 @@ int main(void) {
   g_api.ui = &s_ui_impl;
   g_api.psram = &s_psram_impl;
   g_api.perf = &s_perf_impl;
+  g_api.terminal = &s_terminal_impl;
   // fs wired after SD card init
 
   // Explicitly configure PSRAM hardware pins and XIP write logic for the Pico

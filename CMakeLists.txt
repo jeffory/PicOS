@@ -216,6 +216,11 @@ add_executable(picocalc_os
     src/os/lua_psram_alloc.c
     src/os/system_menu.c
     src/os/screenshot.c
+    src/os/terminal.c
+    src/os/terminal_parser.c
+    src/os/terminal_render.c
+    src/os/lua_bridge_terminal.c
+    src/fonts/font_6x11.c
     src/os/text_input.c
     src/os/file_browser.c
     src/os/config.c
@@ -246,6 +251,7 @@ target_include_directories(picocalc_os PRIVATE
     src/usb/
     src/
     src/os/
+    src/fonts/
     src/drivers/
     third_party/mongoose/
     third_party/umm_malloc/src/

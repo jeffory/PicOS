@@ -24,6 +24,7 @@ static char s_pass[64] = {0};
 static char s_ip[20] = {0};
 static bool s_http_required = false;
 static bool s_disconnect_pending = false; // deferred disconnect from SNTP callback
+static bool s_auto_connected = false;    // true only for boot auto-connect
 
 static struct mg_mgr s_mgr;
 static struct mg_tcpip_if s_ifp;
@@ -68,7 +69,7 @@ static void sntp_cb(struct mg_connection *c, int ev, void *ev_data) {
     printf("WiFi: SNTP sync OK, time: %lld\n", *t);
     clock_sntp_set((unsigned)(*t / 1000));
     c->is_closing = 1;
-    if (!s_http_required) {
+    if (!s_http_required && s_auto_connected) {
       // Don't call mg_wifi_disconnect() directly here — we're inside
       // mg_mgr_poll() and calling it from within a Mongoose callback causes
       // reentrancy into the CYW43 driver. Set a flag; wifi_poll() will
@@ -300,6 +301,7 @@ void wifi_init(void) {
   if (ssid && ssid[0]) {
     printf("WiFi: auto-connecting to '%s'\n", ssid);
     wifi_connect(ssid, pass ? pass : "");
+    s_auto_connected = true; // mark as boot auto-connect (after wifi_connect clears it)
   }
 }
 
@@ -321,6 +323,7 @@ void wifi_connect(const char *ssid, const char *password) {
 
   s_status = WIFI_STATUS_CONNECTING;
   s_ip[0] = '\0';
+  s_auto_connected = false; // user/app-initiated, don't auto-disconnect after SNTP
 
   printf("WiFi: connecting to '%s'...\n", s_ssid);
 

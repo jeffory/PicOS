@@ -20,6 +20,8 @@
 #include "pico/stdlib.h"
 #include "pico/time.h"
 
+#include "../dev_commands.h"
+
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -54,6 +56,8 @@ void register_subtable(lua_State *L, const char *name,
 static void menu_lua_hook(lua_State *L, lua_Debug *ar) {
   (void)ar;
   http_lua_fire_pending(L); // fire any queued HTTP Lua callbacks
+  dev_commands_poll();
+  dev_commands_process();
   if (kbd_consume_menu_press())
     system_menu_show(L);
   // Both screenshot triggers set s_screenshot_pending so the capture fires
@@ -84,6 +88,7 @@ static void menu_lua_hook(lua_State *L, lua_Debug *ar) {
 
 
 void lua_bridge_game_init(lua_State *L);
+void lua_bridge_terminal_init(lua_State *L);
 
 void lua_bridge_register(lua_State *L) {
   printf("[LUA] lua_bridge_register start, PSRAM free=%lu\n",
@@ -142,6 +147,8 @@ void lua_bridge_register(lua_State *L) {
   lua_bridge_video_init(L);
   printf("[LUA] registering game...\n");
   lua_bridge_game_init(L);
+  printf("[LUA] registering terminal...\n");
+  lua_bridge_terminal_init(L);
   printf("[LUA] all modules done, PSRAM free=%lu\n",
          (unsigned long)umm_free_heap_size());
   // Set as global

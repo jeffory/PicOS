@@ -1,0 +1,8 @@
+{
+  "mcpServers": {
+    "picos": {
+      "command": "python3",
+      "args": ["tools/picos_mcp.py"]
+    }
+  }
+}

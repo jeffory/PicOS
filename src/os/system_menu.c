@@ -17,10 +17,17 @@
 
 #include "hardware/watchdog.h"
 #include "hardware/clocks.h"
+#include "pico/bootrom.h"
 #include "pico/stdlib.h"
+
+#include "umm_malloc.h"
 
 #include <stdio.h>
 #include <string.h>
+
+// Saved darkened background for restoring after sub-dialogs.
+// Allocated in PSRAM (umm_malloc) at menu entry, freed on exit.
+static uint16_t *s_saved_bg = NULL;
 
 // ── App-registered items
 // ──────────────────────────────────────────────────────
@@ -63,6 +70,11 @@ typedef enum {
   ITEM_SCREENSHOT,
   ITEM_REBOOT,
   ITEM_EXIT,
+  ITEM_SETTINGS,
+  ITEM_REBOOT_FLASH,
+  ITEM_WIFI_TOGGLE,
+  ITEM_WIFI_SETTINGS,
+  ITEM_WIFI_STATUS,
 } item_type_t;
 
 typedef struct {
@@ -70,76 +82,75 @@ typedef struct {
   int app_idx; // valid only when type == ITEM_APP_CB
 } flat_item_t;
 
+typedef enum {
+  PAGE_MAIN,
+  PAGE_SETTINGS,
+} menu_page_t;
+
+// ── Background save/restore helpers
+// ──────────────────────────────────────────────────────────
+// Save the current back buffer (darkened app background) to PSRAM.
+// Must be called once after display_darken() at menu entry.
+static void bg_save(void) {
+  if (!s_saved_bg)
+    s_saved_bg = (uint16_t *)umm_malloc(FB_WIDTH * FB_HEIGHT * sizeof(uint16_t));
+  if (s_saved_bg)
+    memcpy(s_saved_bg, display_get_back_buffer(),
+           FB_WIDTH * FB_HEIGHT * sizeof(uint16_t));
+}
+
+// Restore the saved darkened background into both framebuffers.
+// Call before redrawing the menu panel after a sub-dialog has returned.
+static void bg_restore(void) {
+  if (!s_saved_bg)
+    return;
+  uint16_t *back = display_get_back_buffer();
+  memcpy(back, s_saved_bg, FB_WIDTH * FB_HEIGHT * sizeof(uint16_t));
+}
+
+static void bg_free(void) {
+  if (s_saved_bg) {
+    umm_free(s_saved_bg);
+    s_saved_bg = NULL;
+  }
+}
+
+// ── Item list builder
+// ──────────────────────────────────────────────────────────
+
+static int build_items(flat_item_t *items, menu_page_t page, bool has_exit,
+                       bool is_launcher) {
+  int count = 0;
+
+  if (page == PAGE_MAIN) {
+    for (int i = 0; i < s_app_item_count; i++) {
+      items[count].type = ITEM_APP_CB;
+      items[count].app_idx = i;
+      count++;
+    }
+    items[count++] = (flat_item_t){ITEM_BATTERY, 0};
+    items[count++] = (flat_item_t){ITEM_RAM_INFO, 0};
+    items[count++] = (flat_item_t){ITEM_SETTINGS, 0};
+    if (is_launcher)
+      items[count++] = (flat_item_t){ITEM_USB_MSC, 0};
+    items[count++] = (flat_item_t){ITEM_SCREENSHOT, 0};
+    items[count++] = (flat_item_t){ITEM_REBOOT, 0};
+    items[count++] = (flat_item_t){ITEM_REBOOT_FLASH, 0};
+    if (has_exit)
+      items[count++] = (flat_item_t){ITEM_EXIT, 0};
+  } else { // PAGE_SETTINGS
+    items[count++] = (flat_item_t){ITEM_BRIGHTNESS, 0};
+    items[count++] = (flat_item_t){ITEM_TIMEZONE, 0};
+    items[count++] = (flat_item_t){ITEM_WIFI_TOGGLE, 0};
+    items[count++] = (flat_item_t){ITEM_WIFI_SETTINGS, 0};
+    items[count++] = (flat_item_t){ITEM_WIFI_STATUS, 0};
+    items[count++] = (flat_item_t){ITEM_REMOUNT_SD, 0};
+  }
+  return count;
+}
+
 // ── WiFi helpers
 // ──────────────────────────────────────────────────────────────
-
-// Show a small 2-item submenu: 1=Reconfigure, 2=Disconnect, 0=Cancel
-static int show_wifi_submenu(void) {
-  static const char *const sub_labels[] = {"Reconfigure", "Disconnect"};
-  static const int sub_count = 2;
-
-  const int sub_w = 180;
-  int panel_h = 32 + sub_count * ITEM_H;
-  int panel_x = (FB_WIDTH - sub_w) / 2;
-  int panel_y = (FB_HEIGHT - panel_h) / 2;
-
-  int sel = 0;
-  bool running = true;
-  bool need_redraw = true;
-
-  while (running) {
-    if (need_redraw) {
-      display_draw_rect(panel_x, panel_y, sub_w, panel_h, C_BORDER);
-      display_fill_rect(panel_x + 1, panel_y + 1, sub_w - 2, TITLE_H,
-                        C_TITLE_BG);
-      const char *title = "WiFi";
-      int tw = display_text_width(title);
-      display_draw_text(panel_x + (sub_w - tw) / 2, panel_y + 5, title,
-                        COLOR_WHITE, C_TITLE_BG);
-      display_fill_rect(panel_x + 1, panel_y + 1 + TITLE_H, sub_w - 2, 1,
-                        C_BORDER);
-
-      int items_y = panel_y + 1 + TITLE_H + 1;
-      for (int i = 0; i < sub_count; i++) {
-        int iy = items_y + i * ITEM_H;
-        bool s = (i == sel);
-        uint16_t bg = s ? C_SEL_BG : C_PANEL_BG;
-        display_fill_rect(panel_x + 1, iy, sub_w - 2, ITEM_H, bg);
-        display_draw_text(panel_x + 4, iy + 2, s ? ">" : " ", COLOR_WHITE, bg);
-        display_draw_text(panel_x + 10, iy + 2, sub_labels[i], COLOR_WHITE, bg);
-      }
-
-      int fdiv_y = items_y + sub_count * ITEM_H;
-      display_fill_rect(panel_x + 1, fdiv_y, sub_w - 2, 1, C_BORDER);
-      int footer_y = fdiv_y + 1;
-      display_fill_rect(panel_x + 1, footer_y, sub_w - 2, FOOTER_H, C_TITLE_BG);
-      display_draw_text(panel_x + 4, footer_y + 2, "Enter:select  Esc:close",
-                        COLOR_GRAY, C_TITLE_BG);
-
-      display_flush();
-      need_redraw = false;
-    }
-
-    kbd_poll();
-    uint32_t pressed = kbd_get_buttons_pressed();
-
-    if ((pressed & BTN_UP) && sel > 0) {
-      sel--;
-      need_redraw = true;
-    }
-    if ((pressed & BTN_DOWN) && sel < sub_count - 1) {
-      sel++;
-      need_redraw = true;
-    }
-    if (pressed & BTN_ENTER)
-      return sel + 1;
-    if (pressed & BTN_ESC)
-      return 0;
-
-    sleep_ms(16);
-  }
-  return 0;
-}
 
 static void run_wifi_config(void) {
   char ssid[CONFIG_VAL_MAX];
@@ -166,13 +177,13 @@ static void run_wifi_config(void) {
 // ─────────────────────────────────────────────────────────────
 
 static void draw_panel(const flat_item_t *items, int count, int sel, int px,
-                       int py, int ph, int bat) {
+                       int py, int ph, int bat, menu_page_t page) {
   // Outer border
   display_draw_rect(px, py, PANEL_W, ph, C_BORDER);
 
   // Title bar
   display_fill_rect(px + 1, py + 1, PANEL_W - 2, TITLE_H, C_TITLE_BG);
-  const char *title = "System Menu";
+  const char *title = (page == PAGE_MAIN) ? "System Menu" : "Settings";
   int tw = display_text_width(title);
   display_draw_text(px + (PANEL_W - tw) / 2, py + 5, title, COLOR_WHITE,
                     C_TITLE_BG);
@@ -188,7 +199,7 @@ static void draw_panel(const flat_item_t *items, int count, int sel, int px,
     uint16_t bg = selected ? C_SEL_BG : C_PANEL_BG;
     display_fill_rect(px + 1, iy, PANEL_W - 2, ITEM_H, bg);
 
-    char label[34];
+    char label[48];
     uint16_t fg = COLOR_WHITE;
 
     switch (items[i].type) {
@@ -206,6 +217,10 @@ static void draw_panel(const flat_item_t *items, int count, int sel, int px,
       fg = (bat > 20) ? COLOR_GREEN : COLOR_RED;
       break;
     case ITEM_WIFI:
+      // Legacy — kept for compatibility but not used in paged menu
+      snprintf(label, sizeof(label), "WiFi");
+      break;
+    case ITEM_WIFI_TOGGLE:
       if (!wifi_is_available()) {
         snprintf(label, sizeof(label), "WiFi: N/A");
         fg = COLOR_GRAY;
@@ -213,10 +228,34 @@ static void draw_panel(const flat_item_t *items, int count, int sel, int px,
         switch (wifi_get_status()) {
         case WIFI_STATUS_CONNECTED: {
           const char *ip = wifi_get_ip();
-          snprintf(label, sizeof(label), "WiFi: %s", ip ? ip : "Connected");
+          snprintf(label, sizeof(label), "WiFi: On (%s)", ip ? ip : "?");
           fg = COLOR_GREEN;
           break;
         }
+        case WIFI_STATUS_CONNECTING:
+          snprintf(label, sizeof(label), "WiFi: Connecting...");
+          fg = COLOR_YELLOW;
+          break;
+        default:
+          snprintf(label, sizeof(label), "WiFi: Off");
+          fg = COLOR_GRAY;
+          break;
+        }
+      }
+      break;
+    case ITEM_WIFI_SETTINGS:
+      snprintf(label, sizeof(label), "WiFi Settings");
+      break;
+    case ITEM_WIFI_STATUS:
+      if (!wifi_is_available()) {
+        snprintf(label, sizeof(label), "WiFi: N/A");
+        fg = COLOR_GRAY;
+      } else {
+        switch (wifi_get_status()) {
+        case WIFI_STATUS_CONNECTED:
+          snprintf(label, sizeof(label), "WiFi: Ok");
+          fg = COLOR_GREEN;
+          break;
         case WIFI_STATUS_CONNECTING:
           snprintf(label, sizeof(label), "WiFi: Connecting...");
           fg = COLOR_YELLOW;
@@ -225,15 +264,10 @@ static void draw_panel(const flat_item_t *items, int count, int sel, int px,
           snprintf(label, sizeof(label), "WiFi: Failed");
           fg = COLOR_RED;
           break;
-        default: {
-          const char *ssid = wifi_get_ssid();
-          if (ssid)
-            snprintf(label, sizeof(label), "WiFi: Off (%s)", ssid);
-          else
-            snprintf(label, sizeof(label), "WiFi: Off");
+        default:
+          snprintf(label, sizeof(label), "WiFi: Off");
           fg = COLOR_GRAY;
           break;
-        }
         }
       }
       break;
@@ -253,6 +287,9 @@ static void draw_panel(const flat_item_t *items, int count, int sel, int px,
       fg = (free_kb > 512) ? COLOR_GREEN : (free_kb > 128) ? COLOR_YELLOW : COLOR_RED;
       break;
     }
+    case ITEM_SETTINGS:
+      snprintf(label, sizeof(label), "Settings");
+      break;
     case ITEM_REMOUNT_SD:
       snprintf(label, sizeof(label), "Remount SD Card");
       break;
@@ -264,6 +301,10 @@ static void draw_panel(const flat_item_t *items, int count, int sel, int px,
       break;
     case ITEM_REBOOT:
       snprintf(label, sizeof(label), "Reboot");
+      fg = selected ? COLOR_WHITE : COLOR_RED;
+      break;
+    case ITEM_REBOOT_FLASH:
+      snprintf(label, sizeof(label), "Reboot to Flash");
       fg = selected ? COLOR_WHITE : COLOR_RED;
       break;
     case ITEM_EXIT:
@@ -284,14 +325,212 @@ static void draw_panel(const flat_item_t *items, int count, int sel, int px,
   // Footer hint
   int footer_y = footer_div_y + 1;
   display_fill_rect(px + 1, footer_y, PANEL_W - 2, FOOTER_H, C_TITLE_BG);
-  display_draw_text(px + 4, footer_y + 2, "Enter:select  Esc:close", COLOR_GRAY,
-                    C_TITLE_BG);
+  const char *footer = (page == PAGE_MAIN) ? "Enter:select  Esc:close"
+                                           : "Enter:select  Esc:back";
+  display_draw_text(px + 4, footer_y + 2, footer, COLOR_GRAY, C_TITLE_BG);
 
   // Show current clock speed in bottom-left corner
   char clk_buf[16];
   uint32_t clk_hz = clock_get_hz(clk_sys);
   snprintf(clk_buf, sizeof(clk_buf), "%lu MHz", (unsigned long)(clk_hz / 1000000));
   display_draw_text(4, FB_HEIGHT - 12, clk_buf, COLOR_GREEN, 0);
+}
+
+// ── Shared menu loop
+// ────────────────────────────────────────────────────────────────
+
+// context: 0=launcher, 1=Lua app, 2=native app
+// Returns true if Exit App was selected.
+static bool menu_loop(lua_State *L, int context) {
+  bool has_exit = (context != 0);   // both Lua and native apps have Exit App
+  bool is_launcher = (context == 0);
+  menu_page_t page = PAGE_MAIN;
+  flat_item_t items[SYSMENU_MAX_APP_ITEMS + 12];
+  int count = build_items(items, page, has_exit, is_launcher);
+
+  int panel_h = 32 + count * ITEM_H;
+  int panel_x = (FB_WIDTH - PANEL_W) / 2;
+  int panel_y = (FB_HEIGHT - panel_h) / 2;
+
+  int bat = kbd_get_battery_percent();
+
+  display_darken();
+  bg_save();
+
+  int sel = 0;
+  bool running = true;
+  bool need_redraw = true;
+  bool need_bg_restore = false;
+  bool exit_requested = false;
+
+  while (running) {
+    if (need_redraw) {
+      if (need_bg_restore) {
+        bg_restore();
+        need_bg_restore = false;
+      }
+      draw_panel(items, count, sel, panel_x, panel_y, panel_h, bat, page);
+      display_flush();
+      need_redraw = false;
+    }
+
+    kbd_poll();
+    uint32_t pressed = kbd_get_buttons_pressed();
+
+    if (pressed & BTN_UP) {
+      sel = (sel > 0) ? sel - 1 : count - 1;
+      need_redraw = true;
+    }
+    if (pressed & BTN_DOWN) {
+      sel = (sel < count - 1) ? sel + 1 : 0;
+      need_redraw = true;
+    }
+
+    // Left / Right: adjust brightness when on Brightness item
+    if ((pressed & BTN_LEFT) && items[sel].type == ITEM_BRIGHTNESS) {
+      s_brightness = (s_brightness >= 16) ? s_brightness - 16 : 0;
+      kbd_set_backlight(s_brightness);
+      need_redraw = true;
+    }
+    if ((pressed & BTN_RIGHT) && items[sel].type == ITEM_BRIGHTNESS) {
+      s_brightness = (s_brightness <= 239) ? s_brightness + 16 : 255;
+      kbd_set_backlight(s_brightness);
+      need_redraw = true;
+    }
+
+    if (pressed & BTN_ENTER) {
+      switch (items[sel].type) {
+      case ITEM_APP_CB:
+        s_app_items[items[sel].app_idx].callback(
+            s_app_items[items[sel].app_idx].user);
+        running = false;
+        break;
+      case ITEM_BRIGHTNESS:
+        s_brightness = (s_brightness <= 239) ? s_brightness + 16 : 0;
+        kbd_set_backlight(s_brightness);
+        need_redraw = true;
+        break;
+      case ITEM_BATTERY:
+      case ITEM_RAM_INFO:
+      case ITEM_WIFI_STATUS:
+        break; // read-only items
+      case ITEM_WIFI:
+        break; // legacy, unused
+      case ITEM_SETTINGS:
+        page = PAGE_SETTINGS;
+        count = build_items(items, page, has_exit, is_launcher);
+        panel_h = 32 + count * ITEM_H;
+        panel_y = (FB_HEIGHT - panel_h) / 2;
+        sel = 0;
+        need_bg_restore = true;
+        need_redraw = true;
+        break;
+      case ITEM_WIFI_TOGGLE:
+        if (wifi_is_available()) {
+          if (wifi_get_status() == WIFI_STATUS_CONNECTED) {
+            wifi_disconnect();
+          } else {
+            const char *ssid = config_get("wifi_ssid");
+            const char *pass = config_get("wifi_pass");
+            if (ssid && ssid[0])
+              wifi_connect(ssid, pass ? pass : "");
+            else
+              run_wifi_config(); // no saved credentials, prompt
+          }
+          need_bg_restore = true;
+          need_redraw = true;
+        }
+        break;
+      case ITEM_WIFI_SETTINGS:
+        if (wifi_is_available()) {
+          run_wifi_config();
+          need_bg_restore = true;
+          need_redraw = true;
+        }
+        break;
+      case ITEM_TIMEZONE:
+        tz_picker_show();
+        need_bg_restore = true;
+        need_redraw = true;
+        break;
+      case ITEM_REMOUNT_SD: {
+        display_fill_rect(panel_x + 10, panel_y + panel_h / 2 - 10,
+                          PANEL_W - 20, 30, C_TITLE_BG);
+        display_draw_text(panel_x + 15, panel_y + panel_h / 2 - 5,
+                          "Remounting SD...", COLOR_WHITE, C_TITLE_BG);
+        display_flush();
+
+        if (sdcard_remount()) {
+          display_fill_rect(panel_x + 10, panel_y + panel_h / 2 - 10,
+                            PANEL_W - 20, 30, COLOR_GREEN);
+          display_draw_text(panel_x + 15, panel_y + panel_h / 2 - 5,
+                            "SD Remounted!", COLOR_BLACK, COLOR_GREEN);
+          display_flush();
+          sleep_ms(800);
+          if (is_launcher)
+            launcher_refresh_apps();
+        } else {
+          display_fill_rect(panel_x + 10, panel_y + panel_h / 2 - 10,
+                            PANEL_W - 20, 30, COLOR_RED);
+          display_draw_text(panel_x + 15, panel_y + panel_h / 2 - 5,
+                            "Remount Failed!", COLOR_WHITE, COLOR_RED);
+          display_flush();
+          sleep_ms(1500);
+        }
+        need_bg_restore = true;
+        need_redraw = true;
+        break;
+      }
+      case ITEM_USB_MSC: {
+        usb_msc_enter_mode();
+        kbd_clear_state();
+        kbd_recover_i2c_bus();
+        if (is_launcher)
+          launcher_refresh_apps();
+        need_bg_restore = true;
+        need_redraw = true;
+        break;
+      }
+      case ITEM_SCREENSHOT:
+        screenshot_schedule(250);
+        kbd_clear_state();
+        running = false;
+        break;
+      case ITEM_REBOOT:
+        watchdog_enable(1, true);
+        for (;;)
+          tight_loop_contents();
+        break; /* unreachable */
+      case ITEM_REBOOT_FLASH:
+        reset_usb_boot(0, 0);
+        break; /* unreachable */
+      case ITEM_EXIT:
+        system_menu_clear_items();
+        exit_requested = true;
+        running = false;
+        break;
+      }
+    }
+
+    if (pressed & BTN_ESC) {
+      if (page == PAGE_SETTINGS) {
+        page = PAGE_MAIN;
+        count = build_items(items, page, has_exit, is_launcher);
+        panel_h = 32 + count * ITEM_H;
+        panel_y = (FB_HEIGHT - panel_h) / 2;
+        sel = 0;
+        need_bg_restore = true;
+        need_redraw = true;
+      } else {
+        running = false;
+      }
+    }
+
+    sleep_ms(16);
+  }
+  bg_free();
+  kbd_clear_state();
+  return exit_requested;
 }
 
 // ── Public API
@@ -316,299 +555,13 @@ void system_menu_add_item(const char *label, void (*callback)(void *user),
 void system_menu_clear_items(void) { s_app_item_count = 0; }
 
 void system_menu_show(lua_State *L) {
-  // Build flat item list: app items first, then built-ins.
-  // ITEM_EXIT is omitted when called from the launcher (L == NULL).
-  flat_item_t items[SYSMENU_MAX_APP_ITEMS + 8];
-  int count = 0;
-
-  for (int i = 0; i < s_app_item_count; i++) {
-    items[count].type = ITEM_APP_CB;
-    items[count].app_idx = i;
-    count++;
-  }
-  items[count++] = (flat_item_t){ITEM_BRIGHTNESS, 0};
-  items[count++] = (flat_item_t){ITEM_BATTERY, 0};
-  items[count++] = (flat_item_t){ITEM_WIFI, 0};
-  items[count++] = (flat_item_t){ITEM_RAM_INFO, 0};
-  items[count++] = (flat_item_t){ITEM_TIMEZONE, 0};
-  items[count++] = (flat_item_t){ITEM_REMOUNT_SD, 0};
-  if (L == NULL) {
-    items[count++] = (flat_item_t){ITEM_USB_MSC, 0};
-  }
-  items[count++] = (flat_item_t){ITEM_SCREENSHOT, 0};
-  items[count++] = (flat_item_t){ITEM_REBOOT, 0};
-  if (L != NULL)
-    items[count++] = (flat_item_t){ITEM_EXIT, 0};
-
-  // panel_h = border(1) + title(16) + divider(1) + items(count*13)
-  //         + divider(1) + footer(12) + border(1) = 32 + count*13
-  int panel_h = 32 + count * ITEM_H;
-  int panel_x = (FB_WIDTH - PANEL_W) / 2;
-  int panel_y = (FB_HEIGHT - panel_h) / 2;
-
-  // Read battery once — avoids an I2C hit on every panel redraw.
-  int bat = kbd_get_battery_percent();
-
-  // Darken the current framebuffer for the overlay effect
-  display_darken();
-
-  int sel = 0;
-  bool running = true;
-  bool need_redraw = true;
-
-  while (running) {
-    if (need_redraw) {
-      draw_panel(items, count, sel, panel_x, panel_y, panel_h, bat);
-      display_flush();
-      need_redraw = false;
-    }
-
-    kbd_poll();
-    uint32_t pressed = kbd_get_buttons_pressed();
-
-    if (pressed & BTN_UP) {
-      if (sel > 0) {
-        sel--;
-        need_redraw = true;
-      }
-    }
-    if (pressed & BTN_DOWN) {
-      if (sel < count - 1) {
-        sel++;
-        need_redraw = true;
-      }
-    }
-
-    // Left / Right: adjust brightness when on Brightness item
-    if ((pressed & BTN_LEFT) && items[sel].type == ITEM_BRIGHTNESS) {
-      s_brightness = (s_brightness >= 16) ? s_brightness - 16 : 0;
-      kbd_set_backlight(s_brightness);
-      need_redraw = true;
-    }
-    if ((pressed & BTN_RIGHT) && items[sel].type == ITEM_BRIGHTNESS) {
-      s_brightness = (s_brightness <= 239) ? s_brightness + 16 : 255;
-      kbd_set_backlight(s_brightness);
-      need_redraw = true;
-    }
-
-    if (pressed & BTN_ENTER) {
-      switch (items[sel].type) {
-      case ITEM_APP_CB:
-        // Call the registered callback then dismiss
-        s_app_items[items[sel].app_idx].callback(
-            s_app_items[items[sel].app_idx].user);
-        running = false;
-        break;
-      case ITEM_BRIGHTNESS:
-        // Enter increments; wraps 255→0
-        s_brightness = (s_brightness <= 239) ? s_brightness + 16 : 0;
-        kbd_set_backlight(s_brightness);
-        need_redraw = true;
-        break;
-      case ITEM_BATTERY:
-        break;
-      case ITEM_RAM_INFO:
-        break;
-      case ITEM_WIFI:
-        if (wifi_is_available()) {
-          if (wifi_get_status() == WIFI_STATUS_CONNECTED) {
-            int choice = show_wifi_submenu();
-            if (choice == 1)
-              run_wifi_config();
-            else if (choice == 2)
-              wifi_disconnect();
-          } else {
-            run_wifi_config();
-          }
-          need_redraw = true;
-        }
-        break;
-      case ITEM_TIMEZONE:
-        tz_picker_show();
-        need_redraw = true;
-        break;
-      case ITEM_REMOUNT_SD: {
-        display_fill_rect(panel_x + 10, panel_y + panel_h / 2 - 10,
-                          PANEL_W - 20, 30, C_TITLE_BG);
-        display_draw_text(panel_x + 15, panel_y + panel_h / 2 - 5,
-                          "Remounting SD...", COLOR_WHITE, C_TITLE_BG);
-        display_flush();
-
-        if (sdcard_remount()) {
-          display_fill_rect(panel_x + 10, panel_y + panel_h / 2 - 10,
-                            PANEL_W - 20, 30, COLOR_GREEN);
-          display_draw_text(panel_x + 15, panel_y + panel_h / 2 - 5,
-                            "SD Remounted!", COLOR_BLACK, COLOR_GREEN);
-          display_flush();
-          sleep_ms(800);
-          if (L == NULL)
-            launcher_refresh_apps();
-        } else {
-          display_fill_rect(panel_x + 10, panel_y + panel_h / 2 - 10,
-                            PANEL_W - 20, 30, COLOR_RED);
-          display_draw_text(panel_x + 15, panel_y + panel_h / 2 - 5,
-                            "Remount Failed!", COLOR_WHITE, COLOR_RED);
-          display_flush();
-          sleep_ms(1500);
-        }
-        need_redraw = true;
-        break;
-      }
-      case ITEM_USB_MSC: {
-        usb_msc_enter_mode();
-        kbd_clear_state();
-        kbd_recover_i2c_bus();  // Defense in depth — ensure I2C is clean
-        if (L == NULL)
-          launcher_refresh_apps();
-        need_redraw = true;
-        break;
-      }
-      case ITEM_SCREENSHOT:
-        screenshot_schedule(250);
-        kbd_clear_state();
-        running = false;
-        break;
-      case ITEM_REBOOT:
-        watchdog_enable(1, true);
-        for (;;)
-          tight_loop_contents();
-        break; /* unreachable */
-      case ITEM_EXIT:
-        system_menu_clear_items();
-        if (L != NULL)
-          luaL_error(L, "__picocalc_exit__"); /* does longjmp */
-        else
-          running = false;
-        break;
-      }
-    }
-
-    if (pressed & BTN_ESC)
-      running = false;
-
-    sleep_ms(16);
-  }
-  // Return normally — the Lua hook returns, Lua execution resumes
+  // L==NULL → launcher (context 0), L!=NULL → Lua app (context 1)
+  int context = (L != NULL) ? 1 : 0;
+  bool exit = menu_loop(L, context);
+  if (exit && L != NULL)
+    luaL_error(L, "__picocalc_exit__"); /* does longjmp */
 }
 
 bool system_menu_show_for_native(void) {
-  // Build flat item list: app items first, then built-ins with Exit App.
-  flat_item_t items[SYSMENU_MAX_APP_ITEMS + 8];
-  int count = 0;
-
-  for (int i = 0; i < s_app_item_count; i++) {
-    items[count].type = ITEM_APP_CB;
-    items[count].app_idx = i;
-    count++;
-  }
-  items[count++] = (flat_item_t){ITEM_BRIGHTNESS, 0};
-  items[count++] = (flat_item_t){ITEM_BATTERY, 0};
-  items[count++] = (flat_item_t){ITEM_WIFI, 0};
-  items[count++] = (flat_item_t){ITEM_RAM_INFO, 0};
-  items[count++] = (flat_item_t){ITEM_TIMEZONE, 0};
-  items[count++] = (flat_item_t){ITEM_REMOUNT_SD, 0};
-  items[count++] = (flat_item_t){ITEM_SCREENSHOT, 0};
-  items[count++] = (flat_item_t){ITEM_REBOOT, 0};
-  items[count++] = (flat_item_t){ITEM_EXIT, 0};
-
-  int panel_h = 32 + count * ITEM_H;
-  int panel_x = (FB_WIDTH - PANEL_W) / 2;
-  int panel_y = (FB_HEIGHT - panel_h) / 2;
-
-  int bat = kbd_get_battery_percent();
-
-  display_darken();
-
-  int sel = 0;
-  bool running = true;
-  bool need_redraw = true;
-  bool exit_requested = false;
-
-  while (running) {
-    if (need_redraw) {
-      draw_panel(items, count, sel, panel_x, panel_y, panel_h, bat);
-      display_flush();
-      need_redraw = false;
-    }
-
-    kbd_poll();
-    uint32_t pressed = kbd_get_buttons_pressed();
-
-    if (pressed & BTN_UP) {
-      if (sel > 0) { sel--; need_redraw = true; }
-    }
-    if (pressed & BTN_DOWN) {
-      if (sel < count - 1) { sel++; need_redraw = true; }
-    }
-    if ((pressed & BTN_LEFT) && items[sel].type == ITEM_BRIGHTNESS) {
-      s_brightness = (s_brightness >= 16) ? s_brightness - 16 : 0;
-      kbd_set_backlight(s_brightness);
-      need_redraw = true;
-    }
-    if ((pressed & BTN_RIGHT) && items[sel].type == ITEM_BRIGHTNESS) {
-      s_brightness = (s_brightness <= 239) ? s_brightness + 16 : 255;
-      kbd_set_backlight(s_brightness);
-      need_redraw = true;
-    }
-
-    if (pressed & BTN_ENTER) {
-      switch (items[sel].type) {
-      case ITEM_APP_CB:
-        s_app_items[items[sel].app_idx].callback(
-            s_app_items[items[sel].app_idx].user);
-        running = false;
-        break;
-      case ITEM_BRIGHTNESS:
-        s_brightness = (s_brightness <= 239) ? s_brightness + 16 : 0;
-        kbd_set_backlight(s_brightness);
-        need_redraw = true;
-        break;
-      case ITEM_BATTERY:
-      case ITEM_RAM_INFO:
-        break;
-      case ITEM_WIFI:
-        if (wifi_is_available()) {
-          if (wifi_get_status() == WIFI_STATUS_CONNECTED) {
-            int choice = show_wifi_submenu();
-            if (choice == 1) run_wifi_config();
-            else if (choice == 2) wifi_disconnect();
-          } else {
-            run_wifi_config();
-          }
-          need_redraw = true;
-        }
-        break;
-      case ITEM_TIMEZONE:
-        tz_picker_show();
-        need_redraw = true;
-        break;
-      case ITEM_REMOUNT_SD:
-        need_redraw = true;
-        break;
-      case ITEM_USB_MSC:
-        break;
-      case ITEM_SCREENSHOT:
-        screenshot_schedule(250);
-        kbd_clear_state();
-        running = false;
-        break;
-      case ITEM_REBOOT:
-        watchdog_enable(1, true);
-        for (;;) tight_loop_contents();
-        break;
-      case ITEM_EXIT:
-        system_menu_clear_items();
-        exit_requested = true;
-        running = false;
-        break;
-      }
-    }
-
-    if (pressed & BTN_ESC)
-      running = false;
-
-    sleep_ms(16);
-  }
-  kbd_clear_state();
-  return exit_requested;
+  return menu_loop(NULL, 2); // context 2 = native app
 }

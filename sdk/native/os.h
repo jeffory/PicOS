@@ -3,6 +3,8 @@
 #include <stdint.h>
 #include <stdbool.h>
 
+#include "terminal.h"
+
 // =============================================================================
 // PicoOS API
 //
@@ -259,6 +261,7 @@ typedef struct PicoCalcAPI {
     const picocalc_ui_t      *ui;
     const picocalc_psram_t   *psram;
     const picocalc_perf_t    *perf;
+    const picocalc_terminal_t *terminal;
 } PicoCalcAPI;
 
 // The global API instance, populated during os_init()
