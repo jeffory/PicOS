@@ -41,6 +41,7 @@ typedef struct {
 static app_item_t s_app_items[SYSMENU_MAX_APP_ITEMS];
 static int s_app_item_count = 0;
 static uint8_t s_brightness = 128;
+static bool s_dev_mode = false;
 
 // ── Visual constants
 // ──────────────────────────────────────────────────────────
@@ -75,6 +76,7 @@ typedef enum {
   ITEM_WIFI_TOGGLE,
   ITEM_WIFI_SETTINGS,
   ITEM_WIFI_STATUS,
+  ITEM_DEV_MODE,
 } item_type_t;
 
 typedef struct {
@@ -129,13 +131,15 @@ static int build_items(flat_item_t *items, menu_page_t page, bool has_exit,
       count++;
     }
     items[count++] = (flat_item_t){ITEM_BATTERY, 0};
-    items[count++] = (flat_item_t){ITEM_RAM_INFO, 0};
+    if (s_dev_mode)
+      items[count++] = (flat_item_t){ITEM_RAM_INFO, 0};
     items[count++] = (flat_item_t){ITEM_SETTINGS, 0};
     if (is_launcher)
       items[count++] = (flat_item_t){ITEM_USB_MSC, 0};
     items[count++] = (flat_item_t){ITEM_SCREENSHOT, 0};
     items[count++] = (flat_item_t){ITEM_REBOOT, 0};
-    items[count++] = (flat_item_t){ITEM_REBOOT_FLASH, 0};
+    if (s_dev_mode)
+      items[count++] = (flat_item_t){ITEM_REBOOT_FLASH, 0};
     if (has_exit)
       items[count++] = (flat_item_t){ITEM_EXIT, 0};
   } else { // PAGE_SETTINGS
@@ -143,8 +147,9 @@ static int build_items(flat_item_t *items, menu_page_t page, bool has_exit,
     items[count++] = (flat_item_t){ITEM_TIMEZONE, 0};
     items[count++] = (flat_item_t){ITEM_WIFI_TOGGLE, 0};
     items[count++] = (flat_item_t){ITEM_WIFI_SETTINGS, 0};
-    items[count++] = (flat_item_t){ITEM_WIFI_STATUS, 0};
-    items[count++] = (flat_item_t){ITEM_REMOUNT_SD, 0};
+    if (s_dev_mode)
+      items[count++] = (flat_item_t){ITEM_REMOUNT_SD, 0};
+    items[count++] = (flat_item_t){ITEM_DEV_MODE, 0};
   }
   return count;
 }
@@ -236,6 +241,10 @@ static void draw_panel(const flat_item_t *items, int count, int sel, int px,
           snprintf(label, sizeof(label), "WiFi: Connecting...");
           fg = COLOR_YELLOW;
           break;
+        case WIFI_STATUS_FAILED:
+          snprintf(label, sizeof(label), "WiFi: Failed");
+          fg = COLOR_RED;
+          break;
         default:
           snprintf(label, sizeof(label), "WiFi: Off");
           fg = COLOR_GRAY;
@@ -310,6 +319,10 @@ static void draw_panel(const flat_item_t *items, int count, int sel, int px,
     case ITEM_EXIT:
       snprintf(label, sizeof(label), "Exit App");
       fg = selected ? COLOR_WHITE : COLOR_YELLOW;
+      break;
+    case ITEM_DEV_MODE:
+      snprintf(label, sizeof(label), "Developer Mode: %s", s_dev_mode ? "On" : "Off");
+      fg = s_dev_mode ? COLOR_GREEN : COLOR_GRAY;
       break;
     }
 
@@ -504,6 +517,16 @@ static bool menu_loop(lua_State *L, int context) {
       case ITEM_REBOOT_FLASH:
         reset_usb_boot(0, 0);
         break; /* unreachable */
+      case ITEM_DEV_MODE:
+        s_dev_mode = !s_dev_mode;
+        config_set("dev_mode", s_dev_mode ? "1" : "0");
+        config_save();
+        count = build_items(items, page, has_exit, is_launcher);
+        panel_h = 32 + count * ITEM_H;
+        panel_y = (FB_HEIGHT - panel_h) / 2;
+        if (sel >= count) sel = count - 1;
+        need_redraw = true;
+        break;
       case ITEM_EXIT:
         system_menu_clear_items();
         exit_requested = true;
@@ -539,6 +562,8 @@ static bool menu_loop(lua_State *L, int context) {
 void system_menu_init(void) {
   s_app_item_count = 0;
   s_brightness = 128;
+  const char *dm = config_get("dev_mode");
+  s_dev_mode = (dm && strcmp(dm, "1") == 0);
 }
 
 void system_menu_add_item(const char *label, void (*callback)(void *user),
