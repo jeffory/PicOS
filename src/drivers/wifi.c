@@ -23,7 +23,7 @@ static char s_ssid[64] = {0};
 static char s_pass[64] = {0};
 static char s_ip[20] = {0};
 static bool s_http_required = false;
-static bool s_disconnect_pending = false; // deferred disconnect from SNTP callback
+static volatile bool s_disconnect_pending = false; // deferred disconnect from SNTP callback
 static bool s_auto_connected = false;    // true only for boot auto-connect
 
 static struct mg_mgr s_mgr;

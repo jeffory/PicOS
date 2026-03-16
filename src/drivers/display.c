@@ -177,19 +177,36 @@ static inline void pio_spi_write8(uint8_t data) {
   pio_sm_put_blocking(LCD_PIO, s_pio_sm, (uint32_t)data << 24);
 }
 
-static inline void lcd_spi_wait_idle(void) {
-  while (!pio_sm_is_tx_fifo_empty(LCD_PIO, s_pio_sm))
+// Timeout for PIO SPI idle waits (100ms).  If the LCD ribbon cable is
+// disconnected or the PIO state machine glitches, this prevents an infinite
+// hang that would otherwise brick the device until power-cycle.
+#define LCD_SPI_TIMEOUT_US 100000u
+
+static inline bool lcd_spi_wait_idle(void) {
+  absolute_time_t deadline = make_timeout_time_us(LCD_SPI_TIMEOUT_US);
+  while (!pio_sm_is_tx_fifo_empty(LCD_PIO, s_pio_sm)) {
+    if (absolute_time_diff_us(get_absolute_time(), deadline) <= 0) {
+      printf("[LCD] TIMEOUT: TX FIFO not empty\n");
+      return false;
+    }
     tight_loop_contents();
+  }
   uint32_t stall_mask = 1u << (PIO_FDEBUG_TXSTALL_LSB + s_pio_sm);
   LCD_PIO->fdebug = stall_mask;
-  while (!(LCD_PIO->fdebug & stall_mask))
+  while (!(LCD_PIO->fdebug & stall_mask)) {
+    if (absolute_time_diff_us(get_absolute_time(), deadline) <= 0) {
+      printf("[LCD] TIMEOUT: PIO not stalled\n");
+      return false;
+    }
     tight_loop_contents();
+  }
 
   // The FIFO is physically empty and has stalled the state machine, but the
   // hardware Output Shift Register (OSR) is still holding the final bit chunk
   // and actively clocking it out! We must wait a few more cycles to guarantee
   // the trailing bits exit the screen controller wire before deasserting CS.
   busy_wait_us(1);
+  return true;
 }
 
 static void lcd_write_cmd(uint8_t cmd) {
@@ -470,6 +487,85 @@ void display_draw_line(int x0, int y0, int x1, int y1, uint16_t color) {
     if (e2 <= dx) {
       err += dx;
       y0 += sy;
+    }
+  }
+}
+
+// Fill a triangle using scanline algorithm
+void display_fill_triangle(int x0, int y0, int x1, int y1, int x2, int y2,
+                           uint16_t color) {
+  // Sort vertices by Y coordinate
+  if (y0 > y1) {
+    int temp = y0;
+    y0 = y1;
+    y1 = temp;
+    temp = x0;
+    x0 = x1;
+    x1 = temp;
+  }
+  if (y0 > y2) {
+    int temp = y0;
+    y0 = y2;
+    y2 = temp;
+    temp = x0;
+    x0 = x2;
+    x2 = temp;
+  }
+  if (y1 > y2) {
+    int temp = y1;
+    y1 = y2;
+    y2 = temp;
+    temp = x1;
+    x1 = x2;
+    x2 = temp;
+  }
+
+  // Degenerate: all same y
+  if (y0 == y2) return;
+
+  float inv_dy02 = 1.0f / (float)(y2 - y0);  // long edge, always valid
+
+  if (y0 == y1) {
+    // Top-flat: both v0 and v1 at top, scan down to v2
+    for (int y = y0; y <= y2; y++) {
+      float t = (float)(y - y0) * inv_dy02;
+      int xa = x0 + (int)((x2 - x0) * t);  // v0->v2
+      int xb = x1 + (int)((x2 - x1) * t);  // v1->v2 (same span since y0==y1)
+      if (xa > xb) { int tmp = xa; xa = xb; xb = tmp; }
+      display_draw_line(xa, y, xb, y, color);
+    }
+  } else if (y1 == y2) {
+    // Bottom-flat: v0 at top, both v1 and v2 at bottom
+    float inv_dy01 = 1.0f / (float)(y1 - y0);
+    for (int y = y0; y <= y1; y++) {
+      float t = (float)(y - y0) * inv_dy01;
+      int xa = x0 + (int)((x1 - x0) * t);  // v0->v1
+      int xb = x0 + (int)((x2 - x0) * t);  // v0->v2 (same span since y1==y2)
+      if (xa > xb) { int tmp = xa; xa = xb; xb = tmp; }
+      display_draw_line(xa, y, xb, y, color);
+    }
+  } else {
+    // General: split at y1
+    float inv_dy01 = 1.0f / (float)(y1 - y0);
+    float inv_dy12 = 1.0f / (float)(y2 - y1);
+
+    // Top half (y0 to y1): short edge v0->v1, long edge v0->v2
+    for (int y = y0; y <= y1; y++) {
+      float t_short = (float)(y - y0) * inv_dy01;
+      float t_long  = (float)(y - y0) * inv_dy02;
+      int xa = x0 + (int)((x1 - x0) * t_short);
+      int xb = x0 + (int)((x2 - x0) * t_long);
+      if (xa > xb) { int tmp = xa; xa = xb; xb = tmp; }
+      display_draw_line(xa, y, xb, y, color);
+    }
+    // Bottom half (y1 to y2): short edge v1->v2, long edge v0->v2
+    for (int y = y1; y <= y2; y++) {
+      float t_short = (float)(y - y1) * inv_dy12;
+      float t_long  = (float)(y - y0) * inv_dy02;
+      int xa = x1 + (int)((x2 - x1) * t_short);
+      int xb = x0 + (int)((x2 - x0) * t_long);
+      if (xa > xb) { int tmp = xa; xa = xb; xb = tmp; }
+      display_draw_line(xa, y, xb, y, color);
     }
   }
 }

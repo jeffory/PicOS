@@ -360,6 +360,21 @@ static bool run_app(int idx) {
          lua_psram_alloc_free_size());
 
   // ── Shared pre-launch setup ───────────────────────────────────────────────
+
+  // Disconnect WiFi before clock change if app doesn't need it.
+  // The CYW43 PIO SPI clock divider is set at init time (200 MHz) and is NOT
+  // updated by launcher_apply_clock(), so running WiFi at a different sys clock
+  // causes SPI timing failures ("hdr mismatch" errors) that stall Core 1.
+  if (app->system_clock_khz > 0 && !app->has_http && wifi_is_available()) {
+    wifi_status_t wst = wifi_get_status();
+    if (wst == WIFI_STATUS_CONNECTED || wst == WIFI_STATUS_CONNECTING) {
+      wifi_disconnect();
+      // Wait for Core 1 to process the disconnect request before pausing it
+      // for the clock change. wifi_disconnect() queues via IPC ring buffer.
+      sleep_ms(50);
+    }
+  }
+
   if (app->system_clock_khz > 0) {
     launcher_apply_clock(app->system_clock_khz);
   }
@@ -414,6 +429,7 @@ void launcher_run(void) {
 
   while (true) {
     kbd_poll();
+    watchdog_update(); // kick watchdog every frame
     // wifi_poll() is now driven by Core 1 — do not call from Core 0
 
     // Poll serial dev commands (ping, screenshot, exit, launch, etc.)

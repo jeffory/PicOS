@@ -9,6 +9,7 @@
 
 #include "umm_malloc.h"
 #include "pico/stdlib.h"
+#include "hardware/watchdog.h"
 #include "hardware/xip_cache.h"
 
 #include <stdint.h>
@@ -126,6 +127,7 @@ static void show_error(const char *line1, const char *line2) {
   if (line2)
     display_draw_text(8, 20, line2, COLOR_WHITE, C_BG);
   display_flush();
+  watchdog_update();
   sleep_ms(3000);
 }
 
@@ -205,6 +207,7 @@ static void launch_on_psp(uint32_t psp_top, picos_app_entry_t fn,
 
 // Declared in main.c — pauses Core 1's Mongoose/WiFi polling loop.
 extern volatile bool g_core1_pause;
+extern volatile bool g_core1_paused;
 
 static bool native_run(const app_entry_t *app) {
   printf("[NATIVE] Loading '%s'\n", app->name);
@@ -214,7 +217,11 @@ static bool native_run(const app_entry_t *app) {
   // share the same PSRAM heap where the app image is loaded.  Without this
   // pause, heap metadata corruption can cause Core 1 to overwrite app code.
   g_core1_pause = true;
-  sleep_ms(10); // let any in-flight Core 1 umm operation complete
+  // Wait for Core 1 to acknowledge the pause (explicit handshake).
+  // The old sleep_ms(10) was a race: Core 1 could be mid-umm_malloc()
+  // during DNS resolution when the flag is set.
+  while (!g_core1_paused)
+    sleep_ms(1);
 
   // ── 1. Open ELF from SD card ──────────────────────────────────────────────
   char elf_path[160];
@@ -382,6 +389,7 @@ static bool native_run(const app_entry_t *app) {
     const Elf32_Phdr *ph = &phdr_table[i];
     if (ph->p_type != PT_LOAD || ph->p_filesz == 0)
       continue;
+    watchdog_update(); // kick per segment — large ELFs (e.g. DOOM) take seconds to read
     if (ph->p_offset + ph->p_filesz > (uint32_t)file_len) {
       show_error("ELF: segment data out of bounds", NULL);
       goto out;
@@ -595,7 +603,8 @@ out:
   // ── 9. Cleanup ─────────────────────────────────────────────────────────────
   g_native_audio_callback = NULL;
   g_core1_pause = true;
-  sleep_ms(10);
+  while (!g_core1_paused)
+    sleep_ms(1);
   audio_stop_stream();
   audio_stop_tone();
   if (code_buf)

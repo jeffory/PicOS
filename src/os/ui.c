@@ -1,10 +1,12 @@
 #include "ui.h"
+#include "../dev_commands.h"
 #include "../drivers/display.h"
 #include "../drivers/keyboard.h"
 #include "../drivers/wifi.h"
 #include "../splash_logo.h"
 #include "clock.h"
 #include "os.h"    // BTN_* constants
+#include "hardware/watchdog.h"
 #include "pico/stdlib.h"
 
 #include <stdio.h>
@@ -273,6 +275,8 @@ bool ui_text_input(const char *prompt, const char *default_val,
   bool dirty    = true;
   while (true) {
     kbd_poll();
+    dev_commands_poll();
+    dev_commands_process();
     uint32_t btns = kbd_get_buttons_pressed();
     char c        = kbd_get_char();
 
@@ -298,6 +302,7 @@ bool ui_text_input(const char *prompt, const char *default_val,
       display_flush();
       dirty = false;
     }
+    watchdog_update();
     sleep_ms(20);
   }
 
@@ -335,10 +340,13 @@ bool ui_confirm(const char *message) {
 
   while (true) {
     kbd_poll();
+    dev_commands_poll();
+    dev_commands_process();
     uint32_t btns = kbd_get_buttons_pressed();
     char c        = kbd_get_char();
     if (btns & BTN_ESC || c == 'n' || c == 'N') return false;
     if (c == '\n'       || c == 'y' || c == 'Y') return true;
+    watchdog_update();
     sleep_ms(20);
   }
 }

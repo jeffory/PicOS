@@ -48,6 +48,18 @@ static void __attribute__((used)) hardfault_c(uint32_t *frame, uint32_t exc_retu
   uint32_t mmar = *(volatile uint32_t *)0xE000ED34u; // MMFAR (if MMFARVALID)
   uint32_t ccr = *(volatile uint32_t *)0xE000ED14u;  // SCB CCR
 
+  // Persist fault data in watchdog scratch registers so it survives a
+  // watchdog reset and can be dumped to SD on next boot.
+  #define CRASH_MAGIC 0xDEAD1234u
+  watchdog_hw->scratch[0] = CRASH_MAGIC;
+  watchdog_hw->scratch[1] = pc;
+  watchdog_hw->scratch[2] = lr;
+  watchdog_hw->scratch[3] = (uint32_t)(uintptr_t)frame + 32u; // pre-fault SP
+  watchdog_hw->scratch[4] = cfsr;
+  watchdog_hw->scratch[5] = hfsr;
+  watchdog_hw->scratch[6] = bfar;
+  watchdog_hw->scratch[7] = exc_return;
+
   // frame IS the MSP/PSP just after the hardware pushed the 8-word exception
   // frame.  Pre-fault SP = frame + 32 (8 words × 4 bytes).
   uint32_t sp_at_fault = (uint32_t)(uintptr_t)frame + 32u;
@@ -99,8 +111,10 @@ static void __attribute__((used)) hardfault_c(uint32_t *frame, uint32_t exc_retu
   stdio_flush();
 
   // ── Display output (best-effort — lets us see fault info without a UART) ──
-  // display_clear/draw_text only write to the PSRAM framebuffer (no SPI).
-  // display_flush sends the buffer to the LCD via PIO+DMA (blocking).
+  // display_clear/draw_text only write to the SRAM framebuffer (no SPI).
+  // display_flush sends the buffer to the LCD via PIO+DMA.
+  // lcd_spi_wait_idle() now has a 100ms timeout (C2 fix), so even if the
+  // LCD is disconnected or PIO is stuck, we won't hang forever.
   // Uses static buffers to avoid touching an already-damaged stack.
   static char ln[56]; // static to avoid stack usage
   display_clear(0x0000); // black
@@ -265,6 +279,7 @@ static const char* s_pending_launch = NULL;
 // check the Sym (Menu) key to show the system menu overlay.
 static void sys_poll(void) {
   kbd_poll();
+  watchdog_update();
   http_fire_c_pending();
   if (kbd_consume_menu_press()) {
     if (system_menu_show_for_native())
@@ -495,6 +510,7 @@ static picocalc_fs_t s_fs_impl = {
 // Used during native app loading to eliminate PSRAM heap contention between
 // Core 1's umm_malloc/umm_free and the ELF loader on Core 0.
 volatile bool g_core1_pause = false;
+volatile bool g_core1_paused = false; // acknowledgment flag for Core 1 pause handshake
 
 // Optional audio callback for native apps (e.g. DOOM) that offload mixing
 // to Core 1.  Set by the app at startup, cleared on exit.
@@ -535,7 +551,12 @@ static void core1_entry(void) {
 
   while (true) {
     if (g_core1_pause) {
-      sleep_ms(1);
+      g_core1_paused = true; // signal Core 0 that we've stopped
+      while (g_core1_pause) {
+        watchdog_update(); // keep watchdog alive while paused
+        sleep_ms(1);
+      }
+      g_core1_paused = false;
       continue;
     }
 
@@ -558,7 +579,69 @@ static void core1_entry(void) {
 
 // ── Main ─────────────────────────────────────────────────────────────────────
 
+// ── Crash persistence across watchdog resets ─────────────────────────────────
+#define CRASH_MAGIC 0xDEAD1234u
+static uint32_t s_crash_data[8];
+static bool s_had_crash = false;
+
+static void crash_log_save(void) {
+  if (!s_had_crash) return;
+
+  sdfile_t f = sdcard_fopen("/system/crashlog.txt", "a");
+  if (!f) return;
+
+  char line[256];
+  int n = snprintf(line, sizeof(line),
+    "--- CRASH ---\n"
+    "PC=0x%08lx LR=0x%08lx SP=0x%08lx\n"
+    "CFSR=0x%08lx HFSR=0x%08lx BFAR=0x%08lx\n"
+    "EXC_RETURN=0x%08lx Stack=%s\n\n",
+    (unsigned long)s_crash_data[1], (unsigned long)s_crash_data[2],
+    (unsigned long)s_crash_data[3], (unsigned long)s_crash_data[4],
+    (unsigned long)s_crash_data[5], (unsigned long)s_crash_data[6],
+    (unsigned long)s_crash_data[7],
+    (s_crash_data[7] & 4u) ? "PSP" : "MSP");
+  sdcard_fwrite(f, line, n);
+  sdcard_fclose(f);
+  printf("[CRASH] Saved crash log to /system/crashlog.txt\n");
+}
+
 int main(void) {
+  // ── Boot-loop detection using watchdog scratch[0] ──────────────────────────
+  // scratch[0] encoding:
+  //   CRASH_MAGIC (0xDEAD1234) = HardFault data present
+  //   BOOT_MAGIC  (0xB007xx00) = boot attempt counter (low byte = count)
+  //   anything else            = fresh boot (power-on or clean reset)
+  #define BOOT_MAGIC_MASK  0xFFFFFF00u
+  #define BOOT_MAGIC       0xB0070000u
+  #define BOOT_MAX_RETRIES 3
+
+  uint32_t scratch0 = watchdog_hw->scratch[0];
+  int boot_attempt = 0;
+  bool skip_boot_watchdog = false;
+
+  if (scratch0 == CRASH_MAGIC) {
+    // HardFault crash recovery — preserve fault data for later display
+    memcpy(s_crash_data, (void *)watchdog_hw->scratch, sizeof(s_crash_data));
+    s_had_crash = true;
+  } else if ((scratch0 & BOOT_MAGIC_MASK) == BOOT_MAGIC) {
+    // Previous boot failed during init — increment attempt counter
+    boot_attempt = (scratch0 & 0xFF) + 1;
+    if (boot_attempt >= BOOT_MAX_RETRIES) {
+      // Too many boot failures — disable watchdog so device stays on
+      // error screen instead of looping.  User can read the message
+      // and power-cycle / reinsert SD.
+      skip_boot_watchdog = true;
+      boot_attempt = 0; // reset for next power cycle
+    }
+  } else if (watchdog_caused_reboot()) {
+    // Watchdog timeout without HardFault or boot counter (legacy path)
+    printf("[WATCHDOG] Reset due to timeout (no fault data)\n");
+  }
+
+  // Write boot attempt counter — cleared once launcher starts successfully
+  watchdog_hw->scratch[0] = BOOT_MAGIC | (boot_attempt & 0xFF);
+
   // Overclock to 200 MHz for better display throughput (RP2350 supports 150+)
   // NOTE: If the keyboard fails to initialise reliably, try commenting this
   // out to test at the default 125 MHz — it isolates whether the overclock
@@ -589,8 +672,11 @@ int main(void) {
 
   // Wait up to 3 s for a USB serial host to connect so early printf output
   // isn't lost. Skips automatically if already connected.
-  for (int i = 0; i < 30 && !stdio_usb_connected(); i++)
+  for (int i = 0; i < 30 && !stdio_usb_connected(); i++) {
+    watchdog_update();
     sleep_ms(100);
+  }
+  watchdog_update();
 
   printf("\n--- PicOS booting ---\n");
 
@@ -620,6 +706,12 @@ int main(void) {
   // Initialise display first so we can show progress
   display_init();
 
+  // Arm watchdog early so any boot hang triggers a reset.
+  // Disabled after BOOT_MAX_RETRIES failures so the device stays on the
+  // error screen instead of looping forever.
+  if (!skip_boot_watchdog)
+    watchdog_enable(5000, true); // 5s, pause on debug
+
   // Initialise mainboard PIO PSRAM (8MB on PIO1, independent of QMI PSRAM).
   // Non-fatal if chip not present (some boards may not have it).
   // Uses bulk driver internally for 8KB transfers (300x faster than 27-byte chunks).
@@ -630,6 +722,7 @@ int main(void) {
   ui_draw_splash("Initialising keyboard...", NULL);
 
   bool kbd_ok = kbd_init();
+  watchdog_update();
   if (kbd_ok) {
     kbd_set_backlight(128);
   } else {
@@ -645,11 +738,14 @@ int main(void) {
     display_flush();
     // We can't wait for a keypress if the keyboard is dead,
     // but we'll wait a few seconds so the user can see the error.
+    watchdog_update();
     sleep_ms(5000);
   }
 
   ui_draw_splash("Mounting SD card...", NULL);
+  watchdog_update();
   bool sd_ok = sdcard_init();
+  watchdog_update();
 
   if (!sd_ok) {
     display_clear(COLOR_BLACK);
@@ -663,8 +759,10 @@ int main(void) {
     // Wait for A press then try again
     while (true) {
       kbd_poll();
+      watchdog_update();
       if (kbd_get_buttons_pressed() & BTN_ENTER) {
         sd_ok = sdcard_remount();
+        watchdog_update();
         if (sd_ok)
           break;
       }
@@ -676,19 +774,36 @@ int main(void) {
 
   g_api.fs = &s_fs_impl;
 
+  // Write crash log from previous boot (if any) now that SD is available
+  crash_log_save();
+  watchdog_update();
+  if (s_had_crash) {
+    display_clear(COLOR_BLACK);
+    display_draw_text(8, 8, "Recovered from crash", COLOR_YELLOW, COLOR_BLACK);
+    display_draw_text(8, 24, "See /system/crashlog.txt", COLOR_GRAY, COLOR_BLACK);
+    display_flush();
+    watchdog_update();
+    sleep_ms(2000);
+    watchdog_update();
+  }
+
   // Initialize the PSRAM allocator BEFORE anything that uses it
   // (config_load, WiFi, Lua, etc.)
   lua_psram_alloc_init();
+  watchdog_update();
 
   // Load persisted settings from /system/config.json
   config_load();
+  watchdog_update();
 
   // Initialise WiFi hardware (auto-connects if credentials are in config)
   ui_draw_splash("Initialising WiFi...", NULL);
+  watchdog_update();
   wifi_init();
   http_init();
   tcp_init();
-  
+  watchdog_update();
+
   // Debug: check free size after WiFi/HTTP init
   extern size_t lua_psram_alloc_free_size(void);
   printf("[PSRAM] Free after WiFi/HTTP init: %zu bytes (%zuK)\n",
@@ -696,11 +811,16 @@ int main(void) {
 
   // Launch Core 1 background tasks
   multicore_launch_core1(core1_entry);
+  watchdog_update();
 
   system_menu_init();
 
   ui_draw_splash("Loading...", NULL);
   sleep_ms(300); // Brief pause so the splash is visible
+
+  // Boot completed successfully — clear the boot attempt counter so a
+  // future watchdog reset starts fresh.
+  watchdog_hw->scratch[0] = 0;
 
   // Hand off to the launcher — this never returns
   launcher_run();

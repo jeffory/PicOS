@@ -4,6 +4,7 @@
 #include "../drivers/display.h"
 #include "../drivers/keyboard.h"
 
+#include "hardware/watchdog.h"
 #include "pico/stdlib.h"
 
 #include <string.h>
@@ -228,6 +229,7 @@ bool tz_picker_show(void) {
 
         if (pressed & BTN_ESC) running = false;
 
+        watchdog_update();
         sleep_ms(16);
     }
 

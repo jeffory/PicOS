@@ -56,6 +56,7 @@ void register_subtable(lua_State *L, const char *name,
 // WiFi is now driven by Core 1 (wifi_poll every 5 ms) — no call needed here.
 static void menu_lua_hook(lua_State *L, lua_Debug *ar) {
   (void)ar;
+  watchdog_update(); // kick watchdog — fires every 256 Lua opcodes
   http_lua_fire_pending(L); // fire any queued HTTP Lua callbacks
   dev_commands_poll();
   dev_commands_process();

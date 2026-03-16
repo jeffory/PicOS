@@ -549,6 +549,7 @@ static bool menu_loop(lua_State *L, int context) {
       }
     }
 
+    watchdog_update();
     sleep_ms(16);
   }
   bg_free();

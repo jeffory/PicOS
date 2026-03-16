@@ -65,17 +65,22 @@ static int l_graphics_clear(lua_State *L) {
 static int l_graphics_image_new(lua_State *L) {
   int w = luaL_checkinteger(L, 1);
   int h = luaL_checkinteger(L, 2);
-  if (w <= 0 || h <= 0)
+  if (w <= 0 || h <= 0 || w > 2048 || h > 2048)
     return luaL_error(L, "invalid image dimensions");
+
+  size_t bytes = (size_t)w * (size_t)h * sizeof(uint16_t);
+  // Sanity check: reject allocations > 8MB (entire PSRAM heap)
+  if (bytes > 8u * 1024u * 1024u)
+    return luaL_error(L, "image too large");
 
   lua_image_t *img = (lua_image_t *)lua_newuserdata(L, sizeof(lua_image_t));
   img->w = w;
   img->h = h;
-  img->data = (uint16_t *)umm_malloc(w * h * sizeof(uint16_t));
+  img->data = (uint16_t *)umm_malloc(bytes);
   if (!img->data)
     return luaL_error(L, "out of memory allocating image");
 
-  memset(img->data, 0, w * h * sizeof(uint16_t));
+  memset(img->data, 0, bytes);
 
   luaL_setmetatable(L, GRAPHICS_IMAGE_MT);
   return 1;
@@ -118,11 +123,17 @@ static int l_graphics_image_load(lua_State *L) {
       return luaL_error(L, "invalid BMP format");
     }
 
-    uint32_t data_offset = *(uint32_t *)&full_header[10];
-    int w = *(int32_t *)&full_header[18];
-    int h = *(int32_t *)&full_header[22];
-    uint16_t bpp = *(uint16_t *)&full_header[28];
-    uint32_t compression = *(uint32_t *)&full_header[30];
+    uint32_t data_offset;
+    int32_t w_raw, h_raw;
+    uint16_t bpp;
+    uint32_t compression;
+    memcpy(&data_offset, &full_header[10], sizeof(data_offset));
+    memcpy(&w_raw, &full_header[18], sizeof(w_raw));
+    memcpy(&h_raw, &full_header[22], sizeof(h_raw));
+    memcpy(&bpp, &full_header[28], sizeof(bpp));
+    memcpy(&compression, &full_header[30], sizeof(compression));
+    int w = (int)w_raw;
+    int h = (int)h_raw;
 
     if (compression != 0 && compression != 3) {
       sdcard_fclose(f);
@@ -145,22 +156,21 @@ static int l_graphics_image_load(lua_State *L) {
       return luaL_error(L, "invalid BMP dimensions");
     }
 
-    lua_image_t *img = (lua_image_t *)lua_newuserdata(L, sizeof(lua_image_t));
-    img->w = w;
-    img->h = h;
-    img->data = (uint16_t *)umm_malloc(w * h * sizeof(uint16_t));
-    if (!img->data) {
+    // Allocate pixel buffer and read all BMP data BEFORE any Lua allocations.
+    // This prevents file handle leaks if lua_newuserdata triggers a GC error.
+    size_t pixel_bytes = (size_t)w * (size_t)h * sizeof(uint16_t);
+    uint16_t *pixel_data = (uint16_t *)umm_malloc(pixel_bytes);
+    if (!pixel_data) {
       sdcard_fclose(f);
       return luaL_error(L, "out of memory allocating image");
     }
-    luaL_setmetatable(L, GRAPHICS_IMAGE_MT);
 
     sdcard_fseek(f, data_offset);
 
     int row_bytes = ((w * bpp + 31) / 32) * 4;
     uint8_t *row_buf = (uint8_t *)umm_malloc(row_bytes);
     if (!row_buf) {
-      umm_free(img->data);
+      umm_free(pixel_data);
       sdcard_fclose(f);
       return luaL_error(L, "out of memory allocating row buffer");
     }
@@ -183,15 +193,25 @@ static int l_graphics_image_load(lua_State *L) {
           uint8_t r = row_buf[x * 4 + 2];
           color = RGB565(r, g, b);
         } else if (bpp == 16) {
-          uint16_t p = *(uint16_t *)&row_buf[x * 2];
+          uint16_t p;
+          memcpy(&p, &row_buf[x * 2], sizeof(p));
           color = p;
         }
-        img->data[dest_y * w + x] = color;
+        pixel_data[dest_y * w + x] = color;
       }
     }
 
     umm_free(row_buf);
     sdcard_fclose(f);
+
+    // File is closed — now safe to do Lua allocations (which can longjmp).
+    // If lua_newuserdata fails, pixel_data leaks, but that's acceptable
+    // since OOM means the VM is shutting down anyway.
+    lua_image_t *img = (lua_image_t *)lua_newuserdata(L, sizeof(lua_image_t));
+    img->w = w;
+    img->h = h;
+    img->data = pixel_data;
+    luaL_setmetatable(L, GRAPHICS_IMAGE_MT);
     return 1;
   }
 

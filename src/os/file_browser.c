@@ -4,6 +4,7 @@
 #include "../drivers/sdcard.h"
 #include "os.h"
 
+#include "hardware/watchdog.h"
 #include "pico/stdlib.h"
 
 #include <stdio.h>
@@ -249,6 +250,7 @@ bool file_browser_show(const char *start_path, const char *root_path,
       }
     }
 
+    watchdog_update();
     sleep_ms(16);
   }
 }
