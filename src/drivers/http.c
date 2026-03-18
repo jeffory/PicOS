@@ -112,6 +112,37 @@ void http_ev_fn(struct mg_connection *nc, int ev, void *ev_data) {
       c->content_length = atoi(cl->buf);
     }
 
+    // Parse response headers into hdr_keys/hdr_vals for Lua access
+    c->hdr_count = 0;
+    size_t hdr_off = 0;
+    for (int i = 0; i < MG_MAX_HTTP_HEADERS && hm->headers[i].name.len > 0;
+         i++) {
+      struct mg_http_header *h = &hm->headers[i];
+      size_t need = h->name.len + 1 + h->value.len + 1;
+      if (hdr_off + need > HTTP_HEADER_BUF_MAX)
+        break;
+      if (c->hdr_count >= HTTP_MAX_HDR_ENTRIES)
+        break;
+
+      // Copy name (lowercased for consistent Lua lookups)
+      c->hdr_keys[c->hdr_count] = &c->hdr_buf[hdr_off];
+      for (size_t j = 0; j < h->name.len; j++)
+        c->hdr_buf[hdr_off++] =
+            (h->name.buf[j] >= 'A' && h->name.buf[j] <= 'Z')
+                ? h->name.buf[j] + 32
+                : h->name.buf[j];
+      c->hdr_buf[hdr_off++] = '\0';
+
+      // Copy value
+      c->hdr_vals[c->hdr_count] = &c->hdr_buf[hdr_off];
+      memcpy(&c->hdr_buf[hdr_off], h->value.buf, h->value.len);
+      hdr_off += h->value.len;
+      c->hdr_buf[hdr_off++] = '\0';
+
+      c->hdr_count++;
+    }
+    c->hdr_len = hdr_off;
+
     c->headers_done = true;
     c->state = HTTP_STATE_BODY;
     c->pending |= HTTP_CB_HEADERS | HTTP_CB_REQUEST;
