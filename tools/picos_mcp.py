@@ -232,10 +232,11 @@ async def launch_app(app_name: str, device: str | None = None) -> str:
         )
         for line in lines:
             if "Launching app:" in line:
-                return f"Launched '{app_name}'. The app is now running."
+                launched_name = line.split("Launching app:")[1].strip()
+                return f"Launched '{launched_name}'. The app is now running."
             if "Error:" in line:
                 return line.replace("[DEV] ", "")
-        return f"Sent launch command. Response: {lines}"
+        return f"WARNING: No launch confirmation received. Response: {lines}"
     except serial.SerialException as e:
         return f"Serial error: {e}. Is another program using {port}?"
     except Exception as e:
@@ -323,20 +324,24 @@ def do_flash(file: str, port: str) -> str:
 
     filename = local_path.name
 
-    # Reboot to flash mode
-    try:
-        ser = open_serial(port, timeout=1)
-        ser.write(b"reboot-flash\n")
-        ser.flush()
-        time.sleep(0.1)
-        ser.close()
-    except Exception as e:
-        return f"Failed to send reboot command: {e}"
+    # Check if already in flash mode (mounted as USB drive)
+    mount_dir = find_mount_dir(timeout=2.0)
 
-    # Wait for mount
-    mount_dir = find_mount_dir(timeout=30.0)
     if not mount_dir:
-        return "Device did not mount as USB drive. Is the BOOTSEL button held?"
+        # Not in flash mode - reboot to flash mode first
+        try:
+            ser = open_serial(port, timeout=1)
+            ser.write(b"reboot-flash\n")
+            ser.flush()
+            time.sleep(0.1)
+            ser.close()
+        except Exception as e:
+            return f"Failed to send reboot command: {e}"
+
+        # Wait for mount
+        mount_dir = find_mount_dir(timeout=30.0)
+        if not mount_dir:
+            return "Device did not mount as USB drive. Is the BOOTSEL button held?"
 
     # Verify mount is ready (some systems need a moment)
     for _ in range(5):
