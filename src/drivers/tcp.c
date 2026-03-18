@@ -13,6 +13,11 @@
 
 static tcp_conn_t s_conns[TCP_MAX_CONNECTIONS];
 
+tcp_conn_t *tcp_get_conn(int idx) {
+    if (idx < 0 || idx >= TCP_MAX_CONNECTIONS) return NULL;
+    return &s_conns[idx];
+}
+
 void tcp_init(void) {
     memset(s_conns, 0, sizeof(s_conns));
 }

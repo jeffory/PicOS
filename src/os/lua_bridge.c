@@ -1,5 +1,7 @@
 #include "lua_bridge_internal.h"
 #include "lua_psram_alloc.h"
+
+char lua_bridge_exit_tag; // address used as sentinel, value irrelevant
 #include "../drivers/display.h"
 #include "../drivers/http.h"
 #include "../drivers/keyboard.h"
@@ -58,11 +60,12 @@ static void menu_lua_hook(lua_State *L, lua_Debug *ar) {
   (void)ar;
   watchdog_update(); // kick watchdog — fires every 256 Lua opcodes
   http_lua_fire_pending(L); // fire any queued HTTP Lua callbacks
+  tcp_lua_fire_pending(L);  // fire any queued TCP Lua callbacks
   dev_commands_poll();
   dev_commands_process();
   if (dev_commands_wants_exit()) {
     dev_commands_clear_exit();
-    luaL_error(L, "__picocalc_exit__");
+    lua_bridge_raise_exit(L);
   }
   if (dev_commands_wants_reboot()) {
     printf("[DEV] Rebooting...\n");
@@ -148,6 +151,8 @@ void lua_bridge_register(lua_State *L) {
   lua_bridge_fs_init(L);
   printf("[LUA] registering network...\n");
   lua_bridge_network_init(L);
+  printf("[LUA] registering tcp...\n");
+  lua_bridge_tcp_init(L);
   printf("[LUA] registering config...\n");
   lua_bridge_config_init(L);
   printf("[LUA] registering perf...\n");
@@ -170,6 +175,8 @@ void lua_bridge_register(lua_State *L) {
   lua_bridge_game_init(L);
   printf("[LUA] registering terminal...\n");
   lua_bridge_terminal_init(L);
+  printf("[LUA] registering crypto...\n");
+  lua_bridge_crypto_init(L);
   printf("[LUA] all modules done, PSRAM free=%lu\n",
          (unsigned long)umm_free_heap_size());
   // Set as global
@@ -217,6 +224,7 @@ void lua_bridge_show_error(lua_State *L, const char *context) {
   for (int drain = 0; drain < 125 && kbd_get_buttons(); drain++) {
     kbd_poll();
     sleep_ms(16);
+    watchdog_update();
   }
   kbd_clear_state();
 
@@ -227,6 +235,7 @@ void lua_bridge_show_error(lua_State *L, const char *context) {
     if (kbd_get_buttons() & BTN_ESC)
       break;
     sleep_ms(16);
+    watchdog_update();
   }
   lua_pop(L, 1);
 }

@@ -485,6 +485,7 @@ local function draw_up_to_date()
     draw_centered(120, "Firmware is up to date!", GREEN, BLACK)
     local ver = sys.getVersion()
     draw_centered(140, "Version " .. ver, GRAY, BLACK)
+    draw_centered(180, "Enter: Reflash current version", CYAN, BLACK)
     display.drawText(8, H - 16, "ESC: Back", GRAY, BLACK)
     display.flush()
 end
@@ -616,7 +617,7 @@ while true do
     local pressed = input.getButtonsPressed()
 
     -- ESC exits or goes back
-    if pressed & input.BTN_ESCAPE ~= 0 then
+    if pressed & input.BTN_ESC ~= 0 then
         if current_conn then
             current_conn:close()
             current_conn = nil
@@ -648,7 +649,9 @@ while true do
                 error_msg = "Failed to apply update:\n" .. (err or "unknown error")
                 current_screen = SCR_ERROR
             end
-        elseif current_screen == SCR_UP_TO_DATE or current_screen == SCR_ERROR then
+        elseif current_screen == SCR_UP_TO_DATE then
+            start_download()
+        elseif current_screen == SCR_ERROR then
             current_screen = SCR_MAIN
         end
     end

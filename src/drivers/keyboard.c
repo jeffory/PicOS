@@ -352,6 +352,12 @@ void kbd_poll(void) {
         s_last_char = (char)KEY_BKSPC;
       if (keycode == KEY_ENTER)
         s_last_char = '\n';
+      // Ctrl+letter → control character (0x01-0x1A)
+      if ((s_buttons_curr & BTN_CTRL) && keycode >= 0x20 && keycode < 0x7F) {
+        char upper = keycode & ~0x20;  // force uppercase
+        if (upper >= 'A' && upper <= 'Z')
+          s_last_char = (char)(upper - 'A' + 1);
+      }
     }
   }
 

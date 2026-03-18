@@ -32,6 +32,7 @@ typedef struct {
     uint32_t loop_end;
     int (*finish_callback)(void *);
     void *finish_callback_arg;
+    bool stop_on_underrun;
 } fileplayer_t;
 
 void fileplayer_init(void);
@@ -52,6 +53,8 @@ void fileplayer_set_loop_range(fileplayer_t *player, uint32_t start, uint32_t en
 void fileplayer_set_finish_callback(fileplayer_t *player, int (*cb)(void *), void *arg);
 void fileplayer_set_offset(fileplayer_t *player, uint32_t seconds);
 uint32_t fileplayer_get_offset(const fileplayer_t *player);
+
+void fileplayer_set_stop_on_underrun(fileplayer_t *player, bool flag);
 
 void fileplayer_update(void);
 bool fileplayer_did_underrun(void);

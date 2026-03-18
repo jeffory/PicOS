@@ -1,7 +1,7 @@
 #include "terminal_render.h"
 #include "terminal.h"
 #include "../drivers/display.h"
-#include "../fonts/font_6x11.h"
+#include "../fonts/font_scientifica.h"
 #include "umm_malloc.h"
 #include "pico/time.h"
 #include <string.h>
@@ -11,8 +11,25 @@ static bool s_cursor_blink = true;
 static uint32_t s_last_blink_time = 0;
 static bool s_blink_state = false;
 
-#define FONT_W 6
-#define FONT_H 11
+static const uint8_t* get_glyph(terminal_t* term, char c) {
+    if (term->font == TERM_FONT_SCIENTIFICA_BOLD) {
+        return font_scientifica_bold_glyph(c);
+    }
+    return font_scientifica_glyph(c);
+}
+
+static inline int get_font_width(terminal_t* term) {
+    (void)term;
+    return FONT_SCI_WIDTH;
+}
+
+static inline int get_font_height(terminal_t* term) {
+    (void)term;
+    return FONT_SCI_HEIGHT;
+}
+
+#define FONT_W get_font_width(term)
+#define FONT_H get_font_height(term)
 
 static inline uint16_t byte_swap(uint16_t val) {
     return (val >> 8) | ((val & 0xFF) << 8);
@@ -23,18 +40,20 @@ void terminal_render_init(void) {
     s_blink_state = false;
 }
 
-static void terminal_render_glyph(int x, int y, uint16_t fg, uint16_t bg, const uint16_t* glyph) {
+static void terminal_render_glyph(int x, int y, uint16_t fg, uint16_t bg,
+                                   const uint8_t *glyph, int font_w, int font_h) {
     uint16_t* fb = display_get_back_buffer();
-    int fb_width = 320;
+    uint16_t fg_be = byte_swap(fg);
+    uint16_t bg_be = byte_swap(bg);
 
-    for (int col = 0; col < FONT_W; col++) {
-        uint16_t col_data = glyph[col];
-        for (int row = 0; row < FONT_H; row++) {
+    for (int row = 0; row < font_h; row++) {
+        uint8_t rowdata = glyph[row];
+        int py = y + row;
+        if (py < 0 || py >= 320) continue;
+        for (int col = 0; col < font_w; col++) {
             int px = x + col;
-            int py = y + row;
-            if (px >= 0 && px < fb_width && py >= 0 && py < 320) {
-                uint16_t color = (col_data & (1 << row)) ? fg : bg;
-                fb[py * fb_width + px] = byte_swap(color);
+            if (px >= 0 && px < 320) {
+                fb[py * 320 + px] = (rowdata & (0x80 >> col)) ? fg_be : bg_be;
             }
         }
     }
@@ -69,9 +88,11 @@ void terminal_renderScrollback(terminal_t* term) {
 
         if (vline < 0) {
             // Before scrollback — blank
+            const uint8_t *space = get_glyph(term, ' ');
+            int fw = get_font_width(term);
+            int fh = get_font_height(term);
             for (int col = 0; col < cols; col++) {
-                const uint16_t* glyph = font_6x11_glyph(' ');
-                terminal_render_glyph(col * FONT_W, row * FONT_H, 0xFFFF, 0x0000, glyph);
+                terminal_render_glyph(col * fw, row * fh, 0xFFFF, 0x0000, space, fw, fh);
             }
         } else if (vline < scrollback_count) {
             // Scrollback line — use stored colors
@@ -90,9 +111,8 @@ void terminal_renderScrollback(terminal_t* term) {
                     uint16_t tmp = fg; fg = bg; bg = tmp;
                 }
 
-                const uint16_t* glyph = font_6x11_glyph((char)ch);
-                if (!glyph) glyph = font_6x11_glyph(' ');
-                terminal_render_glyph(col * FONT_W, row * FONT_H, fg, bg, glyph);
+                const uint8_t *glyph = get_glyph(term, (char)(uint8_t)ch);
+                terminal_render_glyph(col * FONT_W, row * FONT_H, fg, bg, glyph, FONT_W, FONT_H);
             }
         } else {
             // Current screen line
@@ -111,14 +131,13 @@ void terminal_renderScrollback(terminal_t* term) {
                         uint16_t tmp = fg; fg = bg; bg = tmp;
                     }
 
-                    const uint16_t* glyph = font_6x11_glyph((char)ch);
-                    if (!glyph) glyph = font_6x11_glyph(' ');
-                    terminal_render_glyph(col * FONT_W, row * FONT_H, fg, bg, glyph);
+                    const uint8_t *glyph = get_glyph(term, (char)(uint8_t)ch);
+                    terminal_render_glyph(col * FONT_W, row * FONT_H, fg, bg, glyph, FONT_W, FONT_H);
                 }
             } else {
+                const uint8_t *space = get_glyph(term, ' ');
                 for (int col = 0; col < cols; col++) {
-                    const uint16_t* glyph = font_6x11_glyph(' ');
-                    terminal_render_glyph(col * FONT_W, row * FONT_H, 0xFFFF, 0x0000, glyph);
+                    terminal_render_glyph(col * FONT_W, row * FONT_H, 0xFFFF, 0x0000, space, FONT_W, FONT_H);
                 }
             }
         }
@@ -164,12 +183,8 @@ void terminal_render(terminal_t* term) {
                 bg = tmp;
             }
 
-            const uint16_t* glyph = font_6x11_glyph((char)ch);
-            if (!glyph) {
-                glyph = font_6x11_glyph(' ');
-            }
-
-            terminal_render_glyph(x, y, fg, bg, glyph);
+            const uint8_t *glyph = get_glyph(term, (char)(uint8_t)ch);
+            terminal_render_glyph(x, y, fg, bg, glyph, FONT_W, FONT_H);
         }
     }
 
@@ -193,12 +208,11 @@ void terminal_render(terminal_t* term) {
             int cursor_idx = term->cursor_y * term->cols + term->cursor_x;
             uint16_t cell = term->cells[cursor_idx];
             uint8_t ch = cell & 0xFF;
-            uint16_t cursor_fg = term->fg_color;
-            uint16_t cursor_bg = term->bg_color;
+            uint16_t cursor_fg = term->fg_colors[cursor_idx];
+            uint16_t cursor_bg = term->bg_colors[cursor_idx];
 
-            const uint16_t* glyph = font_6x11_glyph((char)ch);
-            if (!glyph) glyph = font_6x11_glyph(' ');
-            terminal_render_glyph(cx, cy, cursor_bg, cursor_fg, glyph);
+            const uint8_t *glyph = get_glyph(term, (char)(uint8_t)ch);
+            terminal_render_glyph(cx, cy, cursor_bg, cursor_fg, glyph, FONT_W, FONT_H);
         }
     }
 
@@ -249,12 +263,8 @@ void terminal_renderDirty(terminal_t* term) {
                 bg = tmp;
             }
 
-            const uint16_t* glyph = font_6x11_glyph((char)ch);
-            if (!glyph) {
-                glyph = font_6x11_glyph(' ');
-            }
-
-            terminal_render_glyph(x, y, fg, bg, glyph);
+            const uint8_t *glyph = get_glyph(term, (char)(uint8_t)ch);
+            terminal_render_glyph(x, y, fg, bg, glyph, FONT_W, FONT_H);
         }
 
         terminal_clearRowDirty(term, row);
@@ -280,12 +290,11 @@ void terminal_renderDirty(terminal_t* term) {
             int cursor_idx = term->cursor_y * term->cols + term->cursor_x;
             uint16_t cell = term->cells[cursor_idx];
             uint8_t ch = cell & 0xFF;
-            uint16_t cursor_fg = term->fg_color;
-            uint16_t cursor_bg = term->bg_color;
+            uint16_t cursor_fg = term->fg_colors[cursor_idx];
+            uint16_t cursor_bg = term->bg_colors[cursor_idx];
 
-            const uint16_t* glyph = font_6x11_glyph((char)ch);
-            if (!glyph) glyph = font_6x11_glyph(' ');
-            terminal_render_glyph(cx, cy, cursor_bg, cursor_fg, glyph);
+            const uint8_t *glyph = get_glyph(term, (char)(uint8_t)ch);
+            terminal_render_glyph(cx, cy, cursor_bg, cursor_fg, glyph, FONT_W, FONT_H);
         }
     }
 }
@@ -312,12 +321,8 @@ void terminal_renderRow(terminal_t* term, int row) {
             bg = tmp;
         }
 
-        const uint16_t* glyph = font_6x11_glyph((char)ch);
-        if (!glyph) {
-            glyph = font_6x11_glyph(' ');
-        }
-
-        terminal_render_glyph(x, y, fg, bg, glyph);
+        const uint8_t *glyph = get_glyph(term, (char)(uint8_t)ch);
+        terminal_render_glyph(x, y, fg, bg, glyph, FONT_W, FONT_H);
     }
 
     terminal_clearRowDirty(term, row);

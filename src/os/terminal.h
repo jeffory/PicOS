@@ -4,8 +4,10 @@
 #include <stdint.h>
 
 #define TERM_DEFAULT_COLS 53
-#define TERM_DEFAULT_ROWS 29
+#define TERM_DEFAULT_ROWS 26
 #define TERM_DEFAULT_SCROLLBACK 1000
+#define TERM_MAX_SCROLLBACK 5000
+#define TERM_BLANK_CELL 0x0020
 
 #define TERM_ATTR_BOLD      (1 << 0)
 #define TERM_ATTR_ITALIC    (1 << 1)
@@ -16,6 +18,11 @@
 #define TERM_ATTR_DIM       (1 << 6)
 #define TERM_ATTR_HIDDEN    (1 << 7)
 
+enum terminal_font {
+    TERM_FONT_SCIENTIFICA = 0,
+    TERM_FONT_SCIENTIFICA_BOLD = 1
+};
+
 struct terminal {
     int cols;
     int rows;
@@ -24,6 +31,9 @@ struct terminal {
     uint16_t fg_color;
     uint16_t bg_color;
     uint8_t current_attr;
+    enum terminal_font font;
+    int scroll_top;     // top of scroll region (0-based, default 0)
+    int scroll_bottom;  // bottom of scroll region (0-based, default rows-1)
 
     uint16_t* cells;
     uint16_t* prev_cells;
@@ -111,3 +121,13 @@ void terminal_getDirtyRange(terminal_t* term, int* out_first, int* out_last);
 bool terminal_isFullDirty(terminal_t* term);
 
 void terminal_clearFullDirty(terminal_t* term);
+
+void terminal_setFont(terminal_t* term, enum terminal_font font);
+
+enum terminal_font terminal_getFont(terminal_t* term);
+
+void terminal_insertChars(terminal_t* term, int count);
+
+void terminal_deleteChars(terminal_t* term, int count);
+
+void terminal_setScrollRegion(terminal_t* term, int top, int bottom);

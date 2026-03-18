@@ -1,5 +1,9 @@
 #include "lua_bridge_internal.h"
 #include "lua_psram_alloc.h"
+#include "ota_update.h"
+#include "version.h"
+#include "../hardware.h"
+#include "hardware/gpio.h"
 #include <malloc.h>
 
 // ── picocalc.sys.* ───────────────────────────────────────────────────────────
@@ -41,9 +45,10 @@ static int l_sys_sleep(lua_State *L) {
     if (now >= end_ms)
       break;
 
-    // Fire HTTP callbacks while sleeping so async requests can progress.
+    // Fire HTTP/TCP callbacks while sleeping so async requests can progress.
     // WiFi is driven by Core 1; no poll needed here.
     http_lua_fire_pending(L);
+    tcp_lua_fire_pending(L);
 
     uint32_t remaining = end_ms - now;
     sleep_ms(remaining < 10 ? remaining : 10);
@@ -60,9 +65,16 @@ static int l_sys_reboot(lua_State *L) {
 }
 
 static int l_sys_isUSBPowered(lua_State *L) {
-  // RP2350: VBUS presence is readable via USB hardware; implement if needed.
-  // Stub returns false for now.
-  lua_pushboolean(L, false);
+  lua_pushboolean(L, gpio_get(USB_VBUS_PIN));
+  return 1;
+}
+
+static int l_sys_getPowerStatus(lua_State *L) {
+  lua_createtable(L, 0, 2);
+  lua_pushboolean(L, gpio_get(USB_VBUS_PIN));
+  lua_setfield(L, -2, "charging");
+  lua_pushinteger(L, kbd_get_battery_percent());
+  lua_setfield(L, -2, "percent");
   return 1;
 }
 
@@ -70,8 +82,8 @@ static int l_sys_isUSBPowered(lua_State *L) {
 // Equivalent to `return` at the top level of main.lua, but works from
 // any call depth. The launcher detects the sentinel and skips the error screen.
 static int l_sys_exit(lua_State *L) {
-  (void)L;
-  return luaL_error(L, "__picocalc_exit__");
+  lua_bridge_raise_exit(L);
+  return 0; // unreachable
 }
 
 // ── picocalc.sys.addMenuItem / clearMenuItems
@@ -151,6 +163,24 @@ static int l_sys_addMenuItem(lua_State *L) {
   return 0;
 }
 
+static int l_sys_getVersion(lua_State *L) {
+  lua_pushstring(L, PICOS_VERSION);
+  return 1;
+}
+
+static int l_sys_applyUpdate(lua_State *L) {
+  const char *path = luaL_checkstring(L, 1);
+  const char *err = NULL;
+  bool ok = ota_trigger_update(path, &err);
+  if (!ok) {
+    lua_pushboolean(L, false);
+    lua_pushstring(L, err ? err : "Unknown error");
+    return 2;
+  }
+  // Unreachable — ota_trigger_update reboots on success
+  return 0;
+}
+
 static int l_sys_clearMenuItems(lua_State *L) {
   for (int i = 0; i < s_lua_callback_count; i++)
     luaL_unref(L, LUA_REGISTRYINDEX, s_lua_callbacks[i].ref);
@@ -167,7 +197,10 @@ static const luaL_Reg l_sys_lib[] = {{"getMemInfo", l_sys_getMemInfo},
                                      {"exit", l_sys_exit},
                                      {"reboot", l_sys_reboot},
                                      {"isUSBPowered", l_sys_isUSBPowered},
+                                     {"getPowerStatus", l_sys_getPowerStatus},
                                      {"getClock", l_sys_getClock},
+                                     {"getVersion", l_sys_getVersion},
+                                     {"applyUpdate", l_sys_applyUpdate},
                                      {"addMenuItem", l_sys_addMenuItem},
                                      {"clearMenuItems", l_sys_clearMenuItems},
                                      {NULL, NULL}};

@@ -62,6 +62,8 @@ typedef struct {
     void (*fillRect)(int x, int y, int w, int h, uint16_t color);
     void (*drawRect)(int x, int y, int w, int h, uint16_t color);
     void (*drawLine)(int x0, int y0, int x1, int y1, uint16_t color);
+    void (*drawCircle)(int cx, int cy, int r, uint16_t color);
+    void (*fillCircle)(int cx, int cy, int r, uint16_t color);
     // Draw a null-terminated string. Returns pixel width of drawn text.
     int  (*drawText)(int x, int y, const char *text, uint16_t fg, uint16_t bg);
     // Flush the internal framebuffer to the LCD (call once per frame)
@@ -103,7 +105,8 @@ typedef struct {
     uint32_t (*tell)(pcfile_t f);
     // List directory. Calls callback for each entry. Returns entry count.
     int      (*listDir)(const char *path,
-                        void (*callback)(const char *name, bool is_dir, void *user),
+                        void (*callback)(const char *name, bool is_dir,
+                                         uint32_t size, void *user),
                         void *user);
 } picocalc_fs_t;
 

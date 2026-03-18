@@ -350,3 +350,21 @@ bool ui_confirm(const char *message) {
     sleep_ms(20);
   }
 }
+
+// ── ui_draw_spinner ───────────────────────────────────────────────────────────
+// Draw a single frame of a rotating line spinner at (cx, cy) with radius r.
+// Call once per frame with an incrementing frame counter for animation.
+void ui_draw_spinner(int cx, int cy, int r, int frame) {
+  static const int dx8[] = { 0,  1,  1,  1,  0, -1, -1, -1};
+  static const int dy8[] = {-1, -1,  0,  1,  1,  1,  0, -1};
+  int idx = (frame / 2) & 7; // rotate through 8 positions
+  int x1 = cx + dx8[idx] * r;
+  int y1 = cy + dy8[idx] * r;
+  int x2 = cx - dx8[idx] * r;
+  int y2 = cy - dy8[idx] * r;
+  // Draw main line bright, secondary lines dimmer for motion effect
+  display_draw_line(x1, y1, x2, y2, COLOR_WHITE);
+  int prev = (idx + 7) & 7;
+  display_draw_line(cx + dx8[prev] * r, cy + dy8[prev] * r,
+                    cx - dx8[prev] * r, cy - dy8[prev] * r, COLOR_GRAY);
+}

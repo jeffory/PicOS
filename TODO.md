@@ -9,7 +9,7 @@ These are fully implemented in C but missing from `lua_bridge.c`. All are quick 
 | Function | Status | Notes |
 |---|---|---|
 | `sys.reboot()` | **[done]** | Watchdog-based reboot added to `l_sys_lib` |
-| `sys.isUSBPowered()` | **[done]** | Stub returning false added to `l_sys_lib`; real VBUS check via GP24 still TODO (see System section) |
+| `sys.isUSBPowered()` | **[done]** | Reads GP24 VBUS sense pin directly via `gpio_get()` |
 
 ### `picocalc.fs`
 
@@ -70,19 +70,19 @@ Hardware: PWM on GP26 (left) and GP27 (right) — defined in `hardware.h`
 - [x] sound.sampleplayer:setVolume(left, [right])
 - [x] sound.sampleplayer:getVolume()
 - [ ] sound.sampleplayer:setLoopCallback(callback, [arg])
-- [ ] sound.sampleplayer:setPlayRange(start, end)
-- [ ] sound.sampleplayer:setPaused(flag)
+- [x] sound.sampleplayer:setPlayRange(start, end)
+- [x] sound.sampleplayer:setPaused(flag)
 - [x] sound.sampleplayer:isPlaying()
 - [x] sound.sampleplayer:stop()
 - [ ] sound.sampleplayer:setFinishCallback(func, [arg])
 - [x] sound.sampleplayer:setSample(sample)
-- [ ] sound.sampleplayer:getSample()
-- [ ] sound.sampleplayer:getLength()
-- [ ] sound.sampleplayer:setRate(rate)
-- [ ] sound.sampleplayer:getRate()
+- [x] sound.sampleplayer:getSample()
+- [x] sound.sampleplayer:getLength()
+- [x] sound.sampleplayer:setRate(rate)
+- [x] sound.sampleplayer:getRate()
 - [ ] sound.sampleplayer:setRateMod(signal)
-- [ ] sound.sampleplayer:setOffset(seconds)
-- [ ] sound.sampleplayer:getOffset()
+- [x] sound.sampleplayer:setOffset(seconds)
+- [x] sound.sampleplayer:getOffset()
  - [x] sound.fileplayer.new([buffersize]) - For music
  - [x] sound.fileplayer.new(path, [buffersize])
  - [x] sound.fileplayer:load(path)
@@ -91,9 +91,9 @@ Hardware: PWM on GP26 (left) and GP27 (right) — defined in `hardware.h`
  - [x] sound.fileplayer:pause()
  - [x] sound.fileplayer:isPlaying()
  - [x] sound.fileplayer:getLength()
- - [ ] sound.fileplayer:setFinishCallback(func, [arg])
+ - [x] sound.fileplayer:setFinishCallback(func, [arg])
  - [x] sound.fileplayer:didUnderrun()
- - [ ] sound.fileplayer:setStopOnUnderrun(flag)
+ - [x] sound.fileplayer:setStopOnUnderrun(flag)
  - [x] sound.fileplayer:setLoopRange(start, [end, [loopCallback, [arg]]])
  - [ ] sound.fileplayer:setLoopCallback(callback, [arg])
  - [ ] sound.fileplayer:setBufferSize(seconds)
@@ -105,12 +105,12 @@ Hardware: PWM on GP26 (left) and GP27 (right) — defined in `hardware.h`
  - [x] sound.fileplayer:setOffset(seconds)
  - [x] sound.fileplayer:getOffset()
 - [x] sound.sample.new(path)
-- [ ] sound.sample.new(seconds, [format])
-- [ ] sound.sample:getSubsample(startOffset, endOffset)
+- [x] sound.sample.new(seconds, [format])
+- [x] sound.sample:getSubsample(startOffset, endOffset)
 - [x] sound.sample:load(path)
-- [ ] sound.sample:decompress()
+- [x] sound.sample:decompress()
 - [x] sound.sample:getSampleRate()
-- [ ] sound.sample:getFormat()
+- [x] sound.sample:getFormat()
 - [x] sound.sample:getLength()
 - [ ] sound.sample:play([repeatCount], [rate])
 - [ ] sound.sample:playAt(when, [vol], [rightvol], [rate])
@@ -131,7 +131,7 @@ Hardware: PWM on GP26 (left) and GP27 (right) — defined in `hardware.h`
 - [ ] sound.channel:setVolumeMod(signal)
 - [ ] sound.channel:getDryLevelSignal()
 - [ ] sound.channel:getWetLevelSignal()
-- [ ] sound.playingSources() - Return a list of sources playing
+- [x] sound.playingSources() - Returns count of currently playing sources
 - [x] sound.getCurrentTime() - Returns the current time, in seconds, as measured by the audio device
 - [x] sound.resetTime() - Resets the audio output device time counter.
 
@@ -190,9 +190,9 @@ The Menu/Sym key (`BTN_MENU`) pauses the running app and shows an OS-level overl
 ## Display — missing features
 
 - [ ] `display.drawBitmap(x, y, path)` — load a raw RGB565 or BMP file from SD card and blit it
-- [ ] Larger/alternative font support — current 6×8 font is readable but small; add an 8×12 option
-- [ ] `display.drawCircle(x, y, r, color)` — useful for apps, trivial to add
-- [ ] `display.scroll(dy)` — hardware-assisted vertical scroll (ST7365P supports this)
+- [x] Larger/alternative font support — 8×12 font added; `display.setFont(0|1)`, `getFont()`, `getFontWidth()`, `getFontHeight()`
+- [x] `display.drawCircle(x, y, r, color)` — midpoint circle algorithm + `fillCircle` bonus
+- [x] `display.scroll(dy)` — hardware-assisted vertical scroll via `setScrollArea`/`setScrollOffset`
 
 ---
 
@@ -200,7 +200,7 @@ The Menu/Sym key (`BTN_MENU`) pauses the running app and shows an OS-level overl
 
 - [ ] **Core 1 background tasks** — `core1_entry()` in `main.c` is an idle spin loop; candidates: audio mixing, WiFi polling, display DMA coordination
 - [x] **Shared config** — `src/os/config.h` / `config.c`; reads/writes `/system/config.json`; flat key/value JSON; exposed as `picocalc.config.{get,set,save,load}()`
-- [ ] **`sys.isUSBPowered()` implementation** — currently a stub; on RP2350 Pico, VBUS is detectable via GP24
+- [x] **`sys.isUSBPowered()` implementation** — reads GP24 VBUS sense pin
 - [x] **SD card hot-swap** — `sdcard_remount()` exists; launcher rescans on app exit; manual "Remount SD" added to system menu.
 
 ---
@@ -214,13 +214,13 @@ The Menu/Sym key (`BTN_MENU`) pauses the running app and shows an OS-level overl
 
 ## Code quality / housekeeping
 
-- [ ] `g_api.fs.listDir` callback signature mismatch — `picocalc_fs_t.listDir` in `os.h` has a different signature than `sdcard_list_dir()` in `sdcard.h`; reconcile them (Lua bridge calls `sdcard_list_dir()` directly and is unaffected)
-- [ ] App sandboxing: `picocalc.sys.exit()` uses a string sentinel (`__picocalc_exit__`) — could be hardened with a Lua registry light userdata instead
+- [x] `g_api.fs.listDir` callback signature — updated to include `uint32_t size` parameter, matching `sdcard_entry_t`
+- [x] App sandboxing: `picocalc.sys.exit()` now uses light userdata sentinel (`lua_bridge_exit_tag`) instead of string comparison
 
 ## Quality of life
 
 - [x] Remember the position of the selected app/scrolling position when exiting an application
-- [ ] Add a loading spinner api that apps can use
+- [x] Add a loading spinner api — `picocalc.ui.drawSpinner(cx, cy, [r], [frame])`
 
 ## Graphics APIs - For Lua
 
@@ -252,7 +252,7 @@ The Menu/Sym key (`BTN_MENU`) pauses the running app and shows an OS-level overl
 
 - [ ] Route direct hardware calls in `lua_bridge.c` through g_api for environment portability (Medium effort)
 - [ ] Consider storing framebuffer in native endian, byte-swap only during DMA	
-- [ ] Skip wifi_poll() in lua hook when WiFi is disabled
+- [x] Skip wifi_poll() in lua hook when WiFi is disabled (wifi_poll removed from hook; Core 1 handles it)
 
 ## Sprites
 
@@ -306,14 +306,14 @@ The Menu/Sym key (`BTN_MENU`) pauses the running app and shows an OS-level overl
 - [x] graphics.sprite:setClipRect(x, y, width, height)
 - [x] graphics.sprite:setClipRect(rect)
 - [x] graphics.sprite:clearClipRect()
-- [ ] graphics.sprite.setClipRectsInRange(x, y, width, height, startz, endz)
-- [ ] graphics.sprite.setClipRectsInRange(rect, startz, endz)
-- [ ] graphics.sprite.clearClipRectsInRange(startz, endz)
-- [ ] graphics.sprite:setStencilImage(stencil, [tile])
-- [ ] graphics.setStencilPattern({ row1, row2, row3, row4, row5, row6, row7, row8 })
-- [ ] graphics.setStencilPattern(pattern)
-- [ ] graphics.sprite:setStencilPattern(level, [ditherType])
-- [ ] graphics.sprite:clearStencil()
+- [x] graphics.sprite.setClipRectsInRange(x, y, width, height, startz, endz)
+- [x] graphics.sprite.setClipRectsInRange(rect, startz, endz)
+- [x] graphics.sprite.clearClipRectsInRange(startz, endz)
+- [x] graphics.sprite:setStencilImage(stencil, [tile])
+- [x] graphics.setStencilPattern({ row1, row2, row3, row4, row5, row6, row7, row8 })
+- [x] graphics.setStencilPattern(pattern)
+- [x] graphics.sprite:setStencilPattern(level, [ditherType])
+- [x] graphics.sprite:clearStencil()
 - [x] graphics.sprite.setAlwaysRedraw(flag)
 - [x] graphics.sprite.getAlwaysRedraw()
 - [x] graphics.sprite:markDirty()
@@ -333,7 +333,7 @@ The Menu/Sym key (`BTN_MENU`) pauses the running app and shows an OS-level overl
 - [x] graphics.sprite:clearCollideRect()
 - [x] graphics.sprite:overlappingSprites()
 - [x] graphics.sprite.allOverlappingSprites()
-- [ ] graphics.sprite:alphaCollision(anotherSprite)
+- [x] graphics.sprite:alphaCollision(anotherSprite)
 - [x] graphics.sprite:setCollisionsEnabled(flag)
 - [x] graphics.sprite:collisionsEnabled()
 - [x] graphics.sprite:setGroups(groups)
@@ -344,21 +344,21 @@ The Menu/Sym key (`BTN_MENU`) pauses the running app and shows an OS-level overl
 - [x] graphics.sprite:getCollidesWithGroupsMask()
 - [x] graphics.sprite:resetGroupMask()
 - [x] graphics.sprite:resetCollidesWithGroupsMask()
-- [ ] graphics.sprite:moveWithCollisions(goalX, goalY)
-- [ ] graphics.sprite:moveWithCollisions(goalPoint)
+- [x] graphics.sprite:moveWithCollisions(goalX, goalY)
+- [x] graphics.sprite:moveWithCollisions(goalPoint)
 - [x] graphics.sprite:checkCollisions(x, y)
 - [x] graphics.sprite:checkCollisions(point)
-- [ ] graphics.sprite:collisionResponse(other)
+- [x] graphics.sprite:collisionResponse(other)
 - [x] graphics.sprite.querySpritesAtPoint(x, y)
 - [x] graphics.sprite.querySpritesAtPoint(p)
 - [x] graphics.sprite.querySpritesInRect(x, y, width, height)
 - [x] graphics.sprite.querySpritesInRect(rect)
 - [x] graphics.sprite.querySpritesAlongLine(x1, y1, x2, y2)
-- [ ] graphics.sprite.querySpritesAlongLine(lineSegment)
+- [x] graphics.sprite.querySpritesAlongLine(lineSegment)
 - [x] graphics.sprite.querySpriteInfoAlongLine(x1, y1, x2, y2)
-- [ ] graphics.sprite.querySpriteInfoAlongLine(lineSegment)
-- [ ] graphics.sprite.addEmptyCollisionSprite(r)
-- [ ] graphics.sprite.addEmptyCollisionSprite(x, y, w, h)
+- [x] graphics.sprite.querySpriteInfoAlongLine(lineSegment)
+- [x] graphics.sprite.addEmptyCollisionSprite(r)
+- [x] graphics.sprite.addEmptyCollisionSprite(x, y, w, h)
 - [ ] graphics.sprite.addWallSprites(tilemap, emptyIDs, [xOffset, yOffset])
 - [ ] graphics.font.new(path)
 - [ ] graphics.font.newFamily(fontPaths)
@@ -456,4 +456,4 @@ The Menu/Sym key (`BTN_MENU`) pauses the running app and shows an OS-level overl
 - [ ] pathfinder.node:removeConnection(node, [removeReciprocal])
 - [ ] pathfinder.node:removeAllConnections([removeIncoming])
 - [ ] pathfinder.node:setXY(x, y)
-- [ ] getPowerStatus()
+- [x] getPowerStatus() — `picocalc.sys.getPowerStatus()` returns `{charging=bool, percent=int}`

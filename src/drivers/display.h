@@ -47,11 +47,21 @@ void display_set_pixel(int x, int y, uint16_t color);
 void display_fill_rect(int x, int y, int w, int h, uint16_t color);
 void display_draw_rect(int x, int y, int w, int h, uint16_t color);
 void display_draw_line(int x0, int y0, int x1, int y1, uint16_t color);
+void display_fill_triangle(int x0, int y0, int x1, int y1, int x2, int y2,
+                           uint16_t color);
+void display_draw_circle(int cx, int cy, int r, uint16_t color);
+void display_fill_circle(int cx, int cy, int r, uint16_t color);
 
-// Text rendering using the built-in 6x8 bitmap font
+// Text rendering using the active bitmap font (default: 6x8)
 // Returns pixel width of the rendered text
 int display_draw_text(int x, int y, const char *text, uint16_t fg, uint16_t bg);
 int display_text_width(const char *text);
+
+// Font selection: 0 = 6x8 (default), 1 = 8x12, 2 = scientifica 6x12, 3 = scientifica-bold 6x12
+void display_set_font(int font_id);
+int display_get_font(void);
+int display_get_font_width(void);
+int display_get_font_height(void);
 
 // Blit raw RGB565 image data to the framebuffer at (x, y).
 // Pixel values must be in host byte order (same as the RGB565() macro).
@@ -136,3 +146,8 @@ uint16_t *display_get_back_buffer(void);
 // buffer that is currently visible on screen. This ensures screenshots capture
 // the actual displayed frame, not a buffer still being transferred.
 const uint16_t *display_get_screen_buffer(void);
+
+// Hardware vertical scroll (ST7365P VSCRDEF + VSCRSADD).
+// top_fixed + scroll_height + bottom_fixed must equal 320.
+void display_set_scroll_area(int top_fixed, int scroll_height, int bottom_fixed);
+void display_set_scroll_offset(int offset);

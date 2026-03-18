@@ -7,6 +7,7 @@
 #include "../drivers/http.h"
 #include "../drivers/keyboard.h"
 #include "../drivers/sdcard.h"
+#include "../drivers/tcp.h"
 #include "../drivers/wifi.h"
 #include "../os/clock.h"
 #include "../os/config.h"
@@ -33,6 +34,7 @@
 uint16_t l_checkcolor(lua_State *L, int idx);
 bool fs_sandbox_check(lua_State *L, const char *path, bool write);
 void http_lua_fire_pending(lua_State *L);
+void tcp_lua_fire_pending(lua_State *L);
 extern bool s_screenshot_pending;
 
 void register_subtable(lua_State *L, const char *name, const luaL_Reg *funcs);
@@ -50,3 +52,5 @@ void lua_bridge_audio_init(lua_State *L);
 void lua_bridge_sound_init(lua_State *L);
 void lua_bridge_repl_init(lua_State *L);
 void lua_bridge_video_init(lua_State *L);
+void lua_bridge_tcp_init(lua_State *L);
+void lua_bridge_crypto_init(lua_State *L);

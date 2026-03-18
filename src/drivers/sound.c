@@ -81,21 +81,42 @@ void sound_update(void) {
 
     for (int i = 0; i < SOUND_MAX_SAMPLES; i++) {
         sound_player_t *player = &s_context.players[i];
-        if (!player->playing || !player->sample || !player->sample->loaded)
+        if (!player->playing || player->paused || !player->sample || !player->sample->loaded)
             continue;
 
         sound_sample_t *sample = player->sample;
         uint32_t pos = player->position;
 
-        if (pos >= sample->length) {
+        uint32_t effective_end = sample->length;
+        if (player->play_end > 0) {
+            uint32_t bytes_per_sample = sample->bits_per_sample / 8;
+            uint32_t bytes_per_frame = bytes_per_sample * sample->channels;
+            uint32_t end_bytes = player->play_end * bytes_per_frame;
+            if (end_bytes < effective_end)
+                effective_end = end_bytes;
+        }
+
+        uint32_t effective_start = 0;
+        if (player->play_start > 0) {
+            uint32_t bytes_per_sample = sample->bits_per_sample / 8;
+            uint32_t bytes_per_frame = bytes_per_sample * sample->channels;
+            effective_start = player->play_start * bytes_per_frame;
+        }
+
+        if (pos < effective_start) {
+            player->position = effective_start;
+            pos = effective_start;
+        }
+
+        if (pos >= effective_end) {
             player->repeats_played++;
             if (player->repeat_count > 0 && player->repeats_played >= player->repeat_count) {
                 player->playing = false;
-                player->position = 0;
+                player->position = effective_start;
                 continue;
             }
-            player->position = 0;
-            pos = 0;
+            player->position = effective_start;
+            pos = effective_start;
         }
 
         uint32_t bytes_per_sample = sample->bits_per_sample / 8;
@@ -134,7 +155,9 @@ void sound_update(void) {
         pwm_set_gpio_level(AUDIO_PIN_L, left_level);
         pwm_set_gpio_level(AUDIO_PIN_R, right_level);
 
-        player->position += bytes_per_frame;
+        int advance = (int)(bytes_per_frame * player->rate);
+        if (advance < 1) advance = 1;
+        player->position += advance;
     }
 
     s_context.time_offset_us += s_timer_interval_us;
@@ -230,6 +253,9 @@ sound_player_t *sound_player_create(void) {
         sound_player_t *player = &s_context.players[i];
         if (!player->sample) {
             player->volume = 100;
+            player->play_start = 0;
+            player->play_end = 0;
+            player->rate = 1.0f;
             return player;
         }
     }
@@ -322,6 +348,91 @@ uint8_t sound_player_get_volume(const sound_player_t *player) {
 
 bool sound_player_is_playing(const sound_player_t *player) {
     return player && player->playing;
+}
+
+void sound_player_set_play_range(sound_player_t *player, uint32_t start, uint32_t end) {
+    if (!player) return;
+    player->play_start = start;
+    player->play_end = end;
+}
+
+void sound_player_set_rate(sound_player_t *player, float rate) {
+    if (!player) return;
+    if (rate < 0.0f) rate = 0.0f;
+    player->rate = rate;
+}
+
+float sound_player_get_rate(const sound_player_t *player) {
+    return player ? player->rate : 1.0f;
+}
+
+sound_sample_t *sound_sample_new_blank(float seconds, uint32_t sample_rate, uint8_t bits_per_sample, uint8_t channels) {
+    sound_sample_t *sample = sound_sample_create();
+    if (!sample) return NULL;
+
+    uint32_t bytes_per_frame = (bits_per_sample / 8) * channels;
+    uint32_t num_frames = (uint32_t)(seconds * sample_rate);
+    uint32_t data_size = num_frames * bytes_per_frame;
+
+    if (data_size > SOUND_MAX_SAMPLE_SIZE)
+        data_size = SOUND_MAX_SAMPLE_SIZE;
+
+    sample->data = umm_malloc(data_size);
+    if (!sample->data) {
+        sound_sample_destroy(sample);
+        return NULL;
+    }
+
+    memset(sample->data, 0, data_size);
+    sample->length = data_size;
+    sample->sample_rate = sample_rate;
+    sample->bits_per_sample = bits_per_sample;
+    sample->channels = channels;
+    sample->loaded = true;
+
+    return sample;
+}
+
+sound_sample_t *sound_sample_get_subsample(const sound_sample_t *sample, uint32_t start_frame, uint32_t end_frame) {
+    if (!sample || !sample->loaded || !sample->data)
+        return NULL;
+
+    uint32_t bytes_per_frame = (sample->bits_per_sample / 8) * sample->channels;
+    uint32_t total_frames = sample->length / bytes_per_frame;
+
+    if (start_frame >= total_frames) start_frame = total_frames;
+    if (end_frame > total_frames) end_frame = total_frames;
+    if (end_frame <= start_frame) return NULL;
+
+    uint32_t num_frames = end_frame - start_frame;
+    uint32_t data_size = num_frames * bytes_per_frame;
+
+    sound_sample_t *sub = sound_sample_create();
+    if (!sub) return NULL;
+
+    sub->data = umm_malloc(data_size);
+    if (!sub->data) {
+        sound_sample_destroy(sub);
+        return NULL;
+    }
+
+    memcpy(sub->data, sample->data + start_frame * bytes_per_frame, data_size);
+    sub->length = data_size;
+    sub->sample_rate = sample->sample_rate;
+    sub->bits_per_sample = sample->bits_per_sample;
+    sub->channels = sample->channels;
+    sub->loaded = true;
+
+    return sub;
+}
+
+int sound_get_playing_source_count(void) {
+    int count = 0;
+    for (int i = 0; i < SOUND_MAX_SAMPLES; i++) {
+        if (s_context.players[i].playing)
+            count++;
+    }
+    return count;
 }
 
 uint32_t sound_get_current_time(void) {

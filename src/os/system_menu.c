@@ -1,4 +1,5 @@
 #include "system_menu.h"
+#include "lua_bridge.h"
 #include "lua_psram_alloc.h"
 #include "../drivers/display.h"
 #include "../drivers/keyboard.h"
@@ -585,7 +586,7 @@ void system_menu_show(lua_State *L) {
   int context = (L != NULL) ? 1 : 0;
   bool exit = menu_loop(L, context);
   if (exit && L != NULL)
-    luaL_error(L, "__picocalc_exit__"); /* does longjmp */
+    lua_bridge_raise_exit(L); /* does longjmp */
 }
 
 bool system_menu_show_for_native(void) {

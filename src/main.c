@@ -195,6 +195,7 @@ void __attribute__((naked)) isr_hardfault(void) {
 #include "os/launcher.h"
 #include "os/lua_psram_alloc.h"
 #include "os/os.h"
+#include "os/ota_update.h"
 #include "os/perf.h"
 #include "os/system_menu.h"
 #include "os/terminal.h"
@@ -235,6 +236,8 @@ static picocalc_display_t s_display_impl = {
     .fillRect = display_fill_rect,
     .drawRect = display_draw_rect,
     .drawLine = display_draw_line,
+    .drawCircle = display_draw_circle,
+    .fillCircle = display_fill_circle,
     .drawText = display_draw_text,
     .flush = display_flush,
     .getWidth = display_get_width_fn,
@@ -393,22 +396,19 @@ static uint32_t fs_tell(pcfile_t f) {
 // A stack pointer can be clobbered by an ISR or a compiler tail-call before
 // sdcard_list_dir's callback fires, causing an INVSTATE hard fault.
 static struct {
-    void (*fn)(const char *, bool, void *);
+    void (*fn)(const char *, bool, uint32_t, void *);
     void *user;
 } s_list_cb;
 
 static void fs_list_dir_callback(const sdcard_entry_t *entry, void *user) {
     (void)user;
-    printf("[FS_CB] entry=%s fn=%p user=%p\n",
-           entry->name, (void*)s_list_cb.fn, s_list_cb.user);
-    s_list_cb.fn(entry->name, entry->is_dir, s_list_cb.user);
+    s_list_cb.fn(entry->name, entry->is_dir, entry->size, s_list_cb.user);
 }
 
 static int fs_list_dir(const char *path,
-                       void (*callback)(const char *name, bool is_dir, void *user),
+                       void (*callback)(const char *name, bool is_dir,
+                                        uint32_t size, void *user),
                        void *user) {
-    printf("[FS_LISTDIR] path=%s cb=%p user=%p\n",
-           path, (void*)callback, user);
     s_list_cb.fn = callback;
     s_list_cb.user = user;
     return sdcard_list_dir(path, fs_list_dir_callback, NULL);
@@ -777,6 +777,24 @@ int main(void) {
   // Write crash log from previous boot (if any) now that SD is available
   crash_log_save();
   watchdog_update();
+
+  // Check for pending OTA firmware update (must be before Core 1 launch)
+  if (ota_check_pending()) {
+    ui_draw_splash("Applying firmware update...", "DO NOT POWER OFF!");
+    watchdog_update();
+    if (!ota_apply_update()) {
+      // Update failed — show error briefly, continue normal boot
+      display_clear(COLOR_BLACK);
+      display_draw_text(8, 8, "Firmware update failed!", COLOR_RED, COLOR_BLACK);
+      display_draw_text(8, 24, "Booting previous firmware.", COLOR_GRAY, COLOR_BLACK);
+      display_flush();
+      watchdog_update();
+      sleep_ms(3000);
+    }
+    // ota_apply_update reboots on success, so we only get here on failure
+  }
+  watchdog_update();
+
   if (s_had_crash) {
     display_clear(COLOR_BLACK);
     display_draw_text(8, 8, "Recovered from crash", COLOR_YELLOW, COLOR_BLACK);

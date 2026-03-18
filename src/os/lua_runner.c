@@ -96,8 +96,7 @@ static bool lua_run(const app_entry_t *app) {
 
   int run_err = lua_pcall(L, 0, 0, 0);
   if (run_err != LUA_OK) {
-    const char *msg = lua_tostring(L, -1);
-    if (!msg || !strstr(msg, "__picocalc_exit__")) {
+    if (!lua_bridge_is_exit_sentinel(L, -1)) {
       lua_bridge_show_error(L, "Runtime error:");
     } else {
       lua_pop(L, 1); // discard exit sentinel

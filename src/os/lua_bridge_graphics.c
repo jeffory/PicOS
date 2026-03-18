@@ -796,10 +796,16 @@ typedef struct {
   int scale_nn;         // integer scale for NN scaling
   bool use_nn_scaling;  // use NN instead of bilinear
   uint16_t transparent_color;  // 0 = use global setting
+  lua_image_t *stencil;        // stencil image (deferred masking)
+  uint8_t stencil_pattern[8];  // 8x8 dither stencil pattern
+  bool has_stencil_pattern;    // true if stencil_pattern is active
 } lua_sprite_t;
 
 static lua_sprite_t *s_sprites[MAX_SPRITES];
 static int s_sprite_count = 0;
+
+static uint8_t s_global_stencil[8];
+static bool s_has_global_stencil = false;
 
 static lua_sprite_t *check_sprite(lua_State *L, int idx) {
   return (lua_sprite_t *)luaL_checkudata(L, idx, GRAPHICS_SPRITE_MT);
@@ -883,6 +889,16 @@ static int l_sprite_addDirtyRect(lua_State *L);
 static int l_sprite_setRedrawsOnImageChange(lua_State *L);
 static int l_sprite_querySpritesAlongLine(lua_State *L);
 static int l_sprite_querySpriteInfoAlongLine(lua_State *L);
+static int l_sprite_moveWithCollisions(lua_State *L);
+static int l_sprite_collisionResponse(lua_State *L);
+static int l_sprite_setStencilImage(lua_State *L);
+static int l_sprite_clearStencil(lua_State *L);
+static int l_sprite_setStencilPattern(lua_State *L);
+static int l_sprite_alphaCollision(lua_State *L);
+static int l_sprite_setClipRectsInRange(lua_State *L);
+static int l_sprite_clearClipRectsInRange(lua_State *L);
+static int l_sprite_addEmptyCollisionSprite(lua_State *L);
+static int l_graphics_setStencilPattern(lua_State *L);
 
 static int l_sprite_gc(lua_State *L) {
   // getAllSprites() previously pushed proxy full-userdata of sizeof(lua_sprite_t*)
@@ -896,6 +912,8 @@ static int l_sprite_gc(lua_State *L) {
     s->frame_data = NULL;
   }
   s->image = NULL;
+  s->stencil = NULL;
+  s->has_stencil_pattern = false;
   return 0;
 }
 
@@ -944,6 +962,9 @@ static int l_sprite_new(lua_State *L) {
   s->scale_nn = 1;
   s->use_nn_scaling = false;
   s->transparent_color = 0;  // use global setting
+  s->stencil = NULL;
+  memset(s->stencil_pattern, 0, sizeof(s->stencil_pattern));
+  s->has_stencil_pattern = false;
 
   if (lua_isuserdata(L, 1)) {
     s->image = (lua_image_t *)lua_touserdata(L, 1);
@@ -1527,6 +1548,8 @@ static const luaL_Reg l_sprite_methods[] = {
     {"resetGroupMask", l_sprite_resetGroupMask},
     {"resetCollidesWithGroupsMask", l_sprite_resetCollidesWithGroupsMask},
     {"checkCollisions", l_sprite_checkCollisions},
+    {"moveWithCollisions", l_sprite_moveWithCollisions},
+    {"collisionResponse", l_sprite_collisionResponse},
     {"setClipRect", l_sprite_setClipRect},
     {"clearClipRect", l_sprite_clearClipRect},
     {"setAlwaysRedraw", l_sprite_setAlwaysRedraw},
@@ -1534,6 +1557,10 @@ static const luaL_Reg l_sprite_methods[] = {
     {"markDirty", l_sprite_markDirty},
     {"addDirtyRect", l_sprite_addDirtyRect},
     {"setRedrawsOnImageChange", l_sprite_setRedrawsOnImageChange},
+    {"setStencilImage", l_sprite_setStencilImage},
+    {"clearStencil", l_sprite_clearStencil},
+    {"setStencilPattern", l_sprite_setStencilPattern},
+    {"alphaCollision", l_sprite_alphaCollision},
     {NULL, NULL}};
 
 static int l_sprite_addSprite(lua_State *L) {
@@ -1892,6 +1919,203 @@ static int l_sprite_querySpritesInRect(lua_State *L) {
   return 1;
 }
 
+// Collision response types matching Playdate SDK:
+// "slide"   = slide along the collision surface
+// "freeze"  = stop at the collision point
+// "overlap" = pass through (report collision but don't resolve)
+// "bounce"  = reflect off the collision surface
+#define COLLISION_SLIDE   1
+#define COLLISION_FREEZE  2
+#define COLLISION_OVERLAP 3
+#define COLLISION_BOUNCE  4
+
+// Helper: get collision bounds for a sprite at position (px, py)
+static void sprite_collide_bounds_at(const lua_sprite_t *s, int px, int py,
+                                      int *ox, int *oy, int *ow, int *oh) {
+  int cw, ch;
+  if (s->collide_w > 0) { cw = s->collide_w; ch = s->collide_h; }
+  else                   { sprite_visual_size(s, &cw, &ch); }
+  *ox = px + s->collide_x;
+  *oy = py + s->collide_y;
+  *ow = cw;
+  *oh = ch;
+}
+
+// Helper: check if sprite `s` at position (sx, sy) overlaps any other sprite
+// in the active list, respecting group masks.
+static bool sprite_overlaps_any_at(lua_sprite_t *s, int sx, int sy,
+                                    lua_sprite_t **hit_out) {
+  int ax, ay, aw, ah;
+  sprite_collide_bounds_at(s, sx, sy, &ax, &ay, &aw, &ah);
+
+  for (int i = 0; i < s_sprite_count; i++) {
+    lua_sprite_t *other = s_sprites[i];
+    if (other == s || !other->collisions_enabled) continue;
+    // Group mask check: if both masks are non-zero, require overlap
+    if (s->collides_with_mask && other->group_mask &&
+        !(s->collides_with_mask & other->group_mask)) continue;
+
+    int bx, by, bw, bh;
+    sprite_collide_bounds_at(other, other->x, other->y, &bx, &by, &bw, &bh);
+    if (ax < bx + bw && ax + aw > bx && ay < by + bh && ay + ah > by) {
+      if (hit_out) *hit_out = other;
+      return true;
+    }
+  }
+  return false;
+}
+
+// sprite:moveWithCollisions(goalX, goalY)
+// Returns: actualX, actualY, collisions
+// Collisions is a table of {sprite, other, type, normal, touch, move}
+static int l_sprite_moveWithCollisions(lua_State *L) {
+  lua_sprite_t *s = check_sprite(L, 1);
+  int goalX, goalY;
+
+  if (lua_istable(L, 2)) {
+    lua_getfield(L, 2, "x");
+    lua_getfield(L, 2, "y");
+    goalX = luaL_optinteger(L, -2, s->x);
+    goalY = luaL_optinteger(L, -1, s->y);
+    lua_pop(L, 2);
+  } else {
+    goalX = luaL_checkinteger(L, 2);
+    goalY = luaL_checkinteger(L, 3);
+  }
+
+  if (!s->collisions_enabled) {
+    s->x = goalX;
+    s->y = goalY;
+    lua_pushinteger(L, goalX);
+    lua_pushinteger(L, goalY);
+    lua_newtable(L);
+    return 3;
+  }
+
+  int startX = s->x, startY = s->y;
+  int dx = goalX - startX;
+  int dy = goalY - startY;
+
+  lua_createtable(L, 0, 0); // collisions table
+  int coll_count = 0;
+
+  // Try X movement first, then Y (axis-separated resolution)
+  int finalX = startX, finalY = startY;
+
+  // --- X axis ---
+  if (dx != 0) {
+    lua_sprite_t *hit = NULL;
+    if (!sprite_overlaps_any_at(s, goalX, startY, &hit)) {
+      finalX = goalX;
+    } else {
+      int step = (dx > 0) ? 1 : -1;
+      int best = startX;
+      // Simple sweep: step pixel by pixel (capped at 320 iterations max)
+      int steps = abs(dx);
+      if (steps > FB_WIDTH) steps = FB_WIDTH;
+      for (int i = 1; i <= steps; i++) {
+        int testX = startX + step * i;
+        if (sprite_overlaps_any_at(s, testX, startY, &hit)) {
+          // Record collision
+          coll_count++;
+          lua_createtable(L, 0, 6);
+
+          // sprite (self)
+          lua_pushlightuserdata(L, s);
+          lua_setfield(L, -2, "sprite");
+          // other
+          lua_pushlightuserdata(L, hit);
+          lua_setfield(L, -2, "other");
+          // type (default: slide)
+          lua_pushinteger(L, COLLISION_SLIDE);
+          lua_setfield(L, -2, "type");
+          // normal
+          lua_createtable(L, 0, 2);
+          lua_pushinteger(L, dx > 0 ? -1 : 1);
+          lua_setfield(L, -2, "x");
+          lua_pushinteger(L, 0);
+          lua_setfield(L, -2, "y");
+          lua_setfield(L, -2, "normal");
+          // touch point
+          lua_createtable(L, 0, 2);
+          lua_pushinteger(L, best);
+          lua_setfield(L, -2, "x");
+          lua_pushinteger(L, startY);
+          lua_setfield(L, -2, "y");
+          lua_setfield(L, -2, "touch");
+
+          lua_rawseti(L, -2, coll_count);
+          break;
+        }
+        best = testX;
+      }
+      finalX = best;
+    }
+  }
+
+  // --- Y axis ---
+  if (dy != 0) {
+    lua_sprite_t *hit = NULL;
+    if (!sprite_overlaps_any_at(s, finalX, goalY, &hit)) {
+      finalY = goalY;
+    } else {
+      int step = (dy > 0) ? 1 : -1;
+      int best = startY;
+      int steps = abs(dy);
+      if (steps > FB_HEIGHT) steps = FB_HEIGHT;
+      for (int i = 1; i <= steps; i++) {
+        int testY = startY + step * i;
+        if (sprite_overlaps_any_at(s, finalX, testY, &hit)) {
+          coll_count++;
+          lua_createtable(L, 0, 6);
+
+          lua_pushlightuserdata(L, s);
+          lua_setfield(L, -2, "sprite");
+          lua_pushlightuserdata(L, hit);
+          lua_setfield(L, -2, "other");
+          lua_pushinteger(L, COLLISION_SLIDE);
+          lua_setfield(L, -2, "type");
+          lua_createtable(L, 0, 2);
+          lua_pushinteger(L, 0);
+          lua_setfield(L, -2, "x");
+          lua_pushinteger(L, dy > 0 ? -1 : 1);
+          lua_setfield(L, -2, "y");
+          lua_setfield(L, -2, "normal");
+          lua_createtable(L, 0, 2);
+          lua_pushinteger(L, finalX);
+          lua_setfield(L, -2, "x");
+          lua_pushinteger(L, best);
+          lua_setfield(L, -2, "y");
+          lua_setfield(L, -2, "touch");
+
+          lua_rawseti(L, -2, coll_count);
+          break;
+        }
+        best = testY;
+      }
+      finalY = best;
+    }
+  }
+
+  s->x = finalX;
+  s->y = finalY;
+
+  lua_pushinteger(L, finalX);
+  lua_pushinteger(L, finalY);
+  lua_pushvalue(L, -3); // push the collisions table
+  lua_remove(L, -4);    // remove the original table position
+  return 3;
+}
+
+// sprite:collisionResponse(other) — returns response type string
+// Default is "slide". Apps can override this method in Lua.
+static int l_sprite_collisionResponse(lua_State *L) {
+  (void)check_sprite(L, 1); // self
+  // Default response is "slide"
+  lua_pushstring(L, "slide");
+  return 1;
+}
+
 static int l_sprite_setClipRect(lua_State *L) {
   lua_sprite_t *s = check_sprite(L, 1);
   
@@ -1988,10 +2212,18 @@ static bool sprite_line_intersect(int x1, int y1, int x2, int y2,
 }
 
 static int l_sprite_querySpritesAlongLine(lua_State *L) {
-  int x1 = luaL_checkinteger(L, 1);
-  int y1 = luaL_checkinteger(L, 2);
-  int x2 = luaL_checkinteger(L, 3);
-  int y2 = luaL_checkinteger(L, 4);
+  int x1, y1, x2, y2;
+  if (lua_istable(L, 1)) {
+    lua_getfield(L, 1, "x1"); x1 = luaL_checkinteger(L, -1); lua_pop(L, 1);
+    lua_getfield(L, 1, "y1"); y1 = luaL_checkinteger(L, -1); lua_pop(L, 1);
+    lua_getfield(L, 1, "x2"); x2 = luaL_checkinteger(L, -1); lua_pop(L, 1);
+    lua_getfield(L, 1, "y2"); y2 = luaL_checkinteger(L, -1); lua_pop(L, 1);
+  } else {
+    x1 = luaL_checkinteger(L, 1);
+    y1 = luaL_checkinteger(L, 2);
+    x2 = luaL_checkinteger(L, 3);
+    y2 = luaL_checkinteger(L, 4);
+  }
   
   lua_createtable(L, 0, 0);
   int count = 0;
@@ -2056,10 +2288,18 @@ static bool sprite_line_rect_intersection(int x1, int y1, int x2, int y2,
 }
 
 static int l_sprite_querySpriteInfoAlongLine(lua_State *L) {
-  int x1 = luaL_checkinteger(L, 1);
-  int y1 = luaL_checkinteger(L, 2);
-  int x2 = luaL_checkinteger(L, 3);
-  int y2 = luaL_checkinteger(L, 4);
+  int x1, y1, x2, y2;
+  if (lua_istable(L, 1)) {
+    lua_getfield(L, 1, "x1"); x1 = luaL_checkinteger(L, -1); lua_pop(L, 1);
+    lua_getfield(L, 1, "y1"); y1 = luaL_checkinteger(L, -1); lua_pop(L, 1);
+    lua_getfield(L, 1, "x2"); x2 = luaL_checkinteger(L, -1); lua_pop(L, 1);
+    lua_getfield(L, 1, "y2"); y2 = luaL_checkinteger(L, -1); lua_pop(L, 1);
+  } else {
+    x1 = luaL_checkinteger(L, 1);
+    y1 = luaL_checkinteger(L, 2);
+    x2 = luaL_checkinteger(L, 3);
+    y2 = luaL_checkinteger(L, 4);
+  }
   
   lua_createtable(L, 0, 0);
   int count = 0;
@@ -2088,6 +2328,245 @@ static int l_sprite_querySpriteInfoAlongLine(lua_State *L) {
   return 1;
 }
 
+// ── Stencil Methods ──────────────────────────────────────────────────────────
+
+static int l_sprite_setStencilImage(lua_State *L) {
+  lua_sprite_t *s = check_sprite(L, 1);
+  s->stencil = (lua_image_t *)luaL_checkudata(L, 2, GRAPHICS_IMAGE_MT);
+  // arg 3 (tile) is ignored — reserved for future use
+  return 0;
+}
+
+static int l_sprite_clearStencil(lua_State *L) {
+  lua_sprite_t *s = check_sprite(L, 1);
+  s->stencil = NULL;
+  s->has_stencil_pattern = false;
+  return 0;
+}
+
+// 8x8 ordered (Bayer) dither matrix
+static const uint8_t s_bayer8x8[8][8] = {
+  { 0,  32,  8, 40,  2, 34, 10, 42},
+  {48,  16, 56, 24, 50, 18, 58, 26},
+  {12,  44,  4, 36, 14, 46,  6, 38},
+  {60,  28, 52, 20, 62, 30, 54, 22},
+  { 3,  35, 11, 43,  1, 33,  9, 41},
+  {51,  19, 59, 27, 49, 17, 57, 25},
+  {15,  47,  7, 39, 13, 45,  5, 37},
+  {63,  31, 55, 23, 61, 29, 53, 21}
+};
+
+static int l_sprite_setStencilPattern(lua_State *L) {
+  lua_sprite_t *s = check_sprite(L, 1);
+  float level = (float)luaL_checknumber(L, 2);
+  if (level < 0.0f) level = 0.0f;
+  if (level > 1.0f) level = 1.0f;
+  // ditherType (arg 3) is ignored for now
+
+  int threshold = (int)(level * 64.0f);
+  for (int row = 0; row < 8; row++) {
+    uint8_t bits = 0;
+    for (int col = 0; col < 8; col++) {
+      if ((int)s_bayer8x8[row][col] < threshold)
+        bits |= (1 << col);
+    }
+    s->stencil_pattern[row] = bits;
+  }
+  s->has_stencil_pattern = true;
+  return 0;
+}
+
+// Global graphics.setStencilPattern({row1, row2, ..., row8})
+static int l_graphics_setStencilPattern(lua_State *L) {
+  if (lua_isnil(L, 1)) {
+    s_has_global_stencil = false;
+    return 0;
+  }
+  luaL_checktype(L, 1, LUA_TTABLE);
+  for (int i = 0; i < 8; i++) {
+    lua_rawgeti(L, 1, i + 1);
+    s_global_stencil[i] = (uint8_t)luaL_optinteger(L, -1, 0);
+    lua_pop(L, 1);
+  }
+  s_has_global_stencil = true;
+  return 0;
+}
+
+// ── Alpha (Pixel-Perfect) Collision ─────────────────────────────────────────
+
+static int l_sprite_alphaCollision(lua_State *L) {
+  lua_sprite_t *a = check_sprite(L, 1);
+  lua_sprite_t *b = (lua_sprite_t *)luaL_checkudata(L, 2, GRAPHICS_SPRITE_MT);
+
+  // Get image data for each sprite
+  const uint16_t *a_data = a->frame_data ? a->frame_data : (a->image ? a->image->data : NULL);
+  int a_w = a->frame_data ? a->frame_w : a->width;
+  int a_h = a->frame_data ? a->frame_h : a->height;
+
+  const uint16_t *b_data = b->frame_data ? b->frame_data : (b->image ? b->image->data : NULL);
+  int b_w = b->frame_data ? b->frame_w : b->width;
+  int b_h = b->frame_data ? b->frame_h : b->height;
+
+  // If either sprite has no image data, fall back to AABB overlap
+  if (!a_data || !b_data || a_w <= 0 || a_h <= 0 || b_w <= 0 || b_h <= 0) {
+    // Simple AABB overlap check
+    bool overlap = !(a->x + a_w <= b->x || b->x + b_w <= a->x ||
+                     a->y + a_h <= b->y || b->y + b_h <= a->y);
+    lua_pushboolean(L, overlap);
+    return 1;
+  }
+
+  // If either sprite is scaled or rotated, fall back to AABB
+  if (a->rotation != 0.0f || b->rotation != 0.0f ||
+      (a->scale != 1.0f && !a->use_nn_scaling) ||
+      (b->scale != 1.0f && !b->use_nn_scaling) ||
+      a->scale_y != 1.0f || b->scale_y != 1.0f) {
+    bool overlap = !(a->x + a_w <= b->x || b->x + b_w <= a->x ||
+                     a->y + a_h <= b->y || b->y + b_h <= a->y);
+    lua_pushboolean(L, overlap);
+    return 1;
+  }
+
+  // Compute AABB overlap region in screen coordinates
+  int overlap_left   = (a->x > b->x) ? a->x : b->x;
+  int overlap_top    = (a->y > b->y) ? a->y : b->y;
+  int overlap_right  = ((a->x + a_w) < (b->x + b_w)) ? (a->x + a_w) : (b->x + b_w);
+  int overlap_bottom = ((a->y + a_h) < (b->y + b_h)) ? (a->y + a_h) : (b->y + b_h);
+
+  if (overlap_left >= overlap_right || overlap_top >= overlap_bottom) {
+    lua_pushboolean(L, false);
+    return 1;
+  }
+
+  uint16_t a_trans = a->transparent_color ? a->transparent_color : display_get_transparent_color();
+  uint16_t b_trans = b->transparent_color ? b->transparent_color : display_get_transparent_color();
+
+  for (int sy = overlap_top; sy < overlap_bottom; sy++) {
+    for (int sx = overlap_left; sx < overlap_right; sx++) {
+      // Map screen coord to sprite A's local coord
+      int a_lx = sx - a->x;
+      int a_ly = sy - a->y;
+      if (a->flip_x) a_lx = a_w - 1 - a_lx;
+      if (a->flip_y) a_ly = a_h - 1 - a_ly;
+
+      // Map screen coord to sprite B's local coord
+      int b_lx = sx - b->x;
+      int b_ly = sy - b->y;
+      if (b->flip_x) b_lx = b_w - 1 - b_lx;
+      if (b->flip_y) b_ly = b_h - 1 - b_ly;
+
+      uint16_t a_px = a_data[a_ly * a_w + a_lx];
+      uint16_t b_px = b_data[b_ly * b_w + b_lx];
+
+      bool a_opaque = (a_trans == 0) || (a_px != a_trans);
+      bool b_opaque = (b_trans == 0) || (b_px != b_trans);
+
+      if (a_opaque && b_opaque) {
+        lua_pushboolean(L, true);
+        return 1;
+      }
+    }
+  }
+
+  lua_pushboolean(L, false);
+  return 1;
+}
+
+// ── Clip Rects In Range (class-level) ───────────────────────────────────────
+
+static int l_sprite_setClipRectsInRange(lua_State *L) {
+  int clip_x, clip_y, clip_w, clip_h, startz, endz;
+
+  if (lua_istable(L, 1)) {
+    // Table variant: ({x, y, w, h}, startz, endz)
+    lua_getfield(L, 1, "x"); clip_x = luaL_checkinteger(L, -1); lua_pop(L, 1);
+    lua_getfield(L, 1, "y"); clip_y = luaL_checkinteger(L, -1); lua_pop(L, 1);
+    lua_getfield(L, 1, "w"); clip_w = luaL_checkinteger(L, -1); lua_pop(L, 1);
+    lua_getfield(L, 1, "h"); clip_h = luaL_checkinteger(L, -1); lua_pop(L, 1);
+    startz = luaL_checkinteger(L, 2);
+    endz   = luaL_checkinteger(L, 3);
+  } else {
+    // Numeric variant: (x, y, w, h, startz, endz)
+    clip_x = luaL_checkinteger(L, 1);
+    clip_y = luaL_checkinteger(L, 2);
+    clip_w = luaL_checkinteger(L, 3);
+    clip_h = luaL_checkinteger(L, 4);
+    startz = luaL_checkinteger(L, 5);
+    endz   = luaL_checkinteger(L, 6);
+  }
+
+  for (int i = 0; i < s_sprite_count; i++) {
+    lua_sprite_t *s = s_sprites[i];
+    if (s->z_index >= startz && s->z_index <= endz) {
+      s->clip_x = clip_x;
+      s->clip_y = clip_y;
+      s->clip_w = clip_w;
+      s->clip_h = clip_h;
+      s->has_clip = true;
+    }
+  }
+  return 0;
+}
+
+static int l_sprite_clearClipRectsInRange(lua_State *L) {
+  int startz = luaL_checkinteger(L, 1);
+  int endz   = luaL_checkinteger(L, 2);
+
+  for (int i = 0; i < s_sprite_count; i++) {
+    lua_sprite_t *s = s_sprites[i];
+    if (s->z_index >= startz && s->z_index <= endz) {
+      s->has_clip = false;
+    }
+  }
+  return 0;
+}
+
+// ── Empty Collision Sprite (class-level) ────────────────────────────────────
+
+static int l_sprite_addEmptyCollisionSprite(lua_State *L) {
+  int x, y, w, h;
+
+  if (lua_istable(L, 1)) {
+    lua_getfield(L, 1, "x"); x = luaL_checkinteger(L, -1); lua_pop(L, 1);
+    lua_getfield(L, 1, "y"); y = luaL_checkinteger(L, -1); lua_pop(L, 1);
+    lua_getfield(L, 1, "w"); w = luaL_checkinteger(L, -1); lua_pop(L, 1);
+    lua_getfield(L, 1, "h"); h = luaL_checkinteger(L, -1); lua_pop(L, 1);
+  } else {
+    x = luaL_checkinteger(L, 1);
+    y = luaL_checkinteger(L, 2);
+    w = luaL_checkinteger(L, 3);
+    h = luaL_checkinteger(L, 4);
+  }
+
+  if (s_sprite_count >= MAX_SPRITES)
+    return luaL_error(L, "max sprites reached");
+
+  lua_sprite_t *s = (lua_sprite_t *)lua_newuserdata(L, sizeof(lua_sprite_t));
+  memset(s, 0, sizeof(lua_sprite_t));
+  s->x = x;
+  s->y = y;
+  s->width = w;
+  s->height = h;
+  s->scale = 1.0f;
+  s->scale_y = 1.0f;
+  s->scale_nn = 1;
+  s->visible = false;
+  s->collisions_enabled = true;
+  s->collide_x = 0;
+  s->collide_y = 0;
+  s->collide_w = w;
+  s->collide_h = h;
+  s->updates_enabled = true;
+  s->redraws_on_image_change = true;
+  s->opaque = true;
+
+  luaL_setmetatable(L, GRAPHICS_SPRITE_MT);
+
+  s_sprites[s_sprite_count++] = s;
+
+  return 1;  // return the sprite userdata
+}
+
 static const luaL_Reg l_sprite_lib[] = {
     {"new", l_sprite_new},
     {"addSprite", l_sprite_addSprite},
@@ -2102,6 +2581,9 @@ static const luaL_Reg l_sprite_lib[] = {
     {"querySpritesInRect", l_sprite_querySpritesInRect},
     {"querySpritesAlongLine", l_sprite_querySpritesAlongLine},
     {"querySpriteInfoAlongLine", l_sprite_querySpriteInfoAlongLine},
+    {"setClipRectsInRange", l_sprite_setClipRectsInRange},
+    {"clearClipRectsInRange", l_sprite_clearClipRectsInRange},
+    {"addEmptyCollisionSprite", l_sprite_addEmptyCollisionSprite},
     {NULL, NULL}};
 
 // ── Spritesheet System ─────────────────────────────────────────────────────────
@@ -2261,6 +2743,7 @@ static const luaL_Reg l_graphics_lib[] = {
     {"drawPlayfield", l_graphics_drawPlayfield},
     {"updateDrawParticles", l_graphics_updateDrawParticles},
     {"draw3DWireframe", l_graphics_draw3DWireframe},
+    {"setStencilPattern", l_graphics_setStencilPattern},
     {NULL, NULL}};
 
 // ── Animation System ─────────────────────────────────────────────────────────
@@ -2898,9 +3381,102 @@ static const luaL_Reg l_animation_blinker_lib[] = {
     {"stopAll", l_animation_blinker_stopAll},
     {NULL, NULL}};
 
+// ── picocalc.graphics.font.* ─────────────────────────────────────────────────
+
+#define GRAPHICS_FONT_MT "picocalc.graphics.font"
+
+typedef struct {
+  int font_id;
+  int cell_width;
+  int cell_height;
+  const char *name;
+} lua_font_t;
+
+static lua_font_t *check_font(lua_State *L, int idx) {
+  return (lua_font_t *)luaL_checkudata(L, idx, GRAPHICS_FONT_MT);
+}
+
+static int l_font_new(lua_State *L) {
+  const char *name = luaL_checkstring(L, 1);
+  int font_id = -1;
+  int w = 0, h = 0;
+
+  if (strcmp(name, "6x8") == 0) { font_id = 0; w = 6; h = 8; }
+  else if (strcmp(name, "8x12") == 0) { font_id = 1; w = 8; h = 12; }
+  else if (strcmp(name, "scientifica") == 0) { font_id = 2; w = 6; h = 12; }
+  else if (strcmp(name, "scientifica-bold") == 0) { font_id = 3; w = 6; h = 12; }
+  else return luaL_error(L, "unknown font: %s", name);
+
+  lua_font_t *f = (lua_font_t *)lua_newuserdata(L, sizeof(lua_font_t));
+  f->font_id = font_id;
+  f->cell_width = w;
+  f->cell_height = h;
+  f->name = name;
+  luaL_setmetatable(L, GRAPHICS_FONT_MT);
+  return 1;
+}
+
+static int l_font_drawText(lua_State *L) {
+  lua_font_t *f = check_font(L, 1);
+  int x = luaL_checkinteger(L, 2);
+  int y = luaL_checkinteger(L, 3);
+  const char *text = luaL_checkstring(L, 4);
+  uint16_t fg = l_checkcolor(L, 5);
+  uint16_t bg = (lua_gettop(L) >= 6) ? l_checkcolor(L, 6) : COLOR_BLACK;
+
+  int prev_font = display_get_font();
+  display_set_font(f->font_id);
+  int width = display_draw_text(x, y, text, fg, bg);
+  display_set_font(prev_font);
+
+  lua_pushinteger(L, width);
+  return 1;
+}
+
+static int l_font_getHeight(lua_State *L) {
+  lua_font_t *f = check_font(L, 1);
+  lua_pushinteger(L, f->cell_height);
+  return 1;
+}
+
+static int l_font_getWidth(lua_State *L) {
+  lua_font_t *f = check_font(L, 1);
+  lua_pushinteger(L, f->cell_width);
+  return 1;
+}
+
+static int l_font_getTextWidth(lua_State *L) {
+  lua_font_t *f = check_font(L, 1);
+  const char *text = luaL_checkstring(L, 2);
+  int len = 0;
+  while (*text++) len++;
+  lua_pushinteger(L, len * f->cell_width);
+  return 1;
+}
+
+static int l_font_getName(lua_State *L) {
+  lua_font_t *f = check_font(L, 1);
+  lua_pushstring(L, f->name);
+  return 1;
+}
+
+static const luaL_Reg l_font_methods[] = {
+    {"drawText", l_font_drawText},
+    {"getHeight", l_font_getHeight},
+    {"getWidth", l_font_getWidth},
+    {"getTextWidth", l_font_getTextWidth},
+    {"getName", l_font_getName},
+    {NULL, NULL}};
+
+static const luaL_Reg l_font_lib[] = {
+    {"new", l_font_new},
+    {NULL, NULL}};
+
 void lua_bridge_graphics_init(lua_State *L) {
   s_sprite_count = 0;  // reset on each app launch
   s_blinker_count = 0;  // reset blinkers on each app launch
+  s_has_global_stencil = false;
+  memset(s_global_stencil, 0, sizeof(s_global_stencil));
 
   // Install Graphics Image metatable
   luaL_newmetatable(L, GRAPHICS_IMAGE_MT);
@@ -2969,6 +3545,13 @@ void lua_bridge_graphics_init(lua_State *L) {
   lua_setfield(L, -2, "__gc");
   lua_pop(L, 1);
 
+  // Install Graphics Font metatable
+  luaL_newmetatable(L, GRAPHICS_FONT_MT);
+  lua_pushvalue(L, -1);
+  lua_setfield(L, -2, "__index");
+  luaL_setfuncs(L, l_font_methods, 0);
+  lua_pop(L, 1);
+
   // Build picocalc.graphics table
   lua_newtable(L);
   luaL_setfuncs(L, l_graphics_lib, 0);
@@ -3004,6 +3587,10 @@ void lua_bridge_graphics_init(lua_State *L) {
   lua_setfield(L, -2, "blinker");
 
   lua_setfield(L, -2, "animation");  // graphics["animation"] = animation table
+
+  lua_newtable(L);
+  luaL_setfuncs(L, l_font_lib, 0);
+  lua_setfield(L, -2, "font");
 
   lua_setfield(L, -2, "graphics");   // picocalc["graphics"] = graphics table
 }

@@ -37,6 +37,7 @@ extern void umm_free(void *ptr);
 #define MBEDTLS_ECP_C
 #define MBEDTLS_ECP_DP_SECP256R1_ENABLED
 #define MBEDTLS_ECP_DP_SECP384R1_ENABLED   // P-384: used by Let's Encrypt E5/E6 and Wikipedia CDN
+#define MBEDTLS_ECP_DP_CURVE25519_ENABLED  // X25519 for SSH curve25519-sha256 kex
 #define MBEDTLS_ECDH_C
 #define MBEDTLS_ECDSA_C
 #define MBEDTLS_X509_CRT_PARSE_C
@@ -56,6 +57,7 @@ extern void umm_free(void *ptr);
 #define MBEDTLS_GCM_C
 #define MBEDTLS_CIPHER_C
 #define MBEDTLS_CIPHER_MODE_CBC
+#define MBEDTLS_CIPHER_MODE_CTR            // AES-CTR for SSH transport
 #define MBEDTLS_MD_C
 #define MBEDTLS_ERROR_C
 

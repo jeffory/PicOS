@@ -45,6 +45,7 @@ typedef struct {
 
 void tcp_init(void);
 tcp_conn_t *tcp_alloc(void);
+tcp_conn_t *tcp_get_conn(int idx);
 void tcp_free(tcp_conn_t *c);
 bool tcp_connect(tcp_conn_t *c, const char *host, uint16_t port, bool use_ssl);
 int  tcp_write(tcp_conn_t *c, const void *buf, int len);

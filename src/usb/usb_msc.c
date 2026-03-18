@@ -1,4 +1,5 @@
 #include "usb_msc.h"
+#include "hardware/watchdog.h"
 #include "pico/stdlib.h"
 #include "tusb.h"
 
@@ -104,6 +105,7 @@ void usb_msc_enter_mode(void) {
     }
 
     sleep_us(100); // 100µs base interval — lets USB IRQs fire between iterations
+    watchdog_update(); // keep watchdog alive while in USB mode
   }
 
   // 4. Deactivate MSC and remount

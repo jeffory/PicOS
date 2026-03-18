@@ -7,6 +7,7 @@ terminal_t* terminal_new(int cols, int rows, int scrollback_lines) {
     if (cols <= 0) cols = TERM_DEFAULT_COLS;
     if (rows <= 0) rows = TERM_DEFAULT_ROWS;
     if (scrollback_lines <= 0) scrollback_lines = TERM_DEFAULT_SCROLLBACK;
+    if (scrollback_lines > TERM_MAX_SCROLLBACK) scrollback_lines = TERM_MAX_SCROLLBACK;
 
     terminal_t* term = (terminal_t*)umm_malloc(sizeof(terminal_t));
     if (!term) return NULL;
@@ -19,19 +20,23 @@ terminal_t* terminal_new(int cols, int rows, int scrollback_lines) {
     term->fg_color = 0xFFFF;
     term->bg_color = 0x0000;
     term->current_attr = 0;
+    term->font = TERM_FONT_SCIENTIFICA;
+    term->scroll_top = 0;
+    term->scroll_bottom = rows - 1;
     term->full_dirty = true;
     term->scrollback_pos = 0;
     term->scrollback_count = 0;
     term->scrollback_offset = 0;
 
-    int cell_count = cols * rows;
+    size_t cell_count = (size_t)cols * rows;
+    size_t sb_count = (size_t)scrollback_lines * cols;
     term->cells = (uint16_t*)umm_malloc(cell_count * sizeof(uint16_t));
     term->prev_cells = (uint16_t*)umm_malloc(cell_count * sizeof(uint16_t));
     term->fg_colors = (uint16_t*)umm_malloc(cell_count * sizeof(uint16_t));
     term->bg_colors = (uint16_t*)umm_malloc(cell_count * sizeof(uint16_t));
-    term->scrollback = (uint16_t*)umm_malloc(scrollback_lines * cols * sizeof(uint16_t));
-    term->scrollback_fg = (uint16_t*)umm_malloc(scrollback_lines * cols * sizeof(uint16_t));
-    term->scrollback_bg = (uint16_t*)umm_malloc(scrollback_lines * cols * sizeof(uint16_t));
+    term->scrollback = (uint16_t*)umm_malloc(sb_count * sizeof(uint16_t));
+    term->scrollback_fg = (uint16_t*)umm_malloc(sb_count * sizeof(uint16_t));
+    term->scrollback_bg = (uint16_t*)umm_malloc(sb_count * sizeof(uint16_t));
     term->row_dirty = (uint8_t*)umm_malloc(rows * sizeof(uint8_t));
 
     if (!term->cells || !term->prev_cells || !term->fg_colors || !term->bg_colors ||
@@ -42,12 +47,12 @@ terminal_t* terminal_new(int cols, int rows, int scrollback_lines) {
 
     memset(term->cells, 0, cell_count * sizeof(uint16_t));
     memset(term->prev_cells, 0xFF, cell_count * sizeof(uint16_t));
-    for (int i = 0; i < cell_count; i++) {
+    for (size_t i = 0; i < cell_count; i++) {
         term->fg_colors[i] = 0xFFFF;
         term->bg_colors[i] = 0x0000;
     }
-    memset(term->scrollback, 0, scrollback_lines * cols * sizeof(uint16_t));
-    for (int i = 0; i < scrollback_lines * cols; i++) {
+    memset(term->scrollback, 0, sb_count * sizeof(uint16_t));
+    for (size_t i = 0; i < sb_count; i++) {
         term->scrollback_fg[i] = 0xFFFF;
         term->scrollback_bg[i] = 0x0000;
     }
@@ -73,12 +78,14 @@ void terminal_clear(terminal_t* term) {
     if (!term) return;
     int cell_count = term->cols * term->rows;
     for (int i = 0; i < cell_count; i++) {
-        term->cells[i] = 0x0020;
+        term->cells[i] = TERM_BLANK_CELL;
         term->fg_colors[i] = term->fg_color;
         term->bg_colors[i] = term->bg_color;
     }
     term->cursor_x = 0;
     term->cursor_y = 0;
+    term->scroll_top = 0;
+    term->scroll_bottom = term->rows - 1;
     term->full_dirty = true;
     memset(term->row_dirty, 1, term->rows);
     term->scrollback_offset = 0;
@@ -88,7 +95,7 @@ void terminal_clearRow(terminal_t* term, int row) {
     if (!term || row < 0 || row >= term->rows) return;
     int base = row * term->cols;
     for (int x = 0; x < term->cols; x++) {
-        term->cells[base + x] = 0x0020;
+        term->cells[base + x] = TERM_BLANK_CELL;
         term->fg_colors[base + x] = term->fg_color;
         term->bg_colors[base + x] = term->bg_color;
     }
@@ -113,10 +120,11 @@ void terminal_putChar(terminal_t* term, char c) {
 
     if (c == '\n') {
         term->cursor_x = 0;
-        term->cursor_y++;
-        if (term->cursor_y >= term->rows) {
-            term->cursor_y = term->rows - 1;
+        if (term->cursor_y >= term->scroll_bottom) {
+            term->cursor_y = term->scroll_bottom;
             terminal_scrollUp(term);
+        } else {
+            term->cursor_y++;
         }
         return;
     }
@@ -144,10 +152,11 @@ void terminal_putChar(terminal_t* term, char c) {
 
     if (term->cursor_x >= term->cols) {
         term->cursor_x = 0;
-        term->cursor_y++;
-        if (term->cursor_y >= term->rows) {
-            term->cursor_y = term->rows - 1;
+        if (term->cursor_y >= term->scroll_bottom) {
+            term->cursor_y = term->scroll_bottom;
             terminal_scrollUp(term);
+        } else {
+            term->cursor_y++;
         }
     }
 
@@ -221,44 +230,65 @@ void terminal_scroll(terminal_t* term, int lines) {
 void terminal_scrollUp(terminal_t* term) {
     if (!term) return;
 
-    terminal_addScrollback(term);
+    int top = term->scroll_top;
+    int bot = term->scroll_bottom;
+    bool full_screen = (top == 0 && bot == term->rows - 1);
+
+    if (full_screen) {
+        terminal_addScrollback(term);
+    }
 
     int line_size = term->cols * sizeof(uint16_t);
-    memmove(&term->cells[0], &term->cells[term->cols], (term->rows - 1) * line_size);
-    memmove(&term->fg_colors[0], &term->fg_colors[term->cols], (term->rows - 1) * line_size);
-    memmove(&term->bg_colors[0], &term->bg_colors[term->cols], (term->rows - 1) * line_size);
+    int top_offset = top * term->cols;
+    int region_lines = bot - top; // lines to move (bot - top)
+    memmove(&term->cells[top_offset], &term->cells[top_offset + term->cols], region_lines * line_size);
+    memmove(&term->fg_colors[top_offset], &term->fg_colors[top_offset + term->cols], region_lines * line_size);
+    memmove(&term->bg_colors[top_offset], &term->bg_colors[top_offset + term->cols], region_lines * line_size);
 
-    int last_row = (term->rows - 1) * term->cols;
+    int last_row = bot * term->cols;
     for (int x = 0; x < term->cols; x++) {
-        term->cells[last_row + x] = 0x0020;
+        term->cells[last_row + x] = TERM_BLANK_CELL;
         term->fg_colors[last_row + x] = term->fg_color;
         term->bg_colors[last_row + x] = term->bg_color;
     }
 
-    term->full_dirty = true;
-    memset(term->row_dirty, 1, term->rows);
+    for (int r = top; r <= bot; r++) {
+        term->row_dirty[r] = 1;
+    }
+    if (full_screen) {
+        term->full_dirty = true;
+    }
 }
 
 void terminal_scrollDown(terminal_t* term) {
     if (!term) return;
 
+    int top = term->scroll_top;
+    int bot = term->scroll_bottom;
     int line_size = term->cols * sizeof(uint16_t);
-    memmove(&term->cells[term->cols], &term->cells[0], (term->rows - 1) * line_size);
-    memmove(&term->fg_colors[term->cols], &term->fg_colors[0], (term->rows - 1) * line_size);
-    memmove(&term->bg_colors[term->cols], &term->bg_colors[0], (term->rows - 1) * line_size);
+    int top_offset = top * term->cols;
+    int region_lines = bot - top; // lines to move
+    memmove(&term->cells[top_offset + term->cols], &term->cells[top_offset], region_lines * line_size);
+    memmove(&term->fg_colors[top_offset + term->cols], &term->fg_colors[top_offset], region_lines * line_size);
+    memmove(&term->bg_colors[top_offset + term->cols], &term->bg_colors[top_offset], region_lines * line_size);
 
+    int top_row = top * term->cols;
     for (int x = 0; x < term->cols; x++) {
-        term->cells[x] = 0x0020;
-        term->fg_colors[x] = term->fg_color;
-        term->bg_colors[x] = term->bg_color;
+        term->cells[top_row + x] = TERM_BLANK_CELL;
+        term->fg_colors[top_row + x] = term->fg_color;
+        term->bg_colors[top_row + x] = term->bg_color;
     }
 
-    term->full_dirty = true;
-    memset(term->row_dirty, 1, term->rows);
+    for (int r = top; r <= bot; r++) {
+        term->row_dirty[r] = 1;
+    }
+    if (top == 0 && bot == term->rows - 1) {
+        term->full_dirty = true;
+    }
 }
 
 static void terminal_erase_cell(terminal_t* term, int idx) {
-    term->cells[idx] = 0x0020;
+    term->cells[idx] = TERM_BLANK_CELL;
     term->fg_colors[idx] = term->fg_color;
     term->bg_colors[idx] = term->bg_color;
 }
@@ -418,4 +448,65 @@ bool terminal_isFullDirty(terminal_t* term) {
 void terminal_clearFullDirty(terminal_t* term) {
     if (!term) return;
     term->full_dirty = false;
+}
+
+void terminal_setFont(terminal_t* term, enum terminal_font font) {
+    if (!term) return;
+    if (term->font != font) {
+        term->font = font;
+        term->full_dirty = true;
+    }
+}
+
+enum terminal_font terminal_getFont(terminal_t* term) {
+    return term ? term->font : TERM_FONT_SCIENTIFICA;
+}
+
+void terminal_setScrollRegion(terminal_t* term, int top, int bottom) {
+    if (!term) return;
+    if (top < 0) top = 0;
+    if (bottom >= term->rows) bottom = term->rows - 1;
+    if (top >= bottom) return;  // invalid range
+    term->scroll_top = top;
+    term->scroll_bottom = bottom;
+}
+
+void terminal_insertChars(terminal_t* term, int count) {
+    if (!term || count <= 0) return;
+    int y = term->cursor_y;
+    int x = term->cursor_x;
+    int base = y * term->cols;
+    int remaining = term->cols - x;
+    if (count > remaining) count = remaining;
+    // Shift cells right from cursor position
+    memmove(&term->cells[base + x + count], &term->cells[base + x], (remaining - count) * sizeof(uint16_t));
+    memmove(&term->fg_colors[base + x + count], &term->fg_colors[base + x], (remaining - count) * sizeof(uint16_t));
+    memmove(&term->bg_colors[base + x + count], &term->bg_colors[base + x], (remaining - count) * sizeof(uint16_t));
+    // Fill inserted positions with blanks
+    for (int i = 0; i < count; i++) {
+        term->cells[base + x + i] = TERM_BLANK_CELL;
+        term->fg_colors[base + x + i] = term->fg_color;
+        term->bg_colors[base + x + i] = term->bg_color;
+    }
+    term->row_dirty[y] = 1;
+}
+
+void terminal_deleteChars(terminal_t* term, int count) {
+    if (!term || count <= 0) return;
+    int y = term->cursor_y;
+    int x = term->cursor_x;
+    int base = y * term->cols;
+    int remaining = term->cols - x;
+    if (count > remaining) count = remaining;
+    // Shift cells left
+    memmove(&term->cells[base + x], &term->cells[base + x + count], (remaining - count) * sizeof(uint16_t));
+    memmove(&term->fg_colors[base + x], &term->fg_colors[base + x + count], (remaining - count) * sizeof(uint16_t));
+    memmove(&term->bg_colors[base + x], &term->bg_colors[base + x + count], (remaining - count) * sizeof(uint16_t));
+    // Fill end with blanks
+    for (int i = remaining - count; i < remaining; i++) {
+        term->cells[base + x + i] = TERM_BLANK_CELL;
+        term->fg_colors[base + x + i] = term->fg_color;
+        term->bg_colors[base + x + i] = term->bg_color;
+    }
+    term->row_dirty[y] = 1;
 }
