@@ -32,15 +32,28 @@ static bool s_msc_active = false;
 // USB MSC Entry point
 // --------------------------------------------------------------------
 
+// Declared in main.c - pauses Core 1's background tasks (WiFi, HTTP, audio)
+extern volatile bool g_core1_pause;
+extern volatile bool g_core1_paused;
+
 void usb_msc_enter_mode(void) {
   printf("[USB MSC] Entering USB Mass Storage mode\n");
 
-  // 1. Disconnect WiFi to prevent SPI contention with USB
+  // 1. Disconnect WiFi and pause Core 1 to prevent SPI/I2C contention
+  //    Core 1 runs WiFi/HTTP/audio tasks every 5ms which can interfere
+  //    with USB MSC operations and cause keyboard I2C timeouts.
   bool was_connected = (wifi_get_status() == WIFI_STATUS_CONNECTED);
   if (was_connected) {
     printf("[USB MSC] Disconnecting WiFi...\n");
     wifi_disconnect();
   }
+  
+  // Pause Core 1 completely - wait for acknowledgment to ensure it's stopped
+  g_core1_pause = true;
+  while (!g_core1_paused) {
+    sleep_ms(1);
+  }
+  printf("[USB MSC] Core 1 paused (WiFi/HTTP/audio halted)\n");
 
   // 2. Unmount FatFS so host can take over the SD card safely
   printf("[USB MSC] Unmounting FatFS...\n");
@@ -129,6 +142,9 @@ void usb_msc_enter_mode(void) {
   }
 
   printf("[USB MSC] Done\n");
+  
+  // Resume Core 1 background tasks
+  g_core1_pause = false;
 }
 
 // --------------------------------------------------------------------
