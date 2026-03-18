@@ -1,6 +1,18 @@
+# Coding agents
 .claude/
+.env
+.opencode/
+.vscode/
+
+# Build artifacts
 build/
-build-sim/
+build_sim/
+tools/__pycache__/
+build.log
+
+# Not ready code
+_old/
+
 # Upstream library sources — downloaded at CI/build time (see .github/workflows/release.yml)
 # Project-specific files (ffconf.h, port/diskio_spi.c) are tracked below.
 third_party/lua-5.4/
@@ -10,12 +22,13 @@ third_party/fatfs/ffsystem.c
 third_party/fatfs/ffunicode.c
 third_party/fatfs/diskio.h
 third_party/umm_malloc/*
-.vscode/
+
+# Project planning files
 SDK-Planning.md
 SDK.md
 Code Review.md
 review.md
-_old/
+
+# Debugging artifacts
 screenshots/
-tools/__pycache__/
 screen.png
