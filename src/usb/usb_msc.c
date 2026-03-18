@@ -162,12 +162,21 @@ void tud_msc_capacity_cb(uint8_t lun, uint32_t *block_count,
   (void)lun;
   LBA_t count = 0;
 
-  if (s_msc_active && disk_ioctl(0, GET_SECTOR_COUNT, &count) == RES_OK &&
-      count > 0) {
-    *block_size = msc_block_size;
-    *block_count = (uint32_t)count;
-    printf("[USB MSC] Capacity: %lu blocks x %u bytes\n", (unsigned long)count,
-           msc_block_size);
+  if (s_msc_active) {
+    recursive_mutex_enter_blocking(&g_sdcard_mutex);
+    DRESULT res = disk_ioctl(0, GET_SECTOR_COUNT, &count);
+    recursive_mutex_exit(&g_sdcard_mutex);
+    
+    if (res == RES_OK && count > 0) {
+      *block_size = msc_block_size;
+      *block_count = (uint32_t)count;
+      printf("[USB MSC] Capacity: %lu blocks x %u bytes\n", (unsigned long)count,
+             msc_block_size);
+    } else {
+      *block_size = 0;
+      *block_count = 0;
+      printf("[USB MSC] Capacity: not ready (res=%d, count=%lu)\n", res, (unsigned long)count);
+    }
   } else {
     *block_size = 0;
     *block_count = 0;
@@ -191,7 +200,11 @@ int32_t tud_msc_read10_cb(uint8_t lun, uint32_t lba, uint32_t offset,
   if (!s_msc_active)
     return -1;
 
-  if (disk_read(0, (BYTE *)buffer, lba, bufsize / msc_block_size) != RES_OK) {
+  recursive_mutex_enter_blocking(&g_sdcard_mutex);
+  DRESULT res = disk_read(0, (BYTE *)buffer, lba, bufsize / msc_block_size);
+  recursive_mutex_exit(&g_sdcard_mutex);
+  
+  if (res != RES_OK) {
     printf("[USB MSC] Read error at LBA %lu\n", (unsigned long)lba);
     return -1;
   }
@@ -212,8 +225,11 @@ int32_t tud_msc_write10_cb(uint8_t lun, uint32_t lba, uint32_t offset,
   if (!s_msc_active)
     return -1;
 
-  if (disk_write(0, (const BYTE *)buffer, lba, bufsize / msc_block_size) !=
-      RES_OK) {
+  recursive_mutex_enter_blocking(&g_sdcard_mutex);
+  DRESULT res = disk_write(0, (const BYTE *)buffer, lba, bufsize / msc_block_size);
+  recursive_mutex_exit(&g_sdcard_mutex);
+  
+  if (res != RES_OK) {
     printf("[USB MSC] Write error at LBA %lu\n", (unsigned long)lba);
     return -1;
   }
@@ -223,12 +239,15 @@ int32_t tud_msc_write10_cb(uint8_t lun, uint32_t lba, uint32_t offset,
 
 void tud_msc_write10_flush_cb(uint8_t lun) {
   (void)lun;
+  recursive_mutex_enter_blocking(&g_sdcard_mutex);
   disk_ioctl(0, CTRL_SYNC, NULL);
+  recursive_mutex_exit(&g_sdcard_mutex);
 }
 
 bool tud_msc_test_unit_ready_cb(uint8_t lun) {
   // Only check s_msc_active — sdcard_is_mounted() tracks FatFS mount
   // state, which is intentionally false during MSC mode.
+  // Note: No mutex needed here as we don't access SPI0, just check a flag.
   if (!s_msc_active) {
     tud_msc_set_sense(lun, SCSI_SENSE_NOT_READY, 0x3A, 0x00);
     return false;
