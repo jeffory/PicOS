@@ -154,20 +154,29 @@ static bool ota_verify_hash(const char *bin_path, const char *hash_path) {
 static bool ota_validate_header(const uint8_t *data, int len) {
     if (len < 256) return false;
 
+    printf("[OTA] Header dump: ");
+    for (int i = 0; i < 32 && i < len; i++) {
+        printf("%02x ", data[i]);
+    }
+    printf("\n");
+
+    if (memcmp(data, "UF2\n", 4) == 0) {
+        printf("[OTA] Error: File is UF2 format, not .bin!\n");
+        return false;
+    }
+
     uint32_t sp, reset_vec;
     memcpy(&sp, data, 4);
     memcpy(&reset_vec, data + 4, 4);
 
-    // Initial SP should be in SRAM range
     if (sp < SRAM_BASE_ADDR || sp > SRAM_END_ADDR) {
-        printf("[OTA] Invalid SP: 0x%08lx\n", (unsigned long)sp);
+        printf("[OTA] Invalid SP: 0x%08lx (expected 0x20000000-0x20082000)\n", (unsigned long)sp);
         return false;
     }
 
-    // Reset vector should be in flash range (strip Thumb bit)
     uint32_t rv = reset_vec & ~1u;
     if (rv < FLASH_BASE_ADDR || rv >= FLASH_END_ADDR) {
-        printf("[OTA] Invalid reset vector: 0x%08lx\n", (unsigned long)reset_vec);
+        printf("[OTA] Invalid reset vector: 0x%08lx (expected 0x10000000-0x10400000)\n", (unsigned long)reset_vec);
         return false;
     }
 
@@ -309,8 +318,8 @@ fail:
 }
 
 bool ota_trigger_update(const char *bin_path, const char **out_err) {
-    // Validate file exists and has reasonable size
     int size = sdcard_fsize(bin_path);
+    printf("[OTA] Triggering update from %s, size=%d\n", bin_path, size);
     if (size < 0) {
         *out_err = "Firmware file not found";
         return false;
@@ -324,7 +333,6 @@ bool ota_trigger_update(const char *bin_path, const char **out_err) {
         return false;
     }
 
-    // Read and validate the header (first 256 bytes)
     sdfile_t f = sdcard_fopen(bin_path, "r");
     if (!f) {
         *out_err = "Cannot open firmware file";

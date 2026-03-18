@@ -1,5 +1,6 @@
 .claude/
 build/
+build-sim/
 # Upstream library sources — downloaded at CI/build time (see .github/workflows/release.yml)
 # Project-specific files (ffconf.h, port/diskio_spi.c) are tracked below.
 third_party/lua-5.4/

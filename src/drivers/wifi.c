@@ -2,6 +2,7 @@
 #include "tcp.h"
 #include "../os/clock.h"
 #include "../os/config.h"
+#include "../os/system_menu.h"
 #include "display.h"
 #include "http.h"
 
@@ -69,7 +70,8 @@ static void sntp_cb(struct mg_connection *c, int ev, void *ev_data) {
     printf("WiFi: SNTP sync OK, time: %lld\n", *t);
     clock_sntp_set((unsigned)(*t / 1000));
     c->is_closing = 1;
-    if (!s_http_required && s_auto_connected) {
+    if (!s_http_required && s_auto_connected &&
+        system_menu_get_wifi_auto_disconnect()) {
       // Don't call mg_wifi_disconnect() directly here — we're inside
       // mg_mgr_poll() and calling it from within a Mongoose callback causes
       // reentrancy into the CYW43 driver. Set a flag; wifi_poll() will
@@ -140,25 +142,7 @@ static void drain_requests(void) {
           c->state = HTTP_STATE_SENDING;
           c->pending = 0;
           printf("[HTTP] Reusing connection for %s %s\n", c->method, c->path);
-          mg_printf(nc,
-                    "%s %s HTTP/1.1\r\n"
-                    "Host: %s\r\n"
-                    "User-Agent: PicOS/1.0\r\n"
-                    "Connection: keep-alive\r\n",
-                    c->method, c->path, c->server);
-          if (c->extra_hdrs) {
-            mg_printf(nc, "%s", c->extra_hdrs);
-            umm_free(c->extra_hdrs);
-            c->extra_hdrs = NULL;
-          }
-          if (c->tx_buf && c->tx_len > 0) {
-            mg_printf(nc, "Content-Length: %u\r\n\r\n", (unsigned)c->tx_len);
-            mg_send(nc, c->tx_buf, c->tx_len);
-            umm_free(c->tx_buf);
-            c->tx_buf = NULL;
-          } else {
-            mg_printf(nc, "\r\n");
-          }
+          http_build_and_send_request(nc, c);
         } else {
           // New connection
           char url[320];

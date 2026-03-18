@@ -43,6 +43,7 @@ static app_item_t s_app_items[SYSMENU_MAX_APP_ITEMS];
 static int s_app_item_count = 0;
 static uint8_t s_brightness = 128;
 static bool s_dev_mode = false;
+static bool s_wifi_auto_disconnect = true;
 
 // ── Visual constants
 // ──────────────────────────────────────────────────────────
@@ -78,6 +79,7 @@ typedef enum {
   ITEM_WIFI_SETTINGS,
   ITEM_WIFI_STATUS,
   ITEM_DEV_MODE,
+  ITEM_WIFI_AUTO_DISCONNECT,
 } item_type_t;
 
 typedef struct {
@@ -150,6 +152,7 @@ static int build_items(flat_item_t *items, menu_page_t page, bool has_exit,
     items[count++] = (flat_item_t){ITEM_WIFI_SETTINGS, 0};
     if (s_dev_mode)
       items[count++] = (flat_item_t){ITEM_REMOUNT_SD, 0};
+    items[count++] = (flat_item_t){ITEM_WIFI_AUTO_DISCONNECT, 0};
     items[count++] = (flat_item_t){ITEM_DEV_MODE, 0};
   }
   return count;
@@ -320,6 +323,10 @@ static void draw_panel(const flat_item_t *items, int count, int sel, int px,
     case ITEM_EXIT:
       snprintf(label, sizeof(label), "Exit App");
       fg = selected ? COLOR_WHITE : COLOR_YELLOW;
+      break;
+    case ITEM_WIFI_AUTO_DISCONNECT:
+      snprintf(label, sizeof(label), "Auto Disconnect: %s",
+               s_wifi_auto_disconnect ? "On" : "Off");
       break;
     case ITEM_DEV_MODE:
       snprintf(label, sizeof(label), "Developer Mode: %s", s_dev_mode ? "On" : "Off");
@@ -518,6 +525,12 @@ static bool menu_loop(lua_State *L, int context) {
       case ITEM_REBOOT_FLASH:
         reset_usb_boot(0, 0);
         break; /* unreachable */
+      case ITEM_WIFI_AUTO_DISCONNECT:
+        s_wifi_auto_disconnect = !s_wifi_auto_disconnect;
+        config_set("wifi_auto_disconnect", s_wifi_auto_disconnect ? "1" : "0");
+        config_save();
+        need_redraw = true;
+        break;
       case ITEM_DEV_MODE:
         s_dev_mode = !s_dev_mode;
         config_set("dev_mode", s_dev_mode ? "1" : "0");
@@ -566,6 +579,8 @@ void system_menu_init(void) {
   s_brightness = 128;
   const char *dm = config_get("dev_mode");
   s_dev_mode = (dm && strcmp(dm, "1") == 0);
+  const char *wad = config_get("wifi_auto_disconnect");
+  s_wifi_auto_disconnect = (!wad || strcmp(wad, "0") != 0);
 }
 
 void system_menu_add_item(const char *label, void (*callback)(void *user),
@@ -580,6 +595,8 @@ void system_menu_add_item(const char *label, void (*callback)(void *user),
 }
 
 void system_menu_clear_items(void) { s_app_item_count = 0; }
+
+bool system_menu_get_wifi_auto_disconnect(void) { return s_wifi_auto_disconnect; }
 
 void system_menu_show(lua_State *L) {
   // L==NULL → launcher (context 0), L!=NULL → Lua app (context 1)

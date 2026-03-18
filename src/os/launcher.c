@@ -609,6 +609,7 @@ bool launcher_launch_by_name(const char *name) {
   }
 
   printf("[DEV] Launching app: %s\n", name);
+  stdio_flush();
   run_app(app_idx);
   return true;
 }
