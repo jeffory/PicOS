@@ -35,3 +35,7 @@ bool ui_text_input(const char *prompt, const char *default_val,
 // message: text to display (up to two lines; wrapped at ~43-char boundaries)
 // Returns true if the user pressed Enter/Y, false if Esc/N.
 bool ui_confirm(const char *message);
+
+// Draw one frame of a rotating line spinner at center (cx, cy) with radius r.
+// Call once per frame with an incrementing frame counter for animation.
+void ui_draw_spinner(int cx, int cy, int r, int frame);

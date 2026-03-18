@@ -1,4 +1,5 @@
 #include "usb_msc.h"
+#include "hardware/watchdog.h"
 #include "pico/stdlib.h"
 #include "tusb.h"
 
@@ -88,9 +89,9 @@ void usb_msc_enter_mode(void) {
     }
 
     // Check for ESC via CDC serial (for automated workflows)
-    uint8_t cdc_byte;
-    if (tud_cdc_read(&cdc_byte, 1) > 0) {
-      if (cdc_byte == 'x' || cdc_byte == 'X' || cdc_byte == 0x03) {
+    int cdc_ch = getchar_timeout_us(0);
+    if (cdc_ch != PICO_ERROR_TIMEOUT) {
+      if (cdc_ch == 'x' || cdc_ch == 'X' || cdc_ch == 0x03) {
         printf("[USB MSC] ESC via CDC, exiting\n");
         break;
       }
@@ -104,6 +105,7 @@ void usb_msc_enter_mode(void) {
     }
 
     sleep_us(100); // 100µs base interval — lets USB IRQs fire between iterations
+    watchdog_update(); // keep watchdog alive while in USB mode
   }
 
   // 4. Deactivate MSC and remount

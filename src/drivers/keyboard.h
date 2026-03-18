@@ -99,3 +99,11 @@ void kbd_clear_state(void);
 // Force I2C bus recovery — useful after USB MSC mode or other bus-corrupting events.
 // Pulses SCL 9 times to clear stuck STM32 state and reinitializes I2C peripheral.
 void kbd_recover_i2c_bus(void);
+
+// Inject button states (BTN_* from os.h). Injected buttons appear in kbd_get_buttons()
+// and kbd_get_buttons_pressed() until cleared.
+void kbd_inject_buttons(uint32_t buttons);
+
+// Inject a character. The character is stored in s_last_char and consumed on the
+// next call to kbd_get_char() (similar to real keyboard input).
+void kbd_inject_char(char c);

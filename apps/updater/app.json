@@ -1,0 +1,8 @@
+{
+    "id": "com.picos.updater",
+    "name": "System Update",
+    "description": "Check for and install firmware updates",
+    "version": "1.0",
+    "author": "PicOS",
+    "requirements": ["http", "root-filesystem"]
+}

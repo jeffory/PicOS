@@ -23,7 +23,7 @@
 
 #define HTTP_MAX_CONNECTIONS   8      // Simultaneous connections
 #define HTTP_RECV_BUF_DEFAULT  4096   // Default receive ring buffer
-#define HTTP_RECV_BUF_MAX      32768  // Max allowed by setReadBufferSize
+#define HTTP_RECV_BUF_MAX      (2 * 1024 * 1024)  // Max allowed by setReadBufferSize
 #define HTTP_HEADER_BUF_MAX    2048   // Raw response header block
 #define HTTP_MAX_HDR_ENTRIES   24     // Max parsed header fields
 #define HTTP_SERVER_MAX        128    // Hostname buffer

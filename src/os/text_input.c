@@ -1,8 +1,10 @@
 #include "text_input.h"
+#include "../dev_commands.h"
 #include "../drivers/display.h"
 #include "../drivers/keyboard.h"
 #include "os.h"
 
+#include "hardware/watchdog.h"
 #include "pico/stdlib.h"
 
 #include <string.h>
@@ -106,6 +108,8 @@ bool text_input_show(const char *title, const char *prompt,
         }
 
         kbd_poll();
+        dev_commands_poll();
+        dev_commands_process();
 
         char     ch      = kbd_get_char();
         uint32_t pressed = kbd_get_buttons_pressed();
@@ -130,6 +134,7 @@ bool text_input_show(const char *title, const char *prompt,
             }
         }
 
+        watchdog_update();
         sleep_ms(16);
     }
 

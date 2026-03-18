@@ -16,3 +16,5 @@ Code Review.md
 review.md
 _old/
 screenshots/
+tools/__pycache__/
+screen.png

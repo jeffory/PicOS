@@ -139,6 +139,20 @@ static bool sd_init_card(void) {
   for (int i = 0; i < 10; i++)
     spi_byte(0xFF); /* 80 clocks */
 
+  /* ── Recovery: abort any interrupted multi-block write from a crash ── */
+  /* If the previous session crashed during CMD25 (WRITE_MULTIPLE_BLOCK),
+   * the card may be stuck in a busy state holding MISO low.  CMD12
+   * (STOP_TRANSMISSION) aborts the interrupted write; extra dummy clocks
+   * let the card finish internal housekeeping.  Harmless if no write was
+   * active — the card just returns an error we ignore. */
+  sd_cs_low();
+  sd_send_cmd(12, 0);        /* STOP_TRANSMISSION */
+  spi_byte(0xFF);            /* stuff byte after CMD12 */
+  sd_wait_ready(500);        /* wait for card to finish internal ops */
+  sd_cs_high();
+  for (int i = 0; i < 20; i++)
+    spi_byte(0xFF);          /* 160 more dummy clocks with CS high */
+
   /* ── CMD0: Software reset ───────────────────────────────────────────── */
   /* Some cards need several attempts to enter SPI idle mode. */
   sd_cs_low();

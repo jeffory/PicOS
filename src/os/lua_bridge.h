@@ -27,6 +27,18 @@
 // Call this once after lua_newstate(), before running any app code.
 void lua_bridge_register(lua_State *L);
 
+// Exit sentinel: a unique light userdata used as the error object when an app
+// requests a clean exit. Use lua_bridge_is_exit_sentinel() to test.
+extern char lua_bridge_exit_tag; // address used as sentinel, value irrelevant
+static inline void lua_bridge_raise_exit(lua_State *L) {
+  lua_pushlightuserdata(L, &lua_bridge_exit_tag);
+  lua_error(L);
+}
+static inline bool lua_bridge_is_exit_sentinel(lua_State *L, int idx) {
+  return lua_islightuserdata(L, idx) &&
+         lua_touserdata(L, idx) == &lua_bridge_exit_tag;
+}
+
 // Run one update tick: poll input, check for menu button, yield to app.
 // Returns false if the app requested exit (returned from its update()).
 bool lua_bridge_tick(lua_State *L);

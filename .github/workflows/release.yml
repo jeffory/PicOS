@@ -53,7 +53,15 @@ jobs:
       - name: Build
         run: cmake --build build --parallel
 
-      - name: Upload UF2 to release
+      - name: Generate SHA-256 hash
+        run: |
+          cd build
+          sha256sum picocalc_os.bin | awk '{print $1}' > picocalc_os.sha256
+
+      - name: Upload artifacts to release
         uses: softprops/action-gh-release@v2
         with:
-          files: build/picocalc_os.uf2
+          files: |
+            build/picocalc_os.uf2
+            build/picocalc_os.bin
+            build/picocalc_os.sha256

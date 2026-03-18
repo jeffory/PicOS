@@ -1,10 +1,12 @@
 #include "ui.h"
+#include "../dev_commands.h"
 #include "../drivers/display.h"
 #include "../drivers/keyboard.h"
 #include "../drivers/wifi.h"
 #include "../splash_logo.h"
 #include "clock.h"
 #include "os.h"    // BTN_* constants
+#include "hardware/watchdog.h"
 #include "pico/stdlib.h"
 
 #include <stdio.h>
@@ -273,6 +275,8 @@ bool ui_text_input(const char *prompt, const char *default_val,
   bool dirty    = true;
   while (true) {
     kbd_poll();
+    dev_commands_poll();
+    dev_commands_process();
     uint32_t btns = kbd_get_buttons_pressed();
     char c        = kbd_get_char();
 
@@ -298,6 +302,7 @@ bool ui_text_input(const char *prompt, const char *default_val,
       display_flush();
       dirty = false;
     }
+    watchdog_update();
     sleep_ms(20);
   }
 
@@ -335,10 +340,31 @@ bool ui_confirm(const char *message) {
 
   while (true) {
     kbd_poll();
+    dev_commands_poll();
+    dev_commands_process();
     uint32_t btns = kbd_get_buttons_pressed();
     char c        = kbd_get_char();
     if (btns & BTN_ESC || c == 'n' || c == 'N') return false;
     if (c == '\n'       || c == 'y' || c == 'Y') return true;
+    watchdog_update();
     sleep_ms(20);
   }
+}
+
+// ── ui_draw_spinner ───────────────────────────────────────────────────────────
+// Draw a single frame of a rotating line spinner at (cx, cy) with radius r.
+// Call once per frame with an incrementing frame counter for animation.
+void ui_draw_spinner(int cx, int cy, int r, int frame) {
+  static const int dx8[] = { 0,  1,  1,  1,  0, -1, -1, -1};
+  static const int dy8[] = {-1, -1,  0,  1,  1,  1,  0, -1};
+  int idx = (frame / 2) & 7; // rotate through 8 positions
+  int x1 = cx + dx8[idx] * r;
+  int y1 = cy + dy8[idx] * r;
+  int x2 = cx - dx8[idx] * r;
+  int y2 = cy - dy8[idx] * r;
+  // Draw main line bright, secondary lines dimmer for motion effect
+  display_draw_line(x1, y1, x2, y2, COLOR_WHITE);
+  int prev = (idx + 7) & 7;
+  display_draw_line(cx + dx8[prev] * r, cy + dy8[prev] * r,
+                    cx - dx8[prev] * r, cy - dy8[prev] * r, COLOR_GRAY);
 }

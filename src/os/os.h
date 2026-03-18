@@ -3,6 +3,36 @@
 #include <stdint.h>
 #include <stdbool.h>
 
+// Forward declare terminal_t (defined in terminal.h)
+typedef struct terminal terminal_t;
+
+typedef struct {
+    terminal_t* (*create)(int cols, int rows, int scrollback_lines);
+    void (*free)(terminal_t* term);
+    void (*clear)(terminal_t* term);
+    void (*write)(terminal_t* term, const char* str);
+    void (*putChar)(terminal_t* term, char c);
+    void (*setCursor)(terminal_t* term, int x, int y);
+    void (*getCursor)(terminal_t* term, int* out_x, int* out_y);
+    void (*setColors)(terminal_t* term, uint16_t fg, uint16_t bg);
+    void (*getColors)(terminal_t* term, uint16_t* out_fg, uint16_t* out_bg);
+    void (*scroll)(terminal_t* term, int lines);
+    void (*render)(terminal_t* term);
+    void (*renderDirty)(terminal_t* term);
+    int (*getCols)(terminal_t* term);
+    int (*getRows)(terminal_t* term);
+    void (*setCursorVisible)(bool visible);
+    void (*setCursorBlink)(bool blink);
+    void (*markAllDirty)(terminal_t* term);
+    bool (*isFullDirty)(terminal_t* term);
+    void (*getDirtyRange)(terminal_t* term, int* out_first, int* out_last);
+    int (*getScrollbackCount)(terminal_t* term);
+    void (*setScrollbackOffset)(terminal_t* term, int offset);
+    int (*getScrollbackOffset)(terminal_t* term);
+    void (*getScrollbackLine)(terminal_t* term, int line, uint16_t* out_cells);
+    void (*getScrollbackLineColors)(terminal_t* term, int line, uint16_t* out_fg, uint16_t* out_bg);
+} picocalc_terminal_t;
+
 // =============================================================================
 // PicoOS API
 //
@@ -60,6 +90,8 @@ typedef struct {
     void (*fillRect)(int x, int y, int w, int h, uint16_t color);
     void (*drawRect)(int x, int y, int w, int h, uint16_t color);
     void (*drawLine)(int x0, int y0, int x1, int y1, uint16_t color);
+    void (*drawCircle)(int cx, int cy, int r, uint16_t color);
+    void (*fillCircle)(int cx, int cy, int r, uint16_t color);
     // Draw a null-terminated string. Returns pixel width of drawn text.
     int  (*drawText)(int x, int y, const char *text, uint16_t fg, uint16_t bg);
     // Flush the internal framebuffer to the LCD (call once per frame)
@@ -101,7 +133,8 @@ typedef struct {
     uint32_t (*tell)(pcfile_t f);
     // List directory. Calls callback for each entry. Returns entry count.
     int      (*listDir)(const char *path,
-                        void (*callback)(const char *name, bool is_dir, void *user),
+                        void (*callback)(const char *name, bool is_dir,
+                                         uint32_t size, void *user),
                         void *user);
 } picocalc_fs_t;
 
@@ -267,6 +300,7 @@ typedef struct PicoCalcAPI {
     const picocalc_ui_t      *ui;
     const picocalc_psram_t   *psram;
     const picocalc_perf_t    *perf;
+    const picocalc_terminal_t *terminal;
 } PicoCalcAPI;
 
 // The global API instance, populated during os_init()

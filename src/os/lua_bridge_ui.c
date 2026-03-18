@@ -95,11 +95,21 @@ static int l_ui_confirm(lua_State *L) {
   return 1;
 }
 
+static int l_ui_drawSpinner(lua_State *L) {
+  int cx = (int)luaL_checkinteger(L, 1);
+  int cy = (int)luaL_checkinteger(L, 2);
+  int r = (int)luaL_optinteger(L, 3, 8);
+  int frame = (int)luaL_optinteger(L, 4, 0);
+  ui_draw_spinner(cx, cy, r, frame);
+  return 0;
+}
+
 static const luaL_Reg l_ui_lib[] = {{"drawHeader", l_ui_drawHeader},
                                     {"drawFooter", l_ui_drawFooter},
                                     {"drawTabs",   l_ui_drawTabs},
                                     {"textInput",  l_ui_textInput},
                                     {"confirm",    l_ui_confirm},
+                                    {"drawSpinner", l_ui_drawSpinner},
                                     {NULL, NULL}};
 
 

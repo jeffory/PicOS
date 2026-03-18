@@ -13,6 +13,7 @@
 #include "lua.h"
 #include "lualib.h"
 #include "umm_malloc.h"
+#include "hardware/watchdog.h"
 #include "pico/stdlib.h"
 
 #include <stdio.h>
@@ -35,6 +36,7 @@ static bool lua_run(const app_entry_t *app) {
     display_draw_text(8, 8, "Failed to load app:", COLOR_RED, C_BG);
     display_draw_text(8, 20, main_path, COLOR_WHITE, C_BG);
     display_flush();
+    watchdog_update();
     sleep_ms(2000);
     return false;
   }
@@ -94,8 +96,7 @@ static bool lua_run(const app_entry_t *app) {
 
   int run_err = lua_pcall(L, 0, 0, 0);
   if (run_err != LUA_OK) {
-    const char *msg = lua_tostring(L, -1);
-    if (!msg || !strstr(msg, "__picocalc_exit__")) {
+    if (!lua_bridge_is_exit_sentinel(L, -1)) {
       lua_bridge_show_error(L, "Runtime error:");
     } else {
       lua_pop(L, 1); // discard exit sentinel
@@ -103,6 +104,14 @@ static bool lua_run(const app_entry_t *app) {
   }
 
   lua_close(L);
+
+  // Ensure no audio leaks into the next app or launcher.
+  // lua_close() runs __gc handlers which destroy fileplayer/mp3player objects,
+  // but audio_play_tone() and audio_start_stream() have no Lua userdata —
+  // a leftover tone or stream will keep playing into the next app.
+  audio_stop_tone();
+  audio_stop_stream();
+
   return true;
 }
 

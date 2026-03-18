@@ -284,6 +284,11 @@ uint32_t fileplayer_get_offset(const fileplayer_t *player) {
     return player->position / 4 / s_sample_rate;
 }
 
+void fileplayer_set_stop_on_underrun(fileplayer_t *player, bool flag) {
+    if (!player) return;
+    player->stop_on_underrun = flag;
+}
+
 // Called from Core 1 every 5ms. Reads WAV data from SD, converts to
 // stereo int16_t, and pushes into the PCM stream ring buffer.
 void fileplayer_update(void) {
@@ -291,6 +296,12 @@ void fileplayer_update(void) {
     if (!s_current_file || !s_active_player ||
         s_active_player->state != FILEPLAYER_STATE_PLAYING)
         return;
+
+    // Stop on underrun if configured
+    if (s_underflow && s_active_player->stop_on_underrun) {
+        fileplayer_stop(s_active_player);
+        return;
+    }
 
     // Non-blocking: skip if Core 0 owns the SD card
     if (!recursive_mutex_try_enter(&g_sdcard_mutex, NULL))

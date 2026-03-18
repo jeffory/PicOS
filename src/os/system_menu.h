@@ -29,7 +29,7 @@ void system_menu_add_item(const char *label,
 void system_menu_clear_items(void);
 
 // Show the menu synchronously. Blocks until the user dismisses or acts.
-// May raise a Lua error (via luaL_error) when "Exit App" is selected —
+// Raises exit sentinel (via lua_bridge_raise_exit) when "Exit App" is selected —
 // this propagates to lua_pcall in launcher.c exactly like picocalc.sys.exit().
 void system_menu_show(lua_State *L);
 

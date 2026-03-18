@@ -18,6 +18,22 @@ set(CMAKE_CXX_STANDARD 17)
 
 pico_sdk_init()
 
+# ── Version from git tags ────────────────────────────────────────────────────
+execute_process(
+    COMMAND git describe --tags --always
+    WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}
+    OUTPUT_VARIABLE GIT_VERSION
+    OUTPUT_STRIP_TRAILING_WHITESPACE
+    ERROR_QUIET
+)
+# Strip leading 'v' from tag (v0.0.7 → 0.0.7)
+if(GIT_VERSION)
+    string(REGEX REPLACE "^v" "" PICOS_VERSION "${GIT_VERSION}")
+else()
+    set(PICOS_VERSION "0.0.0-unknown")
+endif()
+message(STATUS "PicOS version: ${PICOS_VERSION}")
+
 # ── Lua 5.4 ──────────────────────────────────────────────────────────────────
 # Lua is added as a git submodule or downloaded into third_party/lua-5.4/
 # See README.md for setup instructions.
@@ -200,10 +216,12 @@ add_executable(picocalc_os
     src/os/lua_bridge_sys.c
     src/os/lua_bridge_fs.c
     src/os/lua_bridge_network.c
+    src/os/lua_bridge_tcp.c
     src/os/lua_bridge_config.c
     src/os/lua_bridge_perf.c
     src/os/perf.c
     src/os/lua_bridge_graphics.c
+    src/os/lua_bridge_3d.c
     src/os/lua_bridge_ui.c
     src/os/lua_bridge_audio.c
     src/os/lua_bridge_sound.c
@@ -216,6 +234,14 @@ add_executable(picocalc_os
     src/os/lua_psram_alloc.c
     src/os/system_menu.c
     src/os/screenshot.c
+    src/os/terminal.c
+    src/os/terminal_parser.c
+    src/os/terminal_render.c
+    src/os/lua_bridge_terminal.c
+    src/os/lua_bridge_crypto.c
+    src/os/ota_update.c
+    src/fonts/font_6x11.c
+    src/fonts/font_scientifica.c
     src/os/text_input.c
     src/os/file_browser.c
     src/os/config.c
@@ -246,10 +272,12 @@ target_include_directories(picocalc_os PRIVATE
     src/usb/
     src/
     src/os/
+    src/fonts/
     src/drivers/
     third_party/mongoose/
     third_party/umm_malloc/src/
     third_party/libmad/
+    data/
 )
 
 target_link_libraries(picocalc_os
@@ -263,6 +291,7 @@ target_link_libraries(picocalc_os
     hardware_clocks
     hardware_pio
     hardware_xip_cache
+    hardware_flash
     tinyusb_device
     lua
     fatfs
@@ -331,6 +360,7 @@ target_compile_options(picocalc_os PRIVATE
 # with a linker script that defines .psram → PSRAM address space)
 # On standard Pico 2 the attribute is silently ignored and FB goes in SRAM.
 target_compile_definitions(picocalc_os PRIVATE
+    PICOS_VERSION="${PICOS_VERSION}"
     PICO_RP2350=1
     PICO_MALLOC_PANIC=0   # Return NULL on SRAM OOM instead of HardFault
     PICO_STACK_SIZE=4096  # Reduced to 4KB to fit in SCRATCH_X/Y

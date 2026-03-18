@@ -18,10 +18,13 @@
 #include "ui.h"
 #include "umm_malloc.h"
 
+#include "../dev_commands.h"
 #include "pico/stdlib.h"
 #include "hardware/clocks.h"
 #include "hardware/uart.h"
 #include "hardware/vreg.h"
+#include "hardware/watchdog.h"
+#include "pico/bootrom.h"
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -357,6 +360,21 @@ static bool run_app(int idx) {
          lua_psram_alloc_free_size());
 
   // ── Shared pre-launch setup ───────────────────────────────────────────────
+
+  // Disconnect WiFi before clock change if app doesn't need it.
+  // The CYW43 PIO SPI clock divider is set at init time (200 MHz) and is NOT
+  // updated by launcher_apply_clock(), so running WiFi at a different sys clock
+  // causes SPI timing failures ("hdr mismatch" errors) that stall Core 1.
+  if (app->system_clock_khz > 0 && !app->has_http && wifi_is_available()) {
+    wifi_status_t wst = wifi_get_status();
+    if (wst == WIFI_STATUS_CONNECTED || wst == WIFI_STATUS_CONNECTING) {
+      wifi_disconnect();
+      // Wait for Core 1 to process the disconnect request before pausing it
+      // for the clock change. wifi_disconnect() queues via IPC ring buffer.
+      sleep_ms(50);
+    }
+  }
+
   if (app->system_clock_khz > 0) {
     launcher_apply_clock(app->system_clock_khz);
   }
@@ -411,9 +429,40 @@ void launcher_run(void) {
 
   while (true) {
     kbd_poll();
+    watchdog_update(); // kick watchdog every frame
     // wifi_poll() is now driven by Core 1 — do not call from Core 0
 
+    // Poll serial dev commands (ping, screenshot, exit, launch, etc.)
+    dev_commands_poll();
+    dev_commands_process();
+
     bool dirty = false;
+
+    // Handle dev command flags
+    if (dev_commands_wants_list()) {
+      launcher_list_apps();
+      dev_commands_clear_list();
+    }
+    if (dev_commands_get_pending_launch()) {
+      if (launcher_launch_by_name(dev_commands_get_pending_launch())) {
+        kbd_clear_state();
+        scan_apps();
+        dirty = true;
+      }
+      dev_commands_clear_pending_launch();
+    }
+    if (dev_commands_wants_reboot()) {
+      printf("[DEV] Rebooting...\n");
+      stdio_flush();
+      sleep_ms(100);
+      watchdog_reboot(0, 0, 0);
+    }
+    if (dev_commands_wants_reboot_flash()) {
+      printf("[DEV] Rebooting to BOOTSEL mode...\n");
+      stdio_flush();
+      sleep_ms(100);
+      reset_usb_boot(0, 0);
+    }
 
     if (kbd_consume_menu_press()) {
       system_menu_show(NULL);
@@ -560,8 +609,7 @@ bool launcher_launch_by_name(const char *name) {
   }
 
   printf("[DEV] Launching app: %s\n", name);
-  // TODO: Actually launch the app
-  // For now, just return true - actual launching would be done by the caller
+  run_app(app_idx);
   return true;
 }
 
