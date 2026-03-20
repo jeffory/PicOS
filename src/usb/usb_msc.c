@@ -27,6 +27,7 @@ typedef DWORD LBA_t;
 // Block devices and filesystems
 static uint16_t msc_block_size = 512;
 static bool s_msc_active = false;
+static volatile bool s_msc_ejected = false;  // Set by tud_msc_start_stop_cb when host ejects
 
 // --------------------------------------------------------------------
 // USB MSC Entry point
@@ -59,6 +60,7 @@ void usb_msc_enter_mode(void) {
   printf("[USB MSC] Unmounting FatFS...\n");
   f_unmount("");
   s_msc_active = true;
+  s_msc_ejected = false;  // Reset eject flag on entry
 
   // NOTE: tusb_init() is already called by pico_stdio_usb during
   // stdio_init_all(). Our custom tusb_config.h and usb_descriptors.c
@@ -72,7 +74,7 @@ void usb_msc_enter_mode(void) {
          tud_mounted());
 
   // 2. Draw the splash screen
-  ui_draw_splash("USB Mode", "Press ESC to exit");
+  ui_draw_splash("USB Mode", "Hold escape to exit");
 
   // 3. Poll loop — USB events are processed exclusively by the SDK's
   //    USBCTRL_IRQ background task (PICO_STDIO_USB_ENABLE_IRQ_BACKGROUND_TASK=1
@@ -81,11 +83,17 @@ void usb_msc_enter_mode(void) {
   //    direct call share no mutual exclusion around the processing callbacks,
   //    so both could call disk_read() simultaneously, corrupting SPI0 state
   //    and hanging the device (which manifests as the keyboard locking up).
-  printf("[USB MSC] Waiting for host or ESC key...\n");
+  // CRITICAL: I2C keyboard polling is limited to 500ms intervals during USB MSC.
+  // uf2loader-main reference shows that frequent I2C access during active USB
+  // causes STM32 lockup due to electrical interference/noise. This slower rate
+  // balances usability (ESC key still works) with stability (prevents crashes).
+  // The "Hold escape" message cues users to keep the key pressed longer.
+  // See: reference/uf2loader-main/ui/text_directory_ui.c (no I2C during USB)
+  printf("[USB MSC] Waiting for host or ESC key (hold to exit)...\n");
 
   uint32_t last_kbd_poll_ms = 0;
   uint32_t loop_start_ms = to_ms_since_boot(get_absolute_time());
-  const uint32_t KBD_POLL_INTERVAL_MS = 10;  // Poll keyboard every 10ms max
+  const uint32_t KBD_POLL_INTERVAL_MS = 500;  // Poll keyboard every 500ms (was 10ms)
   const uint32_t HOST_TIMEOUT_MS = 5000;      // 5 second timeout if no host activity
 
   while (true) {
@@ -108,6 +116,12 @@ void usb_msc_enter_mode(void) {
         printf("[USB MSC] ESC via CDC, exiting\n");
         break;
       }
+    }
+
+    // Exit if host has ejected the device
+    if (s_msc_ejected) {
+      printf("[USB MSC] Device ejected by host, exiting\n");
+      break;
     }
 
     // Exit if no host has mounted the device within HOST_TIMEOUT_MS.
@@ -141,8 +155,14 @@ void usb_msc_enter_mode(void) {
     }
   }
 
+  // Recover I2C bus - STM32 may need re-initialization after USB activity
+  printf("[USB MSC] Recovering I2C bus...\n");
+  kbd_recover_i2c_bus();
+  kbd_apply_clock();
+  kbd_clear_state();
+
   printf("[USB MSC] Done\n");
-  
+
   // Resume Core 1 background tasks
   g_core1_pause = false;
 }
@@ -204,7 +224,11 @@ bool tud_msc_start_stop_cb(uint8_t lun, uint8_t power_condition, bool start,
                            bool load_eject) {
   (void)lun;
   (void)power_condition;
-  printf("[USB MSC] Start/Stop: start=%d, load_eject=%d\n", start, load_eject);
+  (void)start;
+  if (load_eject) {
+    printf("[USB MSC] Host ejected device\n");
+    s_msc_ejected = true;
+  }
   return true;
 }
 
