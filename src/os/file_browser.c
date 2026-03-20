@@ -11,6 +11,8 @@
 #include <stdlib.h>
 #include <string.h>
 
+#include "umm_malloc.h"
+
 // ── Visual constants (matches system_menu.c) ─────────────────────────────────
 
 #define FB_PANEL_W 300
@@ -25,17 +27,17 @@
 #define FB_C_BORDER RGB565(80, 100, 150)
 #define FB_C_DIR RGB565(100, 180, 255) // directory names in light blue
 
-// ── Entry list
+// ── Entry list (in PSRAM to save ~8KB SRAM for JPEG decode perf)
 // ────────────────────────────────────────────────────────────────
 
 #define MAX_ENTRIES 128
 
 typedef struct {
-  char name[64];
+  char name[256];
   bool is_dir;
 } fb_entry_t;
 
-static fb_entry_t s_entries[MAX_ENTRIES];
+static fb_entry_t *s_entries = NULL;
 static int s_entry_count = 0;
 
 static void collect_cb(const sdcard_entry_t *e, void *user) {
@@ -61,6 +63,10 @@ static int entry_cmp(const void *a, const void *b) {
 }
 
 static void load_dir(const char *path) {
+  if (!s_entries) {
+    s_entries = (fb_entry_t *)umm_malloc(sizeof(fb_entry_t) * MAX_ENTRIES);
+    if (!s_entries) return;
+  }
   s_entry_count = 0;
   sdcard_list_dir(path, collect_cb, NULL);
   if (s_entry_count > 1)

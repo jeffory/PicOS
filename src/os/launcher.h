@@ -1,5 +1,6 @@
 #pragma once
 #include <stdbool.h>
+#include <stdint.h>
 
 // Runs the app launcher loop (never returns).
 // Scans /apps/ on SD card, renders a scrollable menu, and launches selected apps.
@@ -22,3 +23,7 @@ bool launcher_launch_by_name(const char *name);
 
 // Get the name of the currently running app (NULL if no app running)
 const char* launcher_get_running_app_name(void);
+
+// Change system clock (handles voltage, peripherals, Core 1 pause).
+// khz=0 resets to the default 200 MHz.
+void launcher_apply_clock(uint32_t khz);

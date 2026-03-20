@@ -1157,6 +1157,15 @@ void display_flush(void) {
   // Non-blocking path: DMA runs concurrently while CPU executes Lua/OS code.
 }
 
+void display_wait_for_flush(void) {
+  if (s_dma_active) {
+    dma_channel_wait_for_finish_blocking(s_dma_chan);
+    lcd_spi_wait_idle();
+    lcd_cs_high();
+    s_dma_active = false;
+  }
+}
+
 void display_flush_region(int y0, int y1) {
   // Clamp to valid range
   if (y0 < 0) y0 = 0;

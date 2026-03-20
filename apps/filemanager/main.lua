@@ -985,12 +985,21 @@ while running do
     draw_browse()
   end
 
-  if not (state == ST.VIDEO_VIEW and vid_updated) then
-    disp.flush()
-  end
   if state == ST.VIDEO_VIEW then
+    -- Video player handles its own flushing via setAutoFlush(true).
+    -- Only flush when paused (to show overlay) or when player was destroyed.
+    if not vid_updated then
+      if vid_player and vid_player:isPaused() then
+        disp.flush()
+      elseif not vid_player then
+        disp.flush()  -- player was destroyed (exiting video view)
+      end
+      -- When playing but no frame decoded this tick, do NOT flush —
+      -- a spurious full-screen DMA eats ~15ms and halves the frame rate.
+    end
     sys.sleep(1)
   else
+    disp.flush()
     sys.sleep(16)
   end
 end

@@ -13,7 +13,7 @@ typedef enum {
 
 typedef struct {
     char id[80];           // Reverse-DNS app ID (e.g. "com.picos.editor")
-    char name[64];         // Display name from app.json
+    char name[256];        // Display name from app.json
     char path[128];        // Full path to app directory ("/apps/foo")
     char description[128]; // Short description from app.json
     char version[16];

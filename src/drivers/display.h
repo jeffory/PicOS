@@ -124,6 +124,10 @@ void display_flush_region(int y0, int y1);
 // partial screen updates (status bars, emulator viewports, etc.).
 void display_flush_rows(int y0, int y1);
 
+// Block until any in-flight DMA flush completes.
+// Does NOT swap buffers or start a new transfer.
+void display_wait_for_flush(void);
+
 // Brightness via backlight PWM (0-255)
 void display_set_brightness(uint8_t brightness);
 

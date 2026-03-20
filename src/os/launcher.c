@@ -281,7 +281,7 @@ static const AppRunner *s_runners[] = {
 
 extern volatile bool g_core1_pause;
 
-static void launcher_apply_clock(uint32_t khz) {
+void launcher_apply_clock(uint32_t khz) {
   if (khz == 0) khz = 200000; // Default OS clock
   uint32_t current_khz = clock_get_hz(clk_sys) / 1000;
   if (khz == current_khz) return;
@@ -335,6 +335,9 @@ static void launcher_apply_clock(uint32_t khz) {
 
   // 7. Update keyboard I2C divider for new clk_peri frequency
   kbd_apply_clock();
+
+  // 7b. Re-set SD SPI baud rate (derived from clk_peri)
+  sdcard_apply_clock();
 
   // 8. Re-init UART baud rate (depends on clk_peri)
 #if LIB_PICO_STDIO_UART
@@ -442,6 +445,7 @@ void launcher_run(void) {
   scan_apps();
   
   // Check for simulator auto-launch
+#ifdef SIMULATOR
   extern const char* simulator_get_auto_launch_app(void);
   const char* auto_launch = simulator_get_auto_launch_app();
   if (auto_launch) {
@@ -456,6 +460,9 @@ void launcher_run(void) {
       fflush(stdout);
     }
   }
+#else
+  (void)0; // simulator_get_auto_launch_app stub
+#endif
   
   draw_launcher();
 
@@ -469,10 +476,14 @@ void launcher_run(void) {
     dev_commands_process();
 
     // Socket server poll — JSON-RPC interface for MCP/automation
+#ifdef SIMULATOR
     extern void sim_socket_poll(void);
     extern void sim_handler_check_launch(void);
     sim_socket_poll();
     sim_handler_check_launch();
+#else
+    // Stubs for bare-metal build (no simulator)
+#endif
 
     // Handle pending launch FIRST (before exit check)
     // This ensures "launch" command works (which sets both pending_launch and exit flags)

@@ -70,6 +70,10 @@ bool sdcard_is_mounted(void) {
     return s_mounted;
 }
 
+void sdcard_apply_clock(void) {
+    spi_set_baudrate(SD_SPI_PORT, SD_SPI_BAUD);
+}
+
 bool sdcard_remount(void) {
     recursive_mutex_enter_blocking(&g_sdcard_mutex);
     f_unmount("");
