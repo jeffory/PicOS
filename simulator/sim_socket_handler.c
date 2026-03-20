@@ -1,0 +1,893 @@
+#define _DEFAULT_SOURCE
+#define _GNU_SOURCE
+
+#include "sim_socket.h"
+#include "sim_socket_handler.h"
+#include "hal/hal_sdcard.h"
+#include "hal/hal_display.h"
+#include "hal/hal_input.h"
+#include "hal/hal_audio.h"
+#include "hal/hal_psram.h"
+#include "hal/hal_timing.h"
+#include "drivers/keyboard.h"
+#include "os/launcher.h"
+#include "os/lua_psram_alloc.h"
+#include "os/screenshot.h"
+#include "os/os.h"
+#include "sim_wifi.h"
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <stdbool.h>
+#include <stdint.h>
+#include <ctype.h>
+#include <errno.h>
+#include <limits.h>
+#include <dirent.h>
+#include <sys/stat.h>
+#include <sys/statvfs.h>
+#include <unistd.h>
+#include <time.h>
+#include <math.h>
+#include <SDL2/SDL.h>
+#include <SDL2/SDL_image.h>
+#include <pthread.h>
+
+// ── Circular log buffer ───────────────────────────────────────────────────────
+
+#define LOG_LINE_MAX 256
+#define LOG_BUFFER_LINES 1024
+
+static char s_log_lines[LOG_BUFFER_LINES][LOG_LINE_MAX];
+static int s_log_head = 0;
+static int s_log_count = 0;
+
+static pthread_mutex_t s_log_mutex = PTHREAD_MUTEX_INITIALIZER;
+
+void sim_log_append(const char *line) {
+    if (!line) return;
+    pthread_mutex_lock(&s_log_mutex);
+    int idx = (s_log_head + s_log_count) % LOG_BUFFER_LINES;
+    if (s_log_count < LOG_BUFFER_LINES) {
+        s_log_count++;
+    } else {
+        s_log_head = (s_log_head + 1) % LOG_BUFFER_LINES;
+    }
+    strncpy(s_log_lines[idx], line, LOG_LINE_MAX - 1);
+    s_log_lines[idx][LOG_LINE_MAX - 1] = '\0';
+    pthread_mutex_unlock(&s_log_mutex);
+}
+
+char *sim_get_log_buffer(void) {
+    static char buf[65536];
+    buf[0] = '\0';
+    pthread_mutex_lock(&s_log_mutex);
+    int start = (s_log_head + LOG_BUFFER_LINES - s_log_count) % LOG_BUFFER_LINES;
+    for (int i = 0; i < s_log_count; i++) {
+        int idx = (start + i) % LOG_BUFFER_LINES;
+        size_t len = strlen(buf);
+        size_t line_len = strlen(s_log_lines[idx]);
+        if (len + line_len + 2 < sizeof(buf)) {
+            if (len > 0) strncat(buf, "\n", sizeof(buf) - len - 1);
+            strncat(buf, s_log_lines[idx], sizeof(buf) - len - 1);
+        }
+    }
+    pthread_mutex_unlock(&s_log_mutex);
+    return buf;
+}
+
+int sim_get_log_buffer_count(void) {
+    pthread_mutex_lock(&s_log_mutex);
+    int count = s_log_count;
+    pthread_mutex_unlock(&s_log_mutex);
+    return count;
+}
+
+// ── Launch queue (mirrors dev_commands pattern) ─────────────────────────────────
+
+static const char *s_pending_launch = NULL;
+static bool s_exit_requested = false;
+
+void sim_handler_clear_pending_launch(void) {
+    if (s_pending_launch) {
+        free((void *)s_pending_launch);
+        s_pending_launch = NULL;
+    }
+}
+
+void sim_handler_request_exit(void) {
+    s_exit_requested = true;
+}
+
+const char *sim_handler_get_pending_launch(void) {
+    return s_pending_launch;
+}
+
+void sim_handler_clear_pending_launch_state(void) {
+    sim_handler_clear_pending_launch();
+    s_exit_requested = false;
+}
+
+void sim_handler_check_launch(void) {
+    if (s_exit_requested) {
+        s_exit_requested = false;
+        kbd_inject_buttons(BTN_ESC);
+    }
+    if (s_pending_launch) {
+        const char *name = s_pending_launch;
+        s_pending_launch = NULL;
+        sim_socket_notify("app.started", "{\"name\":\"pending\"}");
+        bool ok = launcher_launch_by_name(name);
+        char params[256];
+        snprintf(params, sizeof(params),
+                 "{\"name\":\"%s\",\"ok\":%s}", name, ok ? "true" : "false");
+        sim_socket_notify("app.exited", params);
+        free((void *)name);
+    }
+}
+
+// ── WiFi error injection ──────────────────────────────────────────────────────
+
+typedef enum {
+    WIFI_NORMAL,
+    WIFI_DISCONNECTED,
+    WIFI_NOT_AVAILABLE,
+    WIFI_ERROR,
+} wifi_error_mode_t;
+
+static struct {
+    bool enabled;
+    wifi_error_mode_t mode;
+    int error_code;
+    const char *error_str;
+} s_wifi_error = {0};
+
+bool sim_wifi_is_available(void) {
+    if (!s_wifi_error.enabled) return true;
+    return s_wifi_error.mode != WIFI_DISCONNECTED &&
+           s_wifi_error.mode != WIFI_NOT_AVAILABLE;
+}
+
+bool sim_network_blocked(void) {
+    if (!s_wifi_error.enabled) return false;
+    return s_wifi_error.mode == WIFI_DISCONNECTED ||
+           s_wifi_error.mode == WIFI_NOT_AVAILABLE ||
+           s_wifi_error.mode == WIFI_ERROR;
+}
+
+const char *sim_wifi_get_error(void) {
+    return s_wifi_error.error_str ? s_wifi_error.error_str : "network error";
+}
+
+// ── Path sandboxing ───────────────────────────────────────────────────────────
+
+static bool sandbox_path(const char *path, char *out_resolved, size_t max) {
+    extern char g_base_path[512];
+    char full[1024];
+    if (path[0] == '/') {
+        snprintf(full, sizeof(full), "%s%s", g_base_path, path);
+    } else {
+        snprintf(full, sizeof(full), "%s/%s", g_base_path, path);
+    }
+    if (!realpath(full, out_resolved)) return false;
+    size_t base_len = strlen(g_base_path);
+    if (strncmp(out_resolved, g_base_path, base_len) != 0) return false;
+    return true;
+}
+
+// ── JSON helpers ─────────────────────────────────────────────────────────────
+
+static bool json_get_str(const char *obj, const char *key, char *out, size_t max) {
+    char search[128];
+    snprintf(search, sizeof(search), "\"%s\"", key);
+    const char *p = strstr(obj, search);
+    if (!p) return false;
+    p += strlen(search);
+    while (*p && (*p == ' ' || *p == ':' || *p == '\t')) p++;
+    if (*p != '"') return false;
+    p++;
+    size_t i = 0;
+    while (*p && *p != '"' && i < max - 1) out[i++] = *p++;
+    out[i] = '\0';
+    return true;
+}
+
+static bool json_get_int(const char *obj, const char *key, int *out) {
+    char search[128];
+    snprintf(search, sizeof(search), "\"%s\"", key);
+    const char *p = strstr(obj, search);
+    if (!p) return false;
+    p += strlen(search);
+    while (*p && (*p == ' ' || *p == ':' || *p == '\t')) p++;
+    *out = atoi(p);
+    return true;
+}
+
+static bool json_get_uint(const char *obj, const char *key, unsigned int *out) {
+    char search[128];
+    snprintf(search, sizeof(search), "\"%s\"", key);
+    const char *p = strstr(obj, search);
+    if (!p) return false;
+    p += strlen(search);
+    while (*p && (*p == ' ' || *p == ':' || *p == '\t')) p++;
+    *out = (unsigned int)atoi(p);
+    return true;
+}
+
+static bool json_get_float(const char *obj, const char *key, float *out) {
+    char search[128];
+    snprintf(search, sizeof(search), "\"%s\"", key);
+    const char *p = strstr(obj, search);
+    if (!p) return false;
+    p += strlen(search);
+    while (*p && (*p == ' ' || *p == ':' || *p == '\t')) p++;
+    *out = (float)atof(p);
+    return true;
+}
+
+static bool json_get_bool(const char *obj, const char *key, bool *out) {
+    char search[128];
+    snprintf(search, sizeof(search), "\"%s\"", key);
+    const char *p = strstr(obj, search);
+    if (!p) return false;
+    p += strlen(search);
+    while (*p && (*p == ' ' || *p == ':' || *p == '\t')) p++;
+    if (strncmp(p, "true", 4) == 0) { *out = true; return true; }
+    if (strncmp(p, "false", 5) == 0) { *out = false; return true; }
+    return false;
+}
+
+static void json_escape(const char *src, char *out, size_t max) {
+    size_t j = 0;
+    for (size_t i = 0; src[i] && j + 5 < max; i++) {
+        char c = src[i];
+        if (c == '"' || c == '\\') { out[j++] = '\\'; out[j++] = c; }
+        else if (c == '\n') { out[j++] = '\\'; out[j++] = 'n'; }
+        else if (c == '\r') { out[j++] = '\\'; out[j++] = 'r'; }
+        else if (c == '\t') { out[j++] = '\\'; out[j++] = 't'; }
+        else { out[j++] = c; }
+    }
+    out[j] = '\0';
+}
+
+// ── Base64 encoding (minimal) ─────────────────────────────────────────────────
+
+static const char s_b64[] =
+    "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+
+static int b64_encode(const uint8_t *src, size_t len, char *out) {
+    size_t i = 0, j = 0;
+    while (i < len) {
+        uint32_t b = (uint32_t)src[i++] << 16;
+        if (i < len) b |= (uint32_t)src[i++] << 8;
+        if (i < len) b |= (uint32_t)src[i++] << 0;
+        out[j++] = s_b64[(b >> 18) & 0x3F];
+        out[j++] = s_b64[(b >> 12) & 0x3F];
+        out[j++] = i > len   ? '=' : s_b64[(b >>  6) & 0x3F];
+        out[j++] = i > len-1 ? '=' : s_b64[(b >>  0) & 0x3F];
+    }
+    out[j] = '\0';
+    return (int)j;
+}
+
+static int b64_enc_size(size_t len) {
+    return (int)(((len + 2) / 3) * 4 + 1);
+}
+
+// ── Screenshot to PNG base64 ──────────────────────────────────────────────────
+
+static char *take_screenshot_png(int *out_len) {
+    uint16_t *fb = hal_display_get_framebuffer();
+    if (!fb) { *out_len = 0; return NULL; }
+
+    SDL_Surface *surf = SDL_CreateRGBSurfaceFrom(
+        fb, 320, 320, 16, 320 * 2,
+        0xF800, 0x07E0, 0x001F, 0x0000);
+    if (!surf) { *out_len = 0; return NULL; }
+
+    SDL_Surface *rgb = SDL_ConvertSurfaceFormat(surf, SDL_PIXELFORMAT_RGB24, 0);
+    SDL_FreeSurface(surf);
+    if (!rgb) { *out_len = 0; return NULL; }
+
+    size_t buf_size = 256 * 1024;
+    uint8_t *png_buf = (uint8_t *)malloc(buf_size);
+    if (!png_buf) { SDL_FreeSurface(rgb); *out_len = 0; return NULL; }
+
+    SDL_RWops *rw = SDL_RWFromMem(png_buf, (int)buf_size);
+    if (!rw) { free(png_buf); SDL_FreeSurface(rgb); *out_len = 0; return NULL; }
+
+    int saved = IMG_SavePNG_RW(rgb, rw, 1);
+    SDL_FreeSurface(rgb);
+
+    if (saved < 0) { SDL_FreeSurface(rgb); free(png_buf); *out_len = 0; return NULL; }
+
+    Sint64 size = SDL_RWsize(rw);
+    if (size <= 0 || (size_t)size >= buf_size) { free(png_buf); *out_len = 0; return NULL; }
+
+    char *b64 = malloc(b64_enc_size((size_t)size) + 1);
+    if (!b64) { free(png_buf); *out_len = 0; return NULL; }
+    b64_encode(png_buf, (size_t)size, b64);
+    free(png_buf);
+    *out_len = (int)strlen(b64);
+    return b64;
+}
+
+// ── RGB565 framebuffer to base64 ───────────────────────────────────────────────
+
+static char *framebuffer_base64(int *out_len) {
+    uint16_t *fb = hal_display_get_framebuffer();
+    if (!fb) { *out_len = 0; return NULL; }
+    char *b64 = malloc(b64_enc_size(320 * 320 * 2) + 1);
+    if (!b64) { *out_len = 0; return NULL; }
+    b64_encode((const uint8_t *)fb, 320 * 320 * 2, b64);
+    *out_len = (int)strlen(b64);
+    return b64;
+}
+
+// ── Method handlers ────────────────────────────────────────────────────────────
+
+static char *h_ping(const char *params) {
+    (void)params;
+    static char buf[256];
+    uint32_t ms = hal_get_time_ms();
+    snprintf(buf, sizeof(buf),
+             "{\"jsonrpc\":\"2.0\",\"result\":{\"version\":\"1.0.0\",\"uptime_ms\":%u}}", ms);
+    return strdup(buf);
+}
+
+static char *h_launch_app(const char *params) {
+    char name[128] = {0};
+    json_get_str(params, "name", name, sizeof(name));
+    if (!name[0]) {
+        return strdup("{\"jsonrpc\":\"2.0\",\"error\":{\"code\":-32602,\"message\":\"name required\"}}");
+    }
+    s_pending_launch = strdup(name);
+    sim_socket_notify("app.started", "{\"name\":\"pending\"}");
+    return strdup("{\"jsonrpc\":\"2.0\",\"result\":{\"ok\":true,\"app_name\":\"pending\"}}");
+}
+
+static char *h_exit_app(const char *params) {
+    (void)params;
+    kbd_inject_buttons(BTN_ESC);
+    s_exit_requested = true;
+    return strdup("{\"jsonrpc\":\"2.0\",\"result\":{\"ok\":true}}");
+}
+
+static char *h_get_running_app(const char *params) {
+    (void)params;
+    const char *name = launcher_get_running_app_name();
+    if (name && name[0]) {
+        static char buf[256];
+        snprintf(buf, sizeof(buf),
+                 "{\"jsonrpc\":\"2.0\",\"result\":{\"name\":\"%s\"}}", name);
+        return strdup(buf);
+    }
+    return strdup("{\"jsonrpc\":\"2.0\",\"result\":null}");
+}
+
+static uint32_t button_name_to_mask(const char *button) {
+    if (strcmp(button, "up") == 0) return BTN_UP;
+    if (strcmp(button, "down") == 0) return BTN_DOWN;
+    if (strcmp(button, "left") == 0) return BTN_LEFT;
+    if (strcmp(button, "right") == 0) return BTN_RIGHT;
+    if (strcmp(button, "enter") == 0) return BTN_ENTER;
+    if (strcmp(button, "esc") == 0 || strcmp(button, "escape") == 0) return BTN_ESC;
+    if (strcmp(button, "menu") == 0) return BTN_MENU;
+    if (strcmp(button, "tab") == 0) return BTN_TAB;
+    if (strcmp(button, "backspace") == 0 || strcmp(button, "bkspc") == 0) return BTN_BACKSPACE;
+    if (strcmp(button, "del") == 0 || strcmp(button, "delete") == 0) return BTN_DEL;
+    if (strncmp(button, "f", 1) == 0 && strlen(button) <= 4) {
+        int f = atoi(button + 1);
+        if (f >= 1 && f <= 12) return (uint32_t)(BTN_F1 << (f - 1));
+    }
+    return 0;
+}
+
+static char *h_inject_button(const char *params) {
+    char button[32] = {0}, action[16] = {0};
+    json_get_str(params, "button", button, sizeof(button));
+    json_get_str(params, "action", action, sizeof(action));
+
+    uint32_t btn_mask = button_name_to_mask(button);
+    if (!btn_mask) {
+        static char buf[128];
+        snprintf(buf, sizeof(buf),
+                 "{\"jsonrpc\":\"2.0\",\"error\":{\"code\":-32602,\"message\":\"unknown button: %s\"}}", button);
+        return strdup(buf);
+    }
+
+    if (strcmp(action, "release") == 0) {
+        return strdup("{\"jsonrpc\":\"2.0\",\"result\":{\"ok\":true}}");
+    }
+    kbd_inject_buttons(btn_mask);
+    if (strcmp(action, "click") == 0 || strcmp(action, "press") == 0) {
+        SDL_Delay(16);
+    }
+    return strdup("{\"jsonrpc\":\"2.0\",\"result\":{\"ok\":true}}");
+}
+
+static char *h_inject_char(const char *params) {
+    char ch[2] = {0};
+    json_get_str(params, "char", ch, 2);
+    if (!ch[0]) {
+        return strdup("{\"jsonrpc\":\"2.0\",\"error\":{\"code\":-32602,\"message\":\"char required\"}}");
+    }
+    kbd_inject_char(ch[0]);
+    return strdup("{\"jsonrpc\":\"2.0\",\"result\":{\"ok\":true}}");
+}
+
+static char *h_screenshot(const char *params) {
+    char format[16] = "png";
+    json_get_str(params, "format", format, sizeof(format));
+
+    char *data;
+    int len;
+    if (strcmp(format, "raw") == 0) {
+        data = framebuffer_base64(&len);
+    } else {
+        data = take_screenshot_png(&len);
+    }
+    if (!data) {
+        return strdup("{\"jsonrpc\":\"2.0\",\"error\":{\"code\":-32603,\"message\":\"screenshot failed\"}}");
+    }
+    char *resp = malloc(1024 + (size_t)len + 1);
+    int n = snprintf(resp, 1024,
+                    "{\"jsonrpc\":\"2.0\",\"result\":{\"format\":\"%s\",\"width\":320,\"height\":320,\"data\":\"",
+                    format);
+    memcpy(resp + n, data, (size_t)len);
+    n += len;
+    snprintf(resp + n, 256, "\"}}");
+    free(data);
+    return resp;
+}
+
+static char *h_read_file(const char *params) {
+    char path[512] = {0};
+    json_get_str(params, "path", path, sizeof(path));
+    if (!path[0]) {
+        return strdup("{\"jsonrpc\":\"2.0\",\"error\":{\"code\":-32602,\"message\":\"path required\"}}");
+    }
+
+    char resolved[1024];
+    if (!sandbox_path(path, resolved, sizeof(resolved))) {
+        return strdup("{\"jsonrpc\":\"2.0\",\"error\":{\"code\":-32003,\"message\":\"path outside sandbox\"}}");
+    }
+
+    FILE *f = fopen(resolved, "rb");
+    if (!f) {
+        return strdup("{\"jsonrpc\":\"2.0\",\"error\":{\"code\":-32002,\"message\":\"file not found\"}}");
+    }
+    fseek(f, 0, SEEK_END);
+    long fsize = ftell(f);
+    fseek(f, 0, SEEK_SET);
+    uint8_t *buf = (uint8_t *)malloc((size_t)fsize ? (size_t)fsize : 1);
+    if (!buf) { fclose(f); return strdup("{\"jsonrpc\":\"2.0\",\"error\":{\"code\":-32603,\"message\":\"out of memory\"}}"); }
+    if (fsize > 0) fread(buf, 1, (size_t)fsize, f);
+    fclose(f);
+
+    char *b64 = malloc(b64_enc_size((size_t)fsize) + 1);
+    if (!b64) { free(buf); return strdup("{\"jsonrpc\":\"2.0\",\"error\":{\"code\":-32603,\"message\":\"out of memory\"}}"); }
+    b64_encode(buf, (size_t)fsize, b64);
+    free(buf);
+
+    char escaped_path[1024];
+    json_escape(path, escaped_path, sizeof(escaped_path));
+    size_t b64len = strlen(b64);
+    char *resp = malloc(1024 + b64len + 1);
+    int n = snprintf(resp, 1024,
+                    "{\"jsonrpc\":\"2.0\",\"result\":{\"path\":\"%s\",\"size\":%ld,\"data\":\"", escaped_path, fsize);
+    memcpy(resp + n, b64, b64len);
+    n += (int)b64len;
+    snprintf(resp + n, 256, "\"}}");
+    free(b64);
+    return resp;
+}
+
+static size_t b64_decode_inplace(char *b64, size_t len) {
+    size_t out_len = 0;
+    size_t i = 0, j = 0;
+    while (i < len) {
+        int v = 0; int clen = 0;
+        for (int k = 0; k < 4 && i < len; k++) {
+            char c = b64[i++];
+            if (c == '=' || c == 0) break;
+            int cv = -1;
+            if (c >= 'A' && c <= 'Z') cv = c - 'A' + 0;
+            else if (c >= 'a' && c <= 'z') cv = c - 'a' + 26;
+            else if (c >= '0' && c <= '9') cv = c - '0' + 52;
+            else if (c == '+') cv = 62;
+            else if (c == '/') cv = 63;
+            else continue;
+            v = (v << 6) | cv;
+            clen++;
+        }
+        for (int k = clen - 2; k >= 0; k--) {
+            b64[j++] = (char)((v >> (k * 8)) & 0xFF);
+            out_len++;
+        }
+    }
+    b64[j] = '\0';
+    return out_len;
+}
+
+static char *h_write_file(const char *params) {
+    char path[512] = {0};
+    json_get_str(params, "path", path, sizeof(path));
+    if (!path[0]) {
+        return strdup("{\"jsonrpc\":\"2.0\",\"error\":{\"code\":-32602,\"message\":\"path required\"}}");
+    }
+
+    char resolved[1024];
+    if (!sandbox_path(path, resolved, sizeof(resolved))) {
+        return strdup("{\"jsonrpc\":\"2.0\",\"error\":{\"code\":-32003,\"message\":\"path outside sandbox\"}}");
+    }
+
+    const char *data_start = strstr(params, "\"data\"");
+    if (!data_start) {
+        return strdup("{\"jsonrpc\":\"2.0\",\"error\":{\"code\":-32602,\"message\":\"data required\"}}");
+    }
+    const char *colon = strchr(data_start, ':');
+    if (!colon) return strdup("{\"jsonrpc\":\"2.0\",\"error\":{\"code\":-32602,\"message\":\"data format error\"}}");
+    const char *p = colon + 1;
+    while (*p == ' ' || *p == '\t') p++;
+    if (*p != '"') return strdup("{\"jsonrpc\":\"2.0\",\"error\":{\"code\":-32602,\"message\":\"data must be base64 string\"}}");
+    p++;
+
+    static char b64_buf[256 * 1024];
+    size_t di = 0;
+    while (*p && *p != '"' && di < sizeof(b64_buf) - 1) b64_buf[di++] = *p++;
+    b64_buf[di] = '\0';
+
+    size_t dec_len = b64_decode_inplace(b64_buf, di);
+
+    FILE *f = fopen(resolved, "wb");
+    if (!f) {
+        return strdup("{\"jsonrpc\":\"2.0\",\"error\":{\"code\":-32003,\"message\":\"write failed\"}}");
+    }
+    fwrite(b64_buf, 1, dec_len, f);
+    fclose(f);
+
+    char *resp = malloc(128);
+    snprintf(resp, 128, "{\"jsonrpc\":\"2.0\",\"result\":{\"ok\":true,\"bytes_written\":%zu}}", dec_len);
+    return resp;
+}
+
+static char *h_delete_file(const char *params) {
+    char path[512] = {0};
+    json_get_str(params, "path", path, sizeof(path));
+    if (!path[0]) {
+        return strdup("{\"jsonrpc\":\"2.0\",\"error\":{\"code\":-32602,\"message\":\"path required\"}}");
+    }
+    char resolved[1024];
+    if (!sandbox_path(path, resolved, sizeof(resolved))) {
+        return strdup("{\"jsonrpc\":\"2.0\",\"error\":{\"code\":-32003,\"message\":\"path outside sandbox\"}}");
+    }
+    if (unlink(resolved) != 0) {
+        return strdup("{\"jsonrpc\":\"2.0\",\"error\":{\"code\":-32002,\"message\":\"delete failed\"}}");
+    }
+    return strdup("{\"jsonrpc\":\"2.0\",\"result\":{\"ok\":true}}");
+}
+
+static char *h_list_dir(const char *params) {
+    char path[512] = "/";
+    json_get_str(params, "path", path, sizeof(path));
+
+    char resolved[1024];
+    if (!sandbox_path(path, resolved, sizeof(resolved))) {
+        return strdup("{\"jsonrpc\":\"2.0\",\"error\":{\"code\":-32003,\"message\":\"path outside sandbox\"}}");
+    }
+
+    DIR *dir = opendir(resolved);
+    if (!dir) {
+        return strdup("{\"jsonrpc\":\"2.0\",\"error\":{\"code\":-32002,\"message\":\"directory not found\"}}");
+    }
+
+    static char buf[65536];
+    char escaped_path[1024];
+    json_escape(path, escaped_path, sizeof(escaped_path));
+    int off = snprintf(buf, sizeof(buf), "{\"jsonrpc\":\"2.0\",\"result\":{\"path\":\"%s\",\"entries\":[", escaped_path);
+    bool first = true;
+    struct dirent *entry;
+    while ((entry = readdir(dir)) != NULL && (size_t)off < sizeof(buf) - 200) {
+        if (entry->d_name[0] == '.') continue;
+        char full[1024];
+        snprintf(full, sizeof(full), "%s/%s", resolved, entry->d_name);
+        struct stat st;
+        bool is_dir = false;
+        uint32_t fsize = 0;
+        if (stat(full, &st) == 0) {
+            is_dir = S_ISDIR(st.st_mode);
+            fsize = (uint32_t)st.st_size;
+        }
+        char name_esc[256];
+        json_escape(entry->d_name, name_esc, sizeof(name_esc));
+        off += snprintf(buf + off, (size_t)(sizeof(buf) - (size_t)off),
+                        "%s{\"name\":\"%s\",\"is_dir\":%s,\"size\":%u}",
+                        first ? "" : ",", name_esc, is_dir ? "true" : "false", fsize);
+        first = false;
+    }
+    closedir(dir);
+    off += snprintf(buf + off, (size_t)(sizeof(buf) - (size_t)off), "]}}");
+    return strdup(buf);
+}
+
+static char *h_disk_info(const char *params) {
+    (void)params;
+    extern char g_base_path[512];
+    uint32_t free_kb = 0, total_kb = 0;
+    struct statvfs st;
+    if (statvfs(g_base_path, &st) == 0) {
+        total_kb = (uint32_t)((uint64_t)st.f_blocks * (uint64_t)st.f_frsize / 1024);
+        free_kb = (uint32_t)((uint64_t)st.f_bavail * (uint64_t)st.f_frsize / 1024);
+    }
+    static char buf[128];
+    snprintf(buf, sizeof(buf),
+             "{\"jsonrpc\":\"2.0\",\"result\":{\"free_kb\":%u,\"total_kb\":%u}}", free_kb, total_kb);
+    return strdup(buf);
+}
+
+static char *h_play_tone(const char *params) {
+    int freq = 440, duration = 500;
+    json_get_int(params, "frequency", &freq);
+    json_get_int(params, "duration_ms", &duration);
+    if (freq < 20) freq = 20;
+    if (freq > 20000) freq = 20000;
+    extern void audio_play_tone(uint32_t freq_hz, uint32_t duration_ms);
+    audio_play_tone((uint32_t)freq, (uint32_t)duration);
+    return strdup("{\"jsonrpc\":\"2.0\",\"result\":{\"ok\":true}}");
+}
+
+static char *h_stop_audio(const char *params) {
+    (void)params;
+    extern void audio_stop_tone(void);
+    extern void audio_stop_stream(void);
+    audio_stop_tone();
+    audio_stop_stream();
+    return strdup("{\"jsonrpc\":\"2.0\",\"result\":{\"ok\":true}}");
+}
+
+static char *h_get_display_buffer(const char *params) {
+    (void)params;
+    int len;
+    char *data = framebuffer_base64(&len);
+    if (!data) {
+        return strdup("{\"jsonrpc\":\"2.0\",\"error\":{\"code\":-32603,\"message\":\"framebuffer unavailable\"}}");
+    }
+    char *resp = malloc(1024 + (size_t)len + 1);
+    int n = snprintf(resp, 1024,
+                    "{\"jsonrpc\":\"2.0\",\"result\":{\"width\":320,\"height\":320,\"format\":\"rgb565\",\"data\":\"");
+    memcpy(resp + n, data, (size_t)len);
+    n += len;
+    snprintf(resp + n, 256, "\"}}");
+    free(data);
+    return resp;
+}
+
+static char *h_get_button_state(const char *params) {
+    (void)params;
+    uint32_t btns = kbd_get_buttons();
+    uint32_t pressed = kbd_get_buttons_pressed();
+    uint32_t released = kbd_get_buttons_released();
+    static char buf[128];
+    snprintf(buf, sizeof(buf),
+             "{\"jsonrpc\":\"2.0\",\"result\":{\"buttons\":%u,\"buttons_pressed\":%u,\"buttons_released\":%u}}",
+             btns, pressed, released);
+    return strdup(buf);
+}
+
+static char *h_get_heap_info(const char *params) {
+    (void)params;
+    size_t free_psram = hal_psram_free_size();
+    size_t used_psram = hal_psram_total_size() - free_psram;
+    size_t lua_heap_free = lua_psram_alloc_free_size();
+    static char buf[256];
+    snprintf(buf, sizeof(buf),
+             "{\"jsonrpc\":\"2.0\",\"result\":{\"lua_heap_used_kb\":%zu,\"lua_heap_free_kb\":%zu,\"psram_total_kb\":%zu}}",
+             used_psram / 1024, lua_heap_free / 1024, hal_psram_total_size() / 1024);
+    return strdup(buf);
+}
+
+static char *h_get_audio_state(const char *params) {
+    (void)params;
+    extern volatile bool s_tone_playing;
+    extern volatile bool s_stream_active;
+    extern int sound_get_playing_source_count(void);
+    bool tone = false;
+    bool stream = false;
+    int players = 0;
+    extern pthread_mutex_t s_sound_mutex;
+    pthread_mutex_lock(&s_sound_mutex);
+    tone = s_tone_playing;
+    stream = s_stream_active;
+    players = sound_get_playing_source_count();
+    pthread_mutex_unlock(&s_sound_mutex);
+    static char buf[128];
+    snprintf(buf, sizeof(buf),
+             "{\"jsonrpc\":\"2.0\",\"result\":{\"tone_playing\":%s,\"stream_active\":%s,\"sound_players_active\":%d}}",
+             tone ? "true" : "false", stream ? "true" : "false", players);
+    return strdup(buf);
+}
+
+static char *h_get_wifi_state(const char *params) {
+    (void)params;
+    wifi_status_t st = wifi_get_status();
+    const char *ssid = wifi_get_ssid();
+    const char *ip = wifi_get_ip();
+    const char *status_str = "disconnected";
+    if (st == WIFI_STATUS_CONNECTED) status_str = "connected";
+    else if (st == WIFI_STATUS_CONNECTING) status_str = "connecting";
+    static char buf[256];
+    snprintf(buf, sizeof(buf),
+             "{\"jsonrpc\":\"2.0\",\"result\":{\"status\":\"%s\",\"ssid\":\"%s\",\"ip\":\"%s\"}}",
+             status_str, ssid ? ssid : "", ip ? ip : "");
+    return strdup(buf);
+}
+
+static char *h_set_wifi_state(const char *params) {
+    char status[32] = {0};
+    char error_str[128] = {0};
+    int error_code = 0;
+    json_get_str(params, "status", status, sizeof(status));
+    json_get_str(params, "error_str", error_str, sizeof(error_str));
+    json_get_int(params, "error_code", &error_code);
+
+    s_wifi_error.enabled = true;
+    if (strcmp(status, "connected") == 0) {
+        s_wifi_error.mode = WIFI_NORMAL;
+        s_wifi_error.enabled = false;
+    } else if (strcmp(status, "disconnected") == 0) {
+        s_wifi_error.mode = WIFI_DISCONNECTED;
+    } else if (strcmp(status, "not_available") == 0) {
+        s_wifi_error.mode = WIFI_NOT_AVAILABLE;
+    } else if (strcmp(status, "error") == 0) {
+        s_wifi_error.mode = WIFI_ERROR;
+        s_wifi_error.error_code = error_code;
+        static char errbuf[128];
+        if (error_str[0]) {
+            snprintf(errbuf, sizeof(errbuf), "%s", error_str);
+        } else {
+            snprintf(errbuf, sizeof(errbuf), "Network error %d", error_code);
+        }
+        s_wifi_error.error_str = errbuf;
+    }
+
+    return strdup("{\"jsonrpc\":\"2.0\",\"result\":{\"ok\":true}}");
+}
+
+static char *h_get_log_buffer(const char *params) {
+    (void)params;
+    char *log = sim_get_log_buffer();
+    int count = sim_get_log_buffer_count();
+    static char buf[65536];
+    char escaped[32768];
+    json_escape(log, escaped, sizeof(escaped));
+    int n = snprintf(buf, sizeof(buf),
+                    "{\"jsonrpc\":\"2.0\",\"result\":{\"count\":%d,\"lines\":%s}}",
+                    count, escaped);
+    if ((size_t)n >= sizeof(buf)) buf[sizeof(buf) - 1] = '\0';
+    return strdup(buf);
+}
+
+static char *h_set_time_multiplier(const char *params) {
+    float mult = 1.0f;
+    json_get_float(params, "multiplier", &mult);
+    if (mult < 0.0f) mult = 0.0f;
+    hal_set_time_multiplier(mult);
+    static char buf[64];
+    snprintf(buf, sizeof(buf), "{\"jsonrpc\":\"2.0\",\"result\":{\"ok\":true,\"multiplier\":%g}}", mult);
+    return strdup(buf);
+}
+
+// ── Dispatch ─────────────────────────────────────────────────────────────────
+
+typedef char *(*handler_fn)(const char *params);
+
+static struct {
+    const char *name;
+    handler_fn fn;
+} s_handlers[] = {
+    { "ping",                h_ping },
+    { "launch_app",         h_launch_app },
+    { "exit_app",           h_exit_app },
+    { "get_running_app",    h_get_running_app },
+    { "inject_button",      h_inject_button },
+    { "inject_char",        h_inject_char },
+    { "screenshot",        h_screenshot },
+    { "read_file",          h_read_file },
+    { "write_file",         h_write_file },
+    { "delete_file",        h_delete_file },
+    { "list_dir",           h_list_dir },
+    { "disk_info",          h_disk_info },
+    { "play_tone",          h_play_tone },
+    { "stop_audio",         h_stop_audio },
+    { "get_display_buffer", h_get_display_buffer },
+    { "get_button_state",   h_get_button_state },
+    { "get_heap_info",      h_get_heap_info },
+    { "get_audio_state",     h_get_audio_state },
+    { "get_wifi_state",     h_get_wifi_state },
+    { "set_wifi_state",     h_set_wifi_state },
+    { "get_log_buffer",     h_get_log_buffer },
+    { "set_time_multiplier",h_set_time_multiplier },
+    { NULL, NULL },
+};
+
+static void wrap_response(int id, const char *result, char *out, size_t max) {
+    snprintf(out, max, "{\"jsonrpc\":\"2.0\",\"id\":%d,", id);
+    size_t base = strlen(out);
+    if (result) strncpy(out + base, result + 1, max - base - 1);
+    out[max - 1] = '\0';
+    strncat(out, "\n", max - strlen(out) - 1);
+}
+
+char *sim_handler_dispatch(const char *request, const char *end) {
+    int id = 0;
+    char method[128] = {0};
+    static char params[8192];
+
+    if ((size_t)(end - request) < 9 || strncmp(request, "{\"jsonrpc\"", 9) != 0) {
+        return strdup("{\"jsonrpc\":\"2.0\",\"error\":{\"code\":-32600,\"message\":\"Invalid request\"}}");
+    }
+
+    const char *id_start = strstr(request, "\"id\"");
+    if (id_start && id_start < end) {
+        const char *colon = strchr(id_start, ':');
+        if (colon && ++colon < end) {
+            while (*colon == ' ' || *colon == '\t') colon++;
+            id = atoi(colon);
+        }
+    }
+
+    const char *method_start = strstr(request, "\"method\"");
+    if (!method_start || method_start >= end) {
+        static char err[64];
+        snprintf(err, sizeof(err),
+                 "{\"jsonrpc\":\"2.0\",\"id\":%d,\"error\":{\"code\":-32600,\"message\":\"method missing\"}}", id);
+        return strdup(err);
+    }
+    const char *m = strchr(method_start, '"');
+    if (m) m++;
+    size_t mi = 0;
+    while (*m && *m != '"' && mi < sizeof(method) - 1) method[mi++] = *m++;
+    method[mi] = '\0';
+
+    params[0] = '\0';
+    const char *params_start = strstr(request, "\"params\"");
+    if (params_start && params_start < end) {
+        const char *colon = strchr(params_start, ':');
+        if (colon) {
+            const char *p = colon + 1;
+            while (*p == ' ' || *p == '\t') p++;
+            if (*p == '{') {
+                int depth = 0;
+                const char *end_brace = p;
+                while (end_brace < end && (*end_brace != '}' || depth > 0)) {
+                    if (*end_brace == '{') depth++;
+                    else if (*end_brace == '}') depth--;
+                    end_brace++;
+                }
+                size_t len = (size_t)(end_brace - p);
+                if (len < sizeof(params)) {
+                    memcpy(params, p, len);
+                    params[len] = '\0';
+                }
+            }
+        }
+    }
+
+    for (int i = 0; s_handlers[i].name; i++) {
+        if (strcmp(s_handlers[i].name, method) == 0) {
+            char *result = s_handlers[i].fn(params);
+            if (!result) return strdup("{\"jsonrpc\":\"2.0\",\"error\":{\"code\":-32603,\"message\":\"handler returned null\"}}");
+            static char resp[65536];
+            wrap_response(id, result, resp, sizeof(resp));
+            free(result);
+            return strdup(resp);
+        }
+    }
+
+    static char err[256];
+    snprintf(err, sizeof(err),
+             "{\"jsonrpc\":\"2.0\",\"id\":%d,\"error\":{\"code\":-32601,\"message\":\"method not found: %s\"}}",
+             id, method);
+    return strdup(err);
+}

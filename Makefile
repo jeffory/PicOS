@@ -1,7 +1,7 @@
 # PicOS Makefile
 # Automated setup, build, and deployment for ClockworkPi PicoCalc
 
-.PHONY: help setup build clean flash rebuild check-env test-lua
+.PHONY: help setup build clean flash rebuild check-env test-lua simulator simulator-run simulator-clean
 
 # ── Configuration ─────────────────────────────────────────────────────────────
 
@@ -23,18 +23,25 @@ FATFS_DIR := third_party/fatfs
 help:
 	@echo "PicOS Build System"
 	@echo ""
-	@echo "Targets:"
-	@echo "  make setup     - Download dependencies (Lua, FatFS) and check environment"
-	@echo "  make build     - Build the firmware (creates build/picocalc_os.uf2)"
-	@echo "  make test-lua  - Test Lua app syntax before deployment"
-	@echo "  make clean     - Remove build directory"
-	@echo "  make rebuild   - Clean and rebuild from scratch"
-	@echo "  make flash     - Show instructions for flashing the device"
-	@echo "  make check-env - Verify build environment is ready"
+	@echo "Hardware Targets:"
+	@echo "  make setup          - Download dependencies (Lua, FatFS) and check environment"
+	@echo "  make build          - Build the firmware (creates build/picocalc_os.uf2)"
+	@echo "  make clean          - Remove build directory"
+	@echo "  make rebuild        - Clean and rebuild from scratch"
+	@echo "  make flash          - Show instructions for flashing the device"
+	@echo "  make check-env      - Verify build environment is ready"
+	@echo ""
+	@echo "Simulator Targets (PC):"
+	@echo "  make simulator      - Build PC simulator for testing/debugging"
+	@echo "  make simulator-run  - Build and run the simulator"
+	@echo "  make simulator-clean - Clean simulator build files"
+	@echo ""
+	@echo "Testing:"
+	@echo "  make test-lua       - Test Lua app syntax before deployment"
 	@echo ""
 	@echo "Environment:"
-	@echo "  PICO_BOARD     - Target board (default: $(PICO_BOARD))"
-	@echo "  PICO_SDK_PATH  - Path to Pico SDK (must be set)"
+	@echo "  PICO_BOARD          - Target board (default: $(PICO_BOARD))"
+	@echo "  PICO_SDK_PATH       - Path to Pico SDK (must be set)"
 	@echo ""
 
 # ── Setup target ──────────────────────────────────────────────────────────────
@@ -184,3 +191,76 @@ test-lua:
 	fi
 	@echo "Testing Lua app syntax..."
 	@lua tools/test_lua_apps.lua
+
+# ── PC Simulator Targets ─────────────────────────────────────────────────────
+
+SIM_BUILD_DIR := build_sim
+SIM_BINARY := $(SIM_BUILD_DIR)/picos_simulator
+
+simulator-check:
+	@echo "Checking simulator build environment..."
+	@if ! command -v cmake >/dev/null 2>&1; then \
+		echo "ERROR: cmake not found in PATH"; \
+		echo "       Install: sudo dnf install cmake  # or apt/brew"; \
+		exit 1; \
+	fi
+	@if ! pkg-config --exists sdl2 2>/dev/null; then \
+		echo "ERROR: SDL2 development libraries not found"; \
+		echo ""; \
+		echo "       Install SDL2:"; \
+		echo "         Fedora:  sudo dnf install SDL2-devel"; \
+		echo "         Ubuntu:  sudo apt install libsdl2-dev"; \
+		echo "         macOS:   brew install sdl2"; \
+		echo ""; \
+		exit 1; \
+	fi
+	@echo "  ✓ cmake: $$(cmake --version | head -n1)"
+	@echo "  ✓ SDL2: $$(pkg-config --modversion sdl2)"
+
+simulator: simulator-check download-lua
+	@echo "Building PicOS PC Simulator..."
+	@mkdir -p $(SIM_BUILD_DIR)
+	@if [ -f $(SIM_BUILD_DIR)/CMakeCache.txt ] && \
+		! grep -q 'CMAKE_HOME_DIRECTORY.*simulator' $(SIM_BUILD_DIR)/CMakeCache.txt 2>/dev/null; then \
+		echo "  Stale CMake cache detected, cleaning..."; \
+		rm -rf $(SIM_BUILD_DIR)/*; \
+	fi
+	@cd $(SIM_BUILD_DIR) && \
+		cmake ../simulator -DCMAKE_BUILD_TYPE=Release && \
+		$(MAKE) -j$$(nproc 2>/dev/null || echo 4)
+	@echo ""
+	@echo "✓ Simulator build complete!"
+	@echo "  Binary: $(SIM_BINARY)"
+	@echo ""
+	@echo "To run:"
+	@echo "  $(SIM_BINARY) --sd-card ./apps"
+	@echo ""
+	@echo "For help:"
+	@echo "  $(SIM_BINARY) --help"
+	@echo ""
+
+simulator-debug: simulator-check download-lua
+	@echo "Building PicOS PC Simulator (Debug)..."
+	@mkdir -p $(SIM_BUILD_DIR)
+	@if [ -f $(SIM_BUILD_DIR)/CMakeCache.txt ] && \
+		! grep -q 'CMAKE_HOME_DIRECTORY.*simulator' $(SIM_BUILD_DIR)/CMakeCache.txt 2>/dev/null; then \
+		echo "  Stale CMake cache detected, cleaning..."; \
+		rm -rf $(SIM_BUILD_DIR)/*; \
+	fi
+	@cd $(SIM_BUILD_DIR) && \
+		cmake ../simulator -DCMAKE_BUILD_TYPE=Debug && \
+		$(MAKE) -j$$(nproc 2>/dev/null || echo 4)
+	@echo ""
+	@echo "✓ Simulator build complete (Debug)!"
+	@echo "  Binary: $(SIM_BINARY)"
+	@echo ""
+
+simulator-run: simulator
+	@echo "Running PicOS Simulator..."
+	@echo ""
+	@$(SIM_BINARY) --sd-card ./apps
+
+simulator-clean:
+	@echo "Cleaning simulator build..."
+	@rm -rf $(SIM_BUILD_DIR)
+	@echo "✓ Simulator clean complete"

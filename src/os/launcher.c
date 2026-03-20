@@ -100,6 +100,8 @@ static bool json_has_requirement(const char *json, const char *requirement) {
 
 static void on_app_dir(const sdcard_entry_t *entry, void *user) {
   (void)user;
+  printf("[LAUNCHER] Found entry: %s (is_dir=%d)\n", entry->name, entry->is_dir);
+  fflush(stdout);
   if (!entry->is_dir)
     return;
   if (entry->name[0] == '.')
@@ -111,11 +113,17 @@ static void on_app_dir(const sdcard_entry_t *entry, void *user) {
   char lua_path[160], elf_path[160];
   snprintf(lua_path, sizeof(lua_path), "/apps/%s/main.lua", entry->name);
   snprintf(elf_path, sizeof(elf_path), "/apps/%s/main.elf", entry->name);
+  printf("[LAUNCHER] Checking: lua=%s exists=%d, elf=%s exists=%d\n", 
+         lua_path, sdcard_fexists(lua_path), elf_path, sdcard_fexists(elf_path));
+  fflush(stdout);
   bool has_lua = sdcard_fexists(lua_path);
   bool has_elf = sdcard_fexists(elf_path);
 
-  if (!has_lua && !has_elf)
+  if (!has_lua && !has_elf) {
+    printf("[LAUNCHER] Skipping %s: no main.lua or main.elf\n", entry->name);
+    fflush(stdout);
     return;
+  }
 
   // Native wins when both exist (rare, but log it)
   if (has_lua && has_elf)
@@ -159,12 +167,19 @@ static void on_app_dir(const sdcard_entry_t *entry, void *user) {
     strncpy(app->version, "?", sizeof(app->version));
   }
 
+  printf("[LAUNCHER] Added app: name='%s' id='%s' type=%s\n", 
+         app->name, app->id, app->type == APP_TYPE_NATIVE ? "native" : "lua");
+  fflush(stdout);
   s_app_count++;
 }
 
 static void scan_apps(void) {
   s_app_count = 0;
+  printf("[LAUNCHER] Scanning /apps directory...\n");
+  fflush(stdout);
   sdcard_list_dir("/apps", on_app_dir, NULL);
+  printf("[LAUNCHER] Found %d apps\n", s_app_count);
+  fflush(stdout);
 }
 
 // ── Launcher rendering
@@ -425,6 +440,23 @@ void launcher_run(void) {
     memset(s_apps, 0, sizeof(app_entry_t) * MAX_APPS);
   }
   scan_apps();
+  
+  // Check for simulator auto-launch
+  extern const char* simulator_get_auto_launch_app(void);
+  const char* auto_launch = simulator_get_auto_launch_app();
+  if (auto_launch) {
+    printf("[LAUNCHER] Auto-launching: %s\n", auto_launch);
+    fflush(stdout);
+    if (launcher_launch_by_name(auto_launch)) {
+      // App launched successfully, it will return here when done
+      printf("[LAUNCHER] Auto-launched app exited, returning to launcher\n");
+      fflush(stdout);
+    } else {
+      printf("[LAUNCHER] Failed to auto-launch: %s\n", auto_launch);
+      fflush(stdout);
+    }
+  }
+  
   draw_launcher();
 
   while (true) {
@@ -436,20 +468,38 @@ void launcher_run(void) {
     dev_commands_poll();
     dev_commands_process();
 
-    bool dirty = false;
+    // Socket server poll — JSON-RPC interface for MCP/automation
+    extern void sim_socket_poll(void);
+    extern void sim_handler_check_launch(void);
+    sim_socket_poll();
+    sim_handler_check_launch();
 
-    // Handle dev command flags
-    if (dev_commands_wants_list()) {
-      launcher_list_apps();
-      dev_commands_clear_list();
-    }
+    // Handle pending launch FIRST (before exit check)
+    // This ensures "launch" command works (which sets both pending_launch and exit flags)
+    bool dirty = false;
     if (dev_commands_get_pending_launch()) {
+      // Clear exit flag since we're launching, not exiting
+      dev_commands_clear_exit();
       if (launcher_launch_by_name(dev_commands_get_pending_launch())) {
         kbd_clear_state();
         scan_apps();
         dirty = true;
       }
       dev_commands_clear_pending_launch();
+    }
+
+    // Check for exit request (window close, dev command, etc.)
+    if (dev_commands_wants_exit()) {
+      printf("[LAUNCHER] Exit requested, shutting down...\n");
+      fflush(stdout);
+      dev_commands_clear_exit();
+      break;
+    }
+
+    // Handle dev command flags
+    if (dev_commands_wants_list()) {
+      launcher_list_apps();
+      dev_commands_clear_list();
     }
     if (dev_commands_wants_reboot()) {
       printf("[DEV] Rebooting...\n");
@@ -583,9 +633,27 @@ void launcher_run(void) {
 void launcher_list_apps(void) {
   printf("[DEV] Available apps:\n");
   for (int i = 0; i < s_app_count; i++) {
-    printf("  %s\n", s_apps[i].name);
+    printf("  %s  (%s)\n", s_apps[i].name, s_apps[i].id);
   }
   printf("[DEV] Total: %d apps\n", s_app_count);
+}
+
+bool launcher_launch_by_id(const char *id) {
+  if (!id || !id[0]) {
+    return false;
+  }
+
+  // Find the app by ID
+  for (int i = 0; i < s_app_count; i++) {
+    if (strcmp(s_apps[i].id, id) == 0) {
+      printf("[DEV] Launching app by ID: %s (%s)\n", id, s_apps[i].name);
+      stdio_flush();
+      run_app(i);
+      return true;
+    }
+  }
+
+  return false;
 }
 
 bool launcher_launch_by_name(const char *name) {
@@ -594,24 +662,23 @@ bool launcher_launch_by_name(const char *name) {
     return false;
   }
 
-  // Find the app by name
-  int app_idx = -1;
+  // First try to match by ID
+  if (launcher_launch_by_id(name)) {
+    return true;
+  }
+
+  // Fall back to name match
   for (int i = 0; i < s_app_count; i++) {
     if (strcmp(s_apps[i].name, name) == 0) {
-      app_idx = i;
-      break;
+      printf("[DEV] Launching app: %s\n", name);
+      stdio_flush();
+      run_app(i);
+      return true;
     }
   }
 
-  if (app_idx < 0) {
-    printf("[DEV] Error: app '%s' not found\n", name);
-    return false;
-  }
-
-  printf("[DEV] Launching app: %s\n", name);
-  stdio_flush();
-  run_app(app_idx);
-  return true;
+  printf("[DEV] Error: app '%s' not found\n", name);
+  return false;
 }
 
 const char* launcher_get_running_app_name(void) {

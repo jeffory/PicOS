@@ -2,6 +2,7 @@
 #include "lua_psram_alloc.h"
 #include "ota_update.h"
 #include "version.h"
+#include "../dev_commands.h"
 #include "../hardware.h"
 #include "hardware/gpio.h"
 #include <malloc.h>
@@ -49,6 +50,10 @@ static int l_sys_sleep(lua_State *L) {
     // WiFi is driven by Core 1; no poll needed here.
     http_lua_fire_pending(L);
     tcp_lua_fire_pending(L);
+
+    // Process dev commands (keypress, etc.) while sleeping.
+    dev_commands_poll();
+    dev_commands_process();
 
     uint32_t remaining = end_ms - now;
     sleep_ms(remaining < 10 ? remaining : 10);

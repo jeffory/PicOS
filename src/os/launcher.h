@@ -8,10 +8,15 @@ void launcher_run(void);
 // Re-scans the SD card for apps and resets the selection.
 void launcher_refresh_apps(void);
 
-// List all installed apps to serial output (one per line)
+// List all installed apps to serial output (shows name and ID)
 void launcher_list_apps(void);
 
-// Launch an app by name. Returns true if app was found and launched.
+// Launch an app by ID. Returns true if app was found and launched.
+// Returns false if app not found.
+bool launcher_launch_by_id(const char *id);
+
+// Launch an app by name or ID. Returns true if app was found and launched.
+// Tries ID match first, then falls back to name match.
 // Returns false if app not found.
 bool launcher_launch_by_name(const char *name);
 
