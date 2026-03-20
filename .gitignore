@@ -12,6 +12,8 @@ build/
 build_sim/
 tools/__pycache__/
 build.log
+pico-sdk/
+generated/
 
 # Not ready code
 _old/
@@ -36,3 +38,5 @@ testplan.md
 # Debugging artifacts
 screenshots/
 screen.png
+
+
