@@ -2,6 +2,9 @@
 .claude/
 .env
 .opencode/
+
+# Git worktrees
+.worktrees/
 .vscode/
 
 # Build artifacts
