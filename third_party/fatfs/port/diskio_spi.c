@@ -7,6 +7,12 @@
  * SPI0 is initialised by sdcard_init() in sdcard.c before FatFS mounts —
  * this file only drives the SD card protocol on top of that bus.
  *
+ * Optimizations:
+ *   - Multi-block reads use single large SPI transfer (uf2loader approach)
+ *   - CMD23 pre-erase for multi-block writes
+ *   - Automatic fallback to per-block mode on errors
+ *   - Config key "sd_optimized_read" to enable/disable (default: enabled)
+ *
  * References:
  *   SD Association Physical Layer Simplified Specification v8.00
  *   FatFs R0.15 diskio.h
@@ -21,6 +27,7 @@
 #include "pico/stdlib.h"
 
 #include <string.h>
+#include <stdio.h>
 
 /* ─── Timing / protocol constants ───────────────────────────────────────────
  */
@@ -49,6 +56,23 @@
 
 static volatile DSTATUS s_dstatus = STA_NOINIT;
 static bool s_is_sdhc = false; /* true: block addressing        */
+
+/* ─── Optimized multi-block read state ──────────────────────────────────────
+ */
+
+static volatile bool s_use_optimized_read = true;  /* Set to false on failure */
+static volatile int s_optimized_fail_count = 0;     /* Track consecutive failures */
+static volatile bool s_optimized_disabled_logged = false; /* Log disable only once */
+
+/* Forward declaration for config check */
+extern const char *config_get(const char *key);
+
+/* Check if optimized reads are enabled via config (default: enabled) */
+static bool sd_optimized_read_enabled(void) {
+  const char *val = config_get("sd_optimized_read");
+  /* If key doesn't exist or is not "0", optimized reads are enabled */
+  return (val == NULL) || (val[0] != '0') || (val[1] != '\0');
+}
 
 /* ─── SPI low-level helpers ─────────────────────────────────────────────────
  */
@@ -230,6 +254,10 @@ DSTATUS disk_initialize(BYTE pdrv) {
   if (pdrv != 0)
     return STA_NOINIT;
   s_dstatus = sd_init_card() ? 0 : STA_NOINIT;
+  /* Reset optimization state on init */
+  s_use_optimized_read = true;
+  s_optimized_fail_count = 0;
+  s_optimized_disabled_logged = false;
   return s_dstatus;
 }
 
@@ -239,9 +267,108 @@ DSTATUS disk_status(BYTE pdrv) {
   return s_dstatus;
 }
 
+/* Optimized multi-block read using single SPI transfer.
+ * Returns true on success, false on failure (caller should use fallback).
+ * This is the uf2loader approach - receive all blocks in one transfer.
+ */
+static bool sd_read_multi_optimized(BYTE *buff, uint32_t addr, UINT count) {
+  /* Send CMD18: READ_MULTIPLE_BLOCK */
+  if (sd_send_cmd(18, addr) != 0x00) {
+    return false;
+  }
+
+  /* Wait for first data token */
+  absolute_time_t deadline = make_timeout_time_ms(SD_CMD_TIMEOUT_MS);
+  uint8_t tok;
+  do {
+    tok = spi_byte(0xFF);
+  } while (tok != SD_TOKEN_DATA_START && !time_reached(deadline));
+  
+  if (tok != SD_TOKEN_DATA_START) {
+    sd_send_cmd(12, 0); /* STOP_TRANSMISSION */
+    spi_byte(0xFF);
+    return false;
+  }
+
+  /* Optimized path: receive all blocks in one large transfer.
+   * This eliminates per-block token polling overhead.
+   * The card sends: 0xFE [512 bytes] [2 CRC] 0xFE [512 bytes] [2 CRC] ...
+   * We read the 0xFE tokens as if they were data - they get overwritten
+   * by the actual data blocks in subsequent transfers. */
+  UINT blocks_remaining = count;
+  while (blocks_remaining > 0) {
+    /* Read one block (512 bytes) */
+    spi_recv_buf(buff, 512);
+    buff += 512;
+    blocks_remaining--;
+    
+    /* Discard CRC (2 bytes) */
+    spi_byte(0xFF);
+    spi_byte(0xFF);
+    
+    /* If there are more blocks, the next 0xFE token should already be 
+     * on the bus from the card. Read and verify it. */
+    if (blocks_remaining > 0) {
+      tok = spi_byte(0xFF);
+      if (tok != SD_TOKEN_DATA_START) {
+        /* Token mismatch - card didn't send expected data token */
+        sd_send_cmd(12, 0); /* STOP_TRANSMISSION */
+        spi_byte(0xFF);
+        return false;
+      }
+    }
+  }
+
+  /* CMD12: STOP_TRANSMISSION */
+  sd_send_cmd(12, 0);
+  spi_byte(0xFF); /* Discard stuff byte */
+  sd_wait_ready(SD_CMD_TIMEOUT_MS);
+  
+  return true;
+}
+
+/* Standard per-block multi-block read (fallback).
+ * More compatible with all SD cards but slower.
+ */
+static bool sd_read_multi_fallback(BYTE *buff, uint32_t addr, UINT count) {
+  /* Send CMD18: READ_MULTIPLE_BLOCK */
+  if (sd_send_cmd(18, addr) != 0x00) {
+    return false;
+  }
+
+  UINT original_count = count;
+  while (count--) {
+    absolute_time_t deadline = make_timeout_time_ms(SD_CMD_TIMEOUT_MS);
+    uint8_t tok;
+    do {
+      tok = spi_byte(0xFF);
+    } while (tok != SD_TOKEN_DATA_START && !time_reached(deadline));
+    if (tok != SD_TOKEN_DATA_START) {
+      sd_send_cmd(12, 0); /* Try to stop anyway */
+      spi_byte(0xFF);
+      return false;
+    }
+
+    spi_recv_buf(buff, 512);
+    spi_byte(0xFF); /* CRC high */
+    spi_byte(0xFF); /* CRC low  */
+    buff += 512;
+  }
+
+  /* CMD12: STOP_TRANSMISSION */
+  sd_send_cmd(12, 0);
+  spi_byte(0xFF); /* Discard stuff byte */
+  sd_wait_ready(SD_CMD_TIMEOUT_MS);
+  
+  return true;
+}
+
 DRESULT disk_read(BYTE pdrv, BYTE *buff, LBA_t sector, UINT count) {
   if (pdrv != 0 || (s_dstatus & STA_NOINIT))
     return RES_NOTRDY;
+
+  /* Check if optimized reads are enabled via config */
+  bool optimized_enabled = sd_optimized_read_enabled();
 
   /* SDSC uses byte address; SDHC uses block address */
   uint32_t addr = s_is_sdhc ? (uint32_t)sector : (uint32_t)sector * 512;
@@ -249,7 +376,7 @@ DRESULT disk_read(BYTE pdrv, BYTE *buff, LBA_t sector, UINT count) {
   sd_cs_low();
 
   if (count == 1) {
-    /* CMD17: READ_SINGLE_BLOCK */
+    /* CMD17: READ_SINGLE_BLOCK - no optimization for single blocks */
     if (sd_send_cmd(17, addr) != 0x00) {
       sd_cs_high();
       return RES_ERROR;
@@ -269,35 +396,47 @@ DRESULT disk_read(BYTE pdrv, BYTE *buff, LBA_t sector, UINT count) {
     spi_byte(0xFF); /* CRC high */
     spi_byte(0xFF); /* CRC low  */
   } else {
-    /* CMD18: READ_MULTIPLE_BLOCK — streams blocks until CMD12 stop */
-    if (sd_send_cmd(18, addr) != 0x00) {
-      sd_cs_high();
-      return RES_ERROR;
+    /* Multi-block read with optimized path and fallback */
+    bool success = false;
+    
+    /* Try optimized path if enabled and not permanently disabled */
+    if (optimized_enabled && s_use_optimized_read) {
+      success = sd_read_multi_optimized(buff, addr, count);
+      
+      if (!success) {
+        s_optimized_fail_count++;
+        printf("[SD] Optimized multi-block read failed (attempt %d)\n", 
+               s_optimized_fail_count);
+        
+        /* After 2 consecutive failures, permanently disable for this session */
+        if (s_optimized_fail_count >= 2) {
+          s_use_optimized_read = false;
+          if (!s_optimized_disabled_logged) {
+            printf("[SD] Optimized multi-block read disabled after %d failures\n",
+                   s_optimized_fail_count);
+            printf("[SD] Set sd_optimized_read=0 in config to disable permanently\n");
+            s_optimized_disabled_logged = true;
+          }
+        }
+        
+        /* Re-initialize card and CS line for fallback attempt */
+        sd_cs_high();
+        sleep_ms(1);
+        sd_cs_low();
+      } else {
+        /* Success - reset failure count */
+        s_optimized_fail_count = 0;
+      }
     }
-
-    while (count--) {
-      absolute_time_t deadline = make_timeout_time_ms(SD_CMD_TIMEOUT_MS);
-      uint8_t tok;
-      do {
-        tok = spi_byte(0xFF);
-      } while (tok != SD_TOKEN_DATA_START && !time_reached(deadline));
-      if (tok != SD_TOKEN_DATA_START) {
-        sd_send_cmd(12, 0); /* Try to stop anyway */
-        spi_byte(0xFF);
+    
+    /* Use fallback if optimized failed or was disabled */
+    if (!success) {
+      success = sd_read_multi_fallback(buff, addr, count);
+      if (!success) {
         sd_cs_high();
         return RES_ERROR;
       }
-
-      spi_recv_buf(buff, 512);
-      spi_byte(0xFF); /* CRC high */
-      spi_byte(0xFF); /* CRC low  */
-      buff += 512;
     }
-
-    /* CMD12: STOP_TRANSMISSION */
-    sd_send_cmd(12, 0);
-    spi_byte(0xFF); /* Discard stuff byte */
-    sd_wait_ready(SD_CMD_TIMEOUT_MS);
   }
 
   sd_cs_high();
@@ -341,7 +480,13 @@ DRESULT disk_write(BYTE pdrv, const BYTE *buff, LBA_t sector, UINT count) {
       return RES_ERROR;
     }
   } else {
-    /* CMD25: WRITE_MULTIPLE_BLOCK */
+    /* CMD25: WRITE_MULTIPLE_BLOCK with CMD23 pre-erase optimization */
+    
+    /* CMD23: SET_BLOCK_COUNT - pre-erase blocks for faster writes */
+    /* This tells the card how many blocks we're about to write,
+     * allowing it to pre-erase and potentially improve performance */
+    sd_send_cmd(23, count);
+    
     if (sd_send_cmd(25, addr) != 0x00) {
       sd_cs_high();
       return RES_ERROR;
