@@ -219,7 +219,7 @@ static int l_http_gc(lua_State *L) {
   if (ud->conn) {
     ud->conn->lua_ud = NULL;
     ud->conn->pending = 0;
-    http_free(ud->conn);
+    g_api.http->close(ud->conn);
     ud->conn = NULL;
   }
   http_ud_unref_all(L, ud);
@@ -234,16 +234,12 @@ static int l_http_new(lua_State *L) {
 
   lua_Integer port = luaL_optinteger(L, 2, use_ssl ? 443 : 80);
 
-  http_conn_t *conn = http_alloc();
+  http_conn_t *conn = (http_conn_t *)g_api.http->newConn(server, (uint16_t)port, use_ssl);
   if (!conn) {
     lua_pushnil(L);
     lua_pushstring(L, "HTTP connection pool full or out of memory");
     return 2;
   }
-
-  strncpy(conn->server, server, HTTP_SERVER_MAX - 1);
-  conn->port = (uint16_t)port;
-  conn->use_ssl = use_ssl;
 
   http_ud_t *ud = (http_ud_t *)lua_newuserdata(L, sizeof(http_ud_t));
   ud->conn = conn;
@@ -261,8 +257,12 @@ static int l_http_new(lua_State *L) {
 // conn:close()
 static int l_http_close(lua_State *L) {
   http_ud_t *ud = check_http(L, 1);
-  if (ud->conn)
-    http_close(ud->conn);
+  if (ud->conn) {
+    ud->conn->lua_ud = NULL;
+    ud->conn->pending = 0;
+    g_api.http->close(ud->conn);
+    ud->conn = NULL;
+  }
   return 0;
 }
 
@@ -301,8 +301,8 @@ static int l_http_setReadTimeout(lua_State *L) {
 // failure, so callers should check the return value before sending a request.
 static int l_http_setReadBufferSize(lua_State *L) {
   http_ud_t *ud = check_http_open(L, 1);
-  bool ok = http_set_recv_buf(ud->conn, (uint32_t)luaL_checkinteger(L, 2));
-  lua_pushboolean(L, ok);
+  g_api.http->setReadBufferSize(ud->conn, (int)luaL_checkinteger(L, 2));
+  lua_pushboolean(L, true);
   return 1;
 }
 
@@ -335,8 +335,11 @@ static int do_request(lua_State *L, bool has_body) {
       hdrs = lua_headers_to_str(L, 3);
   }
 
-  bool ok = has_body ? http_post(ud->conn, path, hdrs, body, body_len)
-                     : http_get(ud->conn, path, hdrs);
+  if (has_body)
+    g_api.http->post(ud->conn, path, hdrs, body, (uint32_t)body_len);
+  else
+    g_api.http->get(ud->conn, path, hdrs);
+  bool ok = (ud->conn->err[0] == '\0');
 
   umm_free(hdrs);
 
@@ -373,7 +376,7 @@ static int l_http_getProgress(lua_State *L) {
 // conn:getBytesAvailable() -> n
 static int l_http_getBytesAvailable(lua_State *L) {
   http_ud_t *ud = check_http(L, 1);
-  lua_pushinteger(L, (lua_Integer)http_bytes_available(ud->conn));
+  lua_pushinteger(L, (lua_Integer)g_api.http->available(ud->conn));
   return 1;
 }
 
@@ -385,7 +388,7 @@ static int l_http_read(lua_State *L) {
     return 1;
   }
 
-  uint32_t avail = http_bytes_available(ud->conn);
+  uint32_t avail = g_api.http->available(ud->conn);
   if (avail == 0) {
     lua_pushnil(L);
     return 1;
@@ -406,7 +409,7 @@ static int l_http_read(lua_State *L) {
     return 1;
   }
 
-  uint32_t n = http_read(ud->conn, tmp, want);
+  uint32_t n = (uint32_t)g_api.http->read(ud->conn, tmp, want);
   if (n > 0)
     lua_pushlstring(L, (char *)tmp, n);
   else
