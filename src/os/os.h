@@ -438,11 +438,13 @@ typedef struct {
                      const uint8_t *data, uint32_t dlen, uint8_t out[20]);
     // Fill buf with cryptographically random bytes.
     void (*randomBytes)(uint8_t *buf, uint32_t len);
-    // SSH key derivation (RFC 4253). hash_type: 'A'–'F'.
-    void (*deriveKey)(char hash_type,
-                      const uint8_t *key, uint32_t klen,
-                      const uint8_t *salt, uint32_t slen,
-                      uint8_t *out, uint32_t olen);
+    // SSH session-key derivation (RFC 4253 §7.2). letter = 'A'–'F'.
+    // K = shared secret mpint, H = exchange hash, session_id = initial H.
+    void (*deriveKey)(char letter,
+                      const uint8_t *K, uint32_t k_len,
+                      const uint8_t *H, uint32_t h_len,
+                      const uint8_t *session_id, uint32_t sid_len,
+                      uint8_t *out, uint32_t out_len);
     // --- AES-CTR ---
     // Create AES-CTR context. klen = 16/24/32. nonce = 16 bytes.
     pccrypto_aes_t (*aesNew)(const uint8_t *key, uint32_t klen,
