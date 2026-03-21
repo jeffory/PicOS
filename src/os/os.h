@@ -321,11 +321,11 @@ typedef struct {
     void  (*get)(pchttp_t c, const char *path, const char *extra_hdrs);
     // Initiate POST request. body/body_len may be 0/NULL. Non-blocking.
     void  (*post)(pchttp_t c, const char *path, const char *extra_hdrs,
-                  const char *body, int body_len);
-    // Read up to len bytes of response body. Returns bytes read (0 = none yet).
-    int   (*read)(pchttp_t c, char *buf, int len);
+                  const char *body, uint32_t body_len);
+    // Read up to len bytes of response body. Returns bytes read or -1 on error.
+    int      (*read)(pchttp_t c, uint8_t *buf, uint32_t len);
     // Returns bytes available in the receive buffer.
-    int   (*available)(pchttp_t c);
+    uint32_t (*available)(pchttp_t c);
     // Close the connection and return it to the pool.
     void  (*close)(pchttp_t c);
     // HTTP response status code (e.g. 200, 404). 0 if not yet received.
@@ -362,41 +362,41 @@ typedef struct {
     // Create a new player instance. Returns NULL on OOM.
     pcsound_player_t (*playerNew)(void);
     void  (*playerSetSample)(pcsound_player_t p, pcsound_sample_t s);
-    void  (*playerPlay)(pcsound_player_t p);
-    void  (*playerStop)(pcsound_player_t p);
-    bool  (*playerIsPlaying)(pcsound_player_t p);
-    float (*playerGetVolume)(pcsound_player_t p);
-    void  (*playerSetVolume)(pcsound_player_t p, float vol);   // 0.0–1.0
-    void  (*playerSetLoop)(pcsound_player_t p, bool loop);
-    void  (*playerFree)(pcsound_player_t p);
+    void     (*playerPlay)(pcsound_player_t p, uint8_t repeat_count);  // 0 = loop while setLoop(true)
+    void     (*playerStop)(pcsound_player_t p);
+    bool     (*playerIsPlaying)(pcsound_player_t p);
+    uint8_t  (*playerGetVolume)(pcsound_player_t p);
+    void     (*playerSetVolume)(pcsound_player_t p, uint8_t vol);   // 0–255
+    void     (*playerSetLoop)(pcsound_player_t p, bool loop);
+    void     (*playerFree)(pcsound_player_t p);
 
     // --- File player (streaming from SD card) ---
     pcfileplayer_t (*filePlayerNew)(void);
-    void  (*filePlayerLoad)(pcfileplayer_t fp, const char *path);
-    void  (*filePlayerPlay)(pcfileplayer_t fp);
-    void  (*filePlayerStop)(pcfileplayer_t fp);
-    void  (*filePlayerPause)(pcfileplayer_t fp);
-    void  (*filePlayerResume)(pcfileplayer_t fp);
-    bool  (*filePlayerIsPlaying)(pcfileplayer_t fp);
-    void  (*filePlayerSetVolume)(pcfileplayer_t fp, float vol);
-    float (*filePlayerGetVolume)(pcfileplayer_t fp);
-    float (*filePlayerGetOffset)(pcfileplayer_t fp);
-    void  (*filePlayerSetOffset)(pcfileplayer_t fp, float pos);
-    bool  (*filePlayerDidUnderrun)(pcfileplayer_t fp);
-    void  (*filePlayerFree)(pcfileplayer_t fp);
+    void     (*filePlayerLoad)(pcfileplayer_t fp, const char *path);
+    void     (*filePlayerPlay)(pcfileplayer_t fp, uint8_t repeat_count);  // 0 = infinite
+    void     (*filePlayerStop)(pcfileplayer_t fp);
+    void     (*filePlayerPause)(pcfileplayer_t fp);
+    void     (*filePlayerResume)(pcfileplayer_t fp);
+    bool     (*filePlayerIsPlaying)(pcfileplayer_t fp);
+    void     (*filePlayerSetVolume)(pcfileplayer_t fp, uint8_t vol);  // sets both L/R channels to same value
+    uint8_t  (*filePlayerGetVolume)(pcfileplayer_t fp);
+    uint32_t (*filePlayerGetOffset)(pcfileplayer_t fp);
+    void     (*filePlayerSetOffset)(pcfileplayer_t fp, uint32_t pos);
+    bool     (*filePlayerDidUnderrun)(pcfileplayer_t fp);
+    void     (*filePlayerFree)(pcfileplayer_t fp);
 
     // --- MP3 player (Core 1 decoding, PIO PSRAM ring buffer) ---
     pcmp3player_t (*mp3PlayerNew)(void);
-    void  (*mp3PlayerLoad)(pcmp3player_t mp, const char *path);
-    void  (*mp3PlayerPlay)(pcmp3player_t mp);
-    void  (*mp3PlayerStop)(pcmp3player_t mp);
-    void  (*mp3PlayerPause)(pcmp3player_t mp);
-    void  (*mp3PlayerResume)(pcmp3player_t mp);
-    bool  (*mp3PlayerIsPlaying)(pcmp3player_t mp);
-    void  (*mp3PlayerSetVolume)(pcmp3player_t mp, float vol);
-    float (*mp3PlayerGetVolume)(pcmp3player_t mp);
-    void  (*mp3PlayerSetLoop)(pcmp3player_t mp, bool loop);
-    void  (*mp3PlayerFree)(pcmp3player_t mp);
+    void     (*mp3PlayerLoad)(pcmp3player_t mp, const char *path);
+    void     (*mp3PlayerPlay)(pcmp3player_t mp, uint8_t repeat_count);  // 0 = infinite
+    void     (*mp3PlayerStop)(pcmp3player_t mp);
+    void     (*mp3PlayerPause)(pcmp3player_t mp);
+    void     (*mp3PlayerResume)(pcmp3player_t mp);
+    bool     (*mp3PlayerIsPlaying)(pcmp3player_t mp);
+    void     (*mp3PlayerSetVolume)(pcmp3player_t mp, uint8_t vol);
+    uint8_t  (*mp3PlayerGetVolume)(pcmp3player_t mp);
+    void     (*mp3PlayerSetLoop)(pcmp3player_t mp, bool loop);
+    void     (*mp3PlayerFree)(pcmp3player_t mp);
 } picocalc_soundplayer_t;
 
 // --- App Config -------------------------------------------------------------
