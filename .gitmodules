@@ -1,3 +1,6 @@
+[submodule "docs"]
+	path = docs
+	url = https://github.com/jeffory/PicOS.wiki.git
 [submodule "third_party/AnimatedGIF"]
 	path = third_party/AnimatedGIF
 	url = https://github.com/bitbank2/AnimatedGIF.git
@@ -16,9 +19,6 @@
 [submodule "third_party/tgx"]
 	path = third_party/tgx
 	url = https://github.com/vindar/tgx.git
-[submodule "docs"]
-	path = docs
-	url = https://github.com/jeffory/PicOS.wiki.git
 [submodule "apps/gbc/RP2350-GBC"]
 	path = apps/gbc/RP2350-GBC
 	url = https://github.com/peterk268/RP2350-GBC.git

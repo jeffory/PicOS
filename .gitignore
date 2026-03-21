@@ -47,3 +47,7 @@ screen.png
 data/
 reference/
 system/
+sim_*.log
+
+tests/e2e/__pycache__/
+*.patch
