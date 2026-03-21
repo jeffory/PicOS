@@ -11,6 +11,7 @@
 #include "../drivers/wifi.h"
 #include "../os/clock.h"
 #include "../os/config.h"
+#include "../os/appconfig.h"
 #include "../os/os.h"
 #include "../os/screenshot.h"
 #include "../os/system_menu.h"
@@ -45,6 +46,7 @@ void lua_bridge_sys_init(lua_State *L);
 void lua_bridge_fs_init(lua_State *L);
 void lua_bridge_network_init(lua_State *L);
 void lua_bridge_config_init(lua_State *L);
+void lua_bridge_appconfig_init(lua_State *L);
 void lua_bridge_perf_init(lua_State *L);
 void lua_bridge_graphics_init(lua_State *L);
 void lua_bridge_ui_init(lua_State *L);

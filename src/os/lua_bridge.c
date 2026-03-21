@@ -1,5 +1,6 @@
 #include "lua_bridge_internal.h"
 #include "lua_psram_alloc.h"
+#include "crashlog.h"
 
 char lua_bridge_exit_tag; // address used as sentinel, value irrelevant
 #include "../drivers/display.h"
@@ -155,6 +156,8 @@ void lua_bridge_register(lua_State *L) {
   lua_bridge_tcp_init(L);
   printf("[LUA] registering config...\n");
   lua_bridge_config_init(L);
+  printf("[LUA] registering appconfig...\n");
+  lua_bridge_appconfig_init(L);
   printf("[LUA] registering perf...\n");
   lua_bridge_perf_init(L);
   printf("[LUA] registering graphics...\n");
@@ -193,6 +196,12 @@ void lua_bridge_show_error(lua_State *L, const char *context) {
   const char *err = lua_tostring(L, -1);
   char buf[256];
   snprintf(buf, sizeof(buf), "%s", err ? err : "unknown error");
+
+  // Log to /system/error.log on SD card
+  lua_getglobal(L, "APP_NAME");
+  const char *app = lua_isstring(L, -1) ? lua_tostring(L, -1) : "unknown";
+  crashlog_write_lua_error(app, context, buf);
+  lua_pop(L, 1);
 
   display_clear(COLOR_BLACK);
   display_draw_text(4, 4, context, COLOR_RED, COLOR_BLACK);

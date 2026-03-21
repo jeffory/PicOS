@@ -39,5 +39,5 @@ static const luaL_Reg l_config_lib[] = {{"get", l_config_get},
 
 
 void lua_bridge_config_init(lua_State *L) {
-  register_subtable(L, "config", l_config_lib);
+    register_subtable(L, "sysconfig", l_config_lib);
 }

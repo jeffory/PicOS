@@ -162,6 +162,15 @@ static void __attribute__((used)) hardfault_c(uint32_t *frame, uint32_t exc_retu
 
   display_flush();
 
+  // Brief pause so the fault screen is visible before reboot.
+  for (volatile int i = 0; i < 2000000; i++) {}
+
+  // Reboot explicitly — watchdog scratch already has the crash data (saved
+  // at the top of this function).  On next boot, crash_log_save() writes it
+  // to /system/crashlog.txt.
+  watchdog_reboot(0, 0, 0);
+
+  // Fallback if reboot doesn't fire immediately.
   while (1) tight_loop_contents();
 }
 
@@ -587,20 +596,52 @@ static bool s_had_crash = false;
 static void crash_log_save(void) {
   if (!s_had_crash) return;
 
+  // Truncate if log is too large (>64KB)
+  int size = sdcard_fsize("/system/crashlog.txt");
+  if (size > 0 && (uint32_t)size > 64u * 1024u) {
+    sdfile_t tf = sdcard_fopen("/system/crashlog.txt", "w");
+    if (tf) sdcard_fclose(tf);
+  }
+
   sdfile_t f = sdcard_fopen("/system/crashlog.txt", "a");
   if (!f) return;
 
-  char line[256];
+  uint32_t cfsr = s_crash_data[4];
+  uint32_t hfsr = s_crash_data[5];
+
+  char line[512];
   int n = snprintf(line, sizeof(line),
-    "--- CRASH ---\n"
-    "PC=0x%08lx LR=0x%08lx SP=0x%08lx\n"
-    "CFSR=0x%08lx HFSR=0x%08lx BFAR=0x%08lx\n"
-    "EXC_RETURN=0x%08lx Stack=%s\n\n",
+    "--- HARDFAULT ---\n"
+    "  PC   = 0x%08lx\n"
+    "  LR   = 0x%08lx\n"
+    "  SP   = 0x%08lx\n"
+    "  CFSR = 0x%08lx\n"
+    "  HFSR = 0x%08lx\n"
+    "  BFAR = 0x%08lx\n"
+    "  Stack: %s\n",
     (unsigned long)s_crash_data[1], (unsigned long)s_crash_data[2],
-    (unsigned long)s_crash_data[3], (unsigned long)s_crash_data[4],
-    (unsigned long)s_crash_data[5], (unsigned long)s_crash_data[6],
-    (unsigned long)s_crash_data[7],
-    (s_crash_data[7] & 4u) ? "PSP" : "MSP");
+    (unsigned long)s_crash_data[3], (unsigned long)cfsr,
+    (unsigned long)hfsr, (unsigned long)s_crash_data[6],
+    (s_crash_data[7] & 4u) ? "PSP (native app)" : "MSP (OS)");
+
+  // Decode CFSR/HFSR flags into human-readable text
+  if (cfsr & (1u<<17)) n += snprintf(line+n, sizeof(line)-n, "  INVSTATE: invalid CPU state\n");
+  if (cfsr & (1u<<16)) n += snprintf(line+n, sizeof(line)-n, "  UNDEFINSTR: undefined instruction\n");
+  if (cfsr & (1u<<18)) n += snprintf(line+n, sizeof(line)-n, "  INVPC: invalid EXC_RETURN/PC\n");
+  if (cfsr & (1u<<19)) n += snprintf(line+n, sizeof(line)-n, "  NOCP: coprocessor access\n");
+  if (cfsr & (1u<< 9)) n += snprintf(line+n, sizeof(line)-n, "  PRECISERR: precise data bus fault\n");
+  if (cfsr & (1u<< 8)) n += snprintf(line+n, sizeof(line)-n, "  IBUSERR: instruction bus fault\n");
+  if (cfsr & (1u<<10)) n += snprintf(line+n, sizeof(line)-n, "  IMPRECISERR: imprecise data bus fault\n");
+  if (cfsr & (1u<<12)) n += snprintf(line+n, sizeof(line)-n, "  STKERR: exception stack push fault\n");
+  if (cfsr & (1u<<11)) n += snprintf(line+n, sizeof(line)-n, "  UNSTKERR: exception stack pop fault\n");
+  if (cfsr & (1u<< 1)) n += snprintf(line+n, sizeof(line)-n, "  DACCVIOL: MPU data access violation\n");
+  if (cfsr & (1u<< 0)) n += snprintf(line+n, sizeof(line)-n, "  IACCVIOL: MPU instruction access violation\n");
+  if (cfsr & (1u<<25)) n += snprintf(line+n, sizeof(line)-n, "  DIVBYZERO\n");
+  if (cfsr & (1u<<24)) n += snprintf(line+n, sizeof(line)-n, "  UNALIGNED access\n");
+  if (hfsr & (1u<<30)) n += snprintf(line+n, sizeof(line)-n, "  HFSR: FORCED escalation\n");
+  if (hfsr & (1u<< 1)) n += snprintf(line+n, sizeof(line)-n, "  HFSR: vector table fault\n");
+  n += snprintf(line+n, sizeof(line)-n, "\n");
+
   sdcard_fwrite(f, line, n);
   sdcard_fclose(f);
   printf("[CRASH] Saved crash log to /system/crashlog.txt\n");
@@ -679,6 +720,9 @@ int main(void) {
   watchdog_update();
 
   printf("\n--- PicOS booting ---\n");
+  printf("[BOOT] scratch0_at_entry=0x%08lx s_had_crash=%d boot_attempt=%d\n",
+         (unsigned long)scratch0, s_had_crash, boot_attempt);
+  printf("[BOOT] watchdog_caused_reboot=%d\n", watchdog_caused_reboot());
 
   // Wire up the global API struct
   g_api.input = &s_input_impl;
@@ -710,7 +754,7 @@ int main(void) {
   // Disabled after BOOT_MAX_RETRIES failures so the device stays on the
   // error screen instead of looping forever.
   if (!skip_boot_watchdog)
-    watchdog_enable(5000, true); // 5s, pause on debug
+    watchdog_enable(10000, true); // 10s, pause on debug
 
   // Initialise mainboard PIO PSRAM (8MB on PIO1, independent of QMI PSRAM).
   // Non-fatal if chip not present (some boards may not have it).
@@ -773,9 +817,6 @@ int main(void) {
   printf("SD card mounted OK\n");
 
   g_api.fs = &s_fs_impl;
-
-  // Write crash log from previous boot (if any) now that SD is available
-  crash_log_save();
   watchdog_update();
 
   // Check for pending OTA firmware update (must be before Core 1 launch)
@@ -808,6 +849,11 @@ int main(void) {
   // Initialize the PSRAM allocator BEFORE anything that uses it
   // (config_load, WiFi, Lua, etc.)
   lua_psram_alloc_init();
+  watchdog_update();
+
+  // Write crash log from previous boot (if any) — must be after PSRAM init
+  // because sdcard_fopen() uses umm_malloc() for the FIL struct.
+  crash_log_save();
   watchdog_update();
 
   // Load persisted settings from /system/config.json

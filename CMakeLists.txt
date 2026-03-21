@@ -226,6 +226,8 @@ add_executable(picocalc_os
     src/os/lua_bridge_network.c
     src/os/lua_bridge_tcp.c
     src/os/lua_bridge_config.c
+    src/os/appconfig.c
+    src/os/lua_bridge_appconfig.c
     src/os/lua_bridge_perf.c
     src/os/perf.c
     src/os/lua_bridge_graphics.c
@@ -253,6 +255,7 @@ add_executable(picocalc_os
     src/os/text_input.c
     src/os/file_browser.c
     src/os/config.c
+    src/os/crashlog.c
     src/os/clock.c
     src/os/tz_picker.c
     src/os/ui.c

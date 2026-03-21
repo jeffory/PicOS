@@ -69,6 +69,14 @@ static int l_sys_reboot(lua_State *L) {
   return 0;
 }
 
+// Deliberately trigger a HardFault for crash-logging testing.
+// Writes to address 0 which is reserved on Cortex-M33 → immediate bus fault.
+static int l_sys_trigger_fault(lua_State *L) {
+  (void)L;
+  *(volatile uint32_t *)0 = 0xDEADu;
+  return 0; // never reached
+}
+
 static int l_sys_isUSBPowered(lua_State *L) {
   lua_pushboolean(L, gpio_get(USB_VBUS_PIN));
   return 1;
@@ -208,6 +216,7 @@ static const luaL_Reg l_sys_lib[] = {{"getMemInfo", l_sys_getMemInfo},
                                      {"applyUpdate", l_sys_applyUpdate},
                                      {"addMenuItem", l_sys_addMenuItem},
                                      {"clearMenuItems", l_sys_clearMenuItems},
+                                     {"triggerFault", l_sys_trigger_fault},
                                      {NULL, NULL}};
 
 
