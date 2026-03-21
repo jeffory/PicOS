@@ -203,6 +203,8 @@ set(PICOS_CORE_SOURCES
     ${PICOS_ROOT}/src/os/lua_bridge_sys.c
     ${PICOS_ROOT}/src/os/lua_bridge_fs.c
     ${PICOS_ROOT}/src/os/lua_bridge_config.c
+    ${PICOS_ROOT}/src/os/appconfig.c
+    ${PICOS_ROOT}/src/os/lua_bridge_appconfig.c
     ${PICOS_ROOT}/src/os/lua_bridge_perf.c
     ${PICOS_ROOT}/src/os/perf.c
     ${PICOS_ROOT}/src/os/lua_bridge_graphics.c

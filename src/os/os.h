@@ -31,6 +31,26 @@ typedef struct {
     int (*getScrollbackOffset)(terminal_t* term);
     void (*getScrollbackLine)(terminal_t* term, int line, uint16_t* out_cells);
     void (*getScrollbackLineColors)(terminal_t* term, int line, uint16_t* out_fg, uint16_t* out_bg);
+    // Line numbers
+    void (*setLineNumbers)(terminal_t* term, bool enabled);
+    void (*setLineNumberStart)(terminal_t* term, int start);
+    void (*setLineNumberCols)(terminal_t* term, int cols);
+    void (*setLineNumberColors)(terminal_t* term, uint16_t fg, uint16_t bg);
+    int (*getContentCols)(terminal_t* term);
+    // Scrollbar
+    void (*setScrollbar)(terminal_t* term, bool enabled);
+    void (*setScrollbarColors)(terminal_t* term, uint16_t bg, uint16_t thumb);
+    void (*setScrollbarWidth)(terminal_t* term, int width);
+    void (*setScrollInfo)(terminal_t* term, int total_lines, int scroll_position);
+    // Word wrap (visual - content not modified)
+    void (*setWordWrap)(terminal_t* term, bool enabled);
+    void (*setWordWrapColumn)(terminal_t* term, int column);
+    void (*setWrapIndicator)(terminal_t* term, bool enabled);
+    bool (*getWordWrap)(terminal_t* term);
+    int (*getVisualRowCount)(terminal_t* term);
+    void (*logicalToVisual)(terminal_t* term, int log_x, int log_y, int* vis_x, int* vis_y);
+    void (*visualToLogical)(terminal_t* term, int vis_x, int vis_y, int* log_x, int* log_y);
+    int (*calculateLineWraps)(terminal_t* term, int logical_line, int* segments, int max_segments);
 } picocalc_terminal_t;
 
 // =============================================================================

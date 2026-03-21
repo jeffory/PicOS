@@ -45,7 +45,7 @@ from mcp.server.fastmcp import FastMCP
 mcp = FastMCP("picos")
 
 DEFAULT_TIMEOUT = 5
-DEFAULT_SIMULATOR_SOCK = "/tmp/picos_control"
+DEFAULT_SIMULATOR_SOCK = "./picos_control"
 TCP_PORT = 7878
 HARDWARE_MODE = False
 
@@ -81,34 +81,20 @@ class SimulatorConnection:
         if self._sock:
             return
 
-        # Try UNIX socket first, then TCP
+        # Try TCP directly
         sock = None
-        path_tried = []
-        for attempt in range(2):
-            try:
-                if attempt == 0:
-                    path_tried = [self.sock_path]
-                    sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-                    sock.settimeout(DEFAULT_TIMEOUT)
-                    sock.connect(self.sock_path)
-                    break
-                else:
-                    path_tried = [f"localhost:{self.tcp_port}"]
-                    sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-                    sock.settimeout(DEFAULT_TIMEOUT)
-                    sock.connect(("127.0.0.1", self.tcp_port))
-                    break
-            except (socket.error, FileNotFoundError, ConnectionRefusedError) as e:
-                if sock:
-                    sock.close()
-                    sock = None
-                if attempt == 0:
-                    # UNIX socket failed, try TCP
-                    continue
-                raise RuntimeError(
-                    f"Cannot connect to simulator. Tried: {path_tried}. "
-                    f"Is the simulator running? Error: {e}"
-                ) from e
+        path_tried = [f"127.0.0.1:{self.tcp_port}"]
+        try:
+            sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            sock.settimeout(DEFAULT_TIMEOUT)
+            sock.connect(("127.0.0.1", self.tcp_port))
+        except (socket.error, ConnectionRefusedError) as e:
+            if sock:
+                sock.close()
+            raise RuntimeError(
+                f"Cannot connect to simulator. Tried: {path_tried}. "
+                f"Is the simulator running? Error: {e}"
+            ) from e
 
         self._sock = sock
         assert self._sock is not None
@@ -695,6 +681,26 @@ async def set_time_multiplier(multiplier: float = 1.0, device: str | None = None
             conn.call, "set_time_multiplier", {"multiplier": multiplier}, timeout=5
         )
         return f"Time multiplier set: {result}"
+    except Exception as e:
+        return f"Error: {e}"
+
+
+@mcp.tool()
+async def get_terminal_buffer(device: str | None = None) -> str:
+    """Get the active terminal's text buffer (simulator only).
+
+    Returns JSON with cols, rows, cursor position, and text lines.
+    Only works when a Lua app has created a picocalc.terminal instance.
+    """
+    port = resolve_port(device)
+    if port:
+        return "(terminal buffer not available in hardware mode)"
+    try:
+        conn = get_connection()
+        result = await asyncio.to_thread(conn.call, "get_terminal_buffer", timeout=5)
+        return json.dumps(result, indent=2)
+    except JRpcError as e:
+        return f"[{e.code}] {e.message}"
     except Exception as e:
         return f"Error: {e}"
 

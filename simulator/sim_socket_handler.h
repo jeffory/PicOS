@@ -16,4 +16,8 @@ int sim_get_log_buffer_count(void);
 
 char *sim_handler_dispatch(const char *request, const char *end);
 
+// Active terminal tracking (for terminal buffer dump in tests)
+void sim_set_active_terminal(void *term);
+void *sim_get_active_terminal(void);
+
 #endif // SIM_SOCKET_HANDLER_H

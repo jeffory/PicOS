@@ -501,6 +501,7 @@ void usb_msc_enter_mode(void) {
 
 // SD card stubs
 void sdcard_remount(void) {}
+void sdcard_apply_clock(void) {}
 
 bool sdcard_fexists(const char* path) {
     extern char g_base_path[512];
@@ -552,7 +553,7 @@ char* sdcard_read_file(const char* path, int* out_len) {
 }
 // Define sdcard_entry_t locally to avoid including pico headers
 typedef struct {
-    char     name[64];
+    char     name[256];
     bool     is_dir;
     uint32_t size;
     uint16_t fdate;
@@ -672,6 +673,12 @@ bool sdcard_disk_info(uint32_t* out_free_kb, uint32_t* out_total_kb) {
     return false;
 }
 
+// Crashlog stub
+void crashlog_write_lua_error(const char *app_name, const char *context, const char *message) {
+    (void)app_name; (void)context;
+    if (message) fprintf(stderr, "[CRASHLOG] %s\n", message);
+}
+
 // Audio/sound/fileplayer/mp3 are implemented in simulator/sim_audio.c
 
 // Native audio callback
@@ -712,3 +719,8 @@ void video_player_update(void* player) { (void)player; }
 float video_player_get_fps(void* player) { (void)player; return 0; }
 int video_player_get_dropped_frames(void* player) { (void)player; return 0; }
 void video_player_reset_stats(void* player) { (void)player; }
+bool video_player_has_audio(void* player) { (void)player; return false; }
+void video_player_set_audio_volume(void* player, uint8_t volume) { (void)player; (void)volume; }
+uint8_t video_player_get_audio_volume(void* player) { (void)player; return 100; }
+void video_player_set_audio_muted(void* player, bool muted) { (void)player; (void)muted; }
+bool video_player_get_audio_muted(void* player) { (void)player; return false; }

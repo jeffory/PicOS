@@ -6,6 +6,10 @@
 #include "umm_malloc.h"
 #include "pico/time.h"
 
+#ifdef PICOS_SIMULATOR
+#include "sim_socket_handler.h"
+#endif
+
 #define TERMINAL_MT "picocalc.terminal"
 
 typedef struct {
@@ -20,6 +24,10 @@ static lua_terminal_t* check_terminal(lua_State* L, int idx) {
 static int l_terminal_gc(lua_State* L) {
     lua_terminal_t* t = check_terminal(L, 1);
     if (t->term) {
+#ifdef PICOS_SIMULATOR
+        if (sim_get_active_terminal() == t->term)
+            sim_set_active_terminal(NULL);
+#endif
         terminal_free(t->term);
         t->term = NULL;
     }
@@ -41,6 +49,11 @@ static int l_terminal_new(lua_State* L) {
     terminal_parser_init(&t->parser, term);
 
     luaL_setmetatable(L, TERMINAL_MT);
+
+#ifdef PICOS_SIMULATOR
+    sim_set_active_terminal(term);
+#endif
+
     return 1;
 }
 
@@ -355,6 +368,107 @@ static int l_terminal_waitForChar(lua_State* L) {
     }
 }
 
+// Line numbers bindings
+static int l_terminal_setLineNumbers(lua_State* L) {
+    lua_terminal_t* t = check_terminal(L, 1);
+    bool enabled = lua_toboolean(L, 2);
+    terminal_setLineNumbers(t->term, enabled);
+    return 0;
+}
+
+static int l_terminal_setLineNumberStart(lua_State* L) {
+    lua_terminal_t* t = check_terminal(L, 1);
+    int start = luaL_checkinteger(L, 2);
+    terminal_setLineNumberStart(t->term, start);
+    return 0;
+}
+
+static int l_terminal_setLineNumberCols(lua_State* L) {
+    lua_terminal_t* t = check_terminal(L, 1);
+    int cols = luaL_checkinteger(L, 2);
+    terminal_setLineNumberCols(t->term, cols);
+    return 0;
+}
+
+static int l_terminal_setLineNumberColors(lua_State* L) {
+    lua_terminal_t* t = check_terminal(L, 1);
+    uint16_t fg = (uint16_t)luaL_checkinteger(L, 2);
+    uint16_t bg = (uint16_t)luaL_checkinteger(L, 3);
+    terminal_setLineNumberColors(t->term, fg, bg);
+    return 0;
+}
+
+static int l_terminal_getContentCols(lua_State* L) {
+    lua_terminal_t* t = check_terminal(L, 1);
+    lua_pushinteger(L, terminal_getContentCols(t->term));
+    return 1;
+}
+
+// Scrollbar bindings
+static int l_terminal_setScrollbar(lua_State* L) {
+    lua_terminal_t* t = check_terminal(L, 1);
+    bool enabled = lua_toboolean(L, 2);
+    terminal_setScrollbar(t->term, enabled);
+    return 0;
+}
+
+static int l_terminal_setScrollbarColors(lua_State* L) {
+    lua_terminal_t* t = check_terminal(L, 1);
+    uint16_t bg = (uint16_t)luaL_checkinteger(L, 2);
+    uint16_t thumb = (uint16_t)luaL_checkinteger(L, 3);
+    terminal_setScrollbarColors(t->term, bg, thumb);
+    return 0;
+}
+
+static int l_terminal_setScrollbarWidth(lua_State* L) {
+    lua_terminal_t* t = check_terminal(L, 1);
+    int width = luaL_checkinteger(L, 2);
+    terminal_setScrollbarWidth(t->term, width);
+    return 0;
+}
+
+static int l_terminal_setScrollInfo(lua_State* L) {
+    lua_terminal_t* t = check_terminal(L, 1);
+    int total_lines = luaL_checkinteger(L, 2);
+    int scroll_position = luaL_checkinteger(L, 3);
+    terminal_setScrollInfo(t->term, total_lines, scroll_position);
+    return 0;
+}
+
+// Word wrap bindings
+static int l_terminal_setWordWrap(lua_State* L) {
+    lua_terminal_t* t = check_terminal(L, 1);
+    bool enabled = lua_toboolean(L, 2);
+    terminal_setWordWrap(t->term, enabled);
+    return 0;
+}
+
+static int l_terminal_setWordWrapColumn(lua_State* L) {
+    lua_terminal_t* t = check_terminal(L, 1);
+    int column = luaL_checkinteger(L, 2);
+    terminal_setWordWrapColumn(t->term, column);
+    return 0;
+}
+
+static int l_terminal_setWrapIndicator(lua_State* L) {
+    lua_terminal_t* t = check_terminal(L, 1);
+    bool enabled = lua_toboolean(L, 2);
+    terminal_setWrapIndicator(t->term, enabled);
+    return 0;
+}
+
+static int l_terminal_getWordWrap(lua_State* L) {
+    lua_terminal_t* t = check_terminal(L, 1);
+    lua_pushboolean(L, terminal_getWordWrap(t->term));
+    return 1;
+}
+
+static int l_terminal_getVisualRowCount(lua_State* L) {
+    lua_terminal_t* t = check_terminal(L, 1);
+    lua_pushinteger(L, terminal_getVisualRowCount(t->term));
+    return 1;
+}
+
 static const luaL_Reg terminal_methods[] = {
     {"write", l_terminal_write},
     {"clear", l_terminal_clear},
@@ -383,6 +497,23 @@ static const luaL_Reg terminal_methods[] = {
     {"readKey", l_terminal_readKey},
     {"readChar", l_terminal_readChar},
     {"waitForChar", l_terminal_waitForChar},
+    // Line numbers
+    {"setLineNumbers", l_terminal_setLineNumbers},
+    {"setLineNumberStart", l_terminal_setLineNumberStart},
+    {"setLineNumberCols", l_terminal_setLineNumberCols},
+    {"setLineNumberColors", l_terminal_setLineNumberColors},
+    {"getContentCols", l_terminal_getContentCols},
+    // Scrollbar
+    {"setScrollbar", l_terminal_setScrollbar},
+    {"setScrollbarColors", l_terminal_setScrollbarColors},
+    {"setScrollbarWidth", l_terminal_setScrollbarWidth},
+    {"setScrollInfo", l_terminal_setScrollInfo},
+    // Word wrap
+    {"setWordWrap", l_terminal_setWordWrap},
+    {"setWordWrapColumn", l_terminal_setWordWrapColumn},
+    {"setWrapIndicator", l_terminal_setWrapIndicator},
+    {"getWordWrap", l_terminal_getWordWrap},
+    {"getVisualRowCount", l_terminal_getVisualRowCount},
     {"__gc", l_terminal_gc},
     {NULL, NULL}
 };

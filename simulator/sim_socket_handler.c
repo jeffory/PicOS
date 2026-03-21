@@ -15,6 +15,7 @@
 #include "os/screenshot.h"
 #include "os/os.h"
 #include "sim_wifi.h"
+#include "os/terminal.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -82,6 +83,13 @@ int sim_get_log_buffer_count(void) {
     pthread_mutex_unlock(&s_log_mutex);
     return count;
 }
+
+// ── Active terminal tracking ─────────────────────────────────────────────────
+
+static void *s_active_terminal = NULL;
+
+void sim_set_active_terminal(void *term) { s_active_terminal = term; }
+void *sim_get_active_terminal(void) { return s_active_terminal; }
 
 // ── Launch queue (mirrors dev_commands pattern) ─────────────────────────────────
 
@@ -299,7 +307,7 @@ static char *take_screenshot_png(int *out_len) {
     int saved = IMG_SavePNG_RW(rgb, rw, 1);
     SDL_FreeSurface(rgb);
 
-    if (saved < 0) { SDL_FreeSurface(rgb); free(png_buf); *out_len = 0; return NULL; }
+    if (saved < 0) { free(png_buf); *out_len = 0; return NULL; }
 
     Sint64 size = SDL_RWsize(rw);
     if (size <= 0 || (size_t)size >= buf_size) { free(png_buf); *out_len = 0; return NULL; }
@@ -331,7 +339,7 @@ static char *h_ping(const char *params) {
     static char buf[256];
     uint32_t ms = hal_get_time_ms();
     snprintf(buf, sizeof(buf),
-             "{\"jsonrpc\":\"2.0\",\"result\":{\"version\":\"1.0.0\",\"uptime_ms\":%u}}", ms);
+             "{\"result\":{\"version\":\"1.0.0\",\"uptime_ms\":%u}}", ms);
     return strdup(buf);
 }
 
@@ -432,7 +440,7 @@ static char *h_screenshot(const char *params) {
     }
     char *resp = malloc(1024 + (size_t)len + 1);
     int n = snprintf(resp, 1024,
-                    "{\"jsonrpc\":\"2.0\",\"result\":{\"format\":\"%s\",\"width\":320,\"height\":320,\"data\":\"",
+                    "{\"result\":{\"format\":\"%s\",\"width\":320,\"height\":320,\"data\":\"",
                     format);
     memcpy(resp + n, data, (size_t)len);
     n += len;
@@ -778,6 +786,57 @@ static char *h_set_time_multiplier(const char *params) {
     return strdup(buf);
 }
 
+// ── Terminal buffer dump ─────────────────────────────────────────────────────
+
+static char *h_get_terminal_buffer(const char *params) {
+    (void)params;
+    terminal_t *term = (terminal_t *)s_active_terminal;
+    if (!term) {
+        return strdup("{\"jsonrpc\":\"2.0\",\"error\":{\"code\":-32001,\"message\":\"no active terminal\"}}");
+    }
+
+    int cols = terminal_getCols(term);
+    int rows = terminal_getRows(term);
+    int cx, cy;
+    terminal_getCursor(term, &cx, &cy);
+
+    // Estimate: ~(cols+10) per row for JSON string + overhead
+    size_t buf_size = (size_t)(cols + 20) * (size_t)rows + 512;
+    char *buf = malloc(buf_size);
+    if (!buf) {
+        return strdup("{\"jsonrpc\":\"2.0\",\"error\":{\"code\":-32603,\"message\":\"out of memory\"}}");
+    }
+
+    int off = snprintf(buf, buf_size,
+        "{\"jsonrpc\":\"2.0\",\"result\":{\"cols\":%d,\"rows\":%d,\"cursor_x\":%d,\"cursor_y\":%d,\"lines\":[",
+        cols, rows, cx, cy);
+
+    for (int y = 0; y < rows && (size_t)off < buf_size - 128; y++) {
+        // Extract chars from cells, trim trailing spaces
+        char line[256];
+        int len = 0;
+        for (int x = 0; x < cols && x < 255; x++) {
+            uint16_t cell = terminal_getCell(term, x, y);
+            char ch = (char)(cell & 0xFF);
+            if (ch < 0x20 || ch > 0x7E) ch = ' ';
+            line[len++] = ch;
+        }
+        // Trim trailing spaces
+        while (len > 0 && line[len - 1] == ' ') len--;
+        line[len] = '\0';
+
+        // JSON-escape the line
+        char escaped[512];
+        json_escape(line, escaped, sizeof(escaped));
+
+        off += snprintf(buf + off, buf_size - (size_t)off,
+            "%s\"%s\"", y > 0 ? "," : "", escaped);
+    }
+
+    off += snprintf(buf + off, buf_size - (size_t)off, "]}}");
+    return buf;
+}
+
 // ── Dispatch ─────────────────────────────────────────────────────────────────
 
 typedef char *(*handler_fn)(const char *params);
@@ -808,13 +867,20 @@ static struct {
     { "set_wifi_state",     h_set_wifi_state },
     { "get_log_buffer",     h_get_log_buffer },
     { "set_time_multiplier",h_set_time_multiplier },
+    { "get_terminal_buffer", h_get_terminal_buffer },
     { NULL, NULL },
 };
 
 static void wrap_response(int id, const char *result, char *out, size_t max) {
     snprintf(out, max, "{\"jsonrpc\":\"2.0\",\"id\":%d,", id);
     size_t base = strlen(out);
-    if (result) strncpy(out + base, result + 1, max - base - 1);
+    if (result && result[0] == '{') {
+        strncpy(out + base, result + 1, max - base - 1);
+    } else if (result) {
+        snprintf(out + base, max - base, "\"result\":%s}", result);
+    } else {
+        strncat(out, "}", max - strlen(out) - 1);
+    }
     out[max - 1] = '\0';
     strncat(out, "\n", max - strlen(out) - 1);
 }
@@ -844,8 +910,13 @@ char *sim_handler_dispatch(const char *request, const char *end) {
                  "{\"jsonrpc\":\"2.0\",\"id\":%d,\"error\":{\"code\":-32600,\"message\":\"method missing\"}}", id);
         return strdup(err);
     }
-    const char *m = strchr(method_start, '"');
+    const char *colon = strchr(method_start, ':');
+    if (!colon || colon >= end) {
+        return strdup("{\"jsonrpc\":\"2.0\",\"error\":{\"code\":-32600,\"message\":\"colon missing after method\"}}");
+    }
+    const char *m = strchr(colon, '"');
     if (m) m++;
+    else return strdup("{\"jsonrpc\":\"2.0\",\"error\":{\"code\":-32600,\"message\":\"quote missing for method\"}}");
     size_t mi = 0;
     while (*m && *m != '"' && mi < sizeof(method) - 1) method[mi++] = *m++;
     method[mi] = '\0';
@@ -878,10 +949,10 @@ char *sim_handler_dispatch(const char *request, const char *end) {
         if (strcmp(s_handlers[i].name, method) == 0) {
             char *result = s_handlers[i].fn(params);
             if (!result) return strdup("{\"jsonrpc\":\"2.0\",\"error\":{\"code\":-32603,\"message\":\"handler returned null\"}}");
-            static char resp[65536];
-            wrap_response(id, result, resp, sizeof(resp));
+            static char resp_buf[1024 * 1024];
+            wrap_response(id, result, resp_buf, sizeof(resp_buf));
             free(result);
-            return strdup(resp);
+            return strdup(resp_buf);
         }
     }
 

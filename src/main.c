@@ -494,6 +494,26 @@ static picocalc_terminal_t s_terminal_impl = {
     .getScrollbackOffset = terminal_getScrollbackOffset,
     .getScrollbackLine = terminal_getScrollbackLine,
     .getScrollbackLineColors = terminal_getScrollbackLineColors,
+    // Line numbers
+    .setLineNumbers = terminal_setLineNumbers,
+    .setLineNumberStart = terminal_setLineNumberStart,
+    .setLineNumberCols = terminal_setLineNumberCols,
+    .setLineNumberColors = terminal_setLineNumberColors,
+    .getContentCols = terminal_getContentCols,
+    // Scrollbar
+    .setScrollbar = terminal_setScrollbar,
+    .setScrollbarColors = terminal_setScrollbarColors,
+    .setScrollbarWidth = terminal_setScrollbarWidth,
+    .setScrollInfo = terminal_setScrollInfo,
+    // Word wrap (visual - content not modified)
+    .setWordWrap = terminal_setWordWrap,
+    .setWordWrapColumn = terminal_setWordWrapColumn,
+    .setWrapIndicator = terminal_setWrapIndicator,
+    .getWordWrap = terminal_getWordWrap,
+    .getVisualRowCount = terminal_getVisualRowCount,
+    .logicalToVisual = terminal_logicalToVisual,
+    .visualToLogical = terminal_visualToLogical,
+    .calculateLineWraps = terminal_calculateLineWraps,
 };
 
 static picocalc_fs_t s_fs_impl = {

@@ -15,7 +15,7 @@
 
 #define MAX_CLIENTS 8
 #define READ_BUF_SIZE 4096
-#define UNIX_SOCK_PATH "/tmp/picos_control"
+#define UNIX_SOCK_PATH "./picos_control"
 #define TCP_PORT 7878
 
 typedef struct {
@@ -128,6 +128,18 @@ static void process_requests(client_t *c) {
     }
 }
 
+static pthread_t s_poll_thread;
+static volatile bool s_poll_running = false;
+
+static void* poll_thread_fn(void* arg) {
+    (void)arg;
+    while (s_poll_running) {
+        sim_socket_poll();
+        usleep(10000); // 10ms poll interval
+    }
+    return NULL;
+}
+
 void sim_socket_init(void) {
     memset(s_clients, 0, sizeof(s_clients));
     for (int i = 0; i < MAX_CLIENTS; i++) s_clients[i].fd = -1;
@@ -135,6 +147,7 @@ void sim_socket_init(void) {
     s_max_fd = -1;
 
     unlink(UNIX_SOCK_PATH);
+    // ...
 
     s_unix_fd = socket(AF_UNIX, SOCK_STREAM, 0);
     if (s_unix_fd >= 0) {
@@ -158,18 +171,21 @@ void sim_socket_init(void) {
         set_nonblocking(s_tcp_fd);
         struct sockaddr_in addr = {0};
         addr.sin_family = AF_INET;
-        addr.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+        addr.sin_addr.s_addr = htonl(INADDR_ANY);
         addr.sin_port = htons(TCP_PORT);
         if (bind(s_tcp_fd, (struct sockaddr *)&addr, sizeof(addr)) == 0 &&
             listen(s_tcp_fd, 5) == 0) {
-            printf("[Socket] TCP server listening on localhost:%d\n", TCP_PORT);
+            printf("[Socket] TCP server listening on 0.0.0.0:%d\n", TCP_PORT);
         } else {
             close(s_tcp_fd);
             s_tcp_fd = -1;
         }
     }
 
-    if (s_unix_fd < 0 && s_tcp_fd < 0) {
+    if (s_unix_fd >= 0 || s_tcp_fd >= 0) {
+        s_poll_running = true;
+        pthread_create(&s_poll_thread, NULL, poll_thread_fn, NULL);
+    } else {
         printf("[Socket] WARNING: Failed to open any socket\n");
     }
 }
@@ -191,6 +207,9 @@ void sim_socket_poll(void) {
 
     struct timeval tv = {0, 0};
     int n = select(max_fd + 1, &read_fds, NULL, NULL, &tv);
+    if (n > 0) {
+        printf("[Socket] select returned %d\n", n); fflush(stdout);
+    }
     if (n <= 0) return;
 
     if (s_unix_fd >= 0 && FD_ISSET(s_unix_fd, &read_fds)) {
@@ -228,6 +247,10 @@ void sim_socket_poll(void) {
 }
 
 void sim_socket_close(void) {
+    if (s_poll_running) {
+        s_poll_running = false;
+        pthread_join(s_poll_thread, NULL);
+    }
     for (int i = 0; i < MAX_CLIENTS; i++) {
         if (s_clients[i].fd > 0) {
             close(s_clients[i].fd);
