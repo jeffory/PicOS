@@ -157,6 +157,21 @@ Removes all app-registered menu items. Called automatically on app exit.
 
 ---
 
+#### `picocalc.sys.triggerFault()`
+Deliberately triggers a HardFault by writing to address 0. **For crash-handler testing only — never call in production code.**
+
+The fault handler will display register state on screen, save crash data via watchdog scratch registers, then reboot. On the next boot the crash data is written to `/system/crashlog.txt`.
+
+- **Parameters:** None
+- **Returns:** Never returns
+
+```lua
+-- Test that crash logging works
+picocalc.sys.triggerFault()
+```
+
+---
+
 ## picocalc.config
 
 Persistent key-value configuration storage (stored in `/system/config.json`).
