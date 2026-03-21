@@ -470,10 +470,16 @@ void http_free(http_conn_t *c) {
 bool http_set_recv_buf(http_conn_t *c, uint32_t bytes) {
   if (!c || bytes == 0 || bytes > HTTP_RECV_BUF_MAX)
     return false;
-  uint8_t *nb = umm_realloc(c->rx_buf, bytes);
-  if (!nb)
+  // Use free + malloc instead of realloc to avoid memcpy creating stale
+  // XIP cache entries on Core 0.  Core 1 writes response data to rx_buf;
+  // if Core 0's cache has entries from a realloc copy, it reads stale data
+  // (RP2350 has per-core XIP caches, no hardware coherency for PSRAM).
+  umm_free(c->rx_buf);
+  c->rx_buf = umm_malloc(bytes);
+  if (!c->rx_buf) {
+    c->rx_cap = 0;
     return false;
-  c->rx_buf = nb;
+  }
   c->rx_cap = bytes;
   c->rx_head = 0;
   c->rx_tail = 0;

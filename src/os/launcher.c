@@ -29,6 +29,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <strings.h>
 
 // ── App discovery
 // ─────────────────────────────────────────────────────────────
@@ -44,20 +45,22 @@ static bool json_get_string(const char *json, const char *key, char *out,
                             int out_len) {
   char search[64];
   snprintf(search, sizeof(search), "\"%s\"", key);
-  const char *p = strstr(json, search);
-  if (!p)
-    return false;
-  p += strlen(search);
-  while (*p == ' ' || *p == ':' || *p == '\t')
-    p++;
-  if (*p != '"')
-    return false;
-  p++; // skip opening quote
-  int i = 0;
-  while (*p && *p != '"' && i < out_len - 1)
-    out[i++] = *p++;
-  out[i] = '\0';
-  return true;
+  const char *p = json;
+  while ((p = strstr(p, search)) != NULL) {
+    const char *q = p + strlen(search);
+    while (*q == ' ' || *q == ':' || *q == '\t')
+      q++;
+    if (*q == '"') {
+      q++; // skip opening quote
+      int i = 0;
+      while (*q && *q != '"' && i < out_len - 1)
+        out[i++] = *q++;
+      out[i] = '\0';
+      return true;
+    }
+    p++; // false match (key name inside a value), keep searching
+  }
+  return false;
 }
 
 static bool json_get_int(const char *json, const char *key, uint32_t *out) {
@@ -161,6 +164,7 @@ static void on_app_dir(const sdcard_entry_t *entry, void *user) {
 
     umm_free(json);
   } else {
+    printf("[LAUNCHER] WARNING: failed to read '%s', using dir name\n", json_path);
     snprintf(app->id, sizeof(app->id), "local.%s", entry->name);
     strncpy(app->name, entry->name, sizeof(app->name));
     app->description[0] = '\0';
@@ -173,11 +177,19 @@ static void on_app_dir(const sdcard_entry_t *entry, void *user) {
   s_app_count++;
 }
 
+static int compare_app_name(const void *a, const void *b) {
+  return strcasecmp(((const app_entry_t *)a)->name,
+                    ((const app_entry_t *)b)->name);
+}
+
 static void scan_apps(void) {
   s_app_count = 0;
+  memset(s_apps, 0, sizeof(app_entry_t) * MAX_APPS);
   printf("[LAUNCHER] Scanning /apps directory...\n");
   fflush(stdout);
   sdcard_list_dir("/apps", on_app_dir, NULL);
+  if (s_app_count > 1)
+    qsort(s_apps, s_app_count, sizeof(app_entry_t), compare_app_name);
   printf("[LAUNCHER] Found %d apps\n", s_app_count);
   fflush(stdout);
 }
@@ -445,7 +457,7 @@ void launcher_run(void) {
   scan_apps();
   
   // Check for simulator auto-launch
-#ifdef SIMULATOR
+#ifdef PICOS_SIMULATOR
   extern const char* simulator_get_auto_launch_app(void);
   const char* auto_launch = simulator_get_auto_launch_app();
   if (auto_launch) {
@@ -476,7 +488,7 @@ void launcher_run(void) {
     dev_commands_process();
 
     // Socket server poll — JSON-RPC interface for MCP/automation
-#ifdef SIMULATOR
+#ifdef PICOS_SIMULATOR
     extern void sim_socket_poll(void);
     extern void sim_handler_check_launch(void);
     sim_socket_poll();

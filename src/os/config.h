@@ -16,7 +16,7 @@
 //   "brightness"  — Display brightness (0-255, stored as decimal string)
 // =============================================================================
 
-#define CONFIG_MAX_ENTRIES  16
+#define CONFIG_MAX_ENTRIES  6
 #define CONFIG_KEY_MAX      32
 #define CONFIG_VAL_MAX      128
 
