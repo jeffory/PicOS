@@ -36,3 +36,12 @@ uint8_t mp3_player_get_volume(const mp3_player_t *player);
 void mp3_player_set_loop(mp3_player_t *player, bool loop);
 uint32_t mp3_player_get_sample_rate(const mp3_player_t *player);
 void mp3_player_update(void);
+
+// Fed mode: decoder reads from an external ring buffer instead of SD file.
+// Used by video player to feed interleaved AVI audio data.
+bool     mp3_player_start_fed(uint32_t sample_rate, uint16_t channels);
+void     mp3_player_start_dma_fed(void);  // decode pre-fill + start DMA (call after feeding data)
+uint32_t mp3_player_feed(const uint8_t *data, uint32_t len);
+void     mp3_player_stop_fed(void);
+uint32_t mp3_player_feed_space(void);
+bool     mp3_player_is_fed_mode(void);

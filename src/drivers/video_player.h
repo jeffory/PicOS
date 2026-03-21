@@ -49,6 +49,12 @@ float video_player_get_fps(video_player_t *player);
 uint32_t video_player_get_dropped_frames(video_player_t *player);
 void video_player_reset_stats(video_player_t *player);
 
+bool video_player_has_audio(video_player_t *player);
+void video_player_set_audio_volume(video_player_t *player, uint8_t volume);
+uint8_t video_player_get_audio_volume(video_player_t *player);
+void video_player_set_audio_muted(video_player_t *player, bool muted);
+bool video_player_get_audio_muted(video_player_t *player);
+
 #ifdef __cplusplus
 }
 #endif

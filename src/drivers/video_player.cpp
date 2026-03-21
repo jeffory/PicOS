@@ -5,6 +5,8 @@ extern "C" {
 #include "display.h"
 #include "umm_malloc.h"
 #include "wifi.h"
+#include "mp3_player.h"
+#include "pio_psram.h"
 #include "../os/launcher.h"
 #include "../os/config.h"
 }
@@ -76,6 +78,23 @@ typedef struct {
 
     bool     overclocked;       // True if we boosted the clock for playback
     bool     wifi_was_connected; // True if WiFi was connected before overclock
+
+    // Audio track info (parsed from AVI headers)
+    bool     has_audio;
+    uint16_t audio_format;         // 0x0055 = MP3
+    uint32_t audio_sample_rate;
+    uint16_t audio_channels;
+    uint32_t audio_avg_bytes_sec;
+
+    // Audio chunk index (parallel to video frame_index)
+    frame_index_entry_t *audio_index;
+    uint32_t audio_index_count;
+    uint32_t audio_index_capacity;
+
+    // Audio playback state
+    uint32_t audio_feed_cursor;    // Next audio chunk to feed
+    bool     audio_muted;
+    bool     audio_active;         // True if fed mode is currently running
 } video_priv_t;
 
 // JPEGDEC in static SRAM BSS: Huffman tables (10KB), MCU buffers, VLC staging,
@@ -172,10 +191,23 @@ static bool build_frame_index(video_priv_t *priv, video_player_t *player) {
         return false;
     }
 
+    // Allocate audio index if audio stream present
+    if (priv->has_audio) {
+        priv->audio_index_capacity = priv->frame_index_capacity;
+        priv->audio_index = (frame_index_entry_t *)umm_malloc(
+            priv->audio_index_capacity * sizeof(frame_index_entry_t));
+        // Non-fatal if alloc fails — video still works without audio
+        if (!priv->audio_index) {
+            printf("[VIDEO] Warning: could not allocate audio index\n");
+            priv->has_audio = false;
+        }
+    }
+
     uint32_t saved_pos = sdcard_ftell(priv->file);
     sdcard_fseek(priv->file, priv->movi_offset);
 
     uint32_t frame_num = 0;
+    uint32_t audio_num = 0;
     uint8_t chunk[8];
 
     while (sdcard_fread(priv->file, chunk, 8) == 8 && frame_num < priv->frame_index_capacity) {
@@ -189,12 +221,25 @@ static bool build_frame_index(video_priv_t *priv, video_player_t *player) {
             priv->frame_index[frame_num].chunk_size = size;
             frame_num++;
             if (frame_num % 100 == 0) watchdog_update();
+        } else if (priv->has_audio && priv->audio_index &&
+                   chunk[0] == '0' && chunk[1] == '1' &&
+                   chunk[2] == 'w' && chunk[3] == 'b' &&
+                   audio_num < priv->audio_index_capacity) {
+            priv->audio_index[audio_num].file_offset = chunk_pos;
+            priv->audio_index[audio_num].chunk_size = size;
+            audio_num++;
         }
         sdcard_fseek(priv->file, next_pos);
     }
 
     priv->frame_index_count = frame_num;
+    priv->audio_index_count = audio_num;
     sdcard_fseek(priv->file, saved_pos);
+
+    if (priv->has_audio && audio_num > 0) {
+        printf("[VIDEO] Audio index: %u chunks\n", (unsigned)audio_num);
+    }
+
     return true;
 }
 
@@ -249,6 +294,33 @@ static void flush_pending(video_priv_t *priv) {
 static void video_boost_clock(video_priv_t *priv);
 static void video_restore_clock(video_priv_t *priv);
 
+// Feed audio chunks from the audio index into the MP3 fed ring.
+// Called during play (pre-fill) and update (top-up).
+static void video_feed_audio(video_priv_t *priv, int max_chunks) {
+    if (!priv->has_audio || !priv->audio_index || priv->audio_muted)
+        return;
+
+    uint8_t temp[2048];
+    int chunks_fed = 0;
+
+    while (chunks_fed < max_chunks &&
+           priv->audio_feed_cursor < priv->audio_index_count) {
+        uint32_t space = mp3_player_feed_space();
+        if (space < 1024) break;
+
+        uint32_t idx = priv->audio_feed_cursor;
+        uint32_t size = priv->audio_index[idx].chunk_size;
+        if (size > sizeof(temp) || size > space) break;
+
+        sdcard_fseek(priv->file, priv->audio_index[idx].file_offset + 8);
+        sdcard_fread(priv->file, temp, size);
+        mp3_player_feed(temp, size);
+
+        priv->audio_feed_cursor++;
+        chunks_fed++;
+    }
+}
+
 bool video_player_init(void) {
     return true;
 }
@@ -284,11 +356,16 @@ void video_player_destroy(video_player_t *player) {
     if (!player) return;
     video_priv_t *priv = (video_priv_t *)player->priv;
     if (priv) {
+        if (priv->audio_active) {
+            mp3_player_stop_fed();
+            priv->audio_active = false;
+        }
         flush_pending(priv);
         video_restore_clock(priv);
         if (priv->file) sdcard_fclose(priv->file);
         buffer_pool_cleanup(priv);
         if (priv->frame_index) umm_free(priv->frame_index);
+        if (priv->audio_index) umm_free(priv->audio_index);
         if (priv->ra_buffer) umm_free(priv->ra_buffer);
         if (priv->ra_frames) umm_free(priv->ra_frames);
         // priv->jpeg points to static s_jpeg_sram — no free needed
@@ -308,6 +385,14 @@ bool video_player_load(video_player_t *player, const char *path) {
         umm_free(priv->frame_index);
         priv->frame_index = NULL;
     }
+    if (priv->audio_index) {
+        umm_free(priv->audio_index);
+        priv->audio_index = NULL;
+    }
+    if (priv->audio_active) {
+        mp3_player_stop_fed();
+        priv->audio_active = false;
+    }
 
     priv->file = sdcard_fopen(path, "rb");
     if (!priv->file) return false;
@@ -319,6 +404,12 @@ bool video_player_load(video_player_t *player, const char *path) {
         printf("[VIDEO] Not a valid AVI file\n");
         return false;
     }
+
+    priv->has_audio = false;
+    priv->audio_format = 0;
+    priv->audio_sample_rate = 0;
+    priv->audio_channels = 0;
+    priv->audio_avg_bytes_sec = 0;
 
     sdcard_fseek(priv->file, 12);
     uint8_t chunk[8];
@@ -332,7 +423,61 @@ bool video_player_load(video_player_t *player, const char *path) {
                 priv->movi_offset = sdcard_ftell(priv->file);
                 priv->movi_size = size - 4;
                 break;
+            } else if (memcmp(list_type, "strl", 4) == 0) {
+                // Parse stream list — look for audio stream header + format
+                uint32_t strl_end = sdcard_ftell(priv->file) + size - 4;
+                uint8_t sub[8];
+                while (sdcard_ftell(priv->file) < strl_end && sdcard_fread(priv->file, sub, 8) == 8) {
+                    uint32_t sub_size = *(uint32_t *)(sub + 4);
+                    uint32_t sub_start = sdcard_ftell(priv->file);
+
+                    if (memcmp(sub, "strh", 4) == 0 && sub_size >= 56) {
+                        uint8_t strh[56];
+                        sdcard_fread(priv->file, strh, 56);
+                        if (memcmp(strh, "auds", 4) == 0) {
+                            // This is an audio stream — read the matching strf
+                            uint32_t strh_end = sub_start + sub_size;
+                            if (strh_end & 1) strh_end++;
+                            sdcard_fseek(priv->file, strh_end);
+
+                            uint8_t strf_hdr[8];
+                            if (sdcard_fread(priv->file, strf_hdr, 8) == 8 &&
+                                memcmp(strf_hdr, "strf", 4) == 0) {
+                                uint32_t strf_size = *(uint32_t *)(strf_hdr + 4);
+                                if (strf_size >= 16) {
+                                    uint8_t wfx[18];
+                                    uint32_t to_read = (strf_size < 18) ? strf_size : 18;
+                                    sdcard_fread(priv->file, wfx, to_read);
+                                    uint16_t fmt_tag = *(uint16_t *)(wfx + 0);
+                                    if (fmt_tag == 0x0055) {  // MP3
+                                        priv->has_audio = true;
+                                        priv->audio_format = fmt_tag;
+                                        priv->audio_channels = *(uint16_t *)(wfx + 2);
+                                        priv->audio_sample_rate = *(uint32_t *)(wfx + 4);
+                                        priv->audio_avg_bytes_sec = *(uint32_t *)(wfx + 8);
+                                        printf("[VIDEO] Audio: MP3 %u Hz, %u ch, %u bytes/sec\n",
+                                               (unsigned)priv->audio_sample_rate,
+                                               (unsigned)priv->audio_channels,
+                                               (unsigned)priv->audio_avg_bytes_sec);
+                                    }
+                                }
+                            }
+                        }
+                    }
+
+                    // Skip to next sub-chunk
+                    uint32_t next = sub_start + sub_size;
+                    if (next & 1) next++;
+                    sdcard_fseek(priv->file, next);
+                }
+                // Ensure we're at the end of the strl LIST
+                sdcard_fseek(priv->file, strl_end);
+                if (sdcard_ftell(priv->file) & 1)
+                    sdcard_fseek(priv->file, sdcard_ftell(priv->file) + 1);
+                continue;  // Skip the alignment check at the bottom
             }
+            // Other LIST types: skip remaining content
+            // (already consumed 4 bytes for list_type, so skip size-4 more)
         } else if (memcmp(chunk, "avih", 4) == 0) {
             uint8_t avih[56];
             sdcard_fread(priv->file, avih, size < 56 ? size : 56);
@@ -443,15 +588,36 @@ static void video_restore_clock(video_priv_t *priv) {
 
 void video_player_play(video_player_t *player) {
     video_priv_t *priv = (video_priv_t *)player->priv;
+
+    // Clear both framebuffers to black (double-buffered: must clear twice)
+    display_clear(0x0000);
+    display_flush();
+    display_wait_for_flush();
+    display_clear(0x0000);  // Now the swapped-in back buffer is also black
+
     video_boost_clock(priv);
     player->playing = true;
     player->paused = false;
     priv->start_time_us = time_us_64() - (uint64_t)player->current_frame * priv->frame_duration_us;
+
+    // Start audio if available
+    if (priv->has_audio && priv->audio_format == 0x0055 && !priv->audio_muted) {
+        if (mp3_player_start_fed(priv->audio_sample_rate, priv->audio_channels)) {
+            priv->audio_active = true;
+            priv->audio_feed_cursor = 0;
+            video_feed_audio(priv, 50);        // Pre-fill fed ring with compressed data
+            mp3_player_start_dma_fed();        // Decode + start DMA with real audio
+        }
+    }
 }
 
 void video_player_stop(video_player_t *player) {
     video_priv_t *priv = (video_priv_t *)player->priv;
     flush_pending(priv);
+    if (priv->audio_active) {
+        mp3_player_stop_fed();
+        priv->audio_active = false;
+    }
     player->playing = false;
     video_restore_clock(priv);
 }
@@ -460,12 +626,28 @@ void video_player_pause(video_player_t *player) {
     video_priv_t *priv = (video_priv_t *)player->priv;
     flush_pending(priv);
     player->paused = true;
+    if (priv->audio_active) {
+        mp3_player_pause(mp3_player_create());
+    }
 }
 
 void video_player_resume(video_player_t *player) {
     player->paused = false;
     video_priv_t *priv = (video_priv_t *)player->priv;
     priv->start_time_us = time_us_64() - (uint64_t)player->current_frame * priv->frame_duration_us;
+    if (priv->audio_active) {
+        mp3_player_t *mp3 = mp3_player_create();
+        if (mp3_player_is_playing(mp3)) {
+            // Already playing (e.g. seek restarted DMA while paused)
+        } else if (mp3->playing && mp3->paused) {
+            // Normal resume from pause
+            mp3_player_resume(mp3);
+        } else {
+            // Fed mode was restarted (e.g. seek while paused) — start DMA
+            video_feed_audio(priv, 50);
+            mp3_player_start_dma_fed();
+        }
+    }
 }
 
 static bool decode_frame_at(video_player_t *player, video_priv_t *priv,
@@ -636,6 +818,10 @@ bool video_player_update(video_player_t *player) {
             return false;
         }
         flush_pending(priv);
+        if (priv->audio_active) {
+            mp3_player_stop_fed();
+            priv->audio_active = false;
+        }
         player->playing = false;
         return false;
     }
@@ -658,6 +844,11 @@ bool video_player_update(video_player_t *player) {
                 printf("[VIDEO] Decreasing stride to %u\n", (unsigned)priv->adaptive_stride);
             }
         }
+    }
+
+    // Feed audio chunks to keep the compressed ring topped up
+    if (priv->audio_active) {
+        video_feed_audio(priv, 20);
     }
 
     bool decoded = false;
@@ -750,6 +941,24 @@ void video_player_seek(video_player_t *player, uint32_t frame) {
     priv->adaptive_stride = 1;
     priv->consecutive_drops = 0;
     priv->ra_frame_count = 0;  // invalidate read-ahead on seek
+
+    // Reposition audio: flush and restart the fed ring
+    if (priv->audio_active && priv->audio_index_count > 0) {
+        mp3_player_stop_fed();
+        if (mp3_player_start_fed(priv->audio_sample_rate, priv->audio_channels)) {
+            // Compute approximate audio cursor from video frame position
+            priv->audio_feed_cursor = (uint32_t)((uint64_t)frame * priv->audio_index_count / priv->frame_index_count);
+            if (priv->audio_feed_cursor >= priv->audio_index_count)
+                priv->audio_feed_cursor = priv->audio_index_count - 1;
+            video_feed_audio(priv, 50);
+            if (!player->paused) {
+                mp3_player_start_dma_fed();  // Start DMA immediately if playing
+            }
+            // If paused, resume will call start_dma_fed()
+        } else {
+            priv->audio_active = false;
+        }
+    }
 }
 
 float video_player_get_fps(video_player_t *player) {
@@ -770,4 +979,57 @@ void video_player_reset_stats(video_player_t *player) {
     priv->dropped_frames = 0;
     priv->consecutive_drops = 0;
     priv->adaptive_stride = 1;
+}
+
+bool video_player_has_audio(video_player_t *player) {
+    if (!player || !player->priv) return false;
+    video_priv_t *priv = (video_priv_t *)player->priv;
+    return priv->has_audio;
+}
+
+void video_player_set_audio_volume(video_player_t *player, uint8_t volume) {
+    if (!player || !player->priv) return;
+    video_priv_t *priv = (video_priv_t *)player->priv;
+    if (priv->audio_active) {
+        mp3_player_set_volume(mp3_player_create(), volume);
+    }
+}
+
+uint8_t video_player_get_audio_volume(video_player_t *player) {
+    if (!player || !player->priv) return 0;
+    video_priv_t *priv = (video_priv_t *)player->priv;
+    if (priv->audio_active) {
+        return mp3_player_get_volume(mp3_player_create());
+    }
+    return 100;  // default
+}
+
+void video_player_set_audio_muted(video_player_t *player, bool muted) {
+    if (!player || !player->priv) return;
+    video_priv_t *priv = (video_priv_t *)player->priv;
+    priv->audio_muted = muted;
+
+    if (muted && priv->audio_active) {
+        mp3_player_stop_fed();
+        priv->audio_active = false;
+    } else if (!muted && !priv->audio_active && priv->has_audio &&
+               priv->audio_format == 0x0055 && player->playing && !player->paused) {
+        // Unmute: start audio from approximate current position
+        if (mp3_player_start_fed(priv->audio_sample_rate, priv->audio_channels)) {
+            priv->audio_active = true;
+            if (priv->audio_index_count > 0 && priv->frame_index_count > 0) {
+                priv->audio_feed_cursor = (uint32_t)((uint64_t)player->current_frame *
+                    priv->audio_index_count / priv->frame_index_count);
+            } else {
+                priv->audio_feed_cursor = 0;
+            }
+            video_feed_audio(priv, 20);
+        }
+    }
+}
+
+bool video_player_get_audio_muted(video_player_t *player) {
+    if (!player || !player->priv) return false;
+    video_priv_t *priv = (video_priv_t *)player->priv;
+    return priv->audio_muted;
 }
