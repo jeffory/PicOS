@@ -1,4 +1,14 @@
 #include "lua_bridge_internal.h"
+// Metatable name for image objects (defined in lua_bridge_graphics.c)
+#define GRAPHICS_IMAGE_MT "picocalc.graphics.image"
+
+// lua_image_t layout — must match lua_bridge_graphics.c exactly
+typedef struct {
+  int w;
+  int h;
+  uint16_t *data;
+  uint16_t  transparent_color;
+} lua_display_image_t;
 
 // ── picocalc.display.* ───────────────────────────────────────────────────────
 
@@ -136,6 +146,71 @@ static int l_display_rgb(lua_State *L) {
   return 1;
 }
 
+// picocalc.display.applyEffect(name, ...)
+// Dispatches to the appropriate effect function based on the string name.
+static int l_display_applyEffect(lua_State *L) {
+  const char *name = luaL_checkstring(L, 1);
+
+  if (strcmp(name, "invert") == 0) {
+    display_effect_invert();
+  } else if (strcmp(name, "darken") == 0) {
+    uint8_t factor = (uint8_t)luaL_optinteger(L, 2, 128);
+    display_effect_darken(factor);
+  } else if (strcmp(name, "brighten") == 0) {
+    uint8_t factor = (uint8_t)luaL_optinteger(L, 2, 128);
+    display_effect_brighten(factor);
+  } else if (strcmp(name, "tint") == 0) {
+    uint8_t r = (uint8_t)luaL_checkinteger(L, 2);
+    uint8_t g = (uint8_t)luaL_checkinteger(L, 3);
+    uint8_t b = (uint8_t)luaL_checkinteger(L, 4);
+    uint8_t strength = (uint8_t)luaL_optinteger(L, 5, 128);
+    display_effect_tint(r, g, b, strength);
+  } else if (strcmp(name, "fade") == 0) {
+    uint8_t r = (uint8_t)luaL_checkinteger(L, 2);
+    uint8_t g = (uint8_t)luaL_checkinteger(L, 3);
+    uint8_t b = (uint8_t)luaL_checkinteger(L, 4);
+    uint8_t factor = (uint8_t)luaL_optinteger(L, 5, 128);
+    display_effect_tint(r, g, b, factor); // fade = tint toward target color
+  } else if (strcmp(name, "grayscale") == 0) {
+    display_effect_grayscale();
+  } else if (strcmp(name, "blend") == 0) {
+    // Arg 2: image userdata, Arg 3: alpha (0-255)
+    lua_display_image_t *img = (lua_display_image_t *)luaL_checkudata(L, 2, GRAPHICS_IMAGE_MT);
+    if (!img->data) {
+      return luaL_error(L, "blend: image has been freed");
+    }
+    uint8_t alpha = (uint8_t)luaL_optinteger(L, 3, 128);
+    display_effect_blend(img->data, img->w, img->h, alpha);
+  } else if (strcmp(name, "palette") == 0) {
+    // Arg 2: table of 256 RGB565 color values
+    luaL_checktype(L, 2, LUA_TTABLE);
+    int lut_size = (int)luaL_len(L, 2);
+    if (lut_size <= 0 || lut_size > 256) {
+      return luaL_error(L, "palette: table must have 1-256 entries");
+    }
+    // Allocate LUT on stack (256 * 2 = 512 bytes, fine for stack)
+    uint16_t lut[256];
+    for (int i = 0; i < lut_size; i++) {
+      lua_rawgeti(L, 2, i + 1);
+      lut[i] = (uint16_t)lua_tointeger(L, -1);
+      lua_pop(L, 1);
+    }
+    display_effect_palette(lut, lut_size);
+  } else if (strcmp(name, "dither") == 0) {
+    uint8_t levels = (uint8_t)luaL_optinteger(L, 2, 4);
+    display_effect_dither(levels);
+  } else if (strcmp(name, "scanline") == 0) {
+    uint8_t intensity = (uint8_t)luaL_optinteger(L, 2, 128);
+    display_effect_scanline(intensity);
+  } else if (strcmp(name, "posterize") == 0) {
+    uint8_t levels = (uint8_t)luaL_optinteger(L, 2, 4);
+    display_effect_posterize(levels);
+  } else {
+    return luaL_error(L, "unknown effect: %s", name);
+  }
+  return 0;
+}
+
 static const luaL_Reg l_display_lib[] = {
     {"clear", l_display_clear},
     {"setPixel", l_display_setPixel},
@@ -157,6 +232,7 @@ static const luaL_Reg l_display_lib[] = {
     {"getFontWidth", l_display_getFontWidth},
     {"getFontHeight", l_display_getFontHeight},
     {"rgb", l_display_rgb},
+    {"applyEffect", l_display_applyEffect},
     {NULL, NULL}};
 
 

@@ -4,6 +4,7 @@
 #include "hardware/clocks.h"
 #include "hardware/dma.h"
 #include "hardware/gpio.h"
+#include "hardware/interp.h"
 #include "hardware/pio.h"
 #include "hardware/timer.h"
 #include "hardware/xip_cache.h"
@@ -1272,6 +1273,390 @@ void display_darken(void) {
     uint16_t darkened = (native >> 8) | (native << 8); // reswap
     front[i] = darkened;
     back[i] = darkened;
+  }
+}
+
+// =============================================================================
+// Framebuffer Effects
+// =============================================================================
+
+// NOTE: Effects operate on s_framebuffer (the back buffer). DMA reads from the
+// front buffer (the other one). No DMA wait is needed — the two buffers don't
+// overlap. display_flush() swaps buffers atomically after DMA completes.
+
+// Unswap/reswap macros for BE framebuffer ↔ native RGB565
+#define FB_UNSWAP(p) (((p) >> 8) | ((p) << 8))
+#define FB_RESWAP(p) FB_UNSWAP(p)
+
+void display_effect_invert(void) {
+
+  uint16_t *fb = s_framebuffer;
+  size_t n = FB_WIDTH * FB_HEIGHT;
+  // XOR works directly on byte-swapped pixels (bit-level complement)
+  uint32_t *fb32 = (uint32_t *)fb;
+  for (size_t i = 0; i < n / 2; i++) {
+    fb32[i] ^= 0xFFFFFFFF;
+  }
+}
+
+void display_effect_darken(uint8_t factor) {
+
+  uint16_t *fb = s_framebuffer;
+  size_t n = FB_WIDTH * FB_HEIGHT;
+
+  if (factor == 0) {
+    // Full black
+    memset(fb, 0, n * sizeof(uint16_t));
+    return;
+  }
+  if (factor >= 255) return; // No change
+
+  // Use interpolator BLEND mode for per-channel darkening.
+  // blend = pixel * factor / 256 (lerp toward black)
+  interp_config cfg0 = interp_default_config();
+  interp_config_set_blend(&cfg0, true);
+  interp_set_config(interp0, 0, &cfg0);
+
+  interp_config cfg1 = interp_default_config();
+  interp_set_config(interp0, 1, &cfg1);
+
+  // Blend factor in accum[1]: 0=100% base0, 255=100% base1
+  // We want: result = pixel * factor / 256
+  // Set base[1] = 0 (black), base[0] = channel, accum[1] = 255 - factor
+  // Then result = pixel * (255 - (255-factor)) / 256... no, BLEND mode:
+  // result = (base0 * (255 - accum1) + base1 * accum1) >> 8
+  // We want: base0=channel, base1=0, accum1=(255-factor)
+  // result = channel * (255 - (255-factor)) / 256 = channel * factor / 256
+  interp0->accum[1] = 255 - factor;
+
+  for (size_t i = 0; i < n; i++) {
+    uint16_t native = FB_UNSWAP(fb[i]);
+    uint8_t r = (native >> 11) & 0x1F;
+    uint8_t g = (native >> 5) & 0x3F;
+    uint8_t b = native & 0x1F;
+
+    interp0->base[0] = r;
+    interp0->base[1] = 0;
+    r = interp0->peek[1];
+
+    interp0->base[0] = g;
+    g = interp0->peek[1];
+
+    interp0->base[0] = b;
+    b = interp0->peek[1];
+
+    fb[i] = FB_RESWAP((r << 11) | (g << 5) | b);
+  }
+}
+
+void display_effect_brighten(uint8_t factor) {
+
+  uint16_t *fb = s_framebuffer;
+  size_t n = FB_WIDTH * FB_HEIGHT;
+
+  if (factor == 0) return; // No change
+
+  // Blend toward white: result = pixel + (max - pixel) * factor / 256
+  // Using interpolator: base0=pixel, base1=max, accum1=factor
+  interp_config cfg0 = interp_default_config();
+  interp_config_set_blend(&cfg0, true);
+  interp_set_config(interp0, 0, &cfg0);
+
+  interp_config cfg1 = interp_default_config();
+  interp_set_config(interp0, 1, &cfg1);
+
+  interp0->accum[1] = factor;
+
+  for (size_t i = 0; i < n; i++) {
+    uint16_t native = FB_UNSWAP(fb[i]);
+    uint8_t r = (native >> 11) & 0x1F;
+    uint8_t g = (native >> 5) & 0x3F;
+    uint8_t b = native & 0x1F;
+
+    interp0->base[0] = r;
+    interp0->base[1] = 31; // max 5-bit
+    r = interp0->peek[1];
+
+    interp0->base[0] = g;
+    interp0->base[1] = 63; // max 6-bit
+    g = interp0->peek[1];
+
+    interp0->base[0] = b;
+    interp0->base[1] = 31; // max 5-bit
+    b = interp0->peek[1];
+
+    fb[i] = FB_RESWAP((r << 11) | (g << 5) | b);
+  }
+}
+
+void display_effect_tint(uint8_t r_tint, uint8_t g_tint, uint8_t b_tint,
+                         uint8_t strength) {
+
+  if (strength == 0) return;
+
+  uint16_t *fb = s_framebuffer;
+  size_t n = FB_WIDTH * FB_HEIGHT;
+
+  // Convert 8-bit tint to RGB565 channel widths
+  uint8_t tr = r_tint >> 3;  // 5-bit
+  uint8_t tg = g_tint >> 2;  // 6-bit
+  uint8_t tb = b_tint >> 3;  // 5-bit
+
+  // Interpolator BLEND: result = base0*(255-accum1)/256 + base1*accum1/256
+  // base0 = pixel channel, base1 = tint channel, accum1 = strength
+  interp_config cfg0 = interp_default_config();
+  interp_config_set_blend(&cfg0, true);
+  interp_set_config(interp0, 0, &cfg0);
+
+  interp_config cfg1 = interp_default_config();
+  interp_set_config(interp0, 1, &cfg1);
+
+  interp0->accum[1] = strength;
+
+  for (size_t i = 0; i < n; i++) {
+    uint16_t native = FB_UNSWAP(fb[i]);
+    uint8_t r = (native >> 11) & 0x1F;
+    uint8_t g = (native >> 5) & 0x3F;
+    uint8_t b = native & 0x1F;
+
+    interp0->base[0] = r;
+    interp0->base[1] = tr;
+    r = interp0->peek[1];
+
+    interp0->base[0] = g;
+    interp0->base[1] = tg;
+    g = interp0->peek[1];
+
+    interp0->base[0] = b;
+    interp0->base[1] = tb;
+    b = interp0->peek[1];
+
+    fb[i] = FB_RESWAP((r << 11) | (g << 5) | b);
+  }
+}
+
+void display_effect_grayscale(void) {
+
+  uint16_t *fb = s_framebuffer;
+  size_t n = FB_WIDTH * FB_HEIGHT;
+
+  for (size_t i = 0; i < n; i++) {
+    uint16_t native = FB_UNSWAP(fb[i]);
+    uint8_t r = (native >> 11) & 0x1F;
+    uint8_t g = (native >> 5) & 0x3F;
+    uint8_t b = native & 0x1F;
+
+    // ITU-R BT.601 luma: Y = 0.299*R + 0.587*G + 0.114*B
+    // Scale to 5-bit: use 6-bit green scaled to 5-bit range
+    // Approximate with integer: Y5 = (r*77 + (g>>1)*150 + b*29) >> 8
+    uint8_t g5 = g >> 1; // 6-bit green → 5-bit for uniform weighting
+    uint8_t luma = (r * 77 + g5 * 150 + b * 29) >> 8;
+    if (luma > 31) luma = 31;
+    uint8_t luma6 = luma << 1; // back to 6-bit for green channel
+
+    fb[i] = FB_RESWAP((luma << 11) | (luma6 << 5) | luma);
+  }
+}
+
+void display_effect_blend(const uint16_t *src, int w, int h, uint8_t alpha) {
+
+  if (alpha == 0) return; // Fully transparent, no change
+
+  uint16_t *fb = s_framebuffer;
+
+  interp_config cfg0 = interp_default_config();
+  interp_config_set_blend(&cfg0, true);
+  interp_set_config(interp0, 0, &cfg0);
+
+  interp_config cfg1 = interp_default_config();
+  interp_set_config(interp0, 1, &cfg1);
+
+  interp0->accum[1] = alpha;
+
+  // Blend src image onto framebuffer, clipped to screen bounds
+  int max_h = (h < FB_HEIGHT) ? h : FB_HEIGHT;
+  int max_w = (w < FB_WIDTH) ? w : FB_WIDTH;
+
+  for (int y = 0; y < max_h; y++) {
+    for (int x = 0; x < max_w; x++) {
+      int idx = y * FB_WIDTH + x;
+      uint16_t fb_native = FB_UNSWAP(fb[idx]);
+      // src is in host byte order (same as RGB565 macro)
+      uint16_t src_native = src[y * w + x];
+
+      uint8_t fr = (fb_native >> 11) & 0x1F;
+      uint8_t fg = (fb_native >> 5) & 0x3F;
+      uint8_t fbb = fb_native & 0x1F;
+
+      uint8_t sr = (src_native >> 11) & 0x1F;
+      uint8_t sg = (src_native >> 5) & 0x3F;
+      uint8_t sb = src_native & 0x1F;
+
+      // result = fb*(255-alpha)/256 + src*alpha/256
+      interp0->base[0] = fr;
+      interp0->base[1] = sr;
+      uint8_t r = interp0->peek[1];
+
+      interp0->base[0] = fg;
+      interp0->base[1] = sg;
+      uint8_t g = interp0->peek[1];
+
+      interp0->base[0] = fbb;
+      interp0->base[1] = sb;
+      uint8_t b = interp0->peek[1];
+
+      fb[idx] = FB_RESWAP((r << 11) | (g << 5) | b);
+    }
+  }
+}
+
+void display_effect_palette(const uint16_t *lut, int lut_size) {
+
+  if (!lut || lut_size <= 0) return;
+
+  uint16_t *fb = s_framebuffer;
+  size_t n = FB_WIDTH * FB_HEIGHT;
+
+  for (size_t i = 0; i < n; i++) {
+    uint16_t native = FB_UNSWAP(fb[i]);
+    // Map RGB565 to an index: use upper bits of each channel
+    // Simple approach: (r3 << 5) | (g3 << 2) | b2 → 8-bit index (256 entries)
+    uint8_t r = (native >> 13) & 0x07; // top 3 bits of red
+    uint8_t g = (native >> 8) & 0x07;  // top 3 bits of green
+    uint8_t b = (native >> 3) & 0x03;  // top 2 bits of blue
+    int idx = (r << 5) | (g << 2) | b;
+    if (idx >= lut_size) idx = lut_size - 1;
+    // LUT entries are in host byte order
+    fb[i] = FB_RESWAP(lut[idx]);
+  }
+}
+
+void display_effect_dither(uint8_t levels) {
+
+  if (levels < 2) levels = 2;
+  if (levels > 32) levels = 32;
+
+  uint16_t *fb = s_framebuffer;
+
+  // Bayer 4×4 ordered dither matrix (0-15, normalized to 0-255 range)
+  static const uint8_t bayer4[4][4] = {
+    {  0, 128,  32, 160},
+    {192,  64, 224,  96},
+    { 48, 176,  16, 144},
+    {240, 112, 208,  80}
+  };
+
+  for (int y = 0; y < FB_HEIGHT; y++) {
+    for (int x = 0; x < FB_WIDTH; x++) {
+      uint16_t native = FB_UNSWAP(fb[y * FB_WIDTH + x]);
+      uint8_t r = (native >> 11) & 0x1F;
+      uint8_t g = (native >> 5) & 0x3F;
+      uint8_t b = native & 0x1F;
+
+      uint8_t threshold = bayer4[y & 3][x & 3];
+
+      // Quantize each channel: scale to 0-255, add threshold, quantize, scale back
+      // Red (5-bit → 8-bit → quantize → 5-bit)
+      int r8 = (r << 3) | (r >> 2);
+      r8 = r8 + (threshold / levels) - 128 / levels;
+      if (r8 < 0) r8 = 0;
+      if (r8 > 255) r8 = 255;
+      r = (uint8_t)(r8 / (256 / levels)) * (255 / (levels - 1));
+      r >>= 3;
+      if (r > 31) r = 31;
+
+      // Green (6-bit → 8-bit → quantize → 6-bit)
+      int g8 = (g << 2) | (g >> 4);
+      g8 = g8 + (threshold / levels) - 128 / levels;
+      if (g8 < 0) g8 = 0;
+      if (g8 > 255) g8 = 255;
+      g = (uint8_t)(g8 / (256 / levels)) * (255 / (levels - 1));
+      g >>= 2;
+      if (g > 63) g = 63;
+
+      // Blue (5-bit)
+      int b8 = (b << 3) | (b >> 2);
+      b8 = b8 + (threshold / levels) - 128 / levels;
+      if (b8 < 0) b8 = 0;
+      if (b8 > 255) b8 = 255;
+      b = (uint8_t)(b8 / (256 / levels)) * (255 / (levels - 1));
+      b >>= 3;
+      if (b > 31) b = 31;
+
+      fb[y * FB_WIDTH + x] = FB_RESWAP((r << 11) | (g << 5) | b);
+    }
+  }
+}
+
+void display_effect_scanline(uint8_t intensity) {
+
+  if (intensity == 0) return;
+
+  uint16_t *fb = s_framebuffer;
+
+  // Fast bit-shift scanline: darken every odd row.
+  // Works directly on byte-swapped pixels — the shift+mask approach is
+  // endian-agnostic for halving luminance. Process 2 pixels at a time
+  // using 32-bit ops for ~2x throughput.
+  //
+  // intensity controls how many times we halve:
+  //   1-127   = 1 shift (50% brightness on scanlines)
+  //   128-254 = 2 shifts (25% brightness on scanlines)
+  //   255     = black scanlines
+  int shifts = (intensity < 128) ? 1 : (intensity < 255) ? 2 : 0;
+
+  if (intensity == 255) {
+    // Full black scanlines — memset alternate rows
+    for (int y = 1; y < FB_HEIGHT; y += 2) {
+      memset(&fb[y * FB_WIDTH], 0, FB_WIDTH * sizeof(uint16_t));
+    }
+    return;
+  }
+
+  // RGB565 halving mask: prevents bits from bleeding across channel boundaries.
+  // Native RGB565: RRRRRGGG GGGBBBBB → halve mask = 0x7BEF
+  // Byte-swapped:  GGGBBBBB RRRRRGGG → halve mask = 0xEF7B
+  // For 32-bit (two swapped pixels): 0xEF7BEF7B
+  const uint32_t hmask = 0xEF7BEF7Bu;
+
+  for (int y = 1; y < FB_HEIGHT; y += 2) {
+    uint32_t *row32 = (uint32_t *)&fb[y * FB_WIDTH];
+    int n32 = FB_WIDTH / 2;
+    for (int i = 0; i < n32; i++) {
+      uint32_t v = row32[i];
+      for (int s = 0; s < shifts; s++) {
+        v = (v >> 1) & hmask;
+      }
+      row32[i] = v;
+    }
+  }
+}
+
+void display_effect_posterize(uint8_t levels) {
+
+  if (levels < 2) levels = 2;
+  if (levels > 32) levels = 32;
+
+  uint16_t *fb = s_framebuffer;
+  size_t n = FB_WIDTH * FB_HEIGHT;
+
+  // Precompute 5-bit and 6-bit quantization LUTs
+  uint8_t lut5[32], lut6[64];
+  for (int i = 0; i < 32; i++) {
+    int q = (i * (levels - 1) + 15) / 31;  // round
+    lut5[i] = (q * 31 + (levels - 1) / 2) / (levels - 1);
+  }
+  for (int i = 0; i < 64; i++) {
+    int q = (i * (levels - 1) + 31) / 63;
+    lut6[i] = (q * 63 + (levels - 1) / 2) / (levels - 1);
+  }
+
+  for (size_t i = 0; i < n; i++) {
+    uint16_t native = FB_UNSWAP(fb[i]);
+    uint8_t r = lut5[(native >> 11) & 0x1F];
+    uint8_t g = lut6[(native >> 5) & 0x3F];
+    uint8_t b = lut5[native & 0x1F];
+    fb[i] = FB_RESWAP((r << 11) | (g << 5) | b);
   }
 }
 

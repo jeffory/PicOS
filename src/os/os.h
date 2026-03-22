@@ -136,6 +136,17 @@ typedef struct {
     // Get writable pointer to the current back buffer (320x320 RGB565,
     // big-endian / byte-swapped). For direct framebuffer writes.
     uint16_t* (*getBackBuffer)(void);
+    // Framebuffer post-processing effects (shaders)
+    void (*effectInvert)(void);
+    void (*effectDarken)(uint8_t factor);
+    void (*effectBrighten)(uint8_t factor);
+    void (*effectTint)(uint8_t r, uint8_t g, uint8_t b, uint8_t strength);
+    void (*effectGrayscale)(void);
+    void (*effectBlend)(const uint16_t *src, int w, int h, uint8_t alpha);
+    void (*effectPalette)(const uint16_t *lut, int lut_size);
+    void (*effectDither)(uint8_t levels);
+    void (*effectScanline)(uint8_t intensity);
+    void (*effectPosterize)(uint8_t levels);
 } picocalc_display_t;
 
 // --- Filesystem (SD card) ---------------------------------------------------

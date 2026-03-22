@@ -260,6 +260,16 @@ static picocalc_display_t s_display_impl = {
     .flushRows = display_flush_rows,
     .flushRegion = display_flush_region,
     .getBackBuffer = display_get_back_buffer,
+    .effectInvert = display_effect_invert,
+    .effectDarken = display_effect_darken,
+    .effectBrighten = display_effect_brighten,
+    .effectTint = display_effect_tint,
+    .effectGrayscale = display_effect_grayscale,
+    .effectBlend = display_effect_blend,
+    .effectPalette = display_effect_palette,
+    .effectDither = display_effect_dither,
+    .effectScanline = display_effect_scanline,
+    .effectPosterize = display_effect_posterize,
 };
 
 static uint32_t sys_getTimeMs(void) {

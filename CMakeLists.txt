@@ -301,6 +301,7 @@ target_link_libraries(picocalc_os
     hardware_gpio
     hardware_pwm
     hardware_dma
+    hardware_interp
     hardware_clocks
     hardware_pio
     hardware_xip_cache
