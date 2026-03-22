@@ -194,6 +194,8 @@ void __attribute__((naked)) isr_hardfault(void) {
 #include "drivers/pio_psram_bulk.h"
 #include "drivers/sound.h"
 #include "drivers/display.h"
+#include "drivers/image_api.h"
+#include "drivers/video_player.h"
 #include "drivers/http.h"
 #include "drivers/tcp.h"
 #include "drivers/keyboard.h"
@@ -881,6 +883,150 @@ static const picocalc_crypto_t s_crypto_impl = {
     .ecdsaP256Verify   = crypto_ecdsa_p256_verify,
 };
 
+// ── Graphics impl ─────────────────────────────────────────────────────────────
+
+static pcimage_t gfx_load(const char *path) {
+    return (pcimage_t)image_load(path);
+}
+static pcimage_t gfx_new_blank(int w, int h) {
+    return (pcimage_t)image_new_blank(w, h);
+}
+static void gfx_free(pcimage_t img) {
+    image_free((pc_image_t *)img);
+}
+static int gfx_width(pcimage_t img) {
+    return ((pc_image_t *)img)->w;
+}
+static int gfx_height(pcimage_t img) {
+    return ((pc_image_t *)img)->h;
+}
+static uint16_t *gfx_pixels(pcimage_t img) {
+    return ((pc_image_t *)img)->data;
+}
+static void gfx_set_transparent_color(pcimage_t img, uint16_t color) {
+    ((pc_image_t *)img)->transparent_color = color;
+}
+static void gfx_draw(pcimage_t img, int x, int y) {
+    image_draw((const pc_image_t *)img, x, y);
+}
+static void gfx_draw_region(pcimage_t img, int sx, int sy, int sw, int sh,
+                             int dx, int dy) {
+    image_draw_region((const pc_image_t *)img, sx, sy, sw, sh, dx, dy);
+}
+static void gfx_draw_scaled(pcimage_t img, int x, int y, int dst_w, int dst_h) {
+    image_draw_scaled((const pc_image_t *)img, x, y, dst_w, dst_h);
+}
+
+static const picocalc_graphics_t s_graphics_impl = {
+    .load                = gfx_load,
+    .newBlank            = gfx_new_blank,
+    .free                = gfx_free,
+    .width               = gfx_width,
+    .height              = gfx_height,
+    .pixels              = gfx_pixels,
+    .setTransparentColor = gfx_set_transparent_color,
+    .draw                = gfx_draw,
+    .drawRegion          = gfx_draw_region,
+    .drawScaled          = gfx_draw_scaled,
+};
+
+// ── Video impl ────────────────────────────────────────────────────────────────
+
+static pcvideo_t video_new_player(void) {
+    return (pcvideo_t)video_player_create();
+}
+static void video_free_player(pcvideo_t vp) {
+    video_player_destroy((video_player_t *)vp);
+}
+static bool video_load_w(pcvideo_t vp, const char *path) {
+    return video_player_load((video_player_t *)vp, path);
+}
+static void video_play_w(pcvideo_t vp) {
+    video_player_play((video_player_t *)vp);
+}
+static void video_pause_w(pcvideo_t vp) {
+    video_player_pause((video_player_t *)vp);
+}
+static void video_resume_w(pcvideo_t vp) {
+    video_player_resume((video_player_t *)vp);
+}
+static void video_stop_w(pcvideo_t vp) {
+    video_player_stop((video_player_t *)vp);
+}
+static bool video_update_w(pcvideo_t vp) {
+    return video_player_update((video_player_t *)vp);
+}
+static void video_seek_w(pcvideo_t vp, uint32_t frame) {
+    video_player_seek((video_player_t *)vp, frame);
+}
+static float video_get_fps_w(pcvideo_t vp) {
+    return video_player_get_fps((video_player_t *)vp);
+}
+static void video_get_size_w(pcvideo_t vp, uint32_t *w, uint32_t *h) {
+    video_player_t *p = (video_player_t *)vp;
+    if (w) *w = p->width;
+    if (h) *h = p->height;
+}
+static bool video_is_playing_w(pcvideo_t vp) {
+    video_player_t *p = (video_player_t *)vp;
+    return p->playing && !p->paused;
+}
+static bool video_is_paused_w(pcvideo_t vp) {
+    return ((video_player_t *)vp)->paused;
+}
+static void video_set_loop_w(pcvideo_t vp, bool loop) {
+    ((video_player_t *)vp)->loop = loop;
+}
+static void video_set_auto_flush_w(pcvideo_t vp, bool af) {
+    ((video_player_t *)vp)->auto_flush = af;
+}
+static bool video_has_audio_w(pcvideo_t vp) {
+    return video_player_has_audio((video_player_t *)vp);
+}
+static void video_set_volume_w(pcvideo_t vp, uint8_t vol) {
+    video_player_set_audio_volume((video_player_t *)vp, vol);
+}
+static uint8_t video_get_volume_w(pcvideo_t vp) {
+    return video_player_get_audio_volume((video_player_t *)vp);
+}
+static void video_set_muted_w(pcvideo_t vp, bool muted) {
+    video_player_set_audio_muted((video_player_t *)vp, muted);
+}
+static bool video_get_muted_w(pcvideo_t vp) {
+    return video_player_get_audio_muted((video_player_t *)vp);
+}
+static uint32_t video_get_dropped_w(pcvideo_t vp) {
+    return video_player_get_dropped_frames((video_player_t *)vp);
+}
+static void video_reset_stats_w(pcvideo_t vp) {
+    video_player_reset_stats((video_player_t *)vp);
+}
+
+static const picocalc_video_t s_video_impl = {
+    .newPlayer       = video_new_player,
+    .free            = video_free_player,
+    .load            = video_load_w,
+    .play            = video_play_w,
+    .pause           = video_pause_w,
+    .resume          = video_resume_w,
+    .stop            = video_stop_w,
+    .update          = video_update_w,
+    .seek            = video_seek_w,
+    .getFPS          = video_get_fps_w,
+    .getSize         = video_get_size_w,
+    .isPlaying       = video_is_playing_w,
+    .isPaused        = video_is_paused_w,
+    .setLoop         = video_set_loop_w,
+    .setAutoFlush    = video_set_auto_flush_w,
+    .hasAudio        = video_has_audio_w,
+    .setVolume       = video_set_volume_w,
+    .getVolume       = video_get_volume_w,
+    .setMuted        = video_set_muted_w,
+    .getMuted        = video_get_muted_w,
+    .getDroppedFrames = video_get_dropped_w,
+    .resetStats      = video_reset_stats_w,
+};
+
 // ── Core 1 entry — background WiFi polling ────────────────────────────────────
 // Core 1 drives the Mongoose / CYW43 network stack every 5 ms.
 // wifi_poll() acquires display_spi_lock() internally, so the SPI1 bus
@@ -1111,7 +1257,9 @@ int main(void) {
   g_api.soundplayer = &s_soundplayer_impl;
   g_api.appconfig   = &s_appconfig_impl;
   g_api.crypto      = &s_crypto_impl;
-  g_api.version     = 1;
+  g_api.graphics    = &s_graphics_impl;
+  g_api.video       = &s_video_impl;
+  g_api.version     = 2;
   // fs wired after SD card init
 
   // Explicitly configure PSRAM hardware pins and XIP write logic for the Pico

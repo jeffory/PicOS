@@ -473,6 +473,61 @@ typedef struct {
                              const uint8_t *hash, uint32_t hlen);
 } picocalc_crypto_t;
 
+// --- Graphics / Image -------------------------------------------------------
+// Image loading and drawing. Images stored in PSRAM via umm_malloc.
+
+typedef void* pcimage_t;  // opaque image handle
+
+typedef struct {
+    // Load image from path (BMP/JPEG/PNG/GIF). Returns NULL on failure.
+    pcimage_t (*load)(const char *path);
+    // Allocate blank zeroed image. Returns NULL on OOM.
+    pcimage_t (*newBlank)(int width, int height);
+    // Free image (pixels + struct). Safe to call with NULL.
+    void      (*free)(pcimage_t img);
+    // Image dimensions.
+    int       (*width)(pcimage_t img);
+    int       (*height)(pcimage_t img);
+    // Raw RGB565 pixel data pointer (PSRAM).
+    uint16_t* (*pixels)(pcimage_t img);
+    // Per-image transparent color for color-key blending (0 = disabled).
+    void      (*setTransparentColor)(pcimage_t img, uint16_t color);
+    // Draw operations.
+    void      (*draw)(pcimage_t img, int x, int y);
+    void      (*drawRegion)(pcimage_t img, int sx, int sy, int sw, int sh, int dx, int dy);
+    void      (*drawScaled)(pcimage_t img, int x, int y, int dst_w, int dst_h);
+} picocalc_graphics_t;
+
+// --- Video ------------------------------------------------------------------
+// MJPEG video playback. video_player_t* is used as the opaque handle.
+
+typedef void* pcvideo_t;  // opaque video player handle
+
+typedef struct {
+    pcvideo_t (*newPlayer)(void);
+    void      (*free)(pcvideo_t vp);
+    bool      (*load)(pcvideo_t vp, const char *path);
+    void      (*play)(pcvideo_t vp);
+    void      (*pause)(pcvideo_t vp);
+    void      (*resume)(pcvideo_t vp);
+    void      (*stop)(pcvideo_t vp);
+    bool      (*update)(pcvideo_t vp);
+    void      (*seek)(pcvideo_t vp, uint32_t frame);
+    float     (*getFPS)(pcvideo_t vp);
+    void      (*getSize)(pcvideo_t vp, uint32_t *w, uint32_t *h);
+    bool      (*isPlaying)(pcvideo_t vp);
+    bool      (*isPaused)(pcvideo_t vp);
+    void      (*setLoop)(pcvideo_t vp, bool loop);
+    void      (*setAutoFlush)(pcvideo_t vp, bool af);
+    bool      (*hasAudio)(pcvideo_t vp);
+    void      (*setVolume)(pcvideo_t vp, uint8_t vol);
+    uint8_t   (*getVolume)(pcvideo_t vp);
+    void      (*setMuted)(pcvideo_t vp, bool muted);
+    bool      (*getMuted)(pcvideo_t vp);
+    uint32_t  (*getDroppedFrames)(pcvideo_t vp);
+    void      (*resetStats)(pcvideo_t vp);
+} picocalc_video_t;
+
 // --- The complete OS API struct ---------------------------------------------
 // This is what gets passed to every Lua environment and future C app loaders.
 
@@ -493,7 +548,10 @@ typedef struct PicoCalcAPI {
     const picocalc_soundplayer_t *soundplayer; // sample/file/MP3 player
     const picocalc_appconfig_t   *appconfig;   // per-app config store
     const picocalc_crypto_t      *crypto;      // crypto primitives
-    uint32_t                      version;     // 1=Phase1 capable
+    // --- Phase 2 additions ---
+    const picocalc_graphics_t    *graphics;    // image loading/drawing
+    const picocalc_video_t       *video;       // MJPEG video playback
+    uint32_t                      version;     // 1=Phase1, 2=Phase2
 } PicoCalcAPI;
 
 // The global API instance, populated during os_init()
