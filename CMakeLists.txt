@@ -248,6 +248,7 @@ add_executable(picocalc_os
     src/os/terminal_parser.c
     src/os/terminal_render.c
     src/os/lua_bridge_terminal.c
+    src/os/crypto.c
     src/os/lua_bridge_crypto.c
     src/os/ota_update.c
     src/fonts/font_6x11.c
@@ -263,6 +264,7 @@ add_executable(picocalc_os
     src/usb/usb_msc.c
     src/os/image_decoders.cpp
     src/drivers/display.c
+    src/drivers/image_api.c
     src/drivers/audio.c
     src/drivers/sound.c
     src/drivers/fileplayer.c

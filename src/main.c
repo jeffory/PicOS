@@ -194,13 +194,17 @@ void __attribute__((naked)) isr_hardfault(void) {
 #include "drivers/pio_psram_bulk.h"
 #include "drivers/sound.h"
 #include "drivers/display.h"
+#include "drivers/image_api.h"
+#include "drivers/video_player.h"
 #include "drivers/http.h"
 #include "drivers/tcp.h"
 #include "drivers/keyboard.h"
 #include "drivers/sdcard.h"
 #include "drivers/wifi.h"
 #include "hardware.h"
+#include "os/appconfig.h"
 #include "os/config.h"
+#include "os/crypto.h"
 #include "os/launcher.h"
 #include "os/lua_psram_alloc.h"
 #include "os/os.h"
@@ -529,6 +533,500 @@ static picocalc_fs_t s_fs_impl = {
     .listDir = fs_list_dir,
 };
 
+// ── HTTP impl ─────────────────────────────────────────────────────────────────
+
+static pchttp_t http_newConn_w(const char *server, uint16_t port, bool use_ssl) {
+    http_conn_t *c = http_alloc();
+    if (!c) return NULL;
+    // Copy server hostname and port/ssl into the connection slot
+    strncpy(c->server, server, HTTP_SERVER_MAX - 1);
+    c->server[HTTP_SERVER_MAX - 1] = '\0';
+    c->port    = port;
+    c->use_ssl = use_ssl;
+    return (pchttp_t)c;
+}
+
+static void http_get_w(pchttp_t c, const char *path, const char *extra_hdrs) {
+    http_get((http_conn_t *)c, path, extra_hdrs);
+}
+
+static void http_post_w(pchttp_t c, const char *path, const char *extra_hdrs,
+                        const char *body, uint32_t body_len) {
+    http_post((http_conn_t *)c, path, extra_hdrs, body, (size_t)body_len);
+}
+
+static int http_read_w(pchttp_t c, uint8_t *buf, uint32_t len) {
+    return (int)http_read((http_conn_t *)c, buf, len);
+}
+
+static uint32_t http_available_w(pchttp_t c) {
+    return http_bytes_available((http_conn_t *)c);
+}
+
+static void http_close_w(pchttp_t c) {
+    http_free((http_conn_t *)c);
+}
+
+static int http_getStatus_w(pchttp_t c) {
+    return ((http_conn_t *)c)->status_code;
+}
+
+static const char *http_getError_w(pchttp_t c) {
+    http_conn_t *hc = (http_conn_t *)c;
+    return hc->err[0] ? hc->err : NULL;
+}
+
+static int http_getProgress_w(pchttp_t c, int *received, int *total) {
+    http_conn_t *hc = (http_conn_t *)c;
+    if (received) *received = (int)hc->body_received;
+    if (total)    *total    = (int)hc->content_length;  // -1 if unknown
+    return (int)hc->content_length;
+}
+
+static void http_setKeepAlive_w(pchttp_t c, bool keep_alive) {
+    ((http_conn_t *)c)->keep_alive = keep_alive;
+}
+
+static void http_setByteRange_w(pchttp_t c, int from, int to) {
+    ((http_conn_t *)c)->range_from = from;
+    ((http_conn_t *)c)->range_to   = to;
+}
+
+static void http_setConnectTimeout_w(pchttp_t c, int seconds) {
+    ((http_conn_t *)c)->connect_timeout_ms = (uint32_t)(seconds * 1000);
+}
+
+static void http_setReadTimeout_w(pchttp_t c, int seconds) {
+    ((http_conn_t *)c)->read_timeout_ms = (uint32_t)(seconds * 1000);
+}
+
+static void http_setReadBufferSize_w(pchttp_t c, int bytes) {
+    http_set_recv_buf((http_conn_t *)c, (uint32_t)bytes);
+}
+
+static const picocalc_http_t s_http_impl = {
+    .newConn           = http_newConn_w,
+    .get               = http_get_w,
+    .post              = http_post_w,
+    .read              = http_read_w,
+    .available         = http_available_w,
+    .close             = http_close_w,
+    .getStatus         = http_getStatus_w,
+    .getError          = http_getError_w,
+    .getProgress       = http_getProgress_w,
+    .setKeepAlive      = http_setKeepAlive_w,
+    .setByteRange      = http_setByteRange_w,
+    .setConnectTimeout = http_setConnectTimeout_w,
+    .setReadTimeout    = http_setReadTimeout_w,
+    .setReadBufferSize = http_setReadBufferSize_w,
+};
+
+// ── Sound player impl ─────────────────────────────────────────────────────────
+
+static pcsound_sample_t sp_sampleLoad(const char *path) {
+    sound_sample_t *s = sound_sample_create();
+    if (!s) return NULL;
+    if (!sound_sample_load(s, path)) { sound_sample_destroy(s); return NULL; }
+    return (pcsound_sample_t)s;
+}
+
+static void sp_sampleFree(pcsound_sample_t s) {
+    sound_sample_destroy((sound_sample_t *)s);
+}
+
+static pcsound_player_t sp_playerNew(void) {
+    return (pcsound_player_t)sound_player_create();
+}
+
+static void sp_playerSetSample(pcsound_player_t p, pcsound_sample_t s) {
+    sound_player_set_sample((sound_player_t *)p, (sound_sample_t *)s);
+}
+
+static void sp_playerPlay(pcsound_player_t p, uint8_t repeat_count) {
+    sound_player_play((sound_player_t *)p, repeat_count);
+}
+
+static void sp_playerStop(pcsound_player_t p) {
+    sound_player_stop((sound_player_t *)p);
+}
+
+static bool sp_playerIsPlaying(pcsound_player_t p) {
+    return sound_player_is_playing((const sound_player_t *)p);
+}
+
+static uint8_t sp_playerGetVolume(pcsound_player_t p) {
+    return sound_player_get_volume((const sound_player_t *)p);
+}
+
+static void sp_playerSetVolume(pcsound_player_t p, uint8_t vol) {
+    sound_player_set_volume((sound_player_t *)p, vol);
+}
+
+// sound.h has no sound_player_set_loop; repeat_count=0 with playerPlay means
+// the player won't loop — callers should use repeat_count to control looping.
+// We store loop intent as repeat_count=255 (max repeats) when loop=true,
+// and stop the player when loop=false.
+static void sp_playerSetLoop(pcsound_player_t p, bool loop) {
+    sound_player_t *sp = (sound_player_t *)p;
+    sp->repeat_count = loop ? 255 : 0;
+}
+
+static void sp_playerFree(pcsound_player_t p) {
+    sound_player_destroy((sound_player_t *)p);
+}
+
+static pcfileplayer_t sp_filePlayerNew(void) {
+    return (pcfileplayer_t)fileplayer_create();
+}
+
+static void sp_filePlayerLoad(pcfileplayer_t fp, const char *path) {
+    fileplayer_load((fileplayer_t *)fp, path);
+}
+
+static void sp_filePlayerPlay(pcfileplayer_t fp, uint8_t repeat_count) {
+    fileplayer_play((fileplayer_t *)fp, repeat_count);
+}
+
+static void sp_filePlayerStop(pcfileplayer_t fp) {
+    fileplayer_stop((fileplayer_t *)fp);
+}
+
+static void sp_filePlayerPause(pcfileplayer_t fp) {
+    fileplayer_pause((fileplayer_t *)fp);
+}
+
+static void sp_filePlayerResume(pcfileplayer_t fp) {
+    fileplayer_resume((fileplayer_t *)fp);
+}
+
+static bool sp_filePlayerIsPlaying(pcfileplayer_t fp) {
+    return fileplayer_is_playing((const fileplayer_t *)fp);
+}
+
+static void sp_filePlayerSetVolume(pcfileplayer_t fp, uint8_t vol) {
+    fileplayer_set_volume((fileplayer_t *)fp, vol, vol);
+}
+
+static uint8_t sp_filePlayerGetVolume(pcfileplayer_t fp) {
+    uint8_t left = 0, right = 0;
+    fileplayer_get_volume((const fileplayer_t *)fp, &left, &right);
+    return left;
+}
+
+static uint32_t sp_filePlayerGetOffset(pcfileplayer_t fp) {
+    return fileplayer_get_offset((const fileplayer_t *)fp);
+}
+
+static void sp_filePlayerSetOffset(pcfileplayer_t fp, uint32_t pos) {
+    fileplayer_set_offset((fileplayer_t *)fp, pos);
+}
+
+static bool sp_filePlayerDidUnderrun(pcfileplayer_t fp) {
+    (void)fp;
+    return fileplayer_did_underrun();
+}
+
+static void sp_filePlayerFree(pcfileplayer_t fp) {
+    fileplayer_destroy((fileplayer_t *)fp);
+}
+
+static pcmp3player_t sp_mp3PlayerNew(void) {
+    return (pcmp3player_t)mp3_player_create();
+}
+
+static void sp_mp3PlayerLoad(pcmp3player_t mp, const char *path) {
+    mp3_player_load((mp3_player_t *)mp, path);
+}
+
+static void sp_mp3PlayerPlay(pcmp3player_t mp, uint8_t repeat_count) {
+    mp3_player_play((mp3_player_t *)mp, repeat_count);
+}
+
+static void sp_mp3PlayerStop(pcmp3player_t mp) {
+    mp3_player_stop((mp3_player_t *)mp);
+}
+
+static void sp_mp3PlayerPause(pcmp3player_t mp) {
+    mp3_player_pause((mp3_player_t *)mp);
+}
+
+static void sp_mp3PlayerResume(pcmp3player_t mp) {
+    mp3_player_resume((mp3_player_t *)mp);
+}
+
+static bool sp_mp3PlayerIsPlaying(pcmp3player_t mp) {
+    return mp3_player_is_playing((const mp3_player_t *)mp);
+}
+
+static void sp_mp3PlayerSetVolume(pcmp3player_t mp, uint8_t vol) {
+    mp3_player_set_volume((mp3_player_t *)mp, vol);
+}
+
+static uint8_t sp_mp3PlayerGetVolume(pcmp3player_t mp) {
+    return mp3_player_get_volume((const mp3_player_t *)mp);
+}
+
+static void sp_mp3PlayerSetLoop(pcmp3player_t mp, bool loop) {
+    mp3_player_set_loop((mp3_player_t *)mp, loop);
+}
+
+static void sp_mp3PlayerFree(pcmp3player_t mp) {
+    mp3_player_destroy((mp3_player_t *)mp);
+}
+
+static const picocalc_soundplayer_t s_soundplayer_impl = {
+    .sampleLoad          = sp_sampleLoad,
+    .sampleFree          = sp_sampleFree,
+    .playerNew           = sp_playerNew,
+    .playerSetSample     = sp_playerSetSample,
+    .playerPlay          = sp_playerPlay,
+    .playerStop          = sp_playerStop,
+    .playerIsPlaying     = sp_playerIsPlaying,
+    .playerGetVolume     = sp_playerGetVolume,
+    .playerSetVolume     = sp_playerSetVolume,
+    .playerSetLoop       = sp_playerSetLoop,
+    .playerFree          = sp_playerFree,
+    .filePlayerNew       = sp_filePlayerNew,
+    .filePlayerLoad      = sp_filePlayerLoad,
+    .filePlayerPlay      = sp_filePlayerPlay,
+    .filePlayerStop      = sp_filePlayerStop,
+    .filePlayerPause     = sp_filePlayerPause,
+    .filePlayerResume    = sp_filePlayerResume,
+    .filePlayerIsPlaying = sp_filePlayerIsPlaying,
+    .filePlayerSetVolume = sp_filePlayerSetVolume,
+    .filePlayerGetVolume = sp_filePlayerGetVolume,
+    .filePlayerGetOffset = sp_filePlayerGetOffset,
+    .filePlayerSetOffset = sp_filePlayerSetOffset,
+    .filePlayerDidUnderrun = sp_filePlayerDidUnderrun,
+    .filePlayerFree      = sp_filePlayerFree,
+    .mp3PlayerNew        = sp_mp3PlayerNew,
+    .mp3PlayerLoad       = sp_mp3PlayerLoad,
+    .mp3PlayerPlay       = sp_mp3PlayerPlay,
+    .mp3PlayerStop       = sp_mp3PlayerStop,
+    .mp3PlayerPause      = sp_mp3PlayerPause,
+    .mp3PlayerResume     = sp_mp3PlayerResume,
+    .mp3PlayerIsPlaying  = sp_mp3PlayerIsPlaying,
+    .mp3PlayerSetVolume  = sp_mp3PlayerSetVolume,
+    .mp3PlayerGetVolume  = sp_mp3PlayerGetVolume,
+    .mp3PlayerSetLoop    = sp_mp3PlayerSetLoop,
+    .mp3PlayerFree       = sp_mp3PlayerFree,
+};
+
+// ── App config impl ───────────────────────────────────────────────────────────
+
+static const picocalc_appconfig_t s_appconfig_impl = {
+    .load     = appconfig_load,
+    .save     = appconfig_save,
+    .get      = appconfig_get,
+    .set      = appconfig_set,
+    .clear    = appconfig_clear,
+    .reset    = appconfig_reset,
+    .getAppId = appconfig_get_app_id,
+};
+
+// ── Crypto impl ───────────────────────────────────────────────────────────────
+
+static pccrypto_aes_t crypto_aes_new_w(const uint8_t *key, uint32_t klen,
+                                        const uint8_t *nonce) {
+    return (pccrypto_aes_t)crypto_aes_new(key, klen, nonce);
+}
+
+static int crypto_aes_update_w(pccrypto_aes_t ctx,
+                                const uint8_t *in, uint8_t *out, uint32_t len) {
+    return crypto_aes_update((crypto_aes_t *)ctx, in, out, len);
+}
+
+static void crypto_aes_free_w(pccrypto_aes_t ctx) {
+    crypto_aes_free((crypto_aes_t *)ctx);
+}
+
+static pccrypto_ecdh_t crypto_ecdh_x25519_w(void) {
+    return (pccrypto_ecdh_t)crypto_ecdh_x25519();
+}
+
+static pccrypto_ecdh_t crypto_ecdh_p256_w(void) {
+    return (pccrypto_ecdh_t)crypto_ecdh_p256();
+}
+
+static void crypto_ecdh_get_pubkey_w(pccrypto_ecdh_t ctx,
+                                      uint8_t *out, uint32_t *out_len) {
+    crypto_ecdh_get_public_key((crypto_ecdh_t *)ctx, out, out_len);
+}
+
+static int crypto_ecdh_shared_w(pccrypto_ecdh_t ctx,
+                                 const uint8_t *remote, uint32_t rlen,
+                                 uint8_t *out, uint32_t *out_len) {
+    return crypto_ecdh_compute_shared((crypto_ecdh_t *)ctx, remote, rlen,
+                                      out, out_len);
+}
+
+static void crypto_ecdh_free_w(pccrypto_ecdh_t ctx) {
+    crypto_ecdh_free((crypto_ecdh_t *)ctx);
+}
+
+static const picocalc_crypto_t s_crypto_impl = {
+    .sha256            = crypto_sha256,
+    .sha1              = crypto_sha1,
+    .hmacSha256        = crypto_hmac_sha256,
+    .hmacSha1          = crypto_hmac_sha1,
+    .randomBytes       = crypto_random_bytes,
+    .deriveKey         = crypto_derive_key,
+    .aesNew            = crypto_aes_new_w,
+    .aesUpdate         = crypto_aes_update_w,
+    .aesFree           = crypto_aes_free_w,
+    .ecdhX25519        = crypto_ecdh_x25519_w,
+    .ecdhP256          = crypto_ecdh_p256_w,
+    .ecdhGetPublicKey  = crypto_ecdh_get_pubkey_w,
+    .ecdhComputeShared = crypto_ecdh_shared_w,
+    .ecdhFree          = crypto_ecdh_free_w,
+    .rsaVerify         = crypto_rsa_verify,
+    .ecdsaP256Verify   = crypto_ecdsa_p256_verify,
+};
+
+// ── Graphics impl ─────────────────────────────────────────────────────────────
+
+static pcimage_t gfx_load(const char *path) {
+    return (pcimage_t)image_load(path);
+}
+static pcimage_t gfx_new_blank(int w, int h) {
+    return (pcimage_t)image_new_blank(w, h);
+}
+static void gfx_free(pcimage_t img) {
+    image_free((pc_image_t *)img);
+}
+static int gfx_width(pcimage_t img) {
+    return ((pc_image_t *)img)->w;
+}
+static int gfx_height(pcimage_t img) {
+    return ((pc_image_t *)img)->h;
+}
+static uint16_t *gfx_pixels(pcimage_t img) {
+    return ((pc_image_t *)img)->data;
+}
+static void gfx_set_transparent_color(pcimage_t img, uint16_t color) {
+    ((pc_image_t *)img)->transparent_color = color;
+}
+static void gfx_draw(pcimage_t img, int x, int y) {
+    image_draw((const pc_image_t *)img, x, y);
+}
+static void gfx_draw_region(pcimage_t img, int sx, int sy, int sw, int sh,
+                             int dx, int dy) {
+    image_draw_region((const pc_image_t *)img, sx, sy, sw, sh, dx, dy);
+}
+static void gfx_draw_scaled(pcimage_t img, int x, int y, int dst_w, int dst_h) {
+    image_draw_scaled((const pc_image_t *)img, x, y, dst_w, dst_h);
+}
+
+static const picocalc_graphics_t s_graphics_impl = {
+    .load                = gfx_load,
+    .newBlank            = gfx_new_blank,
+    .free                = gfx_free,
+    .width               = gfx_width,
+    .height              = gfx_height,
+    .pixels              = gfx_pixels,
+    .setTransparentColor = gfx_set_transparent_color,
+    .draw                = gfx_draw,
+    .drawRegion          = gfx_draw_region,
+    .drawScaled          = gfx_draw_scaled,
+};
+
+// ── Video impl ────────────────────────────────────────────────────────────────
+
+static pcvideo_t video_new_player(void) {
+    return (pcvideo_t)video_player_create();
+}
+static void video_free_player(pcvideo_t vp) {
+    video_player_destroy((video_player_t *)vp);
+}
+static bool video_load_w(pcvideo_t vp, const char *path) {
+    return video_player_load((video_player_t *)vp, path);
+}
+static void video_play_w(pcvideo_t vp) {
+    video_player_play((video_player_t *)vp);
+}
+static void video_pause_w(pcvideo_t vp) {
+    video_player_pause((video_player_t *)vp);
+}
+static void video_resume_w(pcvideo_t vp) {
+    video_player_resume((video_player_t *)vp);
+}
+static void video_stop_w(pcvideo_t vp) {
+    video_player_stop((video_player_t *)vp);
+}
+static bool video_update_w(pcvideo_t vp) {
+    return video_player_update((video_player_t *)vp);
+}
+static void video_seek_w(pcvideo_t vp, uint32_t frame) {
+    video_player_seek((video_player_t *)vp, frame);
+}
+static float video_get_fps_w(pcvideo_t vp) {
+    return video_player_get_fps((video_player_t *)vp);
+}
+static void video_get_size_w(pcvideo_t vp, uint32_t *w, uint32_t *h) {
+    video_player_t *p = (video_player_t *)vp;
+    if (w) *w = p->width;
+    if (h) *h = p->height;
+}
+static bool video_is_playing_w(pcvideo_t vp) {
+    video_player_t *p = (video_player_t *)vp;
+    return p->playing && !p->paused;
+}
+static bool video_is_paused_w(pcvideo_t vp) {
+    return ((video_player_t *)vp)->paused;
+}
+static void video_set_loop_w(pcvideo_t vp, bool loop) {
+    ((video_player_t *)vp)->loop = loop;
+}
+static void video_set_auto_flush_w(pcvideo_t vp, bool af) {
+    ((video_player_t *)vp)->auto_flush = af;
+}
+static bool video_has_audio_w(pcvideo_t vp) {
+    return video_player_has_audio((video_player_t *)vp);
+}
+static void video_set_volume_w(pcvideo_t vp, uint8_t vol) {
+    video_player_set_audio_volume((video_player_t *)vp, vol);
+}
+static uint8_t video_get_volume_w(pcvideo_t vp) {
+    return video_player_get_audio_volume((video_player_t *)vp);
+}
+static void video_set_muted_w(pcvideo_t vp, bool muted) {
+    video_player_set_audio_muted((video_player_t *)vp, muted);
+}
+static bool video_get_muted_w(pcvideo_t vp) {
+    return video_player_get_audio_muted((video_player_t *)vp);
+}
+static uint32_t video_get_dropped_w(pcvideo_t vp) {
+    return video_player_get_dropped_frames((video_player_t *)vp);
+}
+static void video_reset_stats_w(pcvideo_t vp) {
+    video_player_reset_stats((video_player_t *)vp);
+}
+
+static const picocalc_video_t s_video_impl = {
+    .newPlayer       = video_new_player,
+    .free            = video_free_player,
+    .load            = video_load_w,
+    .play            = video_play_w,
+    .pause           = video_pause_w,
+    .resume          = video_resume_w,
+    .stop            = video_stop_w,
+    .update          = video_update_w,
+    .seek            = video_seek_w,
+    .getFPS          = video_get_fps_w,
+    .getSize         = video_get_size_w,
+    .isPlaying       = video_is_playing_w,
+    .isPaused        = video_is_paused_w,
+    .setLoop         = video_set_loop_w,
+    .setAutoFlush    = video_set_auto_flush_w,
+    .hasAudio        = video_has_audio_w,
+    .setVolume       = video_set_volume_w,
+    .getVolume       = video_get_volume_w,
+    .setMuted        = video_set_muted_w,
+    .getMuted        = video_get_muted_w,
+    .getDroppedFrames = video_get_dropped_w,
+    .resetStats      = video_reset_stats_w,
+};
+
 // ── Core 1 entry — background WiFi polling ────────────────────────────────────
 // Core 1 drives the Mongoose / CYW43 network stack every 5 ms.
 // wifi_poll() acquires display_spi_lock() internally, so the SPI1 bus
@@ -754,7 +1252,14 @@ int main(void) {
   g_api.ui = &s_ui_impl;
   g_api.psram = &s_psram_impl;
   g_api.perf = &s_perf_impl;
-  g_api.terminal = &s_terminal_impl;
+  g_api.terminal    = &s_terminal_impl;
+  g_api.http        = &s_http_impl;
+  g_api.soundplayer = &s_soundplayer_impl;
+  g_api.appconfig   = &s_appconfig_impl;
+  g_api.crypto      = &s_crypto_impl;
+  g_api.graphics    = &s_graphics_impl;
+  g_api.video       = &s_video_impl;
+  g_api.version     = 2;
   // fs wired after SD card init
 
   // Explicitly configure PSRAM hardware pins and XIP write logic for the Pico

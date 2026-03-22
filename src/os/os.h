@@ -306,6 +306,228 @@ typedef struct {
     void (*setTargetFPS)(uint32_t fps);
 } picocalc_perf_t;
 
+// --- HTTP Client ------------------------------------------------------------
+// Mongoose-based HTTP/1.1+HTTPS client. Non-blocking, cross-core safe.
+// Connections are acquired from a pool of HTTP_MAX_CONNECTIONS (8).
+// All calls are Core 0 → Core 1 IPC — do NOT call mg_* functions directly.
+
+typedef void* pchttp_t;  // opaque HTTP connection handle
+
+typedef struct {
+    // Allocate a connection. server = hostname/IP, port = 0 → 80/443 default.
+    // use_ssl = true for HTTPS. Returns NULL if pool exhausted.
+    pchttp_t (*newConn)(const char *server, uint16_t port, bool use_ssl);
+    // Initiate GET request. extra_hdrs may be NULL. Non-blocking.
+    void  (*get)(pchttp_t c, const char *path, const char *extra_hdrs);
+    // Initiate POST request. body/body_len may be 0/NULL. Non-blocking.
+    void  (*post)(pchttp_t c, const char *path, const char *extra_hdrs,
+                  const char *body, uint32_t body_len);
+    // Read up to len bytes of response body. Returns bytes read or -1 on error.
+    int      (*read)(pchttp_t c, uint8_t *buf, uint32_t len);
+    // Returns bytes available in the receive buffer.
+    uint32_t (*available)(pchttp_t c);
+    // Close the connection and return it to the pool.
+    void  (*close)(pchttp_t c);
+    // HTTP response status code (e.g. 200, 404). 0 if not yet received.
+    int   (*getStatus)(pchttp_t c);
+    // Last error string, or NULL if no error.
+    const char* (*getError)(pchttp_t c);
+    // Progress: sets *received and *total (0 if unknown). Returns total.
+    int   (*getProgress)(pchttp_t c, int *received, int *total);
+    // Configuration — call before get()/post().
+    void  (*setKeepAlive)(pchttp_t c, bool keep_alive);
+    void  (*setByteRange)(pchttp_t c, int from, int to);
+    void  (*setConnectTimeout)(pchttp_t c, int seconds);
+    void  (*setReadTimeout)(pchttp_t c, int seconds);
+    void  (*setReadBufferSize)(pchttp_t c, int bytes);
+} picocalc_http_t;
+
+// --- Sound Player -----------------------------------------------------------
+// High-level audio: sample playback, streaming file playback, MP3 decoding.
+// Objects allocated via umm_malloc (QMI PSRAM). Free when done.
+
+typedef void* pcsound_sample_t; // opaque sound sample handle
+typedef void* pcsound_player_t; // opaque sample player handle
+typedef void* pcfileplayer_t;   // opaque file player handle
+typedef void* pcmp3player_t;    // opaque MP3 player handle
+
+typedef struct {
+    // --- Sample (WAV-like in-memory playback) ---
+    // Load a sample from a file. Returns NULL on failure.
+    pcsound_sample_t (*sampleLoad)(const char *path);
+    // Free a loaded sample.
+    void  (*sampleFree)(pcsound_sample_t s);
+
+    // --- Sample player ---
+    // Create a new player instance. Returns NULL on OOM.
+    pcsound_player_t (*playerNew)(void);
+    void  (*playerSetSample)(pcsound_player_t p, pcsound_sample_t s);
+    void     (*playerPlay)(pcsound_player_t p, uint8_t repeat_count);  // 0 = loop while setLoop(true)
+    void     (*playerStop)(pcsound_player_t p);
+    bool     (*playerIsPlaying)(pcsound_player_t p);
+    uint8_t  (*playerGetVolume)(pcsound_player_t p);
+    void     (*playerSetVolume)(pcsound_player_t p, uint8_t vol);   // 0–255
+    void     (*playerSetLoop)(pcsound_player_t p, bool loop);
+    void     (*playerFree)(pcsound_player_t p);
+
+    // --- File player (streaming from SD card) ---
+    pcfileplayer_t (*filePlayerNew)(void);
+    void     (*filePlayerLoad)(pcfileplayer_t fp, const char *path);
+    void     (*filePlayerPlay)(pcfileplayer_t fp, uint8_t repeat_count);  // 0 = infinite
+    void     (*filePlayerStop)(pcfileplayer_t fp);
+    void     (*filePlayerPause)(pcfileplayer_t fp);
+    void     (*filePlayerResume)(pcfileplayer_t fp);
+    bool     (*filePlayerIsPlaying)(pcfileplayer_t fp);
+    void     (*filePlayerSetVolume)(pcfileplayer_t fp, uint8_t vol);  // sets both L/R channels to same value
+    uint8_t  (*filePlayerGetVolume)(pcfileplayer_t fp);
+    uint32_t (*filePlayerGetOffset)(pcfileplayer_t fp);
+    void     (*filePlayerSetOffset)(pcfileplayer_t fp, uint32_t pos);
+    bool     (*filePlayerDidUnderrun)(pcfileplayer_t fp);
+    void     (*filePlayerFree)(pcfileplayer_t fp);
+
+    // --- MP3 player (Core 1 decoding, PIO PSRAM ring buffer) ---
+    pcmp3player_t (*mp3PlayerNew)(void);
+    void     (*mp3PlayerLoad)(pcmp3player_t mp, const char *path);
+    void     (*mp3PlayerPlay)(pcmp3player_t mp, uint8_t repeat_count);  // 0 = infinite
+    void     (*mp3PlayerStop)(pcmp3player_t mp);
+    void     (*mp3PlayerPause)(pcmp3player_t mp);
+    void     (*mp3PlayerResume)(pcmp3player_t mp);
+    bool     (*mp3PlayerIsPlaying)(pcmp3player_t mp);
+    void     (*mp3PlayerSetVolume)(pcmp3player_t mp, uint8_t vol);
+    uint8_t  (*mp3PlayerGetVolume)(pcmp3player_t mp);
+    void     (*mp3PlayerSetLoop)(pcmp3player_t mp, bool loop);
+    void     (*mp3PlayerFree)(pcmp3player_t mp);
+} picocalc_soundplayer_t;
+
+// --- App Config -------------------------------------------------------------
+// Per-app key/value config persisted at /data/<APP_ID>/config.json.
+// load() is called by the launcher before app start. Max 4 keys, 32-char keys,
+// 256-char values.
+
+typedef struct {
+    // Load config for the given app_id. Called by launcher automatically.
+    bool        (*load)(const char *app_id);
+    // Save in-memory config to /data/<APP_ID>/config.json.
+    bool        (*save)(void);
+    // Get value for key. Returns fallback (may be NULL) if key not found.
+    const char* (*get)(const char *key, const char *fallback);
+    // Set value for key.
+    void        (*set)(const char *key, const char *value);
+    // Clear all in-memory entries (does not delete the file).
+    void        (*clear)(void);
+    // Delete the config file and clear memory.
+    bool        (*reset)(void);
+    // Returns the currently loaded app_id, or NULL.
+    const char* (*getAppId)(void);
+} picocalc_appconfig_t;
+
+// --- Crypto -----------------------------------------------------------------
+// mbedTLS wrappers. All digest/HMAC functions are synchronous.
+// AES and ECDH use opaque context handles; free them when done.
+
+typedef void* pccrypto_aes_t;   // opaque AES-CTR context
+typedef void* pccrypto_ecdh_t;  // opaque ECDH context
+
+typedef struct {
+    // --- Hash / MAC ---
+    void (*sha256)(const uint8_t *data, uint32_t len, uint8_t out[32]);
+    void (*sha1)(const uint8_t *data, uint32_t len, uint8_t out[20]);
+    void (*hmacSha256)(const uint8_t *key, uint32_t klen,
+                       const uint8_t *data, uint32_t dlen, uint8_t out[32]);
+    void (*hmacSha1)(const uint8_t *key, uint32_t klen,
+                     const uint8_t *data, uint32_t dlen, uint8_t out[20]);
+    // Fill buf with cryptographically random bytes.
+    void (*randomBytes)(uint8_t *buf, uint32_t len);
+    // SSH session-key derivation (RFC 4253 §7.2). letter = 'A'–'F'.
+    // K = shared secret mpint, H = exchange hash, session_id = initial H.
+    void (*deriveKey)(char letter,
+                      const uint8_t *K, uint32_t k_len,
+                      const uint8_t *H, uint32_t h_len,
+                      const uint8_t *session_id, uint32_t sid_len,
+                      uint8_t *out, uint32_t out_len);
+    // --- AES-CTR ---
+    // Create AES-CTR context. klen = 16/24/32. nonce = 16 bytes.
+    pccrypto_aes_t (*aesNew)(const uint8_t *key, uint32_t klen,
+                              const uint8_t *nonce);
+    // Encrypt/decrypt in place (or in→out). Returns 0 on success.
+    int  (*aesUpdate)(pccrypto_aes_t ctx,
+                      const uint8_t *in, uint8_t *out, uint32_t len);
+    void (*aesFree)(pccrypto_aes_t ctx);
+    // --- ECDH ---
+    // Create an X25519 or P-256 keypair.
+    pccrypto_ecdh_t (*ecdhX25519)(void);
+    pccrypto_ecdh_t (*ecdhP256)(void);
+    // Write public key bytes into out; sets *out_len.
+    void (*ecdhGetPublicKey)(pccrypto_ecdh_t ctx, uint8_t *out, uint32_t *out_len);
+    // Compute shared secret from remote public key. Returns 0 on success.
+    int  (*ecdhComputeShared)(pccrypto_ecdh_t ctx,
+                              const uint8_t *remote, uint32_t rlen,
+                              uint8_t *out, uint32_t *out_len);
+    void (*ecdhFree)(pccrypto_ecdh_t ctx);
+    // --- Signature verification ---
+    bool (*rsaVerify)(const uint8_t *pubkey, uint32_t pklen,
+                      const uint8_t *sig, uint32_t slen,
+                      const uint8_t *hash, uint32_t hlen);
+    bool (*ecdsaP256Verify)(const uint8_t *pubkey, uint32_t pklen,
+                             const uint8_t *sig, uint32_t slen,
+                             const uint8_t *hash, uint32_t hlen);
+} picocalc_crypto_t;
+
+// --- Graphics / Image -------------------------------------------------------
+// Image loading and drawing. Images stored in PSRAM via umm_malloc.
+
+typedef void* pcimage_t;  // opaque image handle
+
+typedef struct {
+    // Load image from path (BMP/JPEG/PNG/GIF). Returns NULL on failure.
+    pcimage_t (*load)(const char *path);
+    // Allocate blank zeroed image. Returns NULL on OOM.
+    pcimage_t (*newBlank)(int width, int height);
+    // Free image (pixels + struct). Safe to call with NULL.
+    void      (*free)(pcimage_t img);
+    // Image dimensions.
+    int       (*width)(pcimage_t img);
+    int       (*height)(pcimage_t img);
+    // Raw RGB565 pixel data pointer (PSRAM).
+    uint16_t* (*pixels)(pcimage_t img);
+    // Per-image transparent color for color-key blending (0 = disabled).
+    void      (*setTransparentColor)(pcimage_t img, uint16_t color);
+    // Draw operations.
+    void      (*draw)(pcimage_t img, int x, int y);
+    void      (*drawRegion)(pcimage_t img, int sx, int sy, int sw, int sh, int dx, int dy);
+    void      (*drawScaled)(pcimage_t img, int x, int y, int dst_w, int dst_h);
+} picocalc_graphics_t;
+
+// --- Video ------------------------------------------------------------------
+// MJPEG video playback. video_player_t* is used as the opaque handle.
+
+typedef void* pcvideo_t;  // opaque video player handle
+
+typedef struct {
+    pcvideo_t (*newPlayer)(void);
+    void      (*free)(pcvideo_t vp);
+    bool      (*load)(pcvideo_t vp, const char *path);
+    void      (*play)(pcvideo_t vp);
+    void      (*pause)(pcvideo_t vp);
+    void      (*resume)(pcvideo_t vp);
+    void      (*stop)(pcvideo_t vp);
+    bool      (*update)(pcvideo_t vp);
+    void      (*seek)(pcvideo_t vp, uint32_t frame);
+    float     (*getFPS)(pcvideo_t vp);
+    void      (*getSize)(pcvideo_t vp, uint32_t *w, uint32_t *h);
+    bool      (*isPlaying)(pcvideo_t vp);
+    bool      (*isPaused)(pcvideo_t vp);
+    void      (*setLoop)(pcvideo_t vp, bool loop);
+    void      (*setAutoFlush)(pcvideo_t vp, bool af);
+    bool      (*hasAudio)(pcvideo_t vp);
+    void      (*setVolume)(pcvideo_t vp, uint8_t vol);
+    uint8_t   (*getVolume)(pcvideo_t vp);
+    void      (*setMuted)(pcvideo_t vp, bool muted);
+    bool      (*getMuted)(pcvideo_t vp);
+    uint32_t  (*getDroppedFrames)(pcvideo_t vp);
+    void      (*resetStats)(pcvideo_t vp);
+} picocalc_video_t;
+
 // --- The complete OS API struct ---------------------------------------------
 // This is what gets passed to every Lua environment and future C app loaders.
 
@@ -321,6 +543,15 @@ typedef struct PicoCalcAPI {
     const picocalc_psram_t   *psram;
     const picocalc_perf_t    *perf;
     const picocalc_terminal_t *terminal;
+    // --- Phase 1 additions (appended for ABI compatibility) ---
+    const picocalc_http_t        *http;        // HTTP/HTTPS client
+    const picocalc_soundplayer_t *soundplayer; // sample/file/MP3 player
+    const picocalc_appconfig_t   *appconfig;   // per-app config store
+    const picocalc_crypto_t      *crypto;      // crypto primitives
+    // --- Phase 2 additions ---
+    const picocalc_graphics_t    *graphics;    // image loading/drawing
+    const picocalc_video_t       *video;       // MJPEG video playback
+    uint32_t                      version;     // 1=Phase1, 2=Phase2
 } PicoCalcAPI;
 
 // The global API instance, populated during os_init()
