@@ -66,7 +66,7 @@ static int l_ecdh_get_public_key(lua_State *L) {
     ecdh_ud_t *ud = check_ecdh(L, 1);
 
     uint8_t buf[128];
-    uint32_t olen = 0;
+    uint32_t olen = sizeof(buf);
     g_api.crypto->ecdhGetPublicKey(ud->ctx, buf, &olen);
     if (olen == 0)
         return luaL_error(L, "ecdh: failed to get public key");
@@ -212,34 +212,37 @@ static int l_crypto_aes_ctr_new(lua_State *L) {
     if (iv_len != 16)
         return luaL_error(L, "aes_ctr_new: iv must be 16 bytes");
 
-    aes_ctr_ud_t *ud = (aes_ctr_ud_t *)lua_newuserdata(L, sizeof(aes_ctr_ud_t));
-    ud->ctx = g_api.crypto->aesNew((const uint8_t *)key, (uint32_t)key_len,
-                                    (const uint8_t *)iv);
-    if (!ud->ctx)
+    pccrypto_aes_t ctx = g_api.crypto->aesNew((const uint8_t *)key, (uint32_t)key_len,
+                                               (const uint8_t *)iv);
+    if (!ctx)
         return luaL_error(L, "aes_ctr_new: failed to create AES context");
 
+    aes_ctr_ud_t *ud = (aes_ctr_ud_t *)lua_newuserdata(L, sizeof(aes_ctr_ud_t));
+    ud->ctx = ctx;
     luaL_getmetatable(L, AES_CTR_MT);
     lua_setmetatable(L, -2);
     return 1;
 }
 
 static int l_crypto_ecdh_x25519_new(lua_State *L) {
-    ecdh_ud_t *ud = (ecdh_ud_t *)lua_newuserdata(L, sizeof(ecdh_ud_t));
-    ud->ctx = g_api.crypto->ecdhX25519();
-    if (!ud->ctx)
+    pccrypto_ecdh_t ctx = g_api.crypto->ecdhX25519();
+    if (!ctx)
         return luaL_error(L, "ecdh_x25519_new: failed to create ECDH context");
 
+    ecdh_ud_t *ud = (ecdh_ud_t *)lua_newuserdata(L, sizeof(ecdh_ud_t));
+    ud->ctx = ctx;
     luaL_getmetatable(L, ECDH_MT);
     lua_setmetatable(L, -2);
     return 1;
 }
 
 static int l_crypto_ecdh_p256_new(lua_State *L) {
-    ecdh_ud_t *ud = (ecdh_ud_t *)lua_newuserdata(L, sizeof(ecdh_ud_t));
-    ud->ctx = g_api.crypto->ecdhP256();
-    if (!ud->ctx)
+    pccrypto_ecdh_t ctx = g_api.crypto->ecdhP256();
+    if (!ctx)
         return luaL_error(L, "ecdh_p256_new: failed to create ECDH context");
 
+    ecdh_ud_t *ud = (ecdh_ud_t *)lua_newuserdata(L, sizeof(ecdh_ud_t));
+    ud->ctx = ctx;
     luaL_getmetatable(L, ECDH_MT);
     lua_setmetatable(L, -2);
     return 1;

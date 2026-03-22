@@ -716,13 +716,8 @@ void lua_bridge_sound_init(lua_State *L) {
     // Clear Lua callback refs from previous app
     memset(s_fp_cbs, 0, sizeof(s_fp_cbs));
 
-    printf("[SOUND] Initializing fileplayer...\n");
     fileplayer_init();
-    printf("[SOUND] fileplayer_init done\n");
-
-    printf("[SOUND] Initializing mp3_player...\n");
     mp3_player_init();
-    printf("[SOUND] mp3_player_init done\n");
 
     register_subtable(L, "sound", sound_funcs);
 }
