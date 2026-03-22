@@ -42,6 +42,8 @@ typedef struct {
     void (*setScrollbarColors)(terminal_t* term, uint16_t bg, uint16_t thumb);
     void (*setScrollbarWidth)(terminal_t* term, int width);
     void (*setScrollInfo)(terminal_t* term, int total_lines, int scroll_position);
+    // Render bounds
+    void (*setRenderBounds)(terminal_t* term, int y_start, int y_end);
     // Word wrap (visual - content not modified)
     void (*setWordWrap)(terminal_t* term, bool enabled);
     void (*setWordWrapColumn)(terminal_t* term, int column);

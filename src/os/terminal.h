@@ -80,6 +80,11 @@ struct terminal {
     // 0 = this row starts a new logical line (from \n or start of buffer)
     uint8_t* row_continuation;
     uint8_t* scrollback_continuation;  // continuation flags for scrollback buffer
+
+    // Render bounds (pixel coordinates)
+    int render_y_start;   // Top pixel Y (default 28, below header)
+    int render_y_end;     // Bottom pixel Y exclusive (default 302, above footer)
+    int render_x_start;   // Left pixel X (default 4, padding)
 };
 
 typedef struct terminal terminal_t;
@@ -174,6 +179,9 @@ void terminal_setScrollbar(terminal_t* term, bool enabled);
 void terminal_setScrollbarColors(terminal_t* term, uint16_t bg, uint16_t thumb);
 void terminal_setScrollbarWidth(terminal_t* term, int width);
 void terminal_setScrollInfo(terminal_t* term, int total_lines, int scroll_position);
+
+// Render bounds
+void terminal_setRenderBounds(terminal_t* term, int y_start, int y_end);
 
 // Word wrap (visual)
 void terminal_setWordWrap(terminal_t* term, bool enabled);

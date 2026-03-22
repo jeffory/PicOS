@@ -435,6 +435,15 @@ static int l_terminal_setScrollInfo(lua_State* L) {
     return 0;
 }
 
+// Render bounds
+static int l_terminal_setRenderBounds(lua_State* L) {
+    lua_terminal_t* t = check_terminal(L, 1);
+    int y_start = luaL_checkinteger(L, 2);
+    int y_end = luaL_checkinteger(L, 3);
+    terminal_setRenderBounds(t->term, y_start, y_end);
+    return 0;
+}
+
 // Word wrap bindings
 static int l_terminal_setWordWrap(lua_State* L) {
     lua_terminal_t* t = check_terminal(L, 1);
@@ -508,6 +517,8 @@ static const luaL_Reg terminal_methods[] = {
     {"setScrollbarColors", l_terminal_setScrollbarColors},
     {"setScrollbarWidth", l_terminal_setScrollbarWidth},
     {"setScrollInfo", l_terminal_setScrollInfo},
+    // Render bounds
+    {"setRenderBounds", l_terminal_setRenderBounds},
     // Word wrap
     {"setWordWrap", l_terminal_setWordWrap},
     {"setWordWrapColumn", l_terminal_setWordWrapColumn},

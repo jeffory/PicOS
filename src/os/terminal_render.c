@@ -32,9 +32,6 @@ static inline int get_font_height(terminal_t* term) {
 #define FONT_W get_font_width(term)
 #define FONT_H get_font_height(term)
 
-#define TERM_Y_OFFSET 28
-#define TERM_X_PADDING 4
-
 // Shared scratch buffer defined in terminal.c — allocated in PSRAM, single-threaded on Core 0.
 extern char* g_terminal_wrap_buf;
 
@@ -188,7 +185,7 @@ static void terminal_render_glyph(int x, int y, uint16_t fg, uint16_t bg,
     for (int row = 0; row < font_h; row++) {
         uint8_t rowdata = glyph[row];
         int py = y + row;
-        if (py < 0 || py >= 302) continue;
+        if (py < 0 || py >= 320) continue;
         for (int col = 0; col < font_w; col++) {
             int px = x + col;
             if (px >= 0 && px < 320) {
@@ -212,14 +209,14 @@ static void terminal_renderLineNumbers(terminal_t* term) {
     int num_logical = build_logical_lines(term, logical_starts, 26);
 
     for (int row = 0; row < term->rows; row++) {
-        int y = TERM_Y_OFFSET + row * FONT_H;
-        int x = TERM_X_PADDING;
+        int y = term->render_y_start + row * FONT_H;
+        int x = term->render_x_start;
         bool is_continuation = false;
         int logical_line_idx = 0;
 
         if (term->word_wrap_enabled) {
             // Find which logical line and segment this visual row corresponds to
-            int target_visual = term->scroll_position + row;
+            int target_visual = row;
             int current_visual = 0;
 
             for (int li = 0; li < num_logical; li++) {
@@ -289,18 +286,18 @@ static void terminal_renderScrollbar(terminal_t* term) {
 
     // Scrollbar is drawn in the last column (rightmost)
     int scrollbar_col = term->cols - 1;
-    int x = TERM_X_PADDING + scrollbar_col * FONT_W + (FONT_W - term->scrollbar_width) / 2;
+    int x = term->render_x_start + scrollbar_col * FONT_W + (FONT_W - term->scrollbar_width) / 2;
     if (x < 0) x = 0;
-    int y = TERM_Y_OFFSET;
+    int y = term->render_y_start;
     int height = term->rows * FONT_H;
 
     // Draw track (background)
     for (int row = 0; row < term->rows; row++) {
-        int row_y = TERM_Y_OFFSET + row * FONT_H;
+        int row_y = term->render_y_start + row * FONT_H;
         // Fill the cell background with scrollbar_bg color
-        for (int py = row_y; py < row_y + FONT_H && py < 302; py++) {
+        for (int py = row_y; py < row_y + FONT_H && py < term->render_y_end; py++) {
             for (int px = x; px < x + term->scrollbar_width && px < 320; px++) {
-                if (px >= 0 && px < 320 && py >= 0 && py < 302) {
+                if (px >= 0 && px < 320 && py >= 0 && py < term->render_y_end) {
                     uint16_t* fb = display_get_back_buffer();
                     fb[py * 320 + px] = byte_swap(term->scrollbar_bg);
                 }
@@ -318,9 +315,9 @@ static void terminal_renderScrollbar(terminal_t* term) {
     int thumb_y = y + (int)((height - thumb_height_px) * scroll_ratio);
 
     // Draw thumb
-    for (int py = thumb_y; py < thumb_y + thumb_height_px && py < y + height && py < 302; py++) {
+    for (int py = thumb_y; py < thumb_y + thumb_height_px && py < y + height && py < term->render_y_end; py++) {
         for (int px = x; px < x + term->scrollbar_width && px < 320; px++) {
-            if (px >= 0 && px < 320 && py >= 0 && py < 302) {
+            if (px >= 0 && px < 320 && py >= 0 && py < term->render_y_end) {
                 uint16_t* fb = display_get_back_buffer();
                 fb[py * 320 + px] = byte_swap(term->scrollbar_thumb);
             }
@@ -361,7 +358,7 @@ void terminal_renderScrollback(terminal_t* term) {
             int fw = get_font_width(term);
             int fh = get_font_height(term);
             for (int col = 0; col < cols; col++) {
-                terminal_render_glyph(TERM_X_PADDING + col * fw, TERM_Y_OFFSET + row * fh, 0xFFFF, 0x0000, space, fw, fh);
+                terminal_render_glyph(term->render_x_start + col * fw, term->render_y_start + row * fh, 0xFFFF, 0x0000, space, fw, fh);
             }
         } else if (vline < scrollback_count) {
             // Scrollback line — use stored colors
@@ -381,7 +378,7 @@ void terminal_renderScrollback(terminal_t* term) {
                 }
 
                 const uint8_t *glyph = get_glyph(term, (char)(uint8_t)ch);
-                terminal_render_glyph(TERM_X_PADDING + col * FONT_W, TERM_Y_OFFSET + row * FONT_H, fg, bg, glyph, FONT_W, FONT_H);
+                terminal_render_glyph(term->render_x_start + col * FONT_W, term->render_y_start + row * FONT_H, fg, bg, glyph, FONT_W, FONT_H);
             }
         } else {
             // Current screen line
@@ -401,12 +398,12 @@ void terminal_renderScrollback(terminal_t* term) {
                     }
 
                     const uint8_t *glyph = get_glyph(term, (char)(uint8_t)ch);
-                    terminal_render_glyph(TERM_X_PADDING + col * FONT_W, TERM_Y_OFFSET + row * FONT_H, fg, bg, glyph, FONT_W, FONT_H);
+                    terminal_render_glyph(term->render_x_start + col * FONT_W, term->render_y_start + row * FONT_H, fg, bg, glyph, FONT_W, FONT_H);
                 }
             } else {
                 const uint8_t *space = get_glyph(term, ' ');
                 for (int col = 0; col < cols; col++) {
-                    terminal_render_glyph(TERM_X_PADDING + col * FONT_W, TERM_Y_OFFSET + row * FONT_H, 0xFFFF, 0x0000, space, FONT_W, FONT_H);
+                    terminal_render_glyph(term->render_x_start + col * FONT_W, term->render_y_start + row * FONT_H, 0xFFFF, 0x0000, space, FONT_W, FONT_H);
                 }
             }
         }
@@ -453,7 +450,7 @@ void terminal_render(terminal_t* term) {
     }
     if (content_cols < 1) content_cols = 1;
 
-    int x_offset = TERM_X_PADDING + content_offset_cols * FONT_W;
+    int x_offset = term->render_x_start + content_offset_cols * FONT_W;
 
     int wrap_col = term->word_wrap_column > 0 ? term->word_wrap_column : content_cols;
     if (wrap_col > content_cols) wrap_col = content_cols;
@@ -467,12 +464,12 @@ void terminal_render(terminal_t* term) {
 
     // Render each display row
     for (int row = 0; row < term->rows; row++) {
-        int y = TERM_Y_OFFSET + row * FONT_H;
-        if (y + FONT_H > 302) break;
+        int y = term->render_y_start + row * FONT_H;
+        if (y + FONT_H > term->render_y_end) break;
 
         if (term->word_wrap_enabled) {
 
-            int target_visual = term->scroll_position + row;
+            int target_visual = row;
             int current_visual = 0;
             int found_li = -1;
             int segment_idx = 0;
@@ -549,7 +546,7 @@ void terminal_render(terminal_t* term) {
             }
         } else {
             // Normal rendering mode (no word wrap)
-            int logical_row_idx = term->scroll_position + row;
+            int logical_row_idx = row;
             if (logical_row_idx >= term->rows) continue;
 
             int base = logical_row_idx * term->cols;
@@ -626,7 +623,7 @@ void terminal_render(terminal_t* term) {
 
             if (draw_cursor) {
                 int cx = x_offset + cursor_vis_x * FONT_W;
-                int cy = TERM_Y_OFFSET + cursor_vis_y * FONT_H;
+                int cy = term->render_y_start + cursor_vis_y * FONT_H;
 
                 int cursor_idx = term->cursor_y * term->cols + term->cursor_x;
                 uint16_t cell = term->cells[cursor_idx];
@@ -689,13 +686,13 @@ void terminal_renderDirty(terminal_t* term) {
     }
     if (content_cols < 1) content_cols = 1;
 
-    int x_offset = TERM_X_PADDING + content_offset_cols * FONT_W;
+    int x_offset = term->render_x_start + content_offset_cols * FONT_W;
 
     for (int row = first_dirty; row <= last_dirty; row++) {
         if (row < 0 || row >= term->rows) continue;
         if (!terminal_isRowDirty(term, row)) continue;
 
-        int y = TERM_Y_OFFSET + row * FONT_H;
+        int y = term->render_y_start + row * FONT_H;
 
         for (int col = 0; col < content_cols; col++) {
             int x = x_offset + col * FONT_W;
@@ -737,7 +734,7 @@ void terminal_renderDirty(terminal_t* term) {
 
         if (draw_cursor) {
             int cx = x_offset + term->cursor_x * FONT_W;
-            int cy = TERM_Y_OFFSET + term->cursor_y * FONT_H;
+            int cy = term->render_y_start + term->cursor_y * FONT_H;
 
             int cursor_idx = term->cursor_y * term->cols + term->cursor_x;
             uint16_t cell = term->cells[cursor_idx];
@@ -764,10 +761,10 @@ void terminal_renderDirty(terminal_t* term) {
 void terminal_renderRow(terminal_t* term, int row) {
     if (!term || row < 0 || row >= term->rows) return;
 
-    int y = TERM_Y_OFFSET + row * FONT_H;
+    int y = term->render_y_start + row * FONT_H;
 
     for (int col = 0; col < term->cols; col++) {
-        int x = TERM_X_PADDING + col * FONT_W;
+        int x = term->render_x_start + col * FONT_W;
 
         int idx = row * term->cols + col;
         uint16_t cell = term->cells[idx];

@@ -509,6 +509,7 @@ static picocalc_terminal_t s_terminal_impl = {
     .setScrollbarColors = terminal_setScrollbarColors,
     .setScrollbarWidth = terminal_setScrollbarWidth,
     .setScrollInfo = terminal_setScrollInfo,
+    .setRenderBounds = terminal_setRenderBounds,
     // Word wrap (visual - content not modified)
     .setWordWrap = terminal_setWordWrap,
     .setWordWrapColumn = terminal_setWordWrapColumn,

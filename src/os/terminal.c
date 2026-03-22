@@ -65,6 +65,11 @@ terminal_t* terminal_new(int cols, int rows, int scrollback_lines) {
     term->wrap_viewport_start = 0;
     term->wrap_viewport_scroll = 0;
 
+    // Render bounds (default: below header, above footer)
+    term->render_y_start = 28;
+    term->render_y_end = 302;
+    term->render_x_start = 4;
+
     size_t cell_count = (size_t)cols * rows;
     size_t sb_count = (size_t)scrollback_lines * cols;
     term->cells = (uint16_t*)umm_malloc(cell_count * sizeof(uint16_t));
@@ -664,6 +669,17 @@ void terminal_setScrollInfo(terminal_t* term, int total_lines, int scroll_positi
         term->scrollbar_visible = true;
         term->scrollbar_last_scroll_time = 0; // Will be set in render
     }
+}
+
+// Render bounds
+void terminal_setRenderBounds(terminal_t* term, int y_start, int y_end) {
+    if (!term) return;
+    if (y_start < 0) y_start = 0;
+    if (y_end > 320) y_end = 320;
+    if (y_end <= y_start) return;
+    term->render_y_start = y_start;
+    term->render_y_end = y_end;
+    term->full_dirty = true;
 }
 
 // Word wrap implementation (visual - content not modified)
