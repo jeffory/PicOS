@@ -50,7 +50,7 @@ end
 
 ## Notes
 
-- The display uses a **double-buffered framebuffer in PSRAM** (2× 200 KB). DMA flushes run in the background while the CPU draws the next frame.
+- The display uses a **double-buffered framebuffer in SRAM** (2× 200 KB). DMA flushes run in the background while the CPU draws the next frame.
 - Call `picocalc.input.update()` and `picocalc.display.flush()` **once per frame**.
 - The Menu key (F10) is automatically intercepted by the OS to show the system menu overlay.
 - All file paths must be absolute (e.g., `"/apps/myapp/data.txt"` or `APP_DIR .. "/data.txt"`).

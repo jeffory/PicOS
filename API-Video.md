@@ -78,8 +78,9 @@ while true do
     -- draw HUD or overlays here
     picocalc.display.flush()
 
-    local key = picocalc.input.getKey()
-    if key == picocalc.input.KEY_ESCAPE then break end
+    picocalc.input.update()
+    local pressed = picocalc.input.getButtonsPressed()
+    if pressed & picocalc.input.BTN_ESC ~= 0 then break end
 end
 
 player:stop()

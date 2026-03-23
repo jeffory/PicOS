@@ -189,6 +189,217 @@ Predefined RGB565 color values:
 
 ---
 
+### Framebuffer Effects
+
+Post-processing effects applied to the entire framebuffer. Draw your scene first, apply effects, then call `flush()`. Effects use the RP2350's hardware interpolators for fast per-pixel blending where applicable.
+
+All effects operate on the back buffer and do not block DMA — they can overlap with the previous frame's transfer for maximum throughput.
+
+#### `picocalc.display.applyEffect("invert")`
+Bitwise-inverts all pixels. The fastest effect (~0.3ms).
+
+```lua
+picocalc.display.applyEffect("invert")
+```
+
+---
+
+#### `picocalc.display.applyEffect("darken", factor)`
+Darkens the framebuffer by blending each pixel toward black.
+
+- **Parameters:**
+  - `factor` (number, optional): 0 = fully black, 255 = no change. Default: 128.
+
+```lua
+picocalc.display.applyEffect("darken", 200)  -- slight darken
+picocalc.display.applyEffect("darken", 64)   -- heavy darken
+```
+
+---
+
+#### `picocalc.display.applyEffect("brighten", factor)`
+Brightens the framebuffer by blending each pixel toward white.
+
+- **Parameters:**
+  - `factor` (number, optional): 0 = no change, 255 = fully white. Default: 128.
+
+```lua
+picocalc.display.applyEffect("brighten", 80)
+```
+
+---
+
+#### `picocalc.display.applyEffect("tint", r, g, b [, strength])`
+Blends the framebuffer toward a tint color. Uses hardware interpolator BLEND mode.
+
+- **Parameters:**
+  - `r`, `g`, `b` (number): Tint color components (0-255)
+  - `strength` (number, optional): Blend strength (0 = no tint, 255 = solid color). Default: 128.
+
+```lua
+-- Red tint overlay
+picocalc.display.applyEffect("tint", 255, 0, 0, 100)
+
+-- Sepia tone
+picocalc.display.applyEffect("tint", 180, 140, 100, 80)
+```
+
+---
+
+#### `picocalc.display.applyEffect("fade", r, g, b [, factor])`
+Fades the framebuffer toward a target color. Alias for `"tint"` — identical behavior.
+
+- **Parameters:**
+  - `r`, `g`, `b` (number): Target color components (0-255)
+  - `factor` (number, optional): Fade amount (0 = no change, 255 = solid color). Default: 128.
+
+```lua
+-- Fade to black (transition effect)
+picocalc.display.applyEffect("fade", 0, 0, 0, 200)
+
+-- Fade to white (flash effect)
+picocalc.display.applyEffect("fade", 255, 255, 255, 128)
+```
+
+---
+
+#### `picocalc.display.applyEffect("grayscale")`
+Desaturates the framebuffer using ITU-R BT.601 luma weights (0.299R + 0.587G + 0.114B).
+
+```lua
+picocalc.display.applyEffect("grayscale")
+```
+
+---
+
+#### `picocalc.display.applyEffect("blend", image, alpha)`
+Alpha-blends an image onto the framebuffer. The image is drawn at (0, 0) and clipped to the screen.
+
+- **Parameters:**
+  - `image` (userdata): Image object from `picocalc.graphics.image.load()` or `.new()`
+  - `alpha` (number, optional): Opacity (0 = fully transparent, 255 = fully opaque). Default: 128.
+
+```lua
+local overlay = picocalc.graphics.image.load(APP_DIR .. "/overlay.png")
+picocalc.display.applyEffect("blend", overlay, 100)
+```
+
+---
+
+#### `picocalc.display.applyEffect("palette", lut)`
+Remaps all framebuffer colors through a lookup table. Each pixel's RGB channels are quantized to an 8-bit index (3 bits red, 3 bits green, 2 bits blue) and replaced with the corresponding LUT entry.
+
+- **Parameters:**
+  - `lut` (table): Array of 1-256 RGB565 color values
+
+```lua
+-- Create a 256-entry grayscale palette
+local lut = {}
+for i = 1, 256 do
+    local v = math.floor((i - 1) * 255 / 255)
+    lut[i] = picocalc.display.rgb(v, v, v)
+end
+picocalc.display.applyEffect("palette", lut)
+```
+
+---
+
+#### `picocalc.display.applyEffect("dither", levels)`
+Applies ordered Bayer 4x4 dithering, quantizing colors to a reduced number of levels per channel.
+
+- **Parameters:**
+  - `levels` (number, optional): Quantization levels per channel (2-32). Default: 4.
+
+```lua
+picocalc.display.applyEffect("dither", 4)   -- retro 4-level dither
+picocalc.display.applyEffect("dither", 2)   -- extreme 1-bit style dither
+```
+
+---
+
+#### `picocalc.display.applyEffect("scanline", intensity)`
+Darkens every other row to create a CRT scanline effect. Uses fast bit-shift operations (no per-pixel channel extraction).
+
+- **Parameters:**
+  - `intensity` (number, optional): 1-127 = light scanlines (50% brightness), 128-254 = heavy (25%), 255 = black lines. Default: 128.
+
+```lua
+picocalc.display.applyEffect("scanline", 100)  -- subtle CRT effect
+picocalc.display.applyEffect("scanline", 255)  -- full black scanlines
+```
+
+---
+
+#### `picocalc.display.applyEffect("posterize", levels)`
+Reduces color depth by quantizing each channel to a fixed number of levels.
+
+- **Parameters:**
+  - `levels` (number, optional): Levels per channel (2-32). Default: 4.
+
+```lua
+picocalc.display.applyEffect("posterize", 4)   -- poster-art style
+picocalc.display.applyEffect("posterize", 8)   -- subtle reduction
+```
+
+---
+
+### Example: Combining Effects
+
+Effects can be chained. Each modifies the framebuffer in sequence.
+
+```lua
+while true do
+    picocalc.display.clear(picocalc.display.BLACK)
+
+    -- Draw your scene...
+    picocalc.display.fillRect(50, 50, 220, 220, picocalc.display.CYAN)
+    picocalc.display.drawText(80, 160, "Effects!", picocalc.display.WHITE)
+
+    -- Apply effects (order matters)
+    picocalc.display.applyEffect("tint", 255, 100, 0, 60)  -- warm tint
+    picocalc.display.applyEffect("scanline", 100)            -- CRT lines
+    picocalc.display.applyEffect("dither", 8)                -- subtle dither
+
+    picocalc.display.flush()
+end
+```
+
+---
+
+### Native C API
+
+Native ELF apps access effects through the `picocalc_display_t` vtable:
+
+```c
+void picos_main(PicoCalcAPI *api) {
+    const picocalc_display_t *d = api->display;
+
+    d->clear(RGB565(0, 0, 0));
+    d->drawText(10, 10, "Hello", RGB565(255, 255, 255), RGB565(0, 0, 0));
+
+    // Apply effects
+    d->effectTint(255, 0, 0, 128);    // red tint
+    d->effectScanline(100);            // CRT scanlines
+
+    d->flush();
+}
+```
+
+| Function | Signature |
+|----------|-----------|
+| `effectInvert` | `void (*)(void)` |
+| `effectDarken` | `void (*)(uint8_t factor)` |
+| `effectBrighten` | `void (*)(uint8_t factor)` |
+| `effectTint` | `void (*)(uint8_t r, uint8_t g, uint8_t b, uint8_t strength)` |
+| `effectGrayscale` | `void (*)(void)` |
+| `effectBlend` | `void (*)(const uint16_t *src, int w, int h, uint8_t alpha)` |
+| `effectPalette` | `void (*)(const uint16_t *lut, int lut_size)` |
+| `effectDither` | `void (*)(uint8_t levels)` |
+| `effectScanline` | `void (*)(uint8_t intensity)` |
+| `effectPosterize` | `void (*)(uint8_t levels)` |
+
+---
+
 ## picocalc.graphics
 
 Image loading, drawing, and state management. Images are stored in PSRAM and support BMP, JPEG, PNG, and GIF formats.

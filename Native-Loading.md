@@ -6,9 +6,24 @@ PicOS supports running native ARM Cortex-M33 (RP2350) applications in addition t
 
 A native application typically consists of:
 - `main.elf`: The compiled binary.
-- `app.json`: Metadata for the launcher (icon, name, description).
+- `app.json`: Metadata for the launcher (name, description, requirements).
 
 Place these files in `/apps/<your_app_name>/` on the SD card.
+
+### app.json
+
+```json
+{
+  "id": "com.example.myapp",
+  "name": "My App",
+  "description": "A native PicOS app",
+  "version": "1.0",
+  "author": "Your Name",
+  "requirements": ["audio", "http"]
+}
+```
+
+See [[Global Variables and Permissions]] for available requirements (`filesystem`, `root-filesystem`, `http`, `audio`).
 
 ## Development Environment
 
@@ -21,7 +36,7 @@ Place these files in `/apps/<your_app_name>/` on the SD card.
 
 ### Entry Point
 
-Your application must define an entry point named `picos_main`. The OS passes a pointer to the `PicoCalcAPI` struct, which provides access to all OS services (Display, Input, FS, etc.).
+Your application must define an entry point named `picos_main`. The OS passes a pointer to the `PicoCalcAPI` struct, which provides access to all OS services.
 
 ```c
 #include "app_abi.h"
@@ -33,31 +48,74 @@ void picos_main(const PicoCalcAPI *api,
                 const char *app_name)
 {
     const picocalc_display_t *d = api->display;
+    const picocalc_input_t   *i = api->input;
     const picocalc_sys_t     *s = api->sys;
 
     while (true) {
+        s->poll();  // REQUIRED: polls keyboard, fires pending callbacks,
+                    // handles system menu (Sym key)
+
+        if (s->shouldExit())  // User selected "Exit App" from system menu
+            return;
+
+        if (i->getButtonsPressed() & BTN_ESC)
+            return;
+
         d->clear(0x0000);
         d->drawText(10, 10, "Hello from C!", 0xFFFF, 0x0000);
         d->flush();
-
-        s->poll(); // Poll system events
-        if (api->input->getButtonsPressed())
-            break;
     }
 }
 ```
 
+**Important**: You must call `s->poll()` each frame and check `s->shouldExit()` to properly handle the system menu exit. Returning from `picos_main` returns control to the launcher.
+
 ### The API Surface
 
-The `PicoCalcAPI` struct contains pointers to various subsystems:
-- `api->input`: Keyboard and button state.
-- `api->display`: Drawing primitives (pixels, lines, rects, text) and screen flush.
-- `api->fs`: SD card file operations.
-- `api->sys`: System time, reboot, battery status, menu items, and logging.
-- `api->audio`: Tone generation and volume control.
-- `api->wifi`: Network connectivity (on supported hardware).
+The `PicoCalcAPI` struct contains pointers to all OS subsystems. The full type definitions are in `sdk/native/os.h`.
 
-See [Lua SDK Reference](Lua-SDK-Reference.md) for detailed descriptions of these functions, as the C API maps directly to the Lua modules.
+#### Core subsystems (always available)
+
+| Pointer | Type | Description |
+|---------|------|-------------|
+| `api->input` | `picocalc_input_t` | Button state, edge detection, character input |
+| `api->display` | `picocalc_display_t` | Drawing primitives, framebuffer flush, effects |
+| `api->fs` | `picocalc_fs_t` | SD card file I/O (open, read, write, list) |
+| `api->sys` | `picocalc_sys_t` | Time, battery, reboot, menu items, logging, `poll()`, `shouldExit()` |
+| `api->audio` | `picocalc_audio_t` | Tone generation, PCM streaming |
+| `api->wifi` | `picocalc_wifi_t` | WiFi connect/disconnect/status (Pico 2W only) |
+| `api->tcp` | `picocalc_tcp_t` | Raw TCP/TLS sockets (non-blocking) |
+| `api->ui` | `picocalc_ui_t` | Modal dialogs: text input, confirmation |
+| `api->psram` | `picocalc_psram_t` | PIO PSRAM and QMI PSRAM allocation |
+| `api->perf` | `picocalc_perf_t` | FPS counting, frame timing |
+| `api->terminal` | `picocalc_terminal_t` | Terminal emulator widget |
+
+#### Phase 1 additions (`api->version >= 1`)
+
+| Pointer | Type | Description |
+|---------|------|-------------|
+| `api->http` | `picocalc_http_t` | HTTP/HTTPS client (pool of 8 connections) |
+| `api->soundplayer` | `picocalc_soundplayer_t` | Sample playback, file player, MP3 player |
+| `api->appconfig` | `picocalc_appconfig_t` | Per-app key/value config (`/data/<APP_ID>/config.json`) |
+| `api->crypto` | `picocalc_crypto_t` | SHA-256, SHA-1, HMAC, AES-CTR, ECDH, signature verification |
+
+#### Phase 2 additions (`api->version >= 2`)
+
+| Pointer | Type | Description |
+|---------|------|-------------|
+| `api->graphics` | `picocalc_graphics_t` | Image loading (BMP/JPEG/PNG/GIF), drawing, scaling |
+| `api->video` | `picocalc_video_t` | MJPEG video playback with audio |
+
+#### Version detection
+
+```c
+if (api->version >= 2) {
+    // Phase 2 APIs are available
+    pcimage_t img = api->graphics->load("/apps/myapp/logo.bmp");
+}
+```
+
+See `sdk/native/os.h` for the complete type definitions and function signatures. The C API maps directly to the `picocalc.*` Lua modules documented in the [[Lua SDK Reference]].
 
 ## Compilation
 
@@ -72,6 +130,7 @@ Native apps MUST be compiled as **Position-Independent Executables (PIE)**. This
 - `-T linker.ld`: Use the provided linker script.
 - `-Wl,--entry=picos_main`: Set the entry point.
 - `-Wl,-pie`: Final link as PIE.
+- `-Wl,--no-warn-rwx-segments`: Suppress linker warnings about RWX segments.
 - `-nostartfiles -nodefaultlibs`: Native apps do not use standard C runtime startup (CRT0).
 
 ### Example Makefile
@@ -80,7 +139,8 @@ A complete working example can be found in `sdk/native/Makefile`.
 ```makefile
 CC      = arm-none-eabi-gcc
 CFLAGS  = -mcpu=cortex-m33 -mthumb -fpie -fno-plt -Os -I.
-LDFLAGS = -T linker.ld -Wl,--entry=picos_main -Wl,-pie -nostartfiles -nodefaultlibs
+LDFLAGS = -T linker.ld -Wl,--entry=picos_main -Wl,-pie \
+          -Wl,--no-warn-rwx-segments -nostartfiles -nodefaultlibs
 
 all: main.elf
 
@@ -91,14 +151,31 @@ main.elf: main.c
 ## Binary Loading Process
 
 When the PicOS launcher starts a native app:
-1. It reads the `main.elf` file from the SD card.
-2. It parses the ELF program headers.
-3. It allocates space in PSRAM for the `PT_LOAD` segments.
-4. It copies the code and data into PSRAM.
-5. It performs base-relocation if necessary (though PIE usually handles this via PC-relative addressing).
-6. It jumps to the `picos_main` address.
+1. Core 1 is paused to prevent PSRAM heap contention during loading.
+2. The `main.elf` file is read and the ELF header and program headers are validated.
+3. The virtual address range of all `PT_LOAD` segments is computed.
+4. **Split-mode loading**: If the code segment (`PF_X`) fits in SRAM, it is placed there for faster execution. Data/BSS segments go into PSRAM via `umm_malloc`. If SRAM is insufficient, everything goes into PSRAM.
+5. Code written to PSRAM uses the uncached alias (`0x15xxxxxx`) to bypass write-back cache, then XIP cache is invalidated. Execution uses the cached alias (`0x11xxxxxx`) so the 16KB XIP cache serves most instruction fetches.
+6. `R_ARM_RELATIVE` relocations are applied with dual bias (code bias for SRAM, data bias for PSRAM).
+7. The app runs on the **Process Stack Pointer (PSP)** via an 8KB static SRAM stack buffer, keeping the main stack (MSP) available for interrupt handlers.
+8. Core 1 is resumed after the app exits and resources are freed.
 
-The application runs in the same privilege level as the OS but is expected to return control to the OS by exiting `picos_main`.
+The application runs in the same privilege level as the OS but is expected to return control to the OS by returning from `picos_main`.
+
+## Memory
+
+- **Stack**: 8KB (static SRAM buffer, runs on PSP). Do not use large stack allocations.
+- **SRAM heap**: ~28.8KB available via `malloc()`/`free()`. Very limited — free promptly.
+- **PSRAM heap**: 8MB available via `api->psram->qmiAlloc()`/`api->psram->qmiFree()`. Use for large allocations.
+- **PIO PSRAM**: 8MB secondary PSRAM available via `api->psram->pioRead()`/`api->psram->pioWrite()` for bulk data.
+
+**Important**: Do not mix `malloc`/`free` (SRAM) with PSRAM allocation functions. They use separate heaps.
+
+## Debugging
+
+- Native apps can log via `api->sys->log("message: %d", value)`. Output appears on USB serial at 115200 baud as `[APP] message`.
+- If the app crashes (HardFault), the fault handler displays register state, CFSR flags, and stack pointer info on the LCD. It detects whether the crash was in the app (PSP) or OS (MSP).
+- Stack overflow signature: OVFL with SP below `__StackBottom` (0x20081000) and BFAR at 0x35xxxxxx.
 
 ## TinyGo Support
 
@@ -107,3 +184,9 @@ TinyGo can also produce PIE binaries for ARM. Use the following flags:
 - `-gc=none`: Recommended for real-time performance.
 - `-panic=trap`: Minimize binary size.
 - Export `picos_main` using `//export picos_main`.
+
+## See also
+
+- [[Lua SDK Reference]] — Lua API documentation (C API mirrors these modules)
+- [[Global Variables and Permissions]] — App requirements
+- [[Crash Logging and Watchdog]] — Fault recovery and reboot behavior

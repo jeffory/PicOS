@@ -87,7 +87,7 @@ Returns the SSID of the current connection.
 
 ## picocalc.network
 
-HTTP client for making network requests. Requires WiFi to be connected first. Up to **4 simultaneous connections** are supported. HTTPS (SSL/TLS) is supported via mbedTLS.
+HTTP client for making network requests. Requires WiFi to be connected first. Up to **8 simultaneous connections** are supported. HTTPS (SSL/TLS) is supported via mbedTLS.
 
 HTTP connections are objects with method syntax (`conn:get(...)`, `conn:read()`, etc.). Callbacks are fired automatically — you do not need to poll manually.
 

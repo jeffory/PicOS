@@ -9,33 +9,33 @@ These variables are automatically set when your app is launched:
 | `APP_DIR` | string | Absolute path to your app's directory (e.g., `"/apps/hello"`) |
 | `APP_NAME` | string | Name of your app as defined in `app.json` |
 | `APP_ID` | string | Reverse-DNS app identifier from `app.json` (e.g., `"com.picos.hello"`) |
-| `APP_PERMISSIONS` | table | Granted permissions as boolean fields (see [App Permissions](#app-permissions)) |
+| `APP_REQUIREMENTS` | table | Granted requirements as boolean fields (see [App Requirements](#app-requirements)) |
 
 ---
 
-## App Permissions
+## App Requirements
 
-Apps can request elevated permissions via the `permissions` array in `app.json`:
+Apps can request elevated requirements via the `requirements` array in `app.json`:
 
 ```json
 {
-  "permissions": ["root-filesystem"]
+  "requirements": ["root-filesystem"]
 }
 ```
 
-### Available Permissions
+### Available Requirements
 
-| Permission | Description |
+| Requirement | Description |
 |------------|-------------|
 | `filesystem` | Default sandbox access: read `/apps/<appname>/`, read/write `/data/<appid>/` |
 | `root-filesystem` | Full SD card read/write access (bypasses sandbox) |
 
-### Checking Permissions in Lua
+### Checking Requirements in Lua
 
-The `APP_PERMISSIONS` global is a table with boolean fields:
+The `APP_REQUIREMENTS` global is a table with boolean fields:
 
 ```lua
-if APP_PERMISSIONS.root_filesystem then
+if APP_REQUIREMENTS.root_filesystem then
     -- App has full filesystem access
     local entries = picocalc.fs.listDir("/system")
 else
