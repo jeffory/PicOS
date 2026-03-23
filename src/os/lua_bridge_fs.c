@@ -26,6 +26,10 @@ bool fs_sandbox_check(lua_State *L, const char *path, bool write) {
   if (strstr(path, ".."))
     return false; // reject traversal
 
+  // Allow read-only access to /system/lib/ for all apps (shared libraries)
+  if (!write && strncmp(path, "/system/lib/", 12) == 0)
+    return true;
+
   // Check for root-filesystem requirement
   lua_getglobal(L, "APP_REQUIREMENTS");
   if (lua_istable(L, -1)) {

@@ -199,7 +199,7 @@ A debug hook fires every 256 opcodes (`lua_sethook` with `LUA_MASKCOUNT`). The h
 ### Memory Map
 - **SRAM heap**: ~28.8KB free after BSS (for `malloc`/`free` — tiny, must be freed promptly)
 - **QMI PSRAM (8MB)**: Lua heap via `umm_malloc` at 0x11200000 (cached alias). ELF app data/BSS. Never mix `umm_malloc`/`umm_free` with standard `malloc`/`free`.
-- **PIO PSRAM (8MB)**: MP3 ring buffer, video buffer pool. Accessed via `pio_psram_read`/`pio_psram_write`.
+- **PIO PSRAM (8MB)**: MP3 PCM ring buffer (32KB). Accessed via `pio_psram_read`/`pio_psram_write`. Also exposed to native apps via `g_api.psram`.
 - **Main stack**: 4KB in SCRATCH memory (`__StackBottom`=0x20081000, `__StackTop`=0x20082000)
 - **Native app stack**: 8KB static SRAM buffer (`s_native_stack`), runs on PSP
 
@@ -211,7 +211,7 @@ A debug hook fires every 256 opcodes (`lua_sethook` with `LUA_MASKCOUNT`). The h
 - Globals: `g_` prefix (e.g., `g_api`)
 - Macros: `UPPER_CASE`
 - All `malloc()` calls must be paired with explicit `free()`; `umm_malloc()` with `umm_free()`
-- PSRAM allocations via `umm_malloc` (Lua heap) or PIO PSRAM APIs (audio/video buffers)
+- PSRAM allocations via `umm_malloc` (Lua heap) or PIO PSRAM APIs (audio buffers)
 - BTN_* constants live in `os.h` (not keyboard.h)
 
 ## Extending the OS

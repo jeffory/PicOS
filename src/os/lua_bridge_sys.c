@@ -202,6 +202,60 @@ static int l_sys_clearMenuItems(lua_State *L) {
   return 0;
 }
 
+// picocalc.sys.loadlib(name) — load /system/lib/<name>.lua and return its result
+static int l_sys_loadlib(lua_State *L) {
+  const char *name = luaL_checkstring(L, 1);
+
+  // Build path: /system/lib/<name>.lua
+  char path[128];
+  int n = snprintf(path, sizeof(path), "/system/lib/%s.lua", name);
+  if (n < 0 || n >= (int)sizeof(path))
+    return luaL_error(L, "library name too long");
+
+  // Check for path traversal
+  if (strstr(name, "..") || strchr(name, '/'))
+    return luaL_error(L, "invalid library name");
+
+  // Read file via SD card
+  sdfile_t f = sdcard_fopen(path, "r");
+  if (!f) {
+    lua_pushnil(L);
+    lua_pushfstring(L, "cannot open %s", path);
+    return 2;
+  }
+
+  int size = sdcard_fsize(path);
+  if (size <= 0) {
+    sdcard_fclose(f);
+    lua_pushnil(L);
+    lua_pushfstring(L, "empty or unreadable: %s", path);
+    return 2;
+  }
+
+  char *buf = (char *)umm_malloc(size + 1);
+  if (!buf) {
+    sdcard_fclose(f);
+    return luaL_error(L, "out of memory loading %s (%d bytes)", path, size);
+  }
+
+  int read = sdcard_fread(f, buf, size);
+  sdcard_fclose(f);
+  buf[read] = '\0';
+
+  // Load and execute
+  int status = luaL_loadbuffer(L, buf, read, path);
+  umm_free(buf);
+
+  if (status != LUA_OK)
+    return lua_error(L);  // propagate compile error
+
+  // Call the loaded chunk (no arguments, one result)
+  if (lua_pcall(L, 0, 1, 0) != LUA_OK)
+    return lua_error(L);  // propagate runtime error
+
+  return 1;  // return the module's result
+}
+
 static const luaL_Reg l_sys_lib[] = {{"getMemInfo", l_sys_getMemInfo},
                                      {"getTimeMs", l_sys_getTimeMs},
                                      {"getBattery", l_sys_getBattery},
@@ -217,6 +271,7 @@ static const luaL_Reg l_sys_lib[] = {{"getMemInfo", l_sys_getMemInfo},
                                      {"addMenuItem", l_sys_addMenuItem},
                                      {"clearMenuItems", l_sys_clearMenuItems},
                                      {"triggerFault", l_sys_trigger_fault},
+                                     {"loadlib", l_sys_loadlib},
                                      {NULL, NULL}};
 
 

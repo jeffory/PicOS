@@ -1,5 +1,6 @@
 #include "terminal_render.h"
 #include "terminal.h"
+#include "text_wrap.h"
 #include "../drivers/display.h"
 #include "../fonts/font_scientifica.h"
 #include "umm_malloc.h"
@@ -53,25 +54,9 @@ static int get_content_cols(terminal_t* term) {
     return cols > 0 ? cols : 1;
 }
 
-// Helper: Find best wrap position looking backwards for space/punctuation
-// Returns: position to wrap after (1-based), 0 if no good break found
+// Wrapper: delegates to shared text_wrap utility
 static int find_wrap_position(const char* text, int text_len, int max_cols) {
-    if (text_len <= max_cols) return 0;
-    
-    int search_start = max_cols;
-    int search_end = max_cols - 20;
-    if (search_end < 1) search_end = 1;
-    
-    for (int i = search_start; i >= search_end; i--) {
-        char c = text[i - 1];
-        if (c == ' ' || c == '\t' || c == '-' || c == ',' || c == '.' ||
-            c == ';' || c == ':' || c == '!' || c == '?' || c == ')' ||
-            c == ']' || c == '}') {
-            return i;
-        }
-    }
-    
-    return max_cols;  // Force break
+    return text_wrap_find_break(text, text_len, max_cols);
 }
 
 // Find the first buffer row of the logical line containing the given buffer row.
@@ -115,15 +100,12 @@ static int get_logical_line_text(terminal_t* term, int start_row, int num_rows, 
 }
 
 // Calculate wrap segments for a logical line (may span multiple buffer rows).
-// start_row: first buffer row of the logical line
-// num_rows: how many buffer rows it spans
-// segments[] receives the character offset (within the logical line) for each visual row
-// out_line_len: if non-NULL, receives the total logical line length
-// Returns number of visual rows
+// Assembles text from terminal cells, then delegates to shared text_wrap utility.
 static int calculate_wrap_segments(terminal_t* term, int start_row, int num_rows,
                                    int* segments, int max_segments,
                                    int content_cols, int wrap_col,
                                    int* out_line_len) {
+    (void)content_cols;
     if (start_row < 0 || start_row >= term->rows) {
         if (out_line_len) *out_line_len = 0;
         return 1;
@@ -137,30 +119,9 @@ static int calculate_wrap_segments(terminal_t* term, int start_row, int num_rows
     int line_len = get_logical_line_text(term, start_row, num_rows, g_terminal_wrap_buf, 1399);
     if (out_line_len) *out_line_len = line_len;
 
-    if (line_len == 0) {
-        if (segments && max_segments > 0) segments[0] = 0;
-        return 1;
-    }
-
-    // Calculate wrap segments
-    int visual_rows = 0;
-    int pos = 0;
-
-    while (pos < line_len && visual_rows < max_segments) {
-        if (segments) segments[visual_rows] = pos;
-        visual_rows++;
-
-        int remaining = line_len - pos;
-        if (remaining <= wrap_col) {
-            break;
-        }
-
-        int wrap_pos = find_wrap_position(g_terminal_wrap_buf + pos, remaining, wrap_col);
-        if (wrap_pos == 0) wrap_pos = wrap_col;
-        pos += wrap_pos;
-    }
-
-    return visual_rows > 0 ? visual_rows : 1;
+    // Delegate to shared word wrap utility
+    return text_wrap_segments(g_terminal_wrap_buf, line_len, wrap_col,
+                              segments, max_segments);
 }
 
 // Build a list of logical line start rows by scanning continuation flags.

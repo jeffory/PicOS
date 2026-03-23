@@ -43,6 +43,12 @@ static int l_input_getRawKey(lua_State *L) {
   return 1;
 }
 
+static int l_input_clearState(lua_State *L) {
+  (void)L;
+  kbd_clear_state();
+  return 0;
+}
+
 static const luaL_Reg l_input_lib[] = {
     {"update", l_input_update},
     {"getButtons", l_input_getButtons},
@@ -50,6 +56,7 @@ static const luaL_Reg l_input_lib[] = {
     {"getButtonsReleased", l_input_getButtonsReleased},
     {"getChar", l_input_getChar},
     {"getRawKey", l_input_getRawKey},
+    {"clearState", l_input_clearState},
     {NULL, NULL}};
 
 
