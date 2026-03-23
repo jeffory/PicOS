@@ -36,3 +36,6 @@ void system_menu_show(lua_State *L);
 // Show the menu for native (non-Lua) apps. Blocks until dismissed.
 // Returns true if the user selected "Exit App".
 bool system_menu_show_for_native(void);
+
+// Returns true if WiFi should auto-disconnect after NTP sync (default: true).
+bool system_menu_get_wifi_auto_disconnect(void);

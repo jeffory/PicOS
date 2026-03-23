@@ -16,6 +16,8 @@ bool dev_commands_wants_exit(void);
 
 void dev_commands_clear_exit(void);
 
+void dev_commands_set_exit(void);
+
 bool dev_commands_wants_usb(void);
 
 void dev_commands_clear_usb(void);

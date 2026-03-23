@@ -102,6 +102,38 @@ static int l_video_getInfo(lua_State *L) {
     lua_pushinteger(L, player->frame_count); lua_setfield(L, -2, "frames");
     lua_pushinteger(L, player->current_frame); lua_setfield(L, -2, "current_frame");
     lua_pushinteger(L, video_player_get_dropped_frames(player)); lua_setfield(L, -2, "dropped_frames");
+    lua_pushboolean(L, video_player_has_audio(player)); lua_setfield(L, -2, "has_audio");
+    return 1;
+}
+
+static int l_video_hasAudio(lua_State *L) {
+    video_player_t *player = check_video(L, 1);
+    lua_pushboolean(L, video_player_has_audio(player));
+    return 1;
+}
+
+static int l_video_setVolume(lua_State *L) {
+    video_player_t *player = check_video(L, 1);
+    uint8_t vol = (uint8_t)luaL_checkinteger(L, 2);
+    video_player_set_audio_volume(player, vol);
+    return 0;
+}
+
+static int l_video_getVolume(lua_State *L) {
+    video_player_t *player = check_video(L, 1);
+    lua_pushinteger(L, video_player_get_audio_volume(player));
+    return 1;
+}
+
+static int l_video_setMuted(lua_State *L) {
+    video_player_t *player = check_video(L, 1);
+    video_player_set_audio_muted(player, lua_toboolean(L, 2));
+    return 0;
+}
+
+static int l_video_isMuted(lua_State *L) {
+    video_player_t *player = check_video(L, 1);
+    lua_pushboolean(L, video_player_get_audio_muted(player));
     return 1;
 }
 
@@ -152,6 +184,11 @@ static const luaL_Reg video_methods[] = {
     {"resetStats", l_video_resetStats},
     {"setLoop", l_video_setLoop},
     {"setAutoFlush", l_video_setAutoFlush},
+    {"hasAudio", l_video_hasAudio},
+    {"setVolume", l_video_setVolume},
+    {"getVolume", l_video_getVolume},
+    {"setMuted", l_video_setMuted},
+    {"isMuted", l_video_isMuted},
     {"__gc", l_video_gc},
     {NULL, NULL}
 };

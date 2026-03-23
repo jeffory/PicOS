@@ -3,6 +3,7 @@
 
 #include "pico/stdlib.h"
 #include "pico/mutex.h"
+#include "pico/time.h"
 #include "hardware/spi.h"
 #include "hardware/gpio.h"
 
@@ -10,6 +11,7 @@
 #include "diskio.h"
 #include "umm_malloc.h"
 
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -21,6 +23,69 @@ static bool  s_mounted = false;
 // Protects all FatFS operations from concurrent access across cores.
 // Recursive so that sdcard_list_dir callbacks can call other sdcard_* functions.
 recursive_mutex_t g_sdcard_mutex;
+
+// ── Filesystem corruption logging ────────────────────────────────────────────
+
+#define FS_LOG_PATH "/system/filesystem.log"
+
+// Returns true for hardware/structural FatFS errors that indicate corruption
+// or media failure, as opposed to benign errors like FR_NO_FILE.
+static bool is_fs_corruption(FRESULT res) {
+    return res == FR_DISK_ERR      // (1) Low-level I/O error
+        || res == FR_INT_ERR       // (2) FatFS assertion failure
+        || res == FR_NOT_READY     // (3) Physical drive not ready
+        || res == FR_NO_FILESYSTEM;// (13) No valid FAT volume found
+}
+
+static const char *fresult_name(FRESULT res) {
+    switch (res) {
+        case FR_DISK_ERR:      return "DISK_ERR";
+        case FR_INT_ERR:       return "INT_ERR";
+        case FR_NOT_READY:     return "NOT_READY";
+        case FR_NO_FILESYSTEM: return "NO_FILESYSTEM";
+        default:               return "FS_ERROR";
+    }
+}
+
+// Appends one line to /system/filesystem.log and mirrors it to UART.
+// op:   short name of the sdcard_* function that failed (e.g. "sdcard_fopen")
+// path: file/dir path involved, or NULL for mount-level errors
+static bool s_log_busy = false; // recursion guard
+static void sdcard_log_corruption(FRESULT res, const char *op, const char *path) {
+    char buf[256];
+    if (path)
+        snprintf(buf, sizeof(buf), "[%8lums] %s(%d) on %s: %s\n",
+                 (unsigned long)time_us_64() / 1000,
+                 fresult_name(res), (int)res, op, path);
+    else
+        snprintf(buf, sizeof(buf), "[%8lums] %s(%d) on %s\n",
+                 (unsigned long)time_us_64() / 1000,
+                 fresult_name(res), (int)res, op);
+
+    printf("[SD] corruption: %s", buf);
+
+    if (!s_mounted) return;
+
+    // Open log in append mode; if the card is too corrupt to write, just skip.
+    FIL *f = (FIL *)umm_malloc(sizeof(FIL));
+    if (f) {
+        recursive_mutex_enter_blocking(&g_sdcard_mutex);
+        if (s_log_busy) {
+            recursive_mutex_exit(&g_sdcard_mutex);
+            umm_free(f);
+            return;
+        }
+        s_log_busy = true;
+        if (f_open(f, FS_LOG_PATH, FA_WRITE | FA_OPEN_APPEND | FA_OPEN_ALWAYS) == FR_OK) {
+            UINT bw = 0;
+            f_write(f, buf, strlen(buf), &bw);
+            f_close(f);
+        }
+        s_log_busy = false;
+        recursive_mutex_exit(&g_sdcard_mutex);
+        umm_free(f);
+    }
+}
 
 // ── SPI SD card low-level (bit-bang layer for FatFS diskio) ──────────────────
 // FatFS calls the diskio_ functions. Those in turn call these SPI helpers.
@@ -61,6 +126,8 @@ bool sdcard_init(void) {
         f_mkdir("/apps");
         f_mkdir("/data");
         f_mkdir("/system");
+    } else if (is_fs_corruption(res)) {
+        sdcard_log_corruption(res, "sdcard_init", NULL);
     }
 
     return s_mounted;
@@ -70,13 +137,21 @@ bool sdcard_is_mounted(void) {
     return s_mounted;
 }
 
+void sdcard_apply_clock(void) {
+    spi_set_baudrate(SD_SPI_PORT, SD_SPI_BAUD);
+}
+
 bool sdcard_remount(void) {
     recursive_mutex_enter_blocking(&g_sdcard_mutex);
     f_unmount("");
     s_mounted = false;
+    sleep_ms(10);  // Brief delay for card to stabilize after unmount
     FRESULT res = f_mount(&s_fs, "", 1);
     s_mounted = (res == FR_OK);
+    printf("[SD] remount: %s (FRESULT=%d)\n", s_mounted ? "OK" : "FAILED", res);
     recursive_mutex_exit(&g_sdcard_mutex);
+    if (!s_mounted && is_fs_corruption(res))
+        sdcard_log_corruption(res, "sdcard_remount", NULL);
     return s_mounted;
 }
 
@@ -107,7 +182,11 @@ sdfile_t sdcard_fopen(const char *path, const char *mode) {
     recursive_mutex_enter_blocking(&g_sdcard_mutex);
     FRESULT res = f_open(f, path, mode_to_fatfs(mode));
     recursive_mutex_exit(&g_sdcard_mutex);
-    if (res != FR_OK) { umm_free(f); return NULL; }
+    if (res != FR_OK) {
+        if (is_fs_corruption(res)) sdcard_log_corruption(res, "sdcard_fopen", path);
+        umm_free(f);
+        return NULL;
+    }
     return (sdfile_t)f;
 }
 
@@ -117,6 +196,8 @@ int sdcard_fread(sdfile_t f, void *buf, int len) {
     UINT br = 0;
     FRESULT res = f_read((FIL *)f, buf, (UINT)len, &br);
     recursive_mutex_exit(&g_sdcard_mutex);
+    if (res != FR_OK && is_fs_corruption(res))
+        sdcard_log_corruption(res, "sdcard_fread", NULL);
     return (res == FR_OK) ? (int)br : -1;
 }
 
@@ -126,6 +207,8 @@ int sdcard_fwrite(sdfile_t f, const void *buf, int len) {
     UINT bw = 0;
     FRESULT res = f_write((FIL *)f, buf, (UINT)len, &bw);
     recursive_mutex_exit(&g_sdcard_mutex);
+    if (res != FR_OK && is_fs_corruption(res))
+        sdcard_log_corruption(res, "sdcard_fwrite", NULL);
     return (res == FR_OK) ? (int)bw : -1;
 }
 
@@ -209,15 +292,19 @@ int sdcard_list_dir(const char *path,
     }
 
     recursive_mutex_enter_blocking(&g_sdcard_mutex);
-    if (f_opendir(dir, path) != FR_OK) {
+    FRESULT open_res = f_opendir(dir, path);
+    if (open_res != FR_OK) {
         recursive_mutex_exit(&g_sdcard_mutex);
         umm_free(dir);
         umm_free(fi);
+        if (is_fs_corruption(open_res))
+            sdcard_log_corruption(open_res, "sdcard_list_dir(opendir)", path);
         return -1;
     }
 
     int count = 0;
-    while (f_readdir(dir, fi) == FR_OK && fi->fname[0]) {
+    FRESULT rd_res;
+    while ((rd_res = f_readdir(dir, fi)) == FR_OK && fi->fname[0]) {
         sdcard_entry_t e;
         strncpy(e.name, fi->fname, sizeof(e.name) - 1);
         e.name[sizeof(e.name) - 1] = '\0';
@@ -227,6 +314,14 @@ int sdcard_list_dir(const char *path,
         e.ftime  = fi->ftime;
         if (callback) callback(&e, user);
         count++;
+    }
+    if (rd_res != FR_OK && is_fs_corruption(rd_res)) {
+        f_closedir(dir);
+        recursive_mutex_exit(&g_sdcard_mutex);
+        umm_free(dir);
+        umm_free(fi);
+        sdcard_log_corruption(rd_res, "sdcard_list_dir(readdir)", path);
+        return count; // return partial count
     }
     f_closedir(dir);
     recursive_mutex_exit(&g_sdcard_mutex);

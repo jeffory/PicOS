@@ -1,48 +1,15 @@
 #include "lua_bridge_internal.h"
 
-#include "mbedtls/ctr_drbg.h"
-#include "mbedtls/entropy.h"
-#include "mbedtls/sha256.h"
-#include "mbedtls/sha1.h"
-#include "mbedtls/md.h"
-#include "mbedtls/aes.h"
-#include "mbedtls/ecdh.h"
-#include "mbedtls/ecp.h"
-#include "mbedtls/pk.h"
-#include "mbedtls/rsa.h"
-#include "mbedtls/ecdsa.h"
-#include "mbedtls/bignum.h"
-#include "mbedtls/asn1.h"
-
-// ── Module-level RNG ────────────────────────────────────────────────────────
-static mbedtls_ctr_drbg_context s_ctr_drbg;
-static mbedtls_entropy_context  s_entropy;
-static bool s_rng_seeded = false;
-
-static int ensure_rng(void) {
-    if (s_rng_seeded) return 0;
-    mbedtls_entropy_init(&s_entropy);
-    mbedtls_ctr_drbg_init(&s_ctr_drbg);
-    int ret = mbedtls_ctr_drbg_seed(&s_ctr_drbg, mbedtls_entropy_func,
-                                     &s_entropy, (const unsigned char *)"picos_crypto", 12);
-    if (ret == 0) s_rng_seeded = true;
-    return ret;
-}
-
 // ── AES-CTR cipher userdata ─────────────────────────────────────────────────
 #define AES_CTR_MT "picocalc.crypto.aes_ctr"
 
 typedef struct {
-    mbedtls_aes_context aes;
-    uint8_t nonce_counter[16];
-    uint8_t stream_block[16];
-    size_t  nc_off;
-    bool    valid;
+    pccrypto_aes_t ctx; // opaque AES-CTR context handle (NULL once freed)
 } aes_ctr_ud_t;
 
 static aes_ctr_ud_t *check_aes_ctr(lua_State *L, int idx) {
     aes_ctr_ud_t *ud = (aes_ctr_ud_t *)luaL_checkudata(L, idx, AES_CTR_MT);
-    if (!ud->valid) luaL_error(L, "aes_ctr: cipher has been freed");
+    if (!ud->ctx) luaL_error(L, "aes_ctr: cipher has been freed");
     return ud;
 }
 
@@ -54,10 +21,9 @@ static int l_aes_ctr_update(lua_State *L) {
     uint8_t *output = umm_malloc(len);
     if (!output) return luaL_error(L, "aes_ctr: out of memory");
 
-    int ret = mbedtls_aes_crypt_ctr(&ud->aes, len,
-                                     &ud->nc_off, ud->nonce_counter,
-                                     ud->stream_block,
-                                     (const unsigned char *)input, output);
+    int ret = g_api.crypto->aesUpdate(ud->ctx,
+                                      (const uint8_t *)input, output,
+                                      (uint32_t)len);
     if (ret != 0) {
         umm_free(output);
         return luaL_error(L, "aes_ctr: encrypt/decrypt failed (%d)", ret);
@@ -70,9 +36,9 @@ static int l_aes_ctr_update(lua_State *L) {
 
 static int l_aes_ctr_free(lua_State *L) {
     aes_ctr_ud_t *ud = (aes_ctr_ud_t *)luaL_checkudata(L, 1, AES_CTR_MT);
-    if (ud->valid) {
-        mbedtls_aes_free(&ud->aes);
-        ud->valid = false;
+    if (ud->ctx) {
+        g_api.crypto->aesFree(ud->ctx);
+        ud->ctx = NULL;
     }
     return 0;
 }
@@ -87,51 +53,25 @@ static const luaL_Reg l_aes_ctr_methods[] = {
 #define ECDH_MT "picocalc.crypto.ecdh"
 
 typedef struct {
-    mbedtls_ecdh_context ctx;
-    mbedtls_ecp_group_id grp_id;
-    bool has_keypair;
-    bool valid;
+    pccrypto_ecdh_t ctx; // opaque ECDH context handle (NULL once freed)
 } ecdh_ud_t;
 
 static ecdh_ud_t *check_ecdh(lua_State *L, int idx) {
     ecdh_ud_t *ud = (ecdh_ud_t *)luaL_checkudata(L, idx, ECDH_MT);
-    if (!ud->valid) luaL_error(L, "ecdh: context has been freed");
+    if (!ud->ctx) luaL_error(L, "ecdh: context has been freed");
     return ud;
 }
 
 static int l_ecdh_get_public_key(lua_State *L) {
     ecdh_ud_t *ud = check_ecdh(L, 1);
 
-    if (!ud->has_keypair) {
-        if (ensure_rng() != 0)
-            return luaL_error(L, "ecdh: RNG init failed");
+    uint8_t buf[128];
+    uint32_t olen = sizeof(buf);
+    g_api.crypto->ecdhGetPublicKey(ud->ctx, buf, &olen);
+    if (olen == 0)
+        return luaL_error(L, "ecdh: failed to get public key");
 
-        // mbedtls_ecdh_make_public generates keypair and outputs public key
-        // in TLS format: [1-byte length][point data]
-        uint8_t tls_buf[128];
-        size_t olen = 0;
-        int ret = mbedtls_ecdh_make_public(&ud->ctx, &olen,
-                                            tls_buf, sizeof(tls_buf),
-                                            mbedtls_ctr_drbg_random, &s_ctr_drbg);
-        if (ret != 0)
-            return luaL_error(L, "ecdh: make_public failed (%d)", ret);
-        ud->has_keypair = true;
-
-        // Strip the TLS length byte — return raw point data
-        // tls_buf[0] = length, tls_buf[1..olen-1] = point data
-        lua_pushlstring(L, (const char *)tls_buf + 1, olen - 1);
-    } else {
-        // Already generated — re-export by calling make_public again
-        // (it's idempotent once keypair exists)
-        uint8_t tls_buf[128];
-        size_t olen = 0;
-        int ret = mbedtls_ecdh_make_public(&ud->ctx, &olen,
-                                            tls_buf, sizeof(tls_buf),
-                                            mbedtls_ctr_drbg_random, &s_ctr_drbg);
-        if (ret != 0)
-            return luaL_error(L, "ecdh: export pubkey failed (%d)", ret);
-        lua_pushlstring(L, (const char *)tls_buf + 1, olen - 1);
-    }
+    lua_pushlstring(L, (const char *)buf, (size_t)olen);
     return 1;
 }
 
@@ -140,37 +80,24 @@ static int l_ecdh_compute_shared(lua_State *L) {
     size_t peer_len;
     const char *peer_pub = luaL_checklstring(L, 2, &peer_len);
 
-    if (ensure_rng() != 0)
-        return luaL_error(L, "ecdh: RNG init failed");
-
-    // Wrap peer public key in TLS format: [1-byte length][point data]
-    uint8_t tls_peer[128];
-    if (peer_len + 1 > sizeof(tls_peer))
-        return luaL_error(L, "ecdh: peer key too long");
-    tls_peer[0] = (uint8_t)peer_len;
-    memcpy(tls_peer + 1, peer_pub, peer_len);
-
-    int ret = mbedtls_ecdh_read_public(&ud->ctx, tls_peer, peer_len + 1);
+    uint8_t secret[66]; // up to P-256 (65 bytes) or X25519 (32 bytes)
+    uint32_t olen = 0;
+    int ret = g_api.crypto->ecdhComputeShared(ud->ctx,
+                                               (const uint8_t *)peer_pub,
+                                               (uint32_t)peer_len,
+                                               secret, &olen);
     if (ret != 0)
-        return luaL_error(L, "ecdh: read_public failed (%d)", ret);
+        return luaL_error(L, "ecdh: compute_shared failed (%d)", ret);
 
-    // Compute shared secret
-    uint8_t secret[32];
-    size_t olen = 0;
-    ret = mbedtls_ecdh_calc_secret(&ud->ctx, &olen, secret, sizeof(secret),
-                                    mbedtls_ctr_drbg_random, &s_ctr_drbg);
-    if (ret != 0)
-        return luaL_error(L, "ecdh: calc_secret failed (%d)", ret);
-
-    lua_pushlstring(L, (const char *)secret, olen);
+    lua_pushlstring(L, (const char *)secret, (size_t)olen);
     return 1;
 }
 
 static int l_ecdh_free(lua_State *L) {
     ecdh_ud_t *ud = (ecdh_ud_t *)luaL_checkudata(L, 1, ECDH_MT);
-    if (ud->valid) {
-        mbedtls_ecdh_free(&ud->ctx);
-        ud->valid = false;
+    if (ud->ctx) {
+        g_api.crypto->ecdhFree(ud->ctx);
+        ud->ctx = NULL;
     }
     return 0;
 }
@@ -189,17 +116,10 @@ static int l_crypto_random_bytes(lua_State *L) {
     if (n <= 0 || n > 4096)
         return luaL_error(L, "randomBytes: n must be 1-4096");
 
-    if (ensure_rng() != 0)
-        return luaL_error(L, "randomBytes: RNG init failed");
-
     uint8_t *buf = umm_malloc((size_t)n);
     if (!buf) return luaL_error(L, "randomBytes: out of memory");
 
-    int ret = mbedtls_ctr_drbg_random(&s_ctr_drbg, buf, (size_t)n);
-    if (ret != 0) {
-        umm_free(buf);
-        return luaL_error(L, "randomBytes: generation failed (%d)", ret);
-    }
+    g_api.crypto->randomBytes(buf, (uint32_t)n);
 
     lua_pushlstring(L, (const char *)buf, (size_t)n);
     umm_free(buf);
@@ -211,9 +131,7 @@ static int l_crypto_sha256(lua_State *L) {
     const char *data = luaL_checklstring(L, 1, &len);
     uint8_t hash[32];
 
-    int ret = mbedtls_sha256((const unsigned char *)data, len, hash, 0);
-    if (ret != 0)
-        return luaL_error(L, "sha256 failed (%d)", ret);
+    g_api.crypto->sha256((const uint8_t *)data, (uint32_t)len, hash);
 
     lua_pushlstring(L, (const char *)hash, 32);
     return 1;
@@ -224,41 +142,38 @@ static int l_crypto_sha1(lua_State *L) {
     const char *data = luaL_checklstring(L, 1, &len);
     uint8_t hash[20];
 
-    int ret = mbedtls_sha1((const unsigned char *)data, len, hash);
-    if (ret != 0)
-        return luaL_error(L, "sha1 failed (%d)", ret);
+    g_api.crypto->sha1((const uint8_t *)data, (uint32_t)len, hash);
 
     lua_pushlstring(L, (const char *)hash, 20);
     return 1;
 }
 
-static int l_crypto_hmac(lua_State *L, mbedtls_md_type_t md_type, int hash_len) {
+static int l_crypto_hmac_sha256(lua_State *L) {
     size_t key_len, data_len;
     const char *key = luaL_checklstring(L, 1, &key_len);
     const char *data = luaL_checklstring(L, 2, &data_len);
-    uint8_t hash[32]; // max output size (SHA-256)
+    uint8_t hash[32];
 
-    const mbedtls_md_info_t *md_info = mbedtls_md_info_from_type(md_type);
-    if (!md_info)
-        return luaL_error(L, "hmac: unsupported hash type");
+    g_api.crypto->hmacSha256((const uint8_t *)key, (uint32_t)key_len,
+                              (const uint8_t *)data, (uint32_t)data_len,
+                              hash);
 
-    int ret = mbedtls_md_hmac(md_info,
-                               (const unsigned char *)key, key_len,
-                               (const unsigned char *)data, data_len,
-                               hash);
-    if (ret != 0)
-        return luaL_error(L, "hmac failed (%d)", ret);
-
-    lua_pushlstring(L, (const char *)hash, (size_t)hash_len);
+    lua_pushlstring(L, (const char *)hash, 32);
     return 1;
 }
 
-static int l_crypto_hmac_sha256(lua_State *L) {
-    return l_crypto_hmac(L, MBEDTLS_MD_SHA256, 32);
-}
-
 static int l_crypto_hmac_sha1(lua_State *L) {
-    return l_crypto_hmac(L, MBEDTLS_MD_SHA1, 20);
+    size_t key_len, data_len;
+    const char *key = luaL_checklstring(L, 1, &key_len);
+    const char *data = luaL_checklstring(L, 2, &data_len);
+    uint8_t hash[20];
+
+    g_api.crypto->hmacSha1((const uint8_t *)key, (uint32_t)key_len,
+                            (const uint8_t *)data, (uint32_t)data_len,
+                            hash);
+
+    lua_pushlstring(L, (const char *)hash, 20);
+    return 1;
 }
 
 // SSH key derivation function (RFC 4253 §7.2)
@@ -276,32 +191,12 @@ static int l_crypto_derive_key(lua_State *L) {
 
     char letter = letter_str[0];
 
-    // First round: SHA256(K || H || letter || session_id)
     uint8_t result[256];
-    int have = 0;
-
-    mbedtls_sha256_context ctx;
-    mbedtls_sha256_init(&ctx);
-    mbedtls_sha256_starts(&ctx, 0);
-    mbedtls_sha256_update(&ctx, (const unsigned char *)K, k_len);
-    mbedtls_sha256_update(&ctx, (const unsigned char *)H, h_len);
-    mbedtls_sha256_update(&ctx, (const unsigned char *)&letter, 1);
-    mbedtls_sha256_update(&ctx, (const unsigned char *)sid, sid_len);
-    mbedtls_sha256_finish(&ctx, result);
-    mbedtls_sha256_free(&ctx);
-    have = 32;
-
-    // Additional rounds if needed: SHA256(K || H || K1 || ... || Kn-1)
-    while (have < needed) {
-        mbedtls_sha256_init(&ctx);
-        mbedtls_sha256_starts(&ctx, 0);
-        mbedtls_sha256_update(&ctx, (const unsigned char *)K, k_len);
-        mbedtls_sha256_update(&ctx, (const unsigned char *)H, h_len);
-        mbedtls_sha256_update(&ctx, result, (size_t)have);
-        mbedtls_sha256_finish(&ctx, result + have);
-        mbedtls_sha256_free(&ctx);
-        have += 32;
-    }
+    g_api.crypto->deriveKey(letter,
+                             (const uint8_t *)K, (uint32_t)k_len,
+                             (const uint8_t *)H, (uint32_t)h_len,
+                             (const uint8_t *)sid, (uint32_t)sid_len,
+                             result, (uint32_t)needed);
 
     lua_pushlstring(L, (const char *)result, (size_t)needed);
     return 1;
@@ -317,51 +212,40 @@ static int l_crypto_aes_ctr_new(lua_State *L) {
     if (iv_len != 16)
         return luaL_error(L, "aes_ctr_new: iv must be 16 bytes");
 
+    pccrypto_aes_t ctx = g_api.crypto->aesNew((const uint8_t *)key, (uint32_t)key_len,
+                                               (const uint8_t *)iv);
+    if (!ctx)
+        return luaL_error(L, "aes_ctr_new: failed to create AES context");
+
     aes_ctr_ud_t *ud = (aes_ctr_ud_t *)lua_newuserdata(L, sizeof(aes_ctr_ud_t));
-    memset(ud, 0, sizeof(aes_ctr_ud_t));
-
-    mbedtls_aes_init(&ud->aes);
-    int ret = mbedtls_aes_setkey_enc(&ud->aes, (const unsigned char *)key, (unsigned int)(key_len * 8));
-    if (ret != 0) {
-        mbedtls_aes_free(&ud->aes);
-        return luaL_error(L, "aes_ctr_new: setkey failed (%d)", ret);
-    }
-
-    memcpy(ud->nonce_counter, iv, 16);
-    ud->nc_off = 0;
-    ud->valid = true;
-
+    ud->ctx = ctx;
     luaL_getmetatable(L, AES_CTR_MT);
     lua_setmetatable(L, -2);
     return 1;
 }
 
-static int l_crypto_ecdh_new(lua_State *L, mbedtls_ecp_group_id grp_id) {
+static int l_crypto_ecdh_x25519_new(lua_State *L) {
+    pccrypto_ecdh_t ctx = g_api.crypto->ecdhX25519();
+    if (!ctx)
+        return luaL_error(L, "ecdh_x25519_new: failed to create ECDH context");
+
     ecdh_ud_t *ud = (ecdh_ud_t *)lua_newuserdata(L, sizeof(ecdh_ud_t));
-    memset(ud, 0, sizeof(ecdh_ud_t));
-
-    mbedtls_ecdh_init(&ud->ctx);
-    int ret = mbedtls_ecdh_setup(&ud->ctx, grp_id);
-    if (ret != 0) {
-        mbedtls_ecdh_free(&ud->ctx);
-        return luaL_error(L, "ecdh_new: setup failed (%d)", ret);
-    }
-
-    ud->grp_id = grp_id;
-    ud->has_keypair = false;
-    ud->valid = true;
-
+    ud->ctx = ctx;
     luaL_getmetatable(L, ECDH_MT);
     lua_setmetatable(L, -2);
     return 1;
 }
 
-static int l_crypto_ecdh_x25519_new(lua_State *L) {
-    return l_crypto_ecdh_new(L, MBEDTLS_ECP_DP_CURVE25519);
-}
-
 static int l_crypto_ecdh_p256_new(lua_State *L) {
-    return l_crypto_ecdh_new(L, MBEDTLS_ECP_DP_SECP256R1);
+    pccrypto_ecdh_t ctx = g_api.crypto->ecdhP256();
+    if (!ctx)
+        return luaL_error(L, "ecdh_p256_new: failed to create ECDH context");
+
+    ecdh_ud_t *ud = (ecdh_ud_t *)lua_newuserdata(L, sizeof(ecdh_ud_t));
+    ud->ctx = ctx;
+    luaL_getmetatable(L, ECDH_MT);
+    lua_setmetatable(L, -2);
+    return 1;
 }
 
 // rsaVerify(pubkey_blob, sig_blob, hash) → bool
@@ -376,62 +260,10 @@ static int l_crypto_rsa_verify(lua_State *L) {
     if (hash_len != 32)
         return luaL_error(L, "rsaVerify: hash must be 32 bytes (SHA-256)");
 
-    // Parse SSH public key blob
-    const unsigned char *p = blob;
-    const unsigned char *end = blob + blob_len;
-
-    // Skip key type string ("ssh-rsa")
-    if (p + 4 > end) goto fail;
-    uint32_t slen = ((uint32_t)p[0] << 24) | ((uint32_t)p[1] << 16) | ((uint32_t)p[2] << 8) | p[3];
-    p += 4 + slen;
-
-    // Read e (public exponent)
-    if (p + 4 > end) goto fail;
-    uint32_t e_len = ((uint32_t)p[0] << 24) | ((uint32_t)p[1] << 16) | ((uint32_t)p[2] << 8) | p[3];
-    p += 4;
-    if (p + e_len > end) goto fail;
-    const unsigned char *e_data = p;
-    p += e_len;
-
-    // Read n (modulus)
-    if (p + 4 > end) goto fail;
-    uint32_t n_len = ((uint32_t)p[0] << 24) | ((uint32_t)p[1] << 16) | ((uint32_t)p[2] << 8) | p[3];
-    p += 4;
-    if (p + n_len > end) goto fail;
-    const unsigned char *n_data = p;
-
-    {
-        mbedtls_rsa_context rsa;
-        mbedtls_rsa_init(&rsa);
-
-        int ret = mbedtls_rsa_import_raw(&rsa,
-                                          n_data, n_len,   // N
-                                          NULL, 0,          // P
-                                          NULL, 0,          // Q
-                                          NULL, 0,          // D
-                                          e_data, e_len);   // E
-        if (ret != 0) {
-            mbedtls_rsa_free(&rsa);
-            goto fail;
-        }
-
-        ret = mbedtls_rsa_complete(&rsa);
-        if (ret != 0) {
-            mbedtls_rsa_free(&rsa);
-            goto fail;
-        }
-
-        // rsa-sha2-256: PKCS#1 v1.5 with SHA-256
-        ret = mbedtls_rsa_pkcs1_verify(&rsa, MBEDTLS_MD_SHA256,
-                                        32, hash, sig);
-        mbedtls_rsa_free(&rsa);
-
-        lua_pushboolean(L, ret == 0);
-        return 1;
-    }
-
-fail:
-    lua_pushboolean(L, 0);
+    bool ok = g_api.crypto->rsaVerify(blob, (uint32_t)blob_len,
+                                       sig, (uint32_t)sig_len,
+                                       hash, (uint32_t)hash_len);
+    lua_pushboolean(L, ok);
     return 1;
 }
 
@@ -447,78 +279,10 @@ static int l_crypto_ecdsa_p256_verify(lua_State *L) {
     if (hash_len != 32)
         return luaL_error(L, "ecdsaP256Verify: hash must be 32 bytes (SHA-256)");
 
-    // Parse SSH public key blob to extract the EC point Q
-    const unsigned char *p = blob;
-    const unsigned char *end = blob + blob_len;
-
-    // Skip key type string
-    if (p + 4 > end) goto fail;
-    uint32_t slen = ((uint32_t)p[0] << 24) | ((uint32_t)p[1] << 16) | ((uint32_t)p[2] << 8) | p[3];
-    p += 4 + slen;
-
-    // Skip curve identifier string
-    if (p + 4 > end) goto fail;
-    slen = ((uint32_t)p[0] << 24) | ((uint32_t)p[1] << 16) | ((uint32_t)p[2] << 8) | p[3];
-    p += 4 + slen;
-
-    // Read Q (uncompressed point)
-    if (p + 4 > end) goto fail;
-    uint32_t q_len = ((uint32_t)p[0] << 24) | ((uint32_t)p[1] << 16) | ((uint32_t)p[2] << 8) | p[3];
-    p += 4;
-    if (p + q_len > end) goto fail;
-    const unsigned char *q_data = p;
-
-    {
-        // Load the EC point
-        mbedtls_ecp_group grp;
-        mbedtls_ecp_point Q;
-        mbedtls_ecp_group_init(&grp);
-        mbedtls_ecp_point_init(&Q);
-
-        int ret = mbedtls_ecp_group_load(&grp, MBEDTLS_ECP_DP_SECP256R1);
-        if (ret != 0) goto cleanup_ec;
-
-        ret = mbedtls_ecp_point_read_binary(&grp, &Q, q_data, q_len);
-        if (ret != 0) goto cleanup_ec;
-
-        // Parse SSH signature: mpint(r) + mpint(s)
-        const unsigned char *sp = sig_data;
-        const unsigned char *send = sig_data + sig_len;
-
-        if (sp + 4 > send) goto cleanup_ec;
-        uint32_t r_len = ((uint32_t)sp[0] << 24) | ((uint32_t)sp[1] << 16) | ((uint32_t)sp[2] << 8) | sp[3];
-        sp += 4;
-        if (sp + r_len > send) goto cleanup_ec;
-        const unsigned char *r_data = sp;
-        sp += r_len;
-
-        if (sp + 4 > send) goto cleanup_ec;
-        uint32_t s_len_val = ((uint32_t)sp[0] << 24) | ((uint32_t)sp[1] << 16) | ((uint32_t)sp[2] << 8) | sp[3];
-        sp += 4;
-        if (sp + s_len_val > send) goto cleanup_ec;
-        const unsigned char *s_data = sp;
-
-        mbedtls_mpi r, s;
-        mbedtls_mpi_init(&r);
-        mbedtls_mpi_init(&s);
-
-        ret = mbedtls_mpi_read_binary(&r, r_data, r_len);
-        if (ret == 0) ret = mbedtls_mpi_read_binary(&s, s_data, s_len_val);
-        if (ret == 0) ret = mbedtls_ecdsa_verify(&grp, hash, hash_len, &Q, &r, &s);
-
-        mbedtls_mpi_free(&r);
-        mbedtls_mpi_free(&s);
-
-cleanup_ec:
-        mbedtls_ecp_point_free(&Q);
-        mbedtls_ecp_group_free(&grp);
-
-        lua_pushboolean(L, ret == 0);
-        return 1;
-    }
-
-fail:
-    lua_pushboolean(L, 0);
+    bool ok = g_api.crypto->ecdsaP256Verify(blob, (uint32_t)blob_len,
+                                              sig_data, (uint32_t)sig_len,
+                                              hash, (uint32_t)hash_len);
+    lua_pushboolean(L, ok);
     return 1;
 }
 

@@ -31,7 +31,7 @@
 bool text_input_show(const char *title, const char *prompt,
                      const char *initial, char *out, int out_len)
 {
-    char buf[128];
+    char buf[256];
     buf[0] = '\0';
     if (initial && initial[0]) {
         strncpy(buf, initial, sizeof(buf) - 1);

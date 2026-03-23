@@ -64,9 +64,62 @@ static void rx_write(http_conn_t *c, const uint8_t *data, uint32_t len) {
   c->rx_count += len;
 }
 
+// ── Build and send HTTP request in a single PSRAM buffer ─────────────────────
+// Uses umm_malloc (PSRAM) to assemble the full request, then mg_send() to
+// append it to the Mongoose send iobuf in one resize.
+
+void http_build_and_send_request(struct mg_connection *nc, http_conn_t *c) {
+  size_t path_len = c->path ? strlen(c->path) : 1;
+  size_t hdrs_len = c->extra_hdrs ? strlen(c->extra_hdrs) : 0;
+  size_t need = path_len + strlen(c->server) + hdrs_len + 256;
+  if (c->tx_buf && c->tx_len > 0)
+    need += 32 + c->tx_len;
+
+  char *buf = umm_malloc(need);
+  if (!buf) {
+    conn_fail(c, "request build OOM");
+    return;
+  }
+
+  // Skip default User-Agent if extra_hdrs already provides one
+  bool has_ua = c->extra_hdrs &&
+      (strstr(c->extra_hdrs, "User-Agent:") != NULL ||
+       strstr(c->extra_hdrs, "user-agent:") != NULL);
+
+  int off = snprintf(buf, need,
+      "%s %s HTTP/1.1\r\n"
+      "Host: %s\r\n"
+      "%s"
+      "Connection: %s\r\n",
+      c->method, c->path, c->server,
+      has_ua ? "" : "User-Agent: PicOS/1.0\r\n",
+      c->keep_alive ? "keep-alive" : "close");
+
+  if (c->extra_hdrs) {
+    off += snprintf(buf + off, need - off, "%s", c->extra_hdrs);
+    umm_free(c->extra_hdrs);
+    c->extra_hdrs = NULL;
+  }
+
+  if (c->tx_buf && c->tx_len > 0) {
+    off += snprintf(buf + off, need - off,
+        "Content-Length: %u\r\n\r\n", (unsigned)c->tx_len);
+    memcpy(buf + off, c->tx_buf, c->tx_len);
+    off += c->tx_len;
+    umm_free(c->tx_buf);
+    c->tx_buf = NULL;
+  } else {
+    off += snprintf(buf + off, need - off, "\r\n");
+  }
+
+  mg_send(nc, buf, off);
+  umm_free(buf);
+}
+
 // ── Mongoose Event Handler ───────────────────────────────────────────────────
 // Non-static: called by wifi.c drain_requests() via mg_http_connect().
 // Runs exclusively on Core 1 inside mg_mgr_poll().
+// Supports streaming: fires HTTP_CB_REQUEST incrementally as data arrives.
 
 void http_ev_fn(struct mg_connection *nc, int ev, void *ev_data) {
   http_conn_t *c = (http_conn_t *)nc->fn_data;
@@ -75,52 +128,38 @@ void http_ev_fn(struct mg_connection *nc, int ev, void *ev_data) {
 
   if (ev == MG_EV_CONNECT) {
     c->state = HTTP_STATE_SENDING;
-    printf("[HTTP] Connected, sending %s %s\n", c->method, c->path);
-
-    mg_printf(nc,
-              "%s %s HTTP/1.1\r\n"
-              "Host: %s\r\n"
-              "User-Agent: PicOS/1.0\r\n"
-              "Connection: %s\r\n",
-              c->method, c->path, c->server,
-              c->keep_alive ? "keep-alive" : "close");
-
-    if (c->extra_hdrs) {
-      mg_printf(nc, "%s", c->extra_hdrs);
-      umm_free(c->extra_hdrs);
-      c->extra_hdrs = NULL;
-    }
-
-    if (c->tx_buf && c->tx_len > 0) {
-      mg_printf(nc, "Content-Length: %u\r\n\r\n", (unsigned)c->tx_len);
-      mg_send(nc, c->tx_buf, c->tx_len);
-      umm_free(c->tx_buf);
-      c->tx_buf = NULL;
-    } else {
-      mg_printf(nc, "\r\n");
-    }
-  } else if (ev == MG_EV_HTTP_MSG) {
+    printf("[HTTP] Connected, sending %s (%u bytes) %s\n", c->method,
+           (unsigned)strlen(c->path), c->path);
+    http_build_and_send_request(nc, c);
+  } else if (ev == MG_EV_HTTP_HDRS) {
+    if (c->headers_done)
+      return;  // Already processed headers for this connection
+    // Headers parsed - extract status code and Content-Length
     struct mg_http_message *hm = (struct mg_http_message *)ev_data;
-    printf("[HTTP] Response received, status %d, body_len %zu\n",
-           atoi(hm->message.buf + 9), hm->body.len);
-
     c->status_code = atoi(hm->message.buf + 9);
+    printf("[HTTP] Headers received, status %d\n", c->status_code);
 
-    // Extract Content-Length for the Lua progress indicators
     struct mg_str *cl = mg_http_get_header(hm, "Content-Length");
     if (cl) {
       c->content_length = atoi(cl->buf);
+      printf("[HTTP] Content-Length %d\n", c->content_length);
     }
 
-    // Parse response headers into hdr_keys/hdr_vals for Lua access
+    // Parse response headers into hdr_keys/hdr_vals for Lua access.
+    // Must be done here (not MG_EV_HTTP_MSG) because streaming detach
+    // below prevents MG_EV_HTTP_MSG from firing for large responses.
     c->hdr_count = 0;
     size_t hdr_off = 0;
     for (int i = 0; i < MG_MAX_HTTP_HEADERS && hm->headers[i].name.len > 0;
          i++) {
       struct mg_http_header *h = &hm->headers[i];
       size_t need = h->name.len + 1 + h->value.len + 1;
-      if (hdr_off + need > HTTP_HEADER_BUF_MAX)
+      if (hdr_off + need > HTTP_HEADER_BUF_MAX) {
+        printf("[HTTP] Header buf overflow: need %u, have %u/%u\n",
+               (unsigned)need, (unsigned)hdr_off,
+               (unsigned)HTTP_HEADER_BUF_MAX);
         break;
+      }
       if (c->hdr_count >= HTTP_MAX_HDR_ENTRIES)
         break;
 
@@ -143,24 +182,157 @@ void http_ev_fn(struct mg_connection *nc, int ev, void *ev_data) {
     }
     c->hdr_len = hdr_off;
 
+    // If body data already arrived with headers (small responses), copy it now
+    if (hm->body.len > 0 && c->rx_count < c->rx_cap) {
+      uint32_t space = c->rx_cap - c->rx_count;
+      uint32_t to_copy = (hm->body.len < space) ? (uint32_t)hm->body.len : space;
+      if (to_copy > 0) {
+        rx_write(c, (const uint8_t *)hm->body.buf, to_copy);
+        c->body_received += to_copy;
+        c->pending |= HTTP_CB_REQUEST;
+      }
+    }
+
     c->headers_done = true;
     c->state = HTTP_STATE_BODY;
-    c->pending |= HTTP_CB_HEADERS | HTTP_CB_REQUEST;
+    c->pending |= HTTP_CB_HEADERS;
 
-    // Copy body into our ring buffer for Lua's conn:read()
-    rx_write(c, (uint8_t *)hm->body.buf, (uint32_t)hm->body.len);
-    c->body_received = (uint32_t)hm->body.len;
+    // Trigger Mongoose streaming detach: clear the recv buffer so Mongoose
+    // sees recv.len changed (mongoose.c:2663) and sets pfn=NULL. All
+    // subsequent data arrives as raw MG_EV_READ events instead of being
+    // buffered for MG_EV_HTTP_MSG — critical for large downloads.
+    mg_iobuf_del(&nc->recv, 0, nc->recv.len);
 
+    // Check if the entire body already arrived with headers (small response)
+    if (c->content_length >= 0 &&
+        c->body_received >= (uint32_t)c->content_length) {
+      c->state = HTTP_STATE_DONE;
+      c->pending |= HTTP_CB_COMPLETE;
+      if (!c->keep_alive) nc->is_closing = 1;
+    }
+  } else if (ev == MG_EV_READ && c->headers_done && c->state != HTTP_STATE_DONE) {
+    // STREAMING: Copy body data incrementally to our rx_buf.
+    // After MG_EV_HTTP_HDRS detach, all body data arrives here as raw reads.
+    uint32_t avail = (uint32_t)nc->recv.len;
+    if (avail > 0 && c->rx_count < c->rx_cap) {
+      uint32_t space = c->rx_cap - c->rx_count;
+      uint32_t to_copy = (avail < space) ? avail : space;
+
+      if (to_copy > 0) {
+        rx_write(c, nc->recv.buf, to_copy);
+        mg_iobuf_del(&nc->recv, 0, to_copy);  // FREE from Mongoose buffer
+        c->body_received += to_copy;
+        c->pending |= HTTP_CB_REQUEST;  // Fire Lua callback with new data
+      }
+
+      // Check for download completion (streaming mode)
+      if (c->content_length >= 0 &&
+          c->body_received >= (uint32_t)c->content_length) {
+        c->state = HTTP_STATE_DONE;
+        c->pending |= HTTP_CB_COMPLETE;
+        if (!c->keep_alive) nc->is_closing = 1;
+      }
+    }
+    // If rx_buf is full, don't consume from nc->recv — TCP backpressure
+    // will pause the sender until Lua drains the buffer via http_read()
+  } else if (ev == MG_EV_HTTP_MSG) {
+    // This only fires for non-streamed connections (where detach didn't happen,
+    // e.g. chunked encoding without Content-Length). Streamed connections
+    // complete via MG_EV_READ completion check above.
+    if (c->headers_done)
+      return;  // Already handled via streaming detach in MG_EV_HTTP_HDRS
+
+    struct mg_http_message *hm = (struct mg_http_message *)ev_data;
+    printf("[HTTP] Response complete (non-streamed), status %d, body_len %zu\n",
+           atoi(hm->message.buf + 9), hm->body.len);
+
+    c->status_code = atoi(hm->message.buf + 9);
+
+    // Log error response bodies for diagnostics
+    if (c->status_code >= 400 && hm->body.len > 0) {
+      size_t show = hm->body.len < 256 ? hm->body.len : 256;
+      printf("[HTTP] Error body: %.*s\n", (int)show, hm->body.buf);
+    }
+
+    // Parse response headers into hdr_keys/hdr_vals for Lua access
+    c->hdr_count = 0;
+    size_t hdr_off = 0;
+    for (int i = 0; i < MG_MAX_HTTP_HEADERS && hm->headers[i].name.len > 0;
+         i++) {
+      struct mg_http_header *h = &hm->headers[i];
+      size_t need = h->name.len + 1 + h->value.len + 1;
+      if (hdr_off + need > HTTP_HEADER_BUF_MAX) {
+        printf("[HTTP] Header buf overflow: need %u, have %u/%u\n",
+               (unsigned)need, (unsigned)hdr_off,
+               (unsigned)HTTP_HEADER_BUF_MAX);
+        break;
+      }
+      if (c->hdr_count >= HTTP_MAX_HDR_ENTRIES)
+        break;
+
+      // Copy name (lowercased for consistent Lua lookups)
+      c->hdr_keys[c->hdr_count] = &c->hdr_buf[hdr_off];
+      for (size_t j = 0; j < h->name.len; j++)
+        c->hdr_buf[hdr_off++] =
+            (h->name.buf[j] >= 'A' && h->name.buf[j] <= 'Z')
+                ? h->name.buf[j] + 32
+                : h->name.buf[j];
+      c->hdr_buf[hdr_off++] = '\0';
+
+      // Copy value
+      c->hdr_vals[c->hdr_count] = &c->hdr_buf[hdr_off];
+      memcpy(&c->hdr_buf[hdr_off], h->value.buf, h->value.len);
+      hdr_off += h->value.len;
+      c->hdr_buf[hdr_off++] = '\0';
+
+      c->hdr_count++;
+    }
+    c->hdr_len = hdr_off;
+
+    // Copy body data
+    if (hm->body.len > 0 && c->rx_count < c->rx_cap) {
+      uint32_t to_copy = (uint32_t)hm->body.len;
+      uint32_t space = c->rx_cap - c->rx_count;
+      if (to_copy > space) to_copy = space;
+      if (to_copy > 0) {
+        rx_write(c, (uint8_t *)hm->body.buf, to_copy);
+        c->body_received += to_copy;
+      }
+    }
+
+    c->headers_done = true;
     c->state = HTTP_STATE_DONE;
-    c->pending |= HTTP_CB_COMPLETE;
+    c->pending |= HTTP_CB_HEADERS | HTTP_CB_COMPLETE;
 
     if (!c->keep_alive) {
       nc->is_closing = 1;
     }
   } else if (ev == MG_EV_ERROR) {
-    // If state is DONE, we got the data, so ignore this error (often late TLS
-    // recv error)
-    if (c->state != HTTP_STATE_DONE) {
+    // If we've received any body data (streaming), treat as partial success
+    // TLS errors after some data received are often benign (late errors)
+    uint32_t pending_data = (nc && c->headers_done) ? (uint32_t)nc->recv.len : 0;
+    if (c->state == HTTP_STATE_DONE) {
+      // Already processed, ignore
+    } else if (c->body_received > 0 || pending_data > 0) {
+      // Got some data - copy any pending data and treat as partial success
+      printf("[HTTP] Partial response: got %u bytes, %u pending in buffer\n", 
+             c->body_received, pending_data);
+      if (pending_data > 0 && c->rx_count < c->rx_cap) {
+        uint32_t to_copy = pending_data;
+        uint32_t space = c->rx_cap - c->rx_count;
+        if (to_copy > space) to_copy = space;
+        if (to_copy > 0) {
+          rx_write(c, nc->recv.buf, to_copy);
+          mg_iobuf_del(&nc->recv, 0, to_copy);
+          c->body_received += to_copy;
+        }
+      }
+      // Fire both REQUEST (for data) and COMPLETE (for done)
+      c->state = HTTP_STATE_DONE;
+      c->pending |= HTTP_CB_REQUEST | HTTP_CB_COMPLETE;
+      nc->is_closing = 1;
+    } else {
+      // No data received, treat as failure
       conn_fail(c, "Mongoose error: %s", (char *)ev_data);
     }
   } else if (ev == MG_EV_CLOSE) {
@@ -284,6 +456,8 @@ void http_free(http_conn_t *c) {
     sleep_ms(1);
   }
 
+  umm_free(c->path);
+  c->path = NULL;
   umm_free(c->extra_hdrs);
   c->extra_hdrs = NULL;
   umm_free(c->tx_buf);
@@ -296,10 +470,16 @@ void http_free(http_conn_t *c) {
 bool http_set_recv_buf(http_conn_t *c, uint32_t bytes) {
   if (!c || bytes == 0 || bytes > HTTP_RECV_BUF_MAX)
     return false;
-  uint8_t *nb = umm_realloc(c->rx_buf, bytes);
-  if (!nb)
+  // Use free + malloc instead of realloc to avoid memcpy creating stale
+  // XIP cache entries on Core 0.  Core 1 writes response data to rx_buf;
+  // if Core 0's cache has entries from a realloc copy, it reads stale data
+  // (RP2350 has per-core XIP caches, no hardware coherency for PSRAM).
+  umm_free(c->rx_buf);
+  c->rx_buf = umm_malloc(bytes);
+  if (!c->rx_buf) {
+    c->rx_cap = 0;
     return false;
-  c->rx_buf = nb;
+  }
   c->rx_cap = bytes;
   c->rx_head = 0;
   c->rx_tail = 0;
@@ -328,7 +508,13 @@ static bool start_request(http_conn_t *c, const char *method, const char *path,
   c->pending = 0;
 
   strncpy(c->method, method, sizeof(c->method) - 1);
-  strncpy(c->path, path, sizeof(c->path) - 1);
+
+  umm_free(c->path);
+  c->path = http_strdup(path);
+  if (!c->path) {
+    conn_fail(c, "path alloc failed");
+    return false;
+  }
 
   // Allocate request buffers — ownership transfers to Core 1 at push time.
   // Core 1 frees them in drain_requests() (keep-alive) or http_ev_fn()
@@ -347,6 +533,8 @@ static bool start_request(http_conn_t *c, const char *method, const char *path,
   conn_req_t req = {.type = CONN_REQ_HTTP_START, .conn = c};
   if (!wifi_req_push(&req)) {
     // Queue full — fail immediately and release buffers
+    umm_free(c->path);
+    c->path = NULL;
     umm_free(c->extra_hdrs);
     c->extra_hdrs = NULL;
     umm_free(c->tx_buf);

@@ -169,6 +169,7 @@ uint8_t s_native_stack[NATIVE_STACK_SIZE] __attribute__((aligned(8)));
 //   r3  = app_dir   (2nd app arg)
 //   [sp+0]  = app_id   (3rd app arg, on caller's stack before this push)
 //   [sp+4]  = app_name (4th app arg)
+#ifndef PICOS_SIMULATOR
 __attribute__((naked, noinline))
 static void launch_on_psp(uint32_t psp_top, picos_app_entry_t fn,
                           const PicoCalcAPI *api, const char *app_dir,
@@ -200,6 +201,21 @@ static void launch_on_psp(uint32_t psp_top, picos_app_entry_t fn,
         "pop    {r4-r7, pc}     \n\t"   /* restore from MSP, return           */
     );
 }
+#else
+// Simulator stub - native apps not supported on PC
+static void launch_on_psp(uint32_t psp_top, picos_app_entry_t fn,
+                          const PicoCalcAPI *api, const char *app_dir,
+                          const char *app_id, const char *app_name)
+{
+    (void)psp_top;
+    (void)fn;
+    (void)api;
+    (void)app_dir;
+    (void)app_id;
+    (void)app_name;
+    printf("[NATIVE] Native apps are not supported in the simulator\n");
+}
+#endif
 
 // =============================================================================
 // ELF loader
@@ -364,9 +380,13 @@ static bool native_run(const app_entry_t *app) {
   }
 
   // ── 4a'. Flush dirty cache lines from umm_malloc ─────────────────────────
+  #ifndef PICOS_SIMULATOR
   __asm volatile ("dsb sy");
+  #endif
   xip_cache_clean_all();
+  #ifndef PICOS_SIMULATOR
   __asm volatile ("isb sy");
+  #endif
 
   // ── 4b. Compute uncached alias for PSRAM writes ───────────────────────────
   uint8_t *exec_base = load_base;
@@ -545,9 +565,13 @@ static bool native_run(const app_entry_t *app) {
   }
 
   // ── 7. Flush XIP cache and compute entry point ──────────────────────────
+  #ifndef PICOS_SIMULATOR
   __asm volatile ("dsb sy");
+  #endif
   xip_cache_invalidate_all();
+  #ifndef PICOS_SIMULATOR
   __asm volatile ("isb sy");
+  #endif
 
   uintptr_t entry_voff_raw = ehdr.e_entry & ~1u;
   uintptr_t entry_addr;

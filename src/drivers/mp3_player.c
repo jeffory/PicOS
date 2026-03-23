@@ -27,8 +27,11 @@
 #define PCM_RING_SIZE          32768
 #define DMA_BUF_SAMPLES        256
 
-#define PWM_WRAP  2047
-#define PWM_MID   (PWM_WRAP / 2)
+// PWM_WRAP chosen so that at 300 MHz (video playback clock), common sample
+// rates land on clean integer dividers:  44100 Hz → div=4, 22050 Hz → div=8.
+// Period 1700 gives 0.04% timing error vs 0.28% with period 2048.
+#define PWM_WRAP  1699
+#define PWM_MID   ((PWM_WRAP + 1) / 2)  // 850
 
 #define FADE_SAMPLES 64
 
@@ -67,6 +70,36 @@ static size_t   s_staging_avail = 0;
 static size_t   s_staging_pos   = 0;
 
 static uint8_t s_pio_read_buf[STAGING_BUF_SIZE] __attribute__((aligned(4)));
+
+// ── Fed mode: compressed MP3 ring in QMI PSRAM, written by Core 0 (video) ───
+// Uses umm_malloc (not PIO PSRAM) because both cores access this ring
+// concurrently and PIO1 SPI is not thread-safe across cores.
+#define FED_RING_SIZE  (64 * 1024)
+static bool     s_fed_mode = false;
+static uint8_t *s_fed_ring_buf = NULL; // umm_malloc'd in QMI PSRAM
+static volatile uint32_t s_fed_wr = 0; // written by Core 0
+static volatile uint32_t s_fed_rd = 0; // read by Core 1
+
+static inline uint32_t fed_ring_available(void) {
+    uint32_t wr = s_fed_wr, rd = s_fed_rd;
+    return (wr >= rd) ? (wr - rd) : (FED_RING_SIZE - rd + wr);
+}
+
+static inline uint32_t fed_ring_free(void) {
+    return FED_RING_SIZE - 1 - fed_ring_available();
+}
+
+static void fed_ring_read(uint8_t *dst, uint32_t len) {
+    uint32_t rd = s_fed_rd;
+    uint32_t to_end = FED_RING_SIZE - rd;
+    if (len <= to_end) {
+        memcpy(dst, s_fed_ring_buf + rd, len);
+    } else {
+        memcpy(dst, s_fed_ring_buf + rd, to_end);
+        memcpy(dst + to_end, s_fed_ring_buf, len - to_end);
+    }
+    s_fed_rd = (rd + len) % FED_RING_SIZE;
+}
 
 static inline size_t __time_critical_func(ring_available)(void) {
     size_t wr = s_ring_wr, rd = s_ring_rd;
@@ -189,10 +222,9 @@ static void __time_critical_func(fill_dma_buffer)(uint32_t *buf, int count) {
             else
                 right = left;
 
-            // 16-bit signed → 11-bit unsigned (0–2047), then apply volume
-            // via multiply+shift instead of division (~1 cycle vs ~8 cycles)
-            lv = (int32_t)((left  + 32768) >> 5);
-            rv = (int32_t)((right + 32768) >> 5);
+            // 16-bit signed → PWM range (0–PWM_WRAP), then apply volume
+            lv = (int32_t)(((uint32_t)(left  + 32768) * (PWM_WRAP + 1)) >> 16);
+            rv = (int32_t)(((uint32_t)(right + 32768) * (PWM_WRAP + 1)) >> 16);
             lv = (lv * vol_scale) >> 8;
             rv = (rv * vol_scale) >> 8;
             if (lv > PWM_WRAP) lv = PWM_WRAP;
@@ -246,10 +278,8 @@ static void dma_audio_irq_handler(void) {
     s_dma_active_buf = next_buf;
 }
 
-// ── Refill compressed-data buffer from SD card (non-blocking) ────────────────
+// ── Refill compressed-data buffer from SD card or fed ring ────────────────────
 static bool refill_decode_buffer(void) {
-    if (!s_file) return false;
-
     // Shift leftover data to front
     if (s_buffer_pos > 0 && s_bytes_in_buffer > 0) {
         memmove(s_decode_buffer, s_decode_buffer + s_buffer_pos, s_bytes_in_buffer);
@@ -258,15 +288,27 @@ static bool refill_decode_buffer(void) {
 
     int space = (int)MP3_DECODE_BUFFER_SIZE - s_bytes_in_buffer - MAD_BUFFER_GUARD;
     if (space > 0) {
-        // Non-blocking: skip if Core 0 owns the SD card
-        if (!recursive_mutex_try_enter(&g_sdcard_mutex, NULL))
-            goto pad;
-        int to_read = (space > 4096) ? 4096 : space;
-        UINT br = 0;
-        FRESULT res = f_read((FIL *)s_file, s_decode_buffer + s_bytes_in_buffer, to_read, &br);
-        recursive_mutex_exit(&g_sdcard_mutex);
-        if (res == FR_OK && br > 0)
-            s_bytes_in_buffer += (int)br;
+        if (s_fed_mode) {
+            // Fed mode: read from compressed audio ring in PIO PSRAM
+            uint32_t avail = fed_ring_available();
+            uint32_t to_read = ((uint32_t)space < avail) ? (uint32_t)space : avail;
+            if (to_read > 4096) to_read = 4096;
+            if (to_read > 0) {
+                fed_ring_read(s_decode_buffer + s_bytes_in_buffer, to_read);
+                s_bytes_in_buffer += (int)to_read;
+            }
+        } else {
+            // SD mode: non-blocking read
+            if (!s_file) goto pad;
+            if (!recursive_mutex_try_enter(&g_sdcard_mutex, NULL))
+                goto pad;
+            int to_read = (space > 4096) ? 4096 : space;
+            UINT br = 0;
+            FRESULT res = f_read((FIL *)s_file, s_decode_buffer + s_bytes_in_buffer, to_read, &br);
+            recursive_mutex_exit(&g_sdcard_mutex);
+            if (res == FR_OK && br > 0)
+                s_bytes_in_buffer += (int)br;
+        }
     }
 
 pad:
@@ -278,7 +320,9 @@ pad:
 
 // ── Decode: fill PCM ring buffer (called from main loop, NOT ISR) ───────────
 static void decode_fill_ring(void) {
-    if (!s_player.playing || s_player.paused || !s_mad_stream || !s_file)
+    if (!s_player.playing || s_player.paused || !s_mad_stream)
+        return;
+    if (!s_fed_mode && !s_file)
         return;
 
     // Batch decode: only decode when ring buffer is below 50% capacity,
@@ -307,6 +351,10 @@ static void decode_fill_ring(void) {
 
             if (s_mad_stream->error == MAD_ERROR_BUFLEN) {
                 if (!refill_decode_buffer()) {
+                    if (s_fed_mode) {
+                        // Fed mode: no more data right now, just break
+                        break;
+                    }
                     if (s_player.loop) {
                         sdcard_fseek(s_file, 0);
                         s_bytes_in_buffer = 0;
@@ -327,6 +375,9 @@ static void decode_fill_ring(void) {
                 // For LOSTSYNC with low buffer, try to refill first
                 if (s_mad_stream->error == MAD_ERROR_LOSTSYNC && s_bytes_in_buffer < 256) {
                     if (!refill_decode_buffer()) {
+                        if (s_fed_mode) {
+                            break;
+                        }
                         if (s_player.loop) {
                             sdcard_fseek(s_file, 0);
                             s_bytes_in_buffer = 0;
@@ -431,6 +482,7 @@ static int skip_id3v2tag(struct mad_stream *stream) {
 
 void mp3_player_reset(void) {
     if (!s_initialized) return;
+    if (s_fed_mode) mp3_player_stop_fed();
     mutex_enter_blocking(&s_mp3_mutex);
     stop_playback();
     if (s_file) { sdcard_fclose(s_file); s_file = NULL; }
@@ -531,6 +583,9 @@ void mp3_player_destroy(mp3_player_t *player) {
 
 bool mp3_player_load(mp3_player_t *player, const char *path) {
     if (!player || !path) return false;
+
+    // Stop fed mode if active (video audio and file playback are mutually exclusive)
+    if (s_fed_mode) mp3_player_stop_fed();
 
     mutex_enter_blocking(&s_mp3_mutex);
 
@@ -681,6 +736,12 @@ bool mp3_player_play(mp3_player_t *player, uint8_t repeat_count) {
 void mp3_player_stop(mp3_player_t *player) {
     if (!player) return;
 
+    // If in fed mode, delegate to stop_fed
+    if (s_fed_mode) {
+        mp3_player_stop_fed();
+        return;
+    }
+
     mutex_enter_blocking(&s_mp3_mutex);
 
     // If DMA is active, fade out before stopping to avoid pop
@@ -762,6 +823,132 @@ uint32_t mp3_player_get_sample_rate(const mp3_player_t *player) {
 void mp3_player_set_loop(mp3_player_t *player, bool loop) {
     if (!player) return;
     player->loop = loop;
+}
+
+// ── Fed mode API (video player audio) ─────────────────────────────────────────
+
+bool mp3_player_start_fed(uint32_t sample_rate, uint16_t channels) {
+    if (!s_initialized) {
+        if (!mp3_player_init()) return false;
+    }
+
+    mutex_enter_blocking(&s_mp3_mutex);
+
+    // Stop any current playback
+    stop_playback();
+    if (s_file) { sdcard_fclose(s_file); s_file = NULL; }
+
+    // Init fed ring in QMI PSRAM
+    if (!s_fed_ring_buf) {
+        s_fed_ring_buf = (uint8_t *)umm_malloc(FED_RING_SIZE);
+        if (!s_fed_ring_buf) {
+            printf("[MP3] FAILED to alloc fed ring (%d bytes)\n", FED_RING_SIZE);
+            mutex_exit(&s_mp3_mutex);
+            return false;
+        }
+    }
+    s_fed_mode = true;
+    s_fed_wr = 0;
+    s_fed_rd = 0;
+
+    // Reset decode state
+    s_bytes_in_buffer = 0;
+    s_buffer_pos = 0;
+    s_ring_rd = s_ring_wr = 0;
+    s_staging_avail = 0;
+    s_staging_pos = 0;
+
+    // Init libmad
+    mad_stream_init(s_mad_stream);
+    mad_frame_init(s_mad_frame);
+    mad_synth_init(s_mad_synth);
+
+    // Configure player state
+    memset(&s_player, 0, sizeof(s_player));
+    s_player.sample_rate = sample_rate;
+    s_player.channels = channels;
+    s_player.playing = true;
+    s_player.volume = 100;
+    s_vol_scale = 256;
+    s_pcm_channels = (int)channels;
+
+    printf("[MP3] Fed mode started: %u Hz, %u ch\n",
+           (unsigned)sample_rate, (unsigned)channels);
+
+    mutex_exit(&s_mp3_mutex);
+    return true;
+}
+
+void mp3_player_start_dma_fed(void) {
+    if (!s_fed_mode || !s_initialized) return;
+
+    mutex_enter_blocking(&s_mp3_mutex);
+
+    // Decode compressed data from fed ring into PCM ring
+    decode_fill_ring();
+    // Copy PCM data to SRAM staging buffer
+    refill_staging_buf();
+    // Configure PWM/DMA with real audio in the buffers (deferred start on Core 1)
+    setup_playback_hw();
+
+    mutex_exit(&s_mp3_mutex);
+}
+
+uint32_t mp3_player_feed(const uint8_t *data, uint32_t len) {
+    if (!s_fed_ring_buf) return 0;
+    uint32_t free_space = fed_ring_free();
+    uint32_t to_write = (len < free_space) ? len : free_space;
+    if (to_write == 0) return 0;
+
+    uint32_t wr = s_fed_wr;
+    uint32_t to_end = FED_RING_SIZE - wr;
+    if (to_write <= to_end) {
+        memcpy(s_fed_ring_buf + wr, data, to_write);
+    } else {
+        memcpy(s_fed_ring_buf + wr, data, to_end);
+        memcpy(s_fed_ring_buf, data + to_end, to_write - to_end);
+    }
+    s_fed_wr = (wr + to_write) % FED_RING_SIZE;
+    return to_write;
+}
+
+void mp3_player_stop_fed(void) {
+    if (!s_fed_mode) return;
+
+    mutex_enter_blocking(&s_mp3_mutex);
+
+    // Fade out if playing
+    if (s_dma_active && s_player.playing) {
+        s_fade_state = FADE_OUT;
+        s_fade_pos = 0;
+        s_stop_after_fade = true;
+        mutex_exit(&s_mp3_mutex);
+        sleep_ms(3);
+        mutex_enter_blocking(&s_mp3_mutex);
+    }
+
+    stop_playback();
+    s_player.playing = false;
+    s_fed_mode = false;
+    s_fed_wr = 0;
+    s_fed_rd = 0;
+    if (s_fed_ring_buf) { umm_free(s_fed_ring_buf); s_fed_ring_buf = NULL; }
+    s_bytes_in_buffer = 0;
+    s_buffer_pos = 0;
+    s_ring_rd = s_ring_wr = 0;
+    s_staging_avail = 0;
+    s_staging_pos = 0;
+
+    printf("[MP3] Fed mode stopped\n");
+    mutex_exit(&s_mp3_mutex);
+}
+
+uint32_t mp3_player_feed_space(void) {
+    return fed_ring_free();
+}
+
+bool mp3_player_is_fed_mode(void) {
+    return s_fed_mode;
 }
 
 void mp3_player_update(void) {

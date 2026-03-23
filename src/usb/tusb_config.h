@@ -49,6 +49,7 @@ extern "C" {
 #define CFG_TUD_CDC_TX_BUFSIZE 256
 
 // MSC Buffer size of Device Mass storage
+// Limited by SRAM — 4KB is the largest that fits with current BSS usage
 #define CFG_TUD_MSC_EP_BUFSIZE 4096
 
 #ifdef __cplusplus

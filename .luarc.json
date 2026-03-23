@@ -1,0 +1,8 @@
+{
+  "$schema": "https://raw.githubusercontent.com/LuaLS/vscode-lua/master/setting/schema.json",
+  "Lua.runtime.version": "Lua 5.4",
+  "Lua.workspace.library": ["sdk/lua"],
+  "Lua.diagnostics.globals": ["APP_DIR", "APP_NAME", "APP_ID", "APP_REQUIREMENTS"],
+  "Lua.diagnostics.disable": ["lowercase-global"],
+  "Lua.workspace.ignoreDir": [".worktrees", "build", "third_party"]
+}

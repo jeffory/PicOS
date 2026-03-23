@@ -50,6 +50,41 @@ struct terminal {
 
     bool full_dirty;
     uint8_t* row_dirty;
+
+    // Line numbers
+    bool line_numbers_enabled;
+    int line_number_start;      // Starting line number (default 1)
+    int line_number_cols;       // Width in columns (default 5)
+    uint16_t line_number_fg;    // Color for line numbers
+    uint16_t line_number_bg;    // Background color for gutter
+
+    // Scrollbar
+    bool scrollbar_enabled;
+    uint16_t scrollbar_bg;      // Track color
+    uint16_t scrollbar_thumb;   // Thumb color
+    int scrollbar_width;        // Width in pixels (default 4)
+    int total_lines;            // Total document lines for thumb calculation
+    int scroll_position;        // Current scroll position (0 = top)
+    bool scrollbar_visible;     // Show scrollbar only when actively scrolling
+    uint32_t scrollbar_last_scroll_time;  // Last scroll activity timestamp
+
+    // Word wrap (visual - content not modified)
+    bool word_wrap_enabled;      // Word wrap on/off
+    int word_wrap_column;        // 0 = auto (use content cols), >0 = specific column
+    bool show_wrap_indicator;    // Show "…" at wrap points (default true)
+    int wrap_viewport_start;     // First logical line in current viewport
+    int wrap_viewport_scroll;    // Current scroll position in visual rows
+
+    // Line continuation flags (for word wrap logical line reconstruction)
+    // 1 = this row continues the previous logical line (auto-wrapped at buffer edge)
+    // 0 = this row starts a new logical line (from \n or start of buffer)
+    uint8_t* row_continuation;
+    uint8_t* scrollback_continuation;  // continuation flags for scrollback buffer
+
+    // Render bounds (pixel coordinates)
+    int render_y_start;   // Top pixel Y (default 28, below header)
+    int render_y_end;     // Bottom pixel Y exclusive (default 302, above footer)
+    int render_x_start;   // Left pixel X (default 4, padding)
 };
 
 typedef struct terminal terminal_t;
@@ -131,3 +166,31 @@ void terminal_insertChars(terminal_t* term, int count);
 void terminal_deleteChars(terminal_t* term, int count);
 
 void terminal_setScrollRegion(terminal_t* term, int top, int bottom);
+
+// Line numbers
+void terminal_setLineNumbers(terminal_t* term, bool enabled);
+void terminal_setLineNumberStart(terminal_t* term, int start);
+void terminal_setLineNumberCols(terminal_t* term, int cols);
+void terminal_setLineNumberColors(terminal_t* term, uint16_t fg, uint16_t bg);
+int terminal_getContentCols(terminal_t* term);  // Returns cols - line_number_cols
+
+// Scrollbar
+void terminal_setScrollbar(terminal_t* term, bool enabled);
+void terminal_setScrollbarColors(terminal_t* term, uint16_t bg, uint16_t thumb);
+void terminal_setScrollbarWidth(terminal_t* term, int width);
+void terminal_setScrollInfo(terminal_t* term, int total_lines, int scroll_position);
+
+// Render bounds
+void terminal_setRenderBounds(terminal_t* term, int y_start, int y_end);
+
+// Word wrap (visual)
+void terminal_setWordWrap(terminal_t* term, bool enabled);
+void terminal_setWordWrapColumn(terminal_t* term, int column);
+void terminal_setWrapIndicator(terminal_t* term, bool enabled);
+bool terminal_getWordWrap(terminal_t* term);
+int terminal_getVisualRowCount(terminal_t* term);  // Total visual rows for scrollbar
+// Convert between logical and visual coordinates
+void terminal_logicalToVisual(terminal_t* term, int log_x, int log_y, int* vis_x, int* vis_y);
+void terminal_visualToLogical(terminal_t* term, int vis_x, int vis_y, int* log_x, int* log_y);
+// Calculate wrap for a specific line (streaming)
+int terminal_calculateLineWraps(terminal_t* term, int logical_line, int* segments, int max_segments);

@@ -117,11 +117,19 @@ set(JPEGDEC_DIR ${CMAKE_SOURCE_DIR}/third_party/JPEGDEC)
 set(PNGDEC_DIR ${CMAKE_SOURCE_DIR}/third_party/PNGdec)
 set(GIF_DIR ${CMAKE_SOURCE_DIR}/third_party/AnimatedGIF)
 
+# JPEGDEC as separate lib with -O2 for faster decode loops (IDCT, Huffman VLC,
+# pixel conversion).  Code grows from ~17KB (-Os) to ~24KB (-O2), but it already
+# exceeded the 16KB XIP cache at -Os, so the extra size doesn't meaningfully
+# worsen cache behavior while each cache-hit instruction runs faster.
+add_library(jpegdec_lib STATIC ${JPEGDEC_DIR}/src/JPEGDEC.cpp)
+target_include_directories(jpegdec_lib PUBLIC ${JPEGDEC_DIR}/src)
+target_compile_definitions(jpegdec_lib PUBLIC __LINUX__=1 ALLOWS_UNALIGNED=1 ARM_MATH_CM33=1)
+target_compile_options(jpegdec_lib PRIVATE -O2 -ffunction-sections -fdata-sections)
+
 add_library(image_decoders STATIC
     ${TGX_DIR}/src/Color.cpp
     ${TGX_DIR}/src/Fonts.cpp
     ${TGX_DIR}/src/Renderer3D.cpp
-    ${JPEGDEC_DIR}/src/JPEGDEC.cpp
     ${PNGDEC_DIR}/src/PNGdec.cpp
     ${PNGDEC_DIR}/src/adler32.c
     ${PNGDEC_DIR}/src/crc32.c
@@ -140,7 +148,7 @@ target_include_directories(image_decoders PUBLIC
     ${GIF_DIR}/src
 )
 
-target_compile_definitions(image_decoders PUBLIC __LINUX__=1)
+target_compile_definitions(image_decoders PUBLIC __LINUX__=1 ALLOWS_UNALIGNED=1 ARM_MATH_CM33=1)
 target_compile_options(image_decoders PRIVATE -O2)
 
 
@@ -218,11 +226,15 @@ add_executable(picocalc_os
     src/os/lua_bridge_network.c
     src/os/lua_bridge_tcp.c
     src/os/lua_bridge_config.c
+    src/os/appconfig.c
+    src/os/lua_bridge_appconfig.c
     src/os/lua_bridge_perf.c
     src/os/perf.c
     src/os/lua_bridge_graphics.c
     src/os/lua_bridge_3d.c
     src/os/lua_bridge_ui.c
+    src/os/ui_widgets.c
+    src/os/text_wrap.c
     src/os/lua_bridge_audio.c
     src/os/lua_bridge_sound.c
     src/os/lua_bridge_repl.c
@@ -238,6 +250,7 @@ add_executable(picocalc_os
     src/os/terminal_parser.c
     src/os/terminal_render.c
     src/os/lua_bridge_terminal.c
+    src/os/crypto.c
     src/os/lua_bridge_crypto.c
     src/os/ota_update.c
     src/fonts/font_6x11.c
@@ -245,6 +258,7 @@ add_executable(picocalc_os
     src/os/text_input.c
     src/os/file_browser.c
     src/os/config.c
+    src/os/crashlog.c
     src/os/clock.c
     src/os/tz_picker.c
     src/os/ui.c
@@ -252,6 +266,7 @@ add_executable(picocalc_os
     src/usb/usb_msc.c
     src/os/image_decoders.cpp
     src/drivers/display.c
+    src/drivers/image_api.c
     src/drivers/audio.c
     src/drivers/sound.c
     src/drivers/fileplayer.c
@@ -288,6 +303,7 @@ target_link_libraries(picocalc_os
     hardware_gpio
     hardware_pwm
     hardware_dma
+    hardware_interp
     hardware_clocks
     hardware_pio
     hardware_xip_cache
@@ -297,6 +313,7 @@ target_link_libraries(picocalc_os
     fatfs
     libmad_ram
     libmad
+    jpegdec_lib
     image_decoders
     pio_psram_lib
 )

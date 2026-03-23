@@ -112,15 +112,15 @@ The RP2350 has a small amount of on-chip SRAM supplemented by two independent 8M
 │  │ Lua heap (umm_malloc)│  │    │  │ 0x0000: MP3 PCM    │    │
 │  │ Base: 0x11200000     │  │    │  │ ring buffer (32KB) │    │
 │  │ ~6MB for Lua VM      │  │    │  ├────────────────────┤    │
-│  │                      │  │    │  │ 0x8000: Video      │    │
-│  │ ⚠ umm_malloc/free   │  │    │  │ buffer pool        │    │
-│  │   only! Never use    │  │    │  │ 3×96KB JPEG frames │    │
-│  │   standard malloc.   │  │    │  ├────────────────────┤    │
-│  ├──────────────────────┤  │    │  │ (rest unused)      │    │
+│  │                      │  │    │  │ 0x8000: Reserved   │    │
+│  │ ⚠ umm_malloc/free   │  │    │  │ (currently unused) │    │
+│  │   only! Never use    │  │    │  │                    │    │
+│  │   standard malloc.   │  │    │  │                    │    │
+│  ├──────────────────────┤  │    │  │                    │    │
 │  │ ELF app data/BSS     │  │    │  └────────────────────┘    │
 │  │ (umm_malloc'd)       │  │    │                           │
 │  ├──────────────────────┤  │    │  Non-fatal if absent —    │
-│  │ ELF app code         │  │    │  MP3/video degrade        │
+│  │ ELF app code         │  │    │  MP3 degrades             │
 │  │ (SRAM preferred,     │  │    │  gracefully               │
 │  │  PSRAM fallback)     │  │    │                           │
 │  └──────────────────────┘  │    └───────────────────────────┘

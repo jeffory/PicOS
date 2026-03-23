@@ -29,6 +29,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <strings.h>
 
 // ── App discovery
 // ─────────────────────────────────────────────────────────────
@@ -44,20 +45,22 @@ static bool json_get_string(const char *json, const char *key, char *out,
                             int out_len) {
   char search[64];
   snprintf(search, sizeof(search), "\"%s\"", key);
-  const char *p = strstr(json, search);
-  if (!p)
-    return false;
-  p += strlen(search);
-  while (*p == ' ' || *p == ':' || *p == '\t')
-    p++;
-  if (*p != '"')
-    return false;
-  p++; // skip opening quote
-  int i = 0;
-  while (*p && *p != '"' && i < out_len - 1)
-    out[i++] = *p++;
-  out[i] = '\0';
-  return true;
+  const char *p = json;
+  while ((p = strstr(p, search)) != NULL) {
+    const char *q = p + strlen(search);
+    while (*q == ' ' || *q == ':' || *q == '\t')
+      q++;
+    if (*q == '"') {
+      q++; // skip opening quote
+      int i = 0;
+      while (*q && *q != '"' && i < out_len - 1)
+        out[i++] = *q++;
+      out[i] = '\0';
+      return true;
+    }
+    p++; // false match (key name inside a value), keep searching
+  }
+  return false;
 }
 
 static bool json_get_int(const char *json, const char *key, uint32_t *out) {
@@ -153,6 +156,7 @@ static void on_app_dir(const sdcard_entry_t *entry, void *user) {
 
     umm_free(json);
   } else {
+    printf("[LAUNCHER] WARNING: failed to read '%s', using dir name\n", json_path);
     snprintf(app->id, sizeof(app->id), "local.%s", entry->name);
     strncpy(app->name, entry->name, sizeof(app->name));
     app->description[0] = '\0';
@@ -162,9 +166,21 @@ static void on_app_dir(const sdcard_entry_t *entry, void *user) {
   s_app_count++;
 }
 
+static int compare_app_name(const void *a, const void *b) {
+  return strcasecmp(((const app_entry_t *)a)->name,
+                    ((const app_entry_t *)b)->name);
+}
+
 static void scan_apps(void) {
   s_app_count = 0;
+  memset(s_apps, 0, sizeof(app_entry_t) * MAX_APPS);
+  printf("[LAUNCHER] Scanning /apps directory...\n");
+  fflush(stdout);
   sdcard_list_dir("/apps", on_app_dir, NULL);
+  if (s_app_count > 1)
+    qsort(s_apps, s_app_count, sizeof(app_entry_t), compare_app_name);
+  printf("[LAUNCHER] Found %d apps\n", s_app_count);
+  fflush(stdout);
 }
 
 // ── Launcher rendering
@@ -266,7 +282,7 @@ static const AppRunner *s_runners[] = {
 
 extern volatile bool g_core1_pause;
 
-static void launcher_apply_clock(uint32_t khz) {
+void launcher_apply_clock(uint32_t khz) {
   if (khz == 0) khz = 200000; // Default OS clock
   uint32_t current_khz = clock_get_hz(clk_sys) / 1000;
   if (khz == current_khz) return;
@@ -320,6 +336,9 @@ static void launcher_apply_clock(uint32_t khz) {
 
   // 7. Update keyboard I2C divider for new clk_peri frequency
   kbd_apply_clock();
+
+  // 7b. Re-set SD SPI baud rate (derived from clk_peri)
+  sdcard_apply_clock();
 
   // 8. Re-init UART baud rate (depends on clk_peri)
 #if LIB_PICO_STDIO_UART
@@ -425,6 +444,27 @@ void launcher_run(void) {
     memset(s_apps, 0, sizeof(app_entry_t) * MAX_APPS);
   }
   scan_apps();
+  
+  // Check for simulator auto-launch
+#ifdef PICOS_SIMULATOR
+  extern const char* simulator_get_auto_launch_app(void);
+  const char* auto_launch = simulator_get_auto_launch_app();
+  if (auto_launch) {
+    printf("[LAUNCHER] Auto-launching: %s\n", auto_launch);
+    fflush(stdout);
+    if (launcher_launch_by_name(auto_launch)) {
+      // App launched successfully, it will return here when done
+      printf("[LAUNCHER] Auto-launched app exited, returning to launcher\n");
+      fflush(stdout);
+    } else {
+      printf("[LAUNCHER] Failed to auto-launch: %s\n", auto_launch);
+      fflush(stdout);
+    }
+  }
+#else
+  (void)0; // simulator_get_auto_launch_app stub
+#endif
+  
   draw_launcher();
 
   while (true) {
@@ -436,20 +476,42 @@ void launcher_run(void) {
     dev_commands_poll();
     dev_commands_process();
 
-    bool dirty = false;
+    // Socket server poll — JSON-RPC interface for MCP/automation
+#ifdef PICOS_SIMULATOR
+    extern void sim_socket_poll(void);
+    extern void sim_handler_check_launch(void);
+    sim_socket_poll();
+    sim_handler_check_launch();
+#else
+    // Stubs for bare-metal build (no simulator)
+#endif
 
-    // Handle dev command flags
-    if (dev_commands_wants_list()) {
-      launcher_list_apps();
-      dev_commands_clear_list();
-    }
+    // Handle pending launch FIRST (before exit check)
+    // This ensures "launch" command works (which sets both pending_launch and exit flags)
+    bool dirty = false;
     if (dev_commands_get_pending_launch()) {
+      // Clear exit flag since we're launching, not exiting
+      dev_commands_clear_exit();
       if (launcher_launch_by_name(dev_commands_get_pending_launch())) {
         kbd_clear_state();
         scan_apps();
         dirty = true;
       }
       dev_commands_clear_pending_launch();
+    }
+
+    // Check for exit request (window close, dev command, etc.)
+    if (dev_commands_wants_exit()) {
+      printf("[LAUNCHER] Exit requested, shutting down...\n");
+      fflush(stdout);
+      dev_commands_clear_exit();
+      break;
+    }
+
+    // Handle dev command flags
+    if (dev_commands_wants_list()) {
+      launcher_list_apps();
+      dev_commands_clear_list();
     }
     if (dev_commands_wants_reboot()) {
       printf("[DEV] Rebooting...\n");
@@ -583,9 +645,27 @@ void launcher_run(void) {
 void launcher_list_apps(void) {
   printf("[DEV] Available apps:\n");
   for (int i = 0; i < s_app_count; i++) {
-    printf("  %s\n", s_apps[i].name);
+    printf("  %s  (%s)\n", s_apps[i].name, s_apps[i].id);
   }
   printf("[DEV] Total: %d apps\n", s_app_count);
+}
+
+bool launcher_launch_by_id(const char *id) {
+  if (!id || !id[0]) {
+    return false;
+  }
+
+  // Find the app by ID
+  for (int i = 0; i < s_app_count; i++) {
+    if (strcmp(s_apps[i].id, id) == 0) {
+      printf("[DEV] Launching app by ID: %s (%s)\n", id, s_apps[i].name);
+      stdio_flush();
+      run_app(i);
+      return true;
+    }
+  }
+
+  return false;
 }
 
 bool launcher_launch_by_name(const char *name) {
@@ -594,23 +674,23 @@ bool launcher_launch_by_name(const char *name) {
     return false;
   }
 
-  // Find the app by name
-  int app_idx = -1;
+  // First try to match by ID
+  if (launcher_launch_by_id(name)) {
+    return true;
+  }
+
+  // Fall back to name match
   for (int i = 0; i < s_app_count; i++) {
     if (strcmp(s_apps[i].name, name) == 0) {
-      app_idx = i;
-      break;
+      printf("[DEV] Launching app: %s\n", name);
+      stdio_flush();
+      run_app(i);
+      return true;
     }
   }
 
-  if (app_idx < 0) {
-    printf("[DEV] Error: app '%s' not found\n", name);
-    return false;
-  }
-
-  printf("[DEV] Launching app: %s\n", name);
-  run_app(app_idx);
-  return true;
+  printf("[DEV] Error: app '%s' not found\n", name);
+  return false;
 }
 
 const char* launcher_get_running_app_name(void) {

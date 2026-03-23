@@ -11,20 +11,22 @@
 critical_section_t g_umm_critsec;
 
 // Allocate 6 MB of PSRAM for the Lua VM heap
-#ifdef PICO_RP2350
+#ifdef PICOS_SIMULATOR
+static uint8_t *s_lua_psram_heap = NULL;
+uint32_t UMM_MALLOC_CFG_HEAP_SIZE = 8 * 1024 * 1024;
+#elif defined(PICO_RP2350)
 static uint8_t *s_lua_psram_heap = (uint8_t *)0x11200000;
-#else
-static uint8_t s_lua_psram_heap[256 * 1024]; // Fallback to 256K on regular Pico
-#endif
-
-#ifdef PICO_RP2350
-// Satisfy umm_malloc.c externs even if we explicitly use umm_init_heap
-void *UMM_MALLOC_CFG_HEAP_ADDR = NULL; // We initialize umm_malloc manually
 uint32_t UMM_MALLOC_CFG_HEAP_SIZE = 6 * 1024 * 1024;
 #else
-// Satisfy umm_malloc.c externs even if we explicitly use umm_init_heap
-void *UMM_MALLOC_CFG_HEAP_ADDR = s_lua_psram_heap;
+static uint8_t s_lua_psram_heap[256 * 1024]; // Fallback to 256K on regular Pico
 uint32_t UMM_MALLOC_CFG_HEAP_SIZE = sizeof(s_lua_psram_heap);
+#endif
+
+// Satisfy umm_malloc.c externs even if we explicitly use umm_init_heap
+#ifdef PICO_RP2350
+void *UMM_MALLOC_CFG_HEAP_ADDR = NULL; // We initialize umm_malloc manually
+#else
+void *UMM_MALLOC_CFG_HEAP_ADDR = NULL; // Initialized in lua_psram_alloc_init
 #endif
 
 static int l_panic(lua_State *L) {
@@ -43,6 +45,15 @@ static void l_warnfoff(void *ud, const char *message, int tocont) {
 
 void lua_psram_alloc_init(void) {
   critical_section_init(&g_umm_critsec);
+#ifdef PICOS_SIMULATOR
+  if (!s_lua_psram_heap) {
+    s_lua_psram_heap = malloc(UMM_MALLOC_CFG_HEAP_SIZE);
+    if (!s_lua_psram_heap) {
+      printf("FATAL: Failed to allocate Lua PSRAM heap in simulator\n");
+      return;
+    }
+  }
+#endif
   umm_init_heap(s_lua_psram_heap, UMM_MALLOC_CFG_HEAP_SIZE);
   printf("PSRAM Lua Allocator Initialized: %d bytes\n",
          (int)UMM_MALLOC_CFG_HEAP_SIZE);

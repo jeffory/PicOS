@@ -6,7 +6,10 @@
 #include "system_menu.h"
 #include "../drivers/audio.h"
 #include "../drivers/display.h"
+#include "../drivers/fileplayer.h"
+#include "../drivers/mp3_player.h"
 #include "../drivers/sdcard.h"
+#include "../drivers/sound.h"
 #include "../drivers/wifi.h"
 
 #include "lauxlib.h"
@@ -111,6 +114,9 @@ static bool lua_run(const app_entry_t *app) {
   // a leftover tone or stream will keep playing into the next app.
   audio_stop_tone();
   audio_stop_stream();
+  fileplayer_reset();
+  sound_init();
+  mp3_player_reset();
 
   return true;
 }

@@ -68,20 +68,23 @@ main()
 - **Core 1**: Runs the network stack (Mongoose/CYW43) and audio decode (MP3, fileplayer). Polls every 5ms. Core 0 communicates via IPC ring buffer (`wifi_req_push()`). **Core 0 must never call `mg_*` functions directly.**
 
 ### Central API (`src/os/os.h`)
-`PicoCalcAPI g_api` is a function pointer table wired in `main.c`. Sub-tables:
-- `picocalc.display` — drawing primitives, DMA flush, brightness, `drawImageNN`, `flushRows`
-- `picocalc.input` — button state, character input, edge detection
-- `picocalc.fs` — file open/read/write/close/exists/size/listDir
-- `picocalc.sys` — time, battery, log, reboot, system menu, poll (native apps), shouldExit
-- `picocalc.wifi` — connect/disconnect/status/IP/SSID/isAvailable
-- `picocalc.config` — key/value persistent config (get/set/save/load)
-- `picocalc.audio` — tone generation, PCM streaming (playTone/stopTone/setVolume/startStream/stopStream/pushSamples)
-- `picocalc.tcp` — raw TCP/TLS sockets (connect/write/read/close/available/getError/getEvents)
-- `picocalc.ui` — modal dialogs (textInput/textInputSimple/confirm)
-- `picocalc.network` — HTTP client (Lua-only, not in g_api; OO connection objects)
-- `picocalc.graphics` — sprite/animation system (Lua-only)
-- `picocalc.sound` — sample/fileplayer/MP3 player (Lua-only)
-- `picocalc.video` — MJPEG video playback (Lua-only)
+`PicoCalcAPI g_api` is a function pointer table wired in `main.c`. Sub-tables (all available to both Lua and native C apps unless noted):
+- `picocalc.display` / `g_api.display` — drawing primitives, DMA flush, brightness, `drawImageNN`, `flushRows`
+- `picocalc.input` / `g_api.input` — button state, character input, edge detection
+- `picocalc.fs` / `g_api.fs` — file open/read/write/close/exists/size/listDir
+- `picocalc.sys` / `g_api.sys` — time, battery, log, reboot, system menu, poll (native apps), shouldExit
+- `picocalc.wifi` / `g_api.wifi` — connect/disconnect/status/IP/SSID/isAvailable
+- `picocalc.config` / `g_api.config` — system-wide key/value config (get/set/save/load)
+- `picocalc.audio` / `g_api.audio` — tone generation, PCM streaming (playTone/stopTone/setVolume/startStream/stopStream/pushSamples)
+- `picocalc.tcp` / `g_api.tcp` — raw TCP/TLS sockets (connect/write/read/close/available/getError/getEvents)
+- `picocalc.ui` / `g_api.ui` — modal dialogs (textInput/textInputSimple/confirm)
+- `g_api.http` — HTTP/HTTPS client (Phase 1; Lua exposes as `picocalc.network.http` OO objects)
+- `g_api.soundplayer` — sample/fileplayer/MP3 player (Phase 1; Lua exposes as `picocalc.sound`)
+- `g_api.appconfig` — per-app key/value config (Phase 1; Lua exposes as `picocalc.appconfig`)
+- `g_api.crypto` — crypto primitives: SHA-256/SHA-1/HMAC/AES-CTR/ECDH (Phase 1; Lua exposes as `picocalc.crypto`)
+- `g_api.graphics` — image loading and drawing (Phase 2; Lua exposes as `picocalc.graphics.image`)
+- `g_api.video` — MJPEG video playback (Phase 2; Lua exposes as `picocalc.video`)
+- `g_api.version` — 1 = Phase 1 additions present, 2 = Phase 2 additions present
 
 ### App Lifecycle (`src/os/launcher.c`)
 1. Scans `/apps/` on SD for dirs containing `main.lua` or `main.elf`
@@ -196,7 +199,7 @@ A debug hook fires every 256 opcodes (`lua_sethook` with `LUA_MASKCOUNT`). The h
 ### Memory Map
 - **SRAM heap**: ~28.8KB free after BSS (for `malloc`/`free` — tiny, must be freed promptly)
 - **QMI PSRAM (8MB)**: Lua heap via `umm_malloc` at 0x11200000 (cached alias). ELF app data/BSS. Never mix `umm_malloc`/`umm_free` with standard `malloc`/`free`.
-- **PIO PSRAM (8MB)**: MP3 ring buffer, video buffer pool. Accessed via `pio_psram_read`/`pio_psram_write`.
+- **PIO PSRAM (8MB)**: MP3 PCM ring buffer (32KB). Accessed via `pio_psram_read`/`pio_psram_write`. Also exposed to native apps via `g_api.psram`.
 - **Main stack**: 4KB in SCRATCH memory (`__StackBottom`=0x20081000, `__StackTop`=0x20082000)
 - **Native app stack**: 8KB static SRAM buffer (`s_native_stack`), runs on PSP
 
@@ -208,7 +211,7 @@ A debug hook fires every 256 opcodes (`lua_sethook` with `LUA_MASKCOUNT`). The h
 - Globals: `g_` prefix (e.g., `g_api`)
 - Macros: `UPPER_CASE`
 - All `malloc()` calls must be paired with explicit `free()`; `umm_malloc()` with `umm_free()`
-- PSRAM allocations via `umm_malloc` (Lua heap) or PIO PSRAM APIs (audio/video buffers)
+- PSRAM allocations via `umm_malloc` (Lua heap) or PIO PSRAM APIs (audio buffers)
 - BTN_* constants live in `os.h` (not keyboard.h)
 
 ## Extending the OS

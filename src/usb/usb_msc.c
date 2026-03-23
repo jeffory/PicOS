@@ -1,4 +1,5 @@
 #include "usb_msc.h"
+#include "hardware/irq.h"
 #include "hardware/watchdog.h"
 #include "pico/stdlib.h"
 #include "tusb.h"
@@ -27,39 +28,65 @@ typedef DWORD LBA_t;
 // Block devices and filesystems
 static uint16_t msc_block_size = 512;
 static bool s_msc_active = false;
+static volatile bool s_msc_ejected = false;  // Set by tud_msc_start_stop_cb when host ejects
+static volatile bool s_media_changed = false; // Signals UNIT ATTENTION on next TUR
+static uint32_t s_cached_sector_count = 0;   // Cached at MSC entry, avoids SPI per query
 
 // --------------------------------------------------------------------
 // USB MSC Entry point
 // --------------------------------------------------------------------
 
+// Declared in main.c - pauses Core 1's background tasks (WiFi, HTTP, audio)
+extern volatile bool g_core1_pause;
+extern volatile bool g_core1_paused;
+
 void usb_msc_enter_mode(void) {
   printf("[USB MSC] Entering USB Mass Storage mode\n");
 
-  // 1. Disconnect WiFi to prevent SPI contention with USB
+  // 1. Disconnect WiFi and pause Core 1 to prevent SPI/I2C contention
+  //    Core 1 runs WiFi/HTTP/audio tasks every 5ms which can interfere
+  //    with USB MSC operations and cause keyboard I2C timeouts.
   bool was_connected = (wifi_get_status() == WIFI_STATUS_CONNECTED);
   if (was_connected) {
     printf("[USB MSC] Disconnecting WiFi...\n");
     wifi_disconnect();
   }
+  
+  // Pause Core 1 completely - wait for acknowledgment to ensure it's stopped
+  g_core1_pause = true;
+  while (!g_core1_paused) {
+    sleep_ms(1);
+  }
+  printf("[USB MSC] Core 1 paused (WiFi/HTTP/audio halted)\n");
 
-  // 2. Unmount FatFS so host can take over the SD card safely
-  printf("[USB MSC] Unmounting FatFS...\n");
+  // 2. Ensure FS Info has valid free cluster count, then unmount FatFS.
+  //    Without this, the host scans the entire FAT (~16MB for a 256GB card)
+  //    over Full-Speed USB to compute free space — takes ~23 seconds.
+  //    f_getfree() computes it over SPI at 40MHz (~3s) and marks fsi_flag
+  //    so f_unmount() writes the FS Info sector.  Host then skips the scan.
+  printf("[USB MSC] Updating FS Info and unmounting FatFS...\n");
+  {
+    FATFS *fs;
+    DWORD free_clust;
+    f_getfree("", &free_clust, &fs);
+  }
   f_unmount("");
+
+  // Cache sector count before entering MSC mode — avoids SPI CMD9 on every
+  // host capacity query.  Must be done after f_unmount but before tud_disconnect.
+  {
+    LBA_t count = 0;
+    DRESULT res = disk_ioctl(0, GET_SECTOR_COUNT, &count);
+    s_cached_sector_count = (res == RES_OK) ? (uint32_t)count : 0;
+    printf("[USB MSC] Cached sector count: %lu\n", (unsigned long)s_cached_sector_count);
+  }
+
   s_msc_active = true;
-
-  // NOTE: tusb_init() is already called by pico_stdio_usb during
-  // stdio_init_all(). Our custom tusb_config.h and usb_descriptors.c
-  // configure it as a composite CDC+MSC device from boot. We do NOT
-  // call tusb_init() again here — doing so could corrupt the stack.
-  //
-  // The MSC interface is always present in the descriptor but the
-  // callbacks return "not ready" while s_msc_active is false.
-
-  printf("[USB MSC] TinyUSB connected=%d, mounted=%d\n", tud_connected(),
-         tud_mounted());
+  s_msc_ejected = false;  // Reset eject flag on entry
+  s_media_changed = true;  // Signal UNIT ATTENTION on next TUR
 
   // 2. Draw the splash screen
-  ui_draw_splash("USB Mode", "Press ESC to exit");
+  ui_draw_splash("USB Mode", "Hold escape to exit");
 
   // 3. Poll loop — USB events are processed exclusively by the SDK's
   //    USBCTRL_IRQ background task (PICO_STDIO_USB_ENABLE_IRQ_BACKGROUND_TASK=1
@@ -68,12 +95,18 @@ void usb_msc_enter_mode(void) {
   //    direct call share no mutual exclusion around the processing callbacks,
   //    so both could call disk_read() simultaneously, corrupting SPI0 state
   //    and hanging the device (which manifests as the keyboard locking up).
-  printf("[USB MSC] Waiting for host or ESC key...\n");
+  // CRITICAL: I2C keyboard polling is limited to 500ms intervals during USB MSC.
+  // uf2loader-main reference shows that frequent I2C access during active USB
+  // causes STM32 lockup due to electrical interference/noise. This slower rate
+  // balances usability (ESC key still works) with stability (prevents crashes).
+  // The "Hold escape" message cues users to keep the key pressed longer.
+  // See: reference/uf2loader-main/ui/text_directory_ui.c (no I2C during USB)
+  printf("[USB MSC] Waiting for host or ESC key (hold to exit)...\n");
 
   uint32_t last_kbd_poll_ms = 0;
   uint32_t loop_start_ms = to_ms_since_boot(get_absolute_time());
-  const uint32_t KBD_POLL_INTERVAL_MS = 10;  // Poll keyboard every 10ms max
-  const uint32_t HOST_TIMEOUT_MS = 5000;      // 5 second timeout if no host activity
+  const uint32_t KBD_POLL_INTERVAL_MS = 500;  // Poll keyboard every 500ms (was 10ms)
+  const uint32_t HOST_TIMEOUT_MS = 10000;     // 10s timeout (accounts for re-enumeration)
 
   while (true) {
     uint32_t now = to_ms_since_boot(get_absolute_time());
@@ -97,6 +130,12 @@ void usb_msc_enter_mode(void) {
       }
     }
 
+    // Exit if host has ejected the device
+    if (s_msc_ejected) {
+      printf("[USB MSC] Device ejected by host, exiting\n");
+      break;
+    }
+
     // Exit if no host has mounted the device within HOST_TIMEOUT_MS.
     // Use wall time so the timeout is accurate regardless of loop body duration.
     if (!tud_mounted() && (now - loop_start_ms) > HOST_TIMEOUT_MS) {
@@ -114,9 +153,27 @@ void usb_msc_enter_mode(void) {
   printf("[USB MSC] Exiting USB Mass Storage mode\n");
   s_msc_active = false;
 
+  // Disable USB IRQ to prevent MSC callbacks from touching SPI during card reinit.
+  // CDC serial won't work briefly but printf output is buffered.
+  irq_set_enabled(USBCTRL_IRQ, false);
+
+  // Flush SD card's internal write buffer before reinitializing.
+  // Without this, the last host writes may not be committed when CMD0
+  // (software reset) fires inside disk_initialize().
+  disk_ioctl(0, CTRL_SYNC, NULL);
+  sleep_ms(50);
+
   // Remount FatFS
   printf("[USB MSC] Remounting FatFS...\n");
-  sdcard_remount();
+  if (!sdcard_remount()) {
+    printf("[USB MSC] WARNING: FatFS remount failed, retrying...\n");
+    sleep_ms(200);
+    if (!sdcard_remount()) {
+      printf("[USB MSC] ERROR: FatFS remount failed after retry\n");
+    }
+  }
+
+  irq_set_enabled(USBCTRL_IRQ, true);
 
   // Reconnect WiFi if we were connected before
   if (was_connected) {
@@ -128,7 +185,16 @@ void usb_msc_enter_mode(void) {
     }
   }
 
+  // Recover I2C bus - STM32 may need re-initialization after USB activity
+  printf("[USB MSC] Recovering I2C bus...\n");
+  kbd_recover_i2c_bus();
+  kbd_apply_clock();
+  kbd_clear_state();
+
   printf("[USB MSC] Done\n");
+
+  // Resume Core 1 background tasks
+  g_core1_pause = false;
 }
 
 // --------------------------------------------------------------------
@@ -154,24 +220,19 @@ void tud_msc_inquiry_cb(uint8_t lun, uint8_t p_vendor_id[8],
   memcpy(p_vendor_id, vendor, sizeof(vendor));
   memcpy(p_product_id, product, sizeof(product));
   memcpy(p_product_rev, revision, sizeof(revision));
-  printf("[USB MSC] Inquiry callback\n");
+  // No printf here — runs in USB IRQ context, CDC output stalls MSC transfers
 }
 
 void tud_msc_capacity_cb(uint8_t lun, uint32_t *block_count,
                          uint16_t *block_size) {
   (void)lun;
-  LBA_t count = 0;
-
-  if (s_msc_active && disk_ioctl(0, GET_SECTOR_COUNT, &count) == RES_OK &&
-      count > 0) {
+  // Use cached sector count — no SPI, no mutex, no printf in USB IRQ context
+  if (s_msc_active && s_cached_sector_count > 0) {
     *block_size = msc_block_size;
-    *block_count = (uint32_t)count;
-    printf("[USB MSC] Capacity: %lu blocks x %u bytes\n", (unsigned long)count,
-           msc_block_size);
+    *block_count = s_cached_sector_count;
   } else {
     *block_size = 0;
     *block_count = 0;
-    printf("[USB MSC] Capacity: not ready (active=%d)\n", s_msc_active);
   }
 }
 
@@ -179,7 +240,11 @@ bool tud_msc_start_stop_cb(uint8_t lun, uint8_t power_condition, bool start,
                            bool load_eject) {
   (void)lun;
   (void)power_condition;
-  printf("[USB MSC] Start/Stop: start=%d, load_eject=%d\n", start, load_eject);
+  (void)start;
+  if (load_eject) {
+    printf("[USB MSC] Host ejected device\n");
+    s_msc_ejected = true;
+  }
   return true;
 }
 
@@ -191,10 +256,10 @@ int32_t tud_msc_read10_cb(uint8_t lun, uint32_t lba, uint32_t offset,
   if (!s_msc_active)
     return -1;
 
-  if (disk_read(0, (BYTE *)buffer, lba, bufsize / msc_block_size) != RES_OK) {
-    printf("[USB MSC] Read error at LBA %lu\n", (unsigned long)lba);
+  // No mutex — Core 1 is paused during MSC mode, nothing else uses SPI0
+  DRESULT res = disk_read(0, (BYTE *)buffer, lba, bufsize / msc_block_size);
+  if (res != RES_OK)
     return -1;
-  }
 
   return (int32_t)bufsize;
 }
@@ -212,26 +277,33 @@ int32_t tud_msc_write10_cb(uint8_t lun, uint32_t lba, uint32_t offset,
   if (!s_msc_active)
     return -1;
 
-  if (disk_write(0, (const BYTE *)buffer, lba, bufsize / msc_block_size) !=
-      RES_OK) {
-    printf("[USB MSC] Write error at LBA %lu\n", (unsigned long)lba);
+  // No mutex — Core 1 is paused during MSC mode, nothing else uses SPI0
+  DRESULT res = disk_write(0, (const BYTE *)buffer, lba, bufsize / msc_block_size);
+  if (res != RES_OK)
     return -1;
-  }
 
   return (int32_t)bufsize;
 }
 
 void tud_msc_write10_flush_cb(uint8_t lun) {
   (void)lun;
+  // No mutex — Core 1 is paused during MSC mode
   disk_ioctl(0, CTRL_SYNC, NULL);
 }
 
 bool tud_msc_test_unit_ready_cb(uint8_t lun) {
   // Only check s_msc_active — sdcard_is_mounted() tracks FatFS mount
   // state, which is intentionally false during MSC mode.
+  // Note: No mutex needed here as we don't access SPI0, just check a flag.
   if (!s_msc_active) {
     tud_msc_set_sense(lun, SCSI_SENSE_NOT_READY, 0x3A, 0x00);
     return false;
+  }
+  // Signal media change on the first TUR after activation so the host
+  // re-reads capacity/partition table (belt-and-suspenders with re-enum).
+  if (s_media_changed) {
+    s_media_changed = false;
+    tud_msc_set_sense(lun, SCSI_SENSE_UNIT_ATTENTION, 0x28, 0x00);
   }
   return true;
 }

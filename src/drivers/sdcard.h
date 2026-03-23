@@ -24,6 +24,9 @@ extern recursive_mutex_t g_sdcard_mutex;
 // Returns true if the SD card was found and mounted successfully
 bool sdcard_init(void);
 
+// Re-set SPI baud rate after a system clock change (keeps SD at SD_SPI_BAUD)
+void sdcard_apply_clock(void);
+
 // Returns true if an SD card is currently mounted
 bool sdcard_is_mounted(void);
 
@@ -50,7 +53,7 @@ bool     sdcard_mkdir(const char *path);
 // ── Directory listing ─────────────────────────────────────────────────────────
 
 typedef struct {
-    char     name[64];
+    char     name[256];
     bool     is_dir;
     uint32_t size;
     uint16_t fdate;  // FatFS packed date: bits[15:9]=year-1980, [8:5]=month, [4:0]=day

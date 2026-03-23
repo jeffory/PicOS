@@ -124,6 +124,10 @@ void display_flush_region(int y0, int y1);
 // partial screen updates (status bars, emulator viewports, etc.).
 void display_flush_rows(int y0, int y1);
 
+// Block until any in-flight DMA flush completes.
+// Does NOT swap buffers or start a new transfer.
+void display_wait_for_flush(void);
+
 // Brightness via backlight PWM (0-255)
 void display_set_brightness(uint8_t brightness);
 
@@ -151,3 +155,41 @@ const uint16_t *display_get_screen_buffer(void);
 // top_fixed + scroll_height + bottom_fixed must equal 320.
 void display_set_scroll_area(int top_fixed, int scroll_height, int bottom_fixed);
 void display_set_scroll_offset(int offset);
+
+// =============================================================================
+// Framebuffer Effects (post-processing shaders)
+//
+// All effects operate on the back buffer in-place. Draw first, apply effects,
+// then call display_flush(). Effects wait for any in-flight DMA before
+// modifying the framebuffer.
+//
+// Uses RP2350 SIO hardware interpolators (BLEND mode) for channel-level
+// operations where beneficial.
+// =============================================================================
+
+typedef enum {
+    EFFECT_INVERT,      // Bitwise invert all pixels
+    EFFECT_DARKEN,      // Darken by factor (0-255, 128 = half brightness)
+    EFFECT_BRIGHTEN,    // Brighten by factor (0-255, 128 = moderate)
+    EFFECT_TINT,        // Blend framebuffer toward a tint color
+    EFFECT_FADE,        // Fade toward a target color (same as tint, alias)
+    EFFECT_GRAYSCALE,   // Desaturate using ITU-R BT.601 weights
+    EFFECT_BLEND,       // Alpha-blend an external image onto the framebuffer
+    EFFECT_PALETTE,     // Remap colors through a 256-entry LUT
+    EFFECT_DITHER,      // Ordered Bayer 4x4 dithering
+    EFFECT_SCANLINE,    // CRT-style scanline darkening
+    EFFECT_POSTERIZE,   // Reduce color depth per channel
+    EFFECT_COUNT
+} display_effect_t;
+
+// Individual effect functions (can be called directly from C)
+void display_effect_invert(void);
+void display_effect_darken(uint8_t factor);    // 0=black, 255=no change
+void display_effect_brighten(uint8_t factor);  // 0=no change, 255=white
+void display_effect_tint(uint8_t r, uint8_t g, uint8_t b, uint8_t strength);
+void display_effect_grayscale(void);
+void display_effect_blend(const uint16_t *src, int w, int h, uint8_t alpha);
+void display_effect_palette(const uint16_t *lut, int lut_size);
+void display_effect_dither(uint8_t levels);    // quantization levels per channel
+void display_effect_scanline(uint8_t intensity); // 0=none, 255=black lines
+void display_effect_posterize(uint8_t levels); // 2-32 levels per channel

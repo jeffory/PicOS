@@ -24,7 +24,7 @@
 #define HTTP_MAX_CONNECTIONS   8      // Simultaneous connections
 #define HTTP_RECV_BUF_DEFAULT  4096   // Default receive ring buffer
 #define HTTP_RECV_BUF_MAX      (2 * 1024 * 1024)  // Max allowed by setReadBufferSize
-#define HTTP_HEADER_BUF_MAX    2048   // Raw response header block
+#define HTTP_HEADER_BUF_MAX    8192   // Raw response header block
 #define HTTP_MAX_HDR_ENTRIES   24     // Max parsed header fields
 #define HTTP_SERVER_MAX        128    // Hostname buffer
 #define HTTP_ERR_MAX           128    // Error string buffer
@@ -60,7 +60,7 @@ typedef struct {
 
     // Configuration (set by lua_bridge before issuing a request)
     char     server[HTTP_SERVER_MAX];
-    char     path[256];
+    char    *path;
     char     method[8];
     char    *extra_hdrs;
     uint16_t port;
@@ -173,3 +173,7 @@ void http_fire_c_pending(void);
 // mg_http_connect() — Core 1 owns all mg_* calls.
 struct mg_connection;  // forward declaration to avoid pulling in mongoose.h
 void http_ev_fn(struct mg_connection *nc, int ev, void *ev_data);
+
+// Build the full HTTP request in a single PSRAM buffer and send via mg_send().
+// Used by http_ev_fn (new connections) and wifi.c drain_requests (keep-alive).
+void http_build_and_send_request(struct mg_connection *nc, http_conn_t *c);

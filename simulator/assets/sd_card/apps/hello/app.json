@@ -1,0 +1,7 @@
+{
+    "id": "com.picos.hello",
+    "name": "Hello World",
+    "description": "A basic drawing demo",
+    "version": "1.0",
+    "author": "PicOS"
+}

@@ -266,7 +266,7 @@ bool dev_commands_process(void) {
         printf("[DEV]   usb            - Enable USB storage mode\n");
         printf("[DEV]   reboot         - Reboot device\n");
         printf("[DEV]   reboot-flash   - Reboot to BOOTSEL for flashing\n");
-        printf("[DEV]   launch <name>  - Launch app by name\n");
+        printf("[DEV]   launch <arg>   - Launch app by ID or name\n");
         printf("[DEV]   list           - List installed apps\n");
         printf("[DEV]   screenshot     - Capture screen\n");
         printf("[DEV]   keypress <key> - Inject keypress\n");
@@ -290,6 +290,10 @@ bool dev_commands_wants_exit(void) {
 
 void dev_commands_clear_exit(void) {
     s_cmd_exit = false;
+}
+
+void dev_commands_set_exit(void) {
+    s_cmd_exit = true;
 }
 
 bool dev_commands_wants_usb(void) {

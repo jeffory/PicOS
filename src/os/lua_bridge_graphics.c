@@ -1,19 +1,12 @@
 #include "lua_bridge_internal.h"
+#include "../drivers/image_api.h"
 #include "pico/time.h"
 #include <math.h>
 
 // ── picocalc.graphics.* ──────────────────────────────────────────────────────
 
-#define GRAPHICS_IMAGE_MT "picocalc.graphics.image"
-
 static uint16_t s_graphics_color = COLOR_WHITE;
 static uint16_t s_graphics_bg_color = COLOR_BLACK;
-
-typedef struct {
-  int w;
-  int h;
-  uint16_t *data;
-} lua_image_t;
 
 static lua_image_t *check_image(lua_State *L, int idx) {
   return (lua_image_t *)luaL_checkudata(L, idx, GRAPHICS_IMAGE_MT);
@@ -65,22 +58,18 @@ static int l_graphics_clear(lua_State *L) {
 static int l_graphics_image_new(lua_State *L) {
   int w = luaL_checkinteger(L, 1);
   int h = luaL_checkinteger(L, 2);
-  if (w <= 0 || h <= 0 || w > 2048 || h > 2048)
-    return luaL_error(L, "invalid image dimensions");
 
-  size_t bytes = (size_t)w * (size_t)h * sizeof(uint16_t);
-  // Sanity check: reject allocations > 8MB (entire PSRAM heap)
-  if (bytes > 8u * 1024u * 1024u)
-    return luaL_error(L, "image too large");
-
-  lua_image_t *img = (lua_image_t *)lua_newuserdata(L, sizeof(lua_image_t));
-  img->w = w;
-  img->h = h;
-  img->data = (uint16_t *)umm_malloc(bytes);
-  if (!img->data)
+  pc_image_t *loaded = image_new_blank(w, h);
+  if (!loaded)
     return luaL_error(L, "out of memory allocating image");
 
-  memset(img->data, 0, bytes);
+  lua_image_t *img = (lua_image_t *)lua_newuserdata(L, sizeof(lua_image_t));
+  img->w = loaded->w;
+  img->h = loaded->h;
+  img->data = loaded->data;        // steal ownership of pixel data
+  img->transparent_color = 0;
+  loaded->data = NULL;             // prevent image_free from freeing pixels
+  umm_free(loaded);                // free just the temp struct
 
   luaL_setmetatable(L, GRAPHICS_IMAGE_MT);
   return 1;
@@ -93,162 +82,22 @@ static int l_graphics_image_load(lua_State *L) {
     return luaL_error(L, "access denied");
   }
 
-  sdfile_t f = sdcard_fopen(path, "r");
-  if (!f)
-    return luaL_error(L, "file not found");
+  pc_image_t *loaded = image_load(path);
+  if (!loaded)
+    return luaL_error(L, "failed to load image: %s", path);
 
-  uint8_t header[16];
-  if (sdcard_fread(f, header, 16) != 16) {
-    sdcard_fclose(f);
-    return luaL_error(L, "invalid or empty file");
-  }
+  // Steal pixel data from the loaded pc_image_t into a Lua-managed userdata.
+  // Lua owns the struct; only the pixel buffer is in PSRAM and freed by __gc.
+  lua_image_t *img = (lua_image_t *)lua_newuserdata(L, sizeof(lua_image_t));
+  img->w = loaded->w;
+  img->h = loaded->h;
+  img->data = loaded->data;        // steal ownership of pixel data
+  img->transparent_color = 0;
+  loaded->data = NULL;             // prevent image_free from freeing pixels
+  umm_free(loaded);                // free just the temp struct
 
-  // Magic byte checks
-  bool is_bmp = (header[0] == 'B' && header[1] == 'M');
-  bool is_jpeg = (header[0] == 0xFF && header[1] == 0xD8);
-  bool is_png = (header[0] == 0x89 && header[1] == 0x50 && header[2] == 0x4E &&
-                 header[3] == 0x47);
-  bool is_gif = (header[0] == 'G' && header[1] == 'I' && header[2] == 'F');
-
-  if (!is_bmp && !is_jpeg && !is_png && !is_gif) {
-    sdcard_fclose(f);
-    return luaL_error(L, "unsupported image format");
-  }
-
-  if (is_bmp) {
-    sdcard_fseek(f, 0);
-    uint8_t full_header[54];
-    if (sdcard_fread(f, full_header, 54) != 54) {
-      sdcard_fclose(f);
-      return luaL_error(L, "invalid BMP format");
-    }
-
-    uint32_t data_offset;
-    int32_t w_raw, h_raw;
-    uint16_t bpp;
-    uint32_t compression;
-    memcpy(&data_offset, &full_header[10], sizeof(data_offset));
-    memcpy(&w_raw, &full_header[18], sizeof(w_raw));
-    memcpy(&h_raw, &full_header[22], sizeof(h_raw));
-    memcpy(&bpp, &full_header[28], sizeof(bpp));
-    memcpy(&compression, &full_header[30], sizeof(compression));
-    int w = (int)w_raw;
-    int h = (int)h_raw;
-
-    if (compression != 0 && compression != 3) {
-      sdcard_fclose(f);
-      return luaL_error(L, "unsupported BMP compression");
-    }
-
-    if (bpp != 16 && bpp != 24 && bpp != 32) {
-      sdcard_fclose(f);
-      return luaL_error(L, "unsupported BMP depth (%d bpp)", bpp);
-    }
-
-    bool flip_y = true;
-    if (h < 0) {
-      h = -h;
-      flip_y = false;
-    }
-
-    if (w <= 0 || h <= 0 || w > 2048 || h > 2048) {
-      sdcard_fclose(f);
-      return luaL_error(L, "invalid BMP dimensions");
-    }
-
-    // Allocate pixel buffer and read all BMP data BEFORE any Lua allocations.
-    // This prevents file handle leaks if lua_newuserdata triggers a GC error.
-    size_t pixel_bytes = (size_t)w * (size_t)h * sizeof(uint16_t);
-    uint16_t *pixel_data = (uint16_t *)umm_malloc(pixel_bytes);
-    if (!pixel_data) {
-      sdcard_fclose(f);
-      return luaL_error(L, "out of memory allocating image");
-    }
-
-    sdcard_fseek(f, data_offset);
-
-    int row_bytes = ((w * bpp + 31) / 32) * 4;
-    uint8_t *row_buf = (uint8_t *)umm_malloc(row_bytes);
-    if (!row_buf) {
-      umm_free(pixel_data);
-      sdcard_fclose(f);
-      return luaL_error(L, "out of memory allocating row buffer");
-    }
-
-    for (int y = 0; y < h; y++) {
-      int dest_y = flip_y ? (h - 1 - y) : y;
-      if (sdcard_fread(f, row_buf, row_bytes) != row_bytes)
-        break;
-
-      for (int x = 0; x < w; x++) {
-        uint16_t color = 0;
-        if (bpp == 24) {
-          uint8_t b = row_buf[x * 3];
-          uint8_t g = row_buf[x * 3 + 1];
-          uint8_t r = row_buf[x * 3 + 2];
-          color = RGB565(r, g, b);
-        } else if (bpp == 32) {
-          uint8_t b = row_buf[x * 4];
-          uint8_t g = row_buf[x * 4 + 1];
-          uint8_t r = row_buf[x * 4 + 2];
-          color = RGB565(r, g, b);
-        } else if (bpp == 16) {
-          uint16_t p;
-          memcpy(&p, &row_buf[x * 2], sizeof(p));
-          color = p;
-        }
-        pixel_data[dest_y * w + x] = color;
-      }
-    }
-
-    umm_free(row_buf);
-    sdcard_fclose(f);
-
-    // File is closed — now safe to do Lua allocations (which can longjmp).
-    // If lua_newuserdata fails, pixel_data leaks, but that's acceptable
-    // since OOM means the VM is shutting down anyway.
-    lua_image_t *img = (lua_image_t *)lua_newuserdata(L, sizeof(lua_image_t));
-    img->w = w;
-    img->h = h;
-    img->data = pixel_data;
-    luaL_setmetatable(L, GRAPHICS_IMAGE_MT);
-    return 1;
-  }
-
-  // BMP wasn't matched. We must close our original handle so the decoders can
-  // open their own.
-  sdcard_fclose(f);
-
-  image_decode_result_t res = {0, 0, NULL};
-  bool success = false;
-  const char *err_msg = "unsupported image format";
-
-  if (is_jpeg) {
-    success = decode_jpeg_file(path, &res);
-    err_msg = "JPEG decoding failed";
-  } else if (is_png) {
-    success = decode_png_file(path, &res);
-    err_msg = "PNG decoding failed";
-  } else if (is_gif) {
-    success = decode_gif_file(path, &res);
-    err_msg = "GIF decoding failed";
-  }
-
-  // Return userdata holding the memory if decoder succeeded
-  if (success && res.data) {
-    lua_image_t *img = (lua_image_t *)lua_newuserdata(L, sizeof(lua_image_t));
-    img->w = res.w;
-    img->h = res.h;
-    img->data = res.data; // Now managed by lua_image_t gc handler
-    luaL_setmetatable(L, GRAPHICS_IMAGE_MT);
-    return 1;
-  }
-
-  // If decoding failed res.data (from umm_malloc) needs to be freed.
-  if (res.data) {
-    umm_free(res.data);
-  }
-  return luaL_error(L, "%s", err_msg);
+  luaL_setmetatable(L, GRAPHICS_IMAGE_MT);
+  return 1;
 }
 
 static int l_graphics_image_getSize(lua_State *L) {
@@ -263,6 +112,7 @@ static int l_graphics_image_copy(lua_State *L) {
   lua_image_t *dst = (lua_image_t *)lua_newuserdata(L, sizeof(lua_image_t));
   dst->w = src->w;
   dst->h = src->h;
+  dst->transparent_color = src->transparent_color;
   dst->data = (uint16_t *)umm_malloc(dst->w * dst->h * sizeof(uint16_t));
   if (!dst->data)
     return luaL_error(L, "out of memory allocating image copy");
@@ -306,7 +156,7 @@ static int l_graphics_image_draw(lua_State *L) {
   }
 
   display_draw_image_partial(x, y, img->w, img->h, img->data, sx, sy, sw, sh,
-                             flip_x, flip_y, 0);
+                             flip_x, flip_y, img->transparent_color);
   return 0;
 }
 
@@ -321,7 +171,7 @@ static int l_graphics_image_drawAnchored(lua_State *L) {
   y -= (int)(img->h * ay);
 
   display_draw_image_partial(x, y, img->w, img->h, img->data, 0, 0, img->w,
-                             img->h, false, false, 0);
+                             img->h, false, false, img->transparent_color);
   return 0;
 }
 
@@ -337,7 +187,8 @@ static int l_graphics_image_drawTiled(lua_State *L) {
       int draw_w = (tx + img->w > rect_w) ? (rect_w - tx) : img->w;
       int draw_h = (ty + img->h > rect_h) ? (rect_h - ty) : img->h;
       display_draw_image_partial(x + tx, y + ty, img->w, img->h, img->data, 0,
-                                 0, draw_w, draw_h, false, false, 0);
+                                 0, draw_w, draw_h, false, false,
+                                 img->transparent_color);
     }
   }
 
@@ -359,7 +210,8 @@ static int l_graphics_image_drawScaled(lua_State *L) {
   float scale = luaL_checknumber(L, 4);
   float angle = luaL_optnumber(L, 5, 0.0);
 
-  display_draw_image_scaled(x, y, img->w, img->h, img->data, scale, angle, 0);
+  display_draw_image_scaled(x, y, img->w, img->h, img->data, scale, angle,
+                            img->transparent_color);
   return 0;
 }
 
@@ -375,8 +227,27 @@ static int l_graphics_image_drawScaledNN(lua_State *L) {
   int dst_w = img->w * scale;
   int dst_h = img->h * scale;
 
-  display_draw_image_scaled_nn(x, y, img->data, img->w, img->h, dst_w, dst_h, 0);
+  display_draw_image_scaled_nn(x, y, img->data, img->w, img->h, dst_w, dst_h,
+                               img->transparent_color);
   return 0;
+}
+
+static int l_graphics_image_setTransparentColor(lua_State *L) {
+  lua_image_t *img = check_image(L, 1);
+  if (lua_isnil(L, 2) || lua_isnone(L, 2))
+    img->transparent_color = 0;
+  else
+    img->transparent_color = (uint16_t)luaL_checkinteger(L, 2);
+  return 0;
+}
+
+static int l_graphics_image_getTransparentColor(lua_State *L) {
+  lua_image_t *img = check_image(L, 1);
+  if (img->transparent_color == 0)
+    lua_pushnil(L);
+  else
+    lua_pushinteger(L, img->transparent_color);
+  return 1;
 }
 
 static const luaL_Reg l_graphics_image_methods[] = {
@@ -387,6 +258,8 @@ static const luaL_Reg l_graphics_image_methods[] = {
     {"drawTiled", l_graphics_image_drawTiled},
     {"drawScaled", l_graphics_image_drawScaled},
     {"drawScaledNN", l_graphics_image_drawScaledNN},
+    {"setTransparentColor", l_graphics_image_setTransparentColor},
+    {"getTransparentColor", l_graphics_image_getTransparentColor},
     {"setStorageLocation", l_graphics_image_setStorageLocation},
     {"getMetadata", l_graphics_image_getMetadata},
     {NULL, NULL}};
@@ -438,6 +311,7 @@ static int l_graphics_image_loadFromBuffer(lua_State *L) {
     img->w = res.w;
     img->h = res.h;
     img->data = res.data;
+    img->transparent_color = 0;
     luaL_setmetatable(L, GRAPHICS_IMAGE_MT);
     return 1;
   }
