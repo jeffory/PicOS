@@ -2,6 +2,7 @@
 
 #include <stdint.h>
 #include <stdbool.h>
+#include "../drivers/display.h"
 
 // ── Widget color constants (matching existing PicOS UI theme) ────────────────
 

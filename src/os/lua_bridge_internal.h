@@ -32,6 +32,16 @@
 #include "../../third_party/umm_malloc/src/umm_malloc.h"
 #include "image_decoders.h"
 
+// Shared image userdata layout — used by both graphics and display bridges
+typedef struct {
+    int w;
+    int h;
+    uint16_t *data;
+    uint16_t  transparent_color;  // 0 = disabled
+} lua_image_t;
+
+#define GRAPHICS_IMAGE_MT "picocalc.graphics.image"
+
 uint16_t l_checkcolor(lua_State *L, int idx);
 bool fs_sandbox_check(lua_State *L, const char *path, bool write);
 void http_lua_fire_pending(lua_State *L);

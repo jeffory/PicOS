@@ -183,7 +183,7 @@ void appconfig_set(const char *key, const char *value) {
     if (!key || !key[0]) return;
     
     if (!value || !value[0]) {
-        appconfig_set(key, "");
+        // Delete the key if it exists
         for (int i = 0; i < s_count; i++) {
             if (strcmp(s_entries[i].key, key) == 0) {
                 for (int j = i; j < s_count - 1; j++)

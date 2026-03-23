@@ -114,10 +114,11 @@ static void process_requests(client_t *c) {
         }
         *newline = '\0';
         size_t msg_len = newline - c->read_buf;
-        c->read_buf_used -= (int)(msg_len + 1);
-        memmove(c->read_buf, newline + 1, c->read_buf_used);
 
         char *resp = sim_handler_dispatch(c->read_buf, c->read_buf + msg_len);
+
+        c->read_buf_used -= (int)(msg_len + 1);
+        memmove(c->read_buf, newline + 1, c->read_buf_used);
         if (resp) {
             if (queue_response(c, resp, 0) < 0) {
                 free(resp);
@@ -126,18 +127,6 @@ static void process_requests(client_t *c) {
             free(resp);
         }
     }
-}
-
-static pthread_t s_poll_thread;
-static volatile bool s_poll_running = false;
-
-static void* poll_thread_fn(void* arg) {
-    (void)arg;
-    while (s_poll_running) {
-        sim_socket_poll();
-        usleep(10000); // 10ms poll interval
-    }
-    return NULL;
 }
 
 void sim_socket_init(void) {
@@ -182,10 +171,7 @@ void sim_socket_init(void) {
         }
     }
 
-    if (s_unix_fd >= 0 || s_tcp_fd >= 0) {
-        s_poll_running = true;
-        pthread_create(&s_poll_thread, NULL, poll_thread_fn, NULL);
-    } else {
+    if (s_unix_fd < 0 && s_tcp_fd < 0) {
         printf("[Socket] WARNING: Failed to open any socket\n");
     }
 }
@@ -247,10 +233,6 @@ void sim_socket_poll(void) {
 }
 
 void sim_socket_close(void) {
-    if (s_poll_running) {
-        s_poll_running = false;
-        pthread_join(s_poll_thread, NULL);
-    }
     for (int i = 0; i < MAX_CLIENTS; i++) {
         if (s_clients[i].fd > 0) {
             close(s_clients[i].fd);

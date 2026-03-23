@@ -1,14 +1,4 @@
 #include "lua_bridge_internal.h"
-// Metatable name for image objects (defined in lua_bridge_graphics.c)
-#define GRAPHICS_IMAGE_MT "picocalc.graphics.image"
-
-// lua_image_t layout — must match lua_bridge_graphics.c exactly
-typedef struct {
-  int w;
-  int h;
-  uint16_t *data;
-  uint16_t  transparent_color;
-} lua_display_image_t;
 
 // ── picocalc.display.* ───────────────────────────────────────────────────────
 
@@ -175,7 +165,7 @@ static int l_display_applyEffect(lua_State *L) {
     display_effect_grayscale();
   } else if (strcmp(name, "blend") == 0) {
     // Arg 2: image userdata, Arg 3: alpha (0-255)
-    lua_display_image_t *img = (lua_display_image_t *)luaL_checkudata(L, 2, GRAPHICS_IMAGE_MT);
+    lua_image_t *img = (lua_image_t *)luaL_checkudata(L, 2, GRAPHICS_IMAGE_MT);
     if (!img->data) {
       return luaL_error(L, "blend: image has been freed");
     }

@@ -64,23 +64,27 @@ static void sdcard_log_corruption(FRESULT res, const char *op, const char *path)
 
     printf("[SD] corruption: %s", buf);
 
-    if (s_log_busy || !s_mounted) return;
-    s_log_busy = true;
+    if (!s_mounted) return;
 
     // Open log in append mode; if the card is too corrupt to write, just skip.
     FIL *f = (FIL *)umm_malloc(sizeof(FIL));
     if (f) {
         recursive_mutex_enter_blocking(&g_sdcard_mutex);
+        if (s_log_busy) {
+            recursive_mutex_exit(&g_sdcard_mutex);
+            umm_free(f);
+            return;
+        }
+        s_log_busy = true;
         if (f_open(f, FS_LOG_PATH, FA_WRITE | FA_OPEN_APPEND | FA_OPEN_ALWAYS) == FR_OK) {
             UINT bw = 0;
             f_write(f, buf, strlen(buf), &bw);
             f_close(f);
         }
+        s_log_busy = false;
         recursive_mutex_exit(&g_sdcard_mutex);
         umm_free(f);
     }
-
-    s_log_busy = false;
 }
 
 // ── SPI SD card low-level (bit-bang layer for FatFS diskio) ──────────────────

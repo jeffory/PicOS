@@ -103,8 +103,6 @@ static bool json_has_requirement(const char *json, const char *requirement) {
 
 static void on_app_dir(const sdcard_entry_t *entry, void *user) {
   (void)user;
-  printf("[LAUNCHER] Found entry: %s (is_dir=%d)\n", entry->name, entry->is_dir);
-  fflush(stdout);
   if (!entry->is_dir)
     return;
   if (entry->name[0] == '.')
@@ -116,17 +114,11 @@ static void on_app_dir(const sdcard_entry_t *entry, void *user) {
   char lua_path[160], elf_path[160];
   snprintf(lua_path, sizeof(lua_path), "/apps/%s/main.lua", entry->name);
   snprintf(elf_path, sizeof(elf_path), "/apps/%s/main.elf", entry->name);
-  printf("[LAUNCHER] Checking: lua=%s exists=%d, elf=%s exists=%d\n", 
-         lua_path, sdcard_fexists(lua_path), elf_path, sdcard_fexists(elf_path));
-  fflush(stdout);
   bool has_lua = sdcard_fexists(lua_path);
   bool has_elf = sdcard_fexists(elf_path);
 
-  if (!has_lua && !has_elf) {
-    printf("[LAUNCHER] Skipping %s: no main.lua or main.elf\n", entry->name);
-    fflush(stdout);
+  if (!has_lua && !has_elf)
     return;
-  }
 
   // Native wins when both exist (rare, but log it)
   if (has_lua && has_elf)
@@ -171,9 +163,6 @@ static void on_app_dir(const sdcard_entry_t *entry, void *user) {
     strncpy(app->version, "?", sizeof(app->version));
   }
 
-  printf("[LAUNCHER] Added app: name='%s' id='%s' type=%s\n", 
-         app->name, app->id, app->type == APP_TYPE_NATIVE ? "native" : "lua");
-  fflush(stdout);
   s_app_count++;
 }
 

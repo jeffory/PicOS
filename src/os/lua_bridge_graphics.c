@@ -5,19 +5,8 @@
 
 // ── picocalc.graphics.* ──────────────────────────────────────────────────────
 
-#define GRAPHICS_IMAGE_MT "picocalc.graphics.image"
-
 static uint16_t s_graphics_color = COLOR_WHITE;
 static uint16_t s_graphics_bg_color = COLOR_BLACK;
-
-// NOTE: layout must match pc_image_t (same first 4 fields in same order)
-// so that Lua userdata pointers can be passed to g_api.graphics draw functions.
-typedef struct {
-  int w;
-  int h;
-  uint16_t *data;
-  uint16_t  transparent_color;  // 0 = disabled
-} lua_image_t;
 
 static lua_image_t *check_image(lua_State *L, int idx) {
   return (lua_image_t *)luaL_checkudata(L, idx, GRAPHICS_IMAGE_MT);
