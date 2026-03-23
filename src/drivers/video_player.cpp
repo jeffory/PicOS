@@ -598,9 +598,9 @@ void video_player_play(video_player_t *player) {
     video_boost_clock(priv);
     player->playing = true;
     player->paused = false;
-    priv->start_time_us = time_us_64() - (uint64_t)player->current_frame * priv->frame_duration_us;
 
-    // Start audio if available
+    // Start audio if available (before capturing start_time_us so the clock
+    // starts only after audio DMA is queued, keeping A/V in sync from frame 0)
     if (priv->has_audio && priv->audio_format == 0x0055 && !priv->audio_muted) {
         if (mp3_player_start_fed(priv->audio_sample_rate, priv->audio_channels)) {
             priv->audio_active = true;
@@ -609,6 +609,10 @@ void video_player_play(video_player_t *player) {
             mp3_player_start_dma_fed();        // Decode + start DMA with real audio
         }
     }
+
+    // Capture start time after audio setup so the video clock aligns with
+    // audio sample 0 (video_feed_audio + start_dma_fed take ~50ms of SD I/O)
+    priv->start_time_us = time_us_64() - (uint64_t)player->current_frame * priv->frame_duration_us;
 }
 
 void video_player_stop(video_player_t *player) {
@@ -634,7 +638,6 @@ void video_player_pause(video_player_t *player) {
 void video_player_resume(video_player_t *player) {
     player->paused = false;
     video_priv_t *priv = (video_priv_t *)player->priv;
-    priv->start_time_us = time_us_64() - (uint64_t)player->current_frame * priv->frame_duration_us;
     if (priv->audio_active) {
         mp3_player_t *mp3 = mp3_player_create();
         if (mp3_player_is_playing(mp3)) {
@@ -648,6 +651,8 @@ void video_player_resume(video_player_t *player) {
             mp3_player_start_dma_fed();
         }
     }
+    // Capture start time after any audio work so clock aligns with audio
+    priv->start_time_us = time_us_64() - (uint64_t)player->current_frame * priv->frame_duration_us;
 }
 
 static bool decode_frame_at(video_player_t *player, video_priv_t *priv,
@@ -937,17 +942,18 @@ void video_player_seek(video_player_t *player, uint32_t frame) {
         }
     }
 
-    priv->start_time_us = time_us_64() - (uint64_t)player->current_frame * priv->frame_duration_us;
     priv->adaptive_stride = 1;
     priv->consecutive_drops = 0;
     priv->ra_frame_count = 0;  // invalidate read-ahead on seek
 
-    // Reposition audio: flush and restart the fed ring
+    // Reposition audio: flush and restart the fed ring from the proportional
+    // audio chunk for the target frame.  Do this before capturing start_time_us
+    // so the video clock starts only after audio pre-fill (SD I/O) completes.
     if (priv->audio_active && priv->audio_index_count > 0) {
         mp3_player_stop_fed();
         if (mp3_player_start_fed(priv->audio_sample_rate, priv->audio_channels)) {
             // Compute approximate audio cursor from video frame position
-            priv->audio_feed_cursor = (uint32_t)((uint64_t)frame * priv->audio_index_count / priv->frame_index_count);
+            priv->audio_feed_cursor = (uint32_t)((uint64_t)player->current_frame * priv->audio_index_count / priv->frame_index_count);
             if (priv->audio_feed_cursor >= priv->audio_index_count)
                 priv->audio_feed_cursor = priv->audio_index_count - 1;
             video_feed_audio(priv, 50);
@@ -959,6 +965,9 @@ void video_player_seek(video_player_t *player, uint32_t frame) {
             priv->audio_active = false;
         }
     }
+
+    // Capture start time after audio setup so clock aligns with restarted audio
+    priv->start_time_us = time_us_64() - (uint64_t)player->current_frame * priv->frame_duration_us;
 }
 
 float video_player_get_fps(video_player_t *player) {
