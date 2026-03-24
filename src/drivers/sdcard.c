@@ -215,6 +215,7 @@ int sdcard_fwrite(sdfile_t f, const void *buf, int len) {
 void sdcard_fclose(sdfile_t f) {
     if (!f) return;
     recursive_mutex_enter_blocking(&g_sdcard_mutex);
+    f_sync((FIL *)f);   // Flush dirty sectors to SD before close
     f_close((FIL *)f);
     recursive_mutex_exit(&g_sdcard_mutex);
     umm_free(f);  // Must match sdcard_fopen() which allocates via umm_malloc
@@ -274,6 +275,8 @@ bool sdcard_mkdir(const char *path) {
     recursive_mutex_enter_blocking(&g_sdcard_mutex);
     // f_mkdir returns FR_OK if successful or FR_EXIST if already exists
     FRESULT res = f_mkdir(path);
+    if (res == FR_OK)
+        disk_ioctl(0, CTRL_SYNC, NULL);  // Flush directory entry to SD
     recursive_mutex_exit(&g_sdcard_mutex);
     return (res == FR_OK || res == FR_EXIST);
 }
@@ -334,6 +337,8 @@ bool sdcard_delete(const char *path) {
     if (!s_mounted) return false;
     recursive_mutex_enter_blocking(&g_sdcard_mutex);
     bool ok = f_unlink(path) == FR_OK;
+    if (ok)
+        disk_ioctl(0, CTRL_SYNC, NULL);  // Flush FAT/directory update to SD
     recursive_mutex_exit(&g_sdcard_mutex);
     return ok;
 }
@@ -342,6 +347,8 @@ bool sdcard_rename(const char *src, const char *dst) {
     if (!s_mounted) return false;
     recursive_mutex_enter_blocking(&g_sdcard_mutex);
     bool ok = f_rename(src, dst) == FR_OK;
+    if (ok)
+        disk_ioctl(0, CTRL_SYNC, NULL);  // Flush FAT/directory update to SD
     recursive_mutex_exit(&g_sdcard_mutex);
     return ok;
 }
@@ -415,6 +422,8 @@ bool sdcard_copy(const char *src, const char *dst,
 
     umm_free(buf);
     f_close(fsrc);
+    if (ok)
+        f_sync(fdst);  // Flush destination data + directory entry before close
     f_close(fdst);
     umm_free(fsrc);
     umm_free(fdst);
