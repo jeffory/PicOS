@@ -1,3 +1,4 @@
+#include "lua_bridge.h"
 #include "lua_bridge_internal.h"
 #include <stdlib.h>
 #include <string.h>
@@ -109,11 +110,13 @@ static int call_scene_method(lua_State *L, int scene_ref, const char *method, in
     
     int err = lua_pcall(L, nargs, 0, 0);
     if (err != 0) {
+        if (lua_bridge_is_exit_sentinel(L, -1))
+            return lua_error(L);  // re-raise exit sentinel
         const char *err_msg = lua_tostring(L, -1);
         printf("[SCENE] Error in %s: %s\n", method, err_msg ? err_msg : "unknown");
         lua_pop(L, 1);
     }
-    
+
     return err == 0;
 }
 
@@ -204,6 +207,8 @@ static int l_scene_update(lua_State *L) {
         lua_pushnumber(L, dt);
         int err = lua_pcall(L, 1, 0, 0);  // Call with 1 arg: dt
         if (err != 0) {
+            if (lua_bridge_is_exit_sentinel(L, -1))
+                return lua_error(L);  // re-raise exit sentinel
             const char *err_msg = lua_tostring(L, -1);
             printf("[SCENE] Error in update: %s\n", err_msg ? err_msg : "unknown");
             lua_pop(L, 1);
@@ -231,6 +236,8 @@ static int l_scene_draw(lua_State *L) {
         lua_remove(L, -2);  // Remove scene table, keep only function
         int err = lua_pcall(L, 0, 0, 0);  // Call with 0 args
         if (err != 0) {
+            if (lua_bridge_is_exit_sentinel(L, -1))
+                return lua_error(L);  // re-raise exit sentinel
             const char *err_msg = lua_tostring(L, -1);
             printf("[SCENE] Error in draw: %s\n", err_msg ? err_msg : "unknown");
             lua_pop(L, 1);
