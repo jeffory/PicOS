@@ -64,6 +64,18 @@ static void menu_lua_hook(lua_State *L, lua_Debug *ar) {
   tcp_lua_fire_pending(L);  // fire any queued TCP Lua callbacks
   dev_commands_poll();
   dev_commands_process();
+#ifdef PICOS_SIMULATOR
+  // Poll the RPC socket so JSON-RPC commands (including shutdown) work
+  // while a Lua app is running.  Without this, sim_socket_poll() only runs
+  // in the launcher's main loop, which is blocked inside lua_pcall().
+  extern void sim_socket_poll(void);
+  sim_socket_poll();
+  // Check the global running flag (set by signal handler or shutdown RPC)
+  extern volatile int g_running;
+  if (!g_running) {
+    dev_commands_set_exit();
+  }
+#endif
   if (dev_commands_wants_exit()) {
     dev_commands_clear_exit();
     lua_bridge_raise_exit(L);
@@ -180,6 +192,8 @@ void lua_bridge_register(lua_State *L) {
   lua_bridge_terminal_init(L);
   printf("[LUA] registering crypto...\n");
   lua_bridge_crypto_init(L);
+  printf("[LUA] registering modplayer...\n");
+  lua_bridge_mod_init(L);
   printf("[LUA] all modules done, PSRAM free=%lu\n",
          (unsigned long)umm_free_heap_size());
   // Set as global

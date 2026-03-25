@@ -66,3 +66,4 @@ void lua_bridge_repl_init(lua_State *L);
 void lua_bridge_video_init(lua_State *L);
 void lua_bridge_tcp_init(lua_State *L);
 void lua_bridge_crypto_init(lua_State *L);
+void lua_bridge_mod_init(lua_State *L);

@@ -193,6 +193,7 @@ void __attribute__((naked)) isr_hardfault(void) {
 #include "drivers/pio_psram.h"
 #include "drivers/pio_psram_bulk.h"
 #include "drivers/sound.h"
+#include "drivers/mod_player.h"
 #include "drivers/display.h"
 #include "drivers/image_api.h"
 #include "drivers/video_player.h"
@@ -1038,6 +1039,33 @@ static const picocalc_video_t s_video_impl = {
     .resetStats      = video_reset_stats_w,
 };
 
+// ── MOD player wrappers (opaque void* API) ───────────────────────────────────
+static pcmodplayer_t mod_create_w(void) { return mod_player_create(); }
+static void mod_destroy_w(pcmodplayer_t mp) { mod_player_destroy((mod_player_t *)mp); }
+static bool mod_load_w(pcmodplayer_t mp, const char *p) { return mod_player_load((mod_player_t *)mp, p); }
+static void mod_play_w(pcmodplayer_t mp, bool loop) { mod_player_play((mod_player_t *)mp, loop); }
+static void mod_stop_w(pcmodplayer_t mp) { mod_player_stop((mod_player_t *)mp); }
+static void mod_pause_w(pcmodplayer_t mp) { mod_player_pause((mod_player_t *)mp); }
+static void mod_resume_w(pcmodplayer_t mp) { mod_player_resume((mod_player_t *)mp); }
+static bool mod_is_playing_w(pcmodplayer_t mp) { return mod_player_is_playing((const mod_player_t *)mp); }
+static void mod_set_volume_w(pcmodplayer_t mp, uint8_t v) { mod_player_set_volume((mod_player_t *)mp, v); }
+static uint8_t mod_get_volume_w(pcmodplayer_t mp) { return mod_player_get_volume((const mod_player_t *)mp); }
+static void mod_set_loop_w(pcmodplayer_t mp, bool l) { mod_player_set_loop((mod_player_t *)mp, l); }
+
+static const picocalc_modplayer_t s_modplayer_impl = {
+    .create    = mod_create_w,
+    .destroy   = mod_destroy_w,
+    .load      = mod_load_w,
+    .play      = mod_play_w,
+    .stop      = mod_stop_w,
+    .pause     = mod_pause_w,
+    .resume    = mod_resume_w,
+    .isPlaying = mod_is_playing_w,
+    .setVolume = mod_set_volume_w,
+    .getVolume = mod_get_volume_w,
+    .setLoop   = mod_set_loop_w,
+};
+
 // ── Core 1 entry — background WiFi polling ────────────────────────────────────
 // Core 1 drives the Mongoose / CYW43 network stack every 5 ms.
 // wifi_poll() acquires display_spi_lock() internally, so the SPI1 bus
@@ -1107,6 +1135,7 @@ static void core1_entry(void) {
       audio_stream_poll();
       mp3_player_update();
       fileplayer_update();
+      mod_player_update();
       if (g_native_audio_callback)
         g_native_audio_callback();
     }
@@ -1270,6 +1299,7 @@ int main(void) {
   g_api.crypto      = &s_crypto_impl;
   g_api.graphics    = &s_graphics_impl;
   g_api.video       = &s_video_impl;
+  g_api.modplayer   = &s_modplayer_impl;
   g_api.version     = 2;
   // fs wired after SD card init
 
@@ -1296,10 +1326,20 @@ int main(void) {
   // Non-fatal if chip not present (some boards may not have it).
   // Uses bulk driver internally for 8KB transfers (300x faster than 27-byte chunks).
   pio_psram_init();
+  printf("[BOOT] pio_psram done\n"); stdio_flush(); watchdog_update();
 
   sound_init();
+  printf("[BOOT] sound done\n"); stdio_flush(); watchdog_update();
+
   audio_init();
+  printf("[BOOT] audio done\n"); stdio_flush(); watchdog_update();
+
+  mod_player_init();
+  printf("[BOOT] mod_player done\n"); stdio_flush(); watchdog_update();
+
+  printf("[BOOT] drawing splash...\n"); stdio_flush();
   ui_draw_splash("Initialising keyboard...", NULL);
+  printf("[BOOT] splash done\n"); stdio_flush(); watchdog_update();
 
   bool kbd_ok = kbd_init();
   watchdog_update();

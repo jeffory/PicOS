@@ -252,6 +252,7 @@ add_executable(picocalc_os
     src/os/lua_bridge_terminal.c
     src/os/crypto.c
     src/os/lua_bridge_crypto.c
+    src/os/lua_bridge_mod.c
     src/os/ota_update.c
     src/fonts/font_6x11.c
     src/fonts/font_scientifica.c
@@ -277,6 +278,7 @@ add_executable(picocalc_os
     src/drivers/wifi.c
     src/drivers/http.c
     src/drivers/tcp.c
+    src/drivers/mod_player.c
     src/drivers/pio_psram.c
     src/drivers/pio_psram_bulk.c
     third_party/mongoose/mongoose.c
@@ -292,6 +294,7 @@ target_include_directories(picocalc_os PRIVATE
     third_party/mongoose/
     third_party/umm_malloc/src/
     third_party/libmad/
+    third_party/pocketmod/
     data/
 )
 
