@@ -2,7 +2,13 @@
   "mcpServers": {
     "picos": {
       "command": "python3",
-      "args": ["tools/picos_mcp.py"]
+      "args": [
+        "tools/picos_mcp.py"
+      ]
+    },
+    "context7": {
+      "type": "sse",
+      "url": "https://mcp.context7.com/mcp"
     }
   }
 }
