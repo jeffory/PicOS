@@ -5,6 +5,12 @@
 #include <string.h>
 #include <stdio.h>
 
+// RP2350 XIP cache coherency — see comment in http.c
+#define PSRAM_UNCACHED_OFFSET 0x04000000u
+static inline uint8_t *rx_buf_uncached(const uint8_t *cached_ptr) {
+  return (uint8_t *)((uintptr_t)cached_ptr + PSRAM_UNCACHED_OFFSET);
+}
+
 #define TCP_CB_CONNECT  (1 << 0)
 #define TCP_CB_READ     (1 << 1)
 #define TCP_CB_WRITE    (1 << 2)
@@ -88,14 +94,16 @@ int tcp_read(tcp_conn_t *c, void *buf, int len) {
     uint32_t n = (len < (int)c->rx_count) ? len : (uint32_t)len;
     if (n > c->rx_count) n = c->rx_count;
 
+    // Read through uncached alias to see Core 1's writes to physical PSRAM
+    const uint8_t *uc = rx_buf_uncached(c->rx_buf);
     uint32_t till_end = c->rx_cap - c->rx_tail;
     if (n <= till_end) {
-        memcpy(buf, &c->rx_buf[c->rx_tail], n);
+        memcpy(buf, &uc[c->rx_tail], n);
         c->rx_tail += n;
         if (c->rx_tail == c->rx_cap) c->rx_tail = 0;
     } else {
-        memcpy(buf, &c->rx_buf[c->rx_tail], till_end);
-        memcpy((uint8_t*)buf + till_end, c->rx_buf, n - till_end);
+        memcpy(buf, &uc[c->rx_tail], till_end);
+        memcpy((uint8_t*)buf + till_end, uc, n - till_end);
         c->rx_tail = n - till_end;
     }
     c->rx_count -= n;
@@ -131,14 +139,16 @@ void tcp_ev_fn(struct mg_connection *nc, int ev, void *ev_data) {
         if (len > space) len = space;
         
         if (len > 0) {
+            // Write through uncached alias to bypass Core 1's XIP cache
+            uint8_t *uc = rx_buf_uncached(c->rx_buf);
             uint32_t till_end = c->rx_cap - c->rx_head;
             if (len <= till_end) {
-                memcpy(&c->rx_buf[c->rx_head], io->buf, len);
+                memcpy(&uc[c->rx_head], io->buf, len);
                 c->rx_head += len;
                 if (c->rx_head == c->rx_cap) c->rx_head = 0;
             } else {
-                memcpy(&c->rx_buf[c->rx_head], io->buf, till_end);
-                memcpy(c->rx_buf, io->buf + till_end, len - till_end);
+                memcpy(&uc[c->rx_head], io->buf, till_end);
+                memcpy(uc, io->buf + till_end, len - till_end);
                 c->rx_head = len - till_end;
             }
             c->rx_count += len;

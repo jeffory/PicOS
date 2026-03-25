@@ -113,7 +113,12 @@ void usb_msc_enter_mode(void) {
 
     // Check ESC key with rate limiting to avoid I2C bus congestion
     if (now - last_kbd_poll_ms >= KBD_POLL_INTERVAL_MS) {
+      // Disable USB IRQ during I2C keyboard poll — USB MSC callbacks
+      // (read10/write10) run in USBCTRL_IRQ and do multi-ms SPI transfers
+      // that preempt the I2C transaction past its 5ms timeout.
+      irq_set_enabled(USBCTRL_IRQ, false);
       kbd_poll();
+      irq_set_enabled(USBCTRL_IRQ, true);
       last_kbd_poll_ms = now;
       if (kbd_get_buttons_pressed() & BTN_ESC) {
         printf("[USB MSC] ESC key pressed, exiting\n");
@@ -314,6 +319,13 @@ int32_t tud_msc_scsi_cb(uint8_t lun, uint8_t const scsi_cmd[16], void *buffer,
   (void)bufsize;
 
   switch (scsi_cmd[0]) {
+  case 0x35: /* SYNCHRONIZE CACHE (10) — host sends before eject to flush
+              * its write-back cache.  Returning ILLEGAL REQUEST here caused
+              * the host to skip the final sync → unflushed FAT/bitmap sectors
+              * → filesystem corruption (clusters marked as free). */
+    disk_ioctl(0, CTRL_SYNC, NULL);
+    return 0;
+
   default:
     tud_msc_set_sense(lun, SCSI_SENSE_ILLEGAL_REQUEST, 0x20, 0x00);
     return -1;

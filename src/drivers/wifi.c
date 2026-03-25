@@ -27,6 +27,12 @@ static bool s_http_required = false;
 static volatile bool s_disconnect_pending = false; // deferred disconnect from SNTP callback
 static bool s_auto_connected = false;    // true only for boot auto-connect
 
+// Connect timeout / retry
+static uint32_t s_connect_start_ms = 0;
+static int      s_connect_retries  = 0;
+#define WIFI_CONNECT_TIMEOUT_MS  15000  // 15 seconds per attempt
+#define WIFI_MAX_RETRIES         3
+
 static struct mg_mgr s_mgr;
 static struct mg_tcpip_if s_ifp;
 static struct mg_tcpip_driver_pico_w_data s_driver_data;
@@ -96,6 +102,8 @@ static void tcpip_cb(struct mg_tcpip_if *ifp, int ev, void *ev_data) {
     uint8_t state = *(uint8_t *)ev_data;
     if (state == MG_TCPIP_STATE_READY) {
       s_status = WIFI_STATUS_CONNECTED;
+      s_connect_start_ms = 0;
+      s_connect_retries = 0;
       mg_snprintf(s_ip, sizeof(s_ip), "%M", mg_print_ip, &ifp->ip);
       printf("WiFi: connected  IP=%s\n", s_ip);
       start_sntp();
@@ -108,6 +116,7 @@ static void tcpip_cb(struct mg_tcpip_if *ifp, int ev, void *ev_data) {
     }
   } else if (ev == MG_TCPIP_EV_WIFI_CONNECT_ERR) {
     s_status = WIFI_STATUS_FAILED;
+    s_connect_start_ms = 0;
     printf("WiFi: connect failed (err=%d)\n", *(int *)ev_data);
   }
 }
@@ -276,6 +285,12 @@ void wifi_init(void) {
   mg_tcpip_init(&s_mgr, &s_ifp);
   s_ifp.pfn = tcpip_cb; // Ensure our callback is set
 
+  if (s_mgr.ifp == NULL) {
+    printf("WiFi: driver init failed — CYW43 not available\n");
+    s_available = false;
+    return;
+  }
+
   s_available = true;
   printf("WiFi: Mongoose TCPIP ready\n");
 
@@ -307,6 +322,8 @@ void wifi_connect(const char *ssid, const char *password) {
 
   s_status = WIFI_STATUS_CONNECTING;
   s_ip[0] = '\0';
+  s_connect_start_ms = to_ms_since_boot(get_absolute_time());
+  s_connect_retries = 0;
   s_auto_connected = false; // user/app-initiated, don't auto-disconnect after SNTP
 
   printf("WiFi: connecting to '%s'...\n", s_ssid);
@@ -359,15 +376,39 @@ void wifi_poll(void) {
   if (get_core_num() != 1)
     return;
 
-  // Skip polling when disconnected to save power
+  // Always drain requests — connect requests must be processed even when
+  // disconnected/failed, otherwise queued WIFI_CONNECT never executes.
+  drain_requests();
+
+  // Skip Mongoose polling when disconnected to save power
   wifi_status_t st = wifi_get_status();
   if (st != WIFI_STATUS_CONNECTED && st != WIFI_STATUS_CONNECTING)
     return;
 
-  // Drain pending Core 0 requests before polling Mongoose
-  drain_requests();
-
   mg_mgr_poll(&s_mgr, 0);
+
+  // Connect timeout: if stuck in CONNECTING, retry or give up
+  if (s_status == WIFI_STATUS_CONNECTING && s_connect_start_ms > 0) {
+    uint32_t now_ms = to_ms_since_boot(get_absolute_time());
+    if (now_ms - s_connect_start_ms > WIFI_CONNECT_TIMEOUT_MS) {
+      if (s_connect_retries < WIFI_MAX_RETRIES) {
+        s_connect_retries++;
+        printf("WiFi: connect timeout, retry %d/%d\n",
+               s_connect_retries, WIFI_MAX_RETRIES);
+        mg_wifi_disconnect();
+        s_driver_data.wifi.ssid = s_ssid;
+        s_driver_data.wifi.pass = s_pass;
+        mg_wifi_connect(&s_driver_data.wifi);
+        s_connect_start_ms = now_ms;
+      } else {
+        printf("WiFi: connect failed after %d retries\n", WIFI_MAX_RETRIES);
+        mg_wifi_disconnect();
+        s_status = WIFI_STATUS_FAILED;
+        s_connect_start_ms = 0;
+        s_connect_retries = 0;
+      }
+    }
+  }
 
   // Process any disconnect deferred from inside a Mongoose callback (SNTP etc.)
   // We're already on Core 1 here, so call mg_wifi_disconnect() directly.

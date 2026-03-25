@@ -6,6 +6,7 @@
 #include "hardware/gpio.h"
 #include "hardware/xip_cache.h"
 #include "pico/mutex.h"
+#include "pico/time.h"
 #include <stdio.h>
 #include <string.h>
 
@@ -48,6 +49,10 @@ static dma_channel_config s_read_dma_cfg;
 // Statistics
 static pio_psram_bulk_stats_t s_stats;
 
+// Forward declarations for command builders (used in self-test before definition)
+static uint32_t build_write_cmd(uint8_t *buf, uint32_t addr, uint32_t data_len);
+static uint32_t build_read_cmd(uint8_t *buf, uint32_t addr, uint32_t data_len);
+
 // Transaction buffer for command assembly
 // Format: [write_bits(16)][read_bits(16)][cmd(8)][addr(24)][data...]
 // We need at least 8 bytes for the header
@@ -65,6 +70,7 @@ bool pio_psram_bulk_init(void) {
     s_sm = pio_claim_unused_sm(s_pio, true);
     if (s_sm < 0) {
         printf("[PIO_PSRAM_BULK] Failed to claim state machine\n");
+        pio_remove_program(s_pio, &psram_bulk_fudge_program, s_prog_offs);
         return false;
     }
 
@@ -99,28 +105,85 @@ bool pio_psram_bulk_init(void) {
     // Initialize mutex for multi-core safety
     mutex_init(&s_mutex);
 
-    // Reset PSRAM chip
-    uint8_t reset_en[] = {0, 0, 0, 0, 0x66};  // minimal format for reset enable
-    uint8_t reset_cmd[] = {0, 0, 0, 0, 0x99}; // minimal format for reset
-    
-    // Send reset enable (simplified - just send the command byte)
-    // For now, skip reset and rely on power-on reset
-    
-    // Self-test: write and read back a pattern
-    uint8_t test[4] = {0xDE, 0xAD, 0xBE, 0xEF};
-    uint8_t readback[4] = {0};
-    
-    pio_psram_bulk_write_large(0, test, 4);
-    pio_psram_bulk_read_large(0, readback, 4);
-    
-    if (memcmp(test, readback, 4) != 0) {
-        printf("[PIO_PSRAM_BULK] Self-test FAILED (read %02X%02X%02X%02X, expected DEADBEEF)\n",
-               readback[0], readback[1], readback[2], readback[3]);
-        // Don't fail - the original driver might still work
-        return false;
+    // Self-test: write 4 bytes then read them back using direct PIO FIFO
+    // access with timeouts.  We can't use the DMA-based bulk read/write
+    // functions here because if the PSRAM chip is absent the read DMA hangs
+    // forever (DREQ from an RX FIFO that never fills).
+    {
+        // --- Write 4 bytes at address 0 ---
+        uint8_t wr_hdr[12];
+        uint32_t wr_hdr_len = build_write_cmd(wr_hdr, 0, 4);
+        // Append data
+        wr_hdr[wr_hdr_len + 0] = 0xDE;
+        wr_hdr[wr_hdr_len + 1] = 0xAD;
+        wr_hdr[wr_hdr_len + 2] = 0xBE;
+        wr_hdr[wr_hdr_len + 3] = 0xEF;
+        uint32_t wr_total = wr_hdr_len + 4;
+
+        // Push bytes into TX FIFO (PIO will shift them out on SPI)
+        for (uint32_t i = 0; i < wr_total; i++)
+            pio_sm_put_blocking(s_pio, s_sm, wr_hdr[i]);
+
+        // Wait for TX FIFO to drain (write complete)
+        absolute_time_t deadline = make_timeout_time_ms(100);
+        while (!pio_sm_is_tx_fifo_empty(s_pio, s_sm)) {
+            if (time_reached(deadline)) {
+                printf("[PIO_PSRAM_BULK] Self-test FAILED (write timeout)\n");
+                goto selftest_fail;
+            }
+            tight_loop_contents();
+        }
+        // Extra delay for PIO to clock out last byte
+        sleep_us(100);
+
+        // --- Read 4 bytes from address 0 ---
+        // Drain any stale RX data
+        while (!pio_sm_is_rx_fifo_empty(s_pio, s_sm))
+            (void)pio_sm_get(s_pio, s_sm);
+
+        uint8_t rd_hdr[12];
+        uint32_t rd_hdr_len = build_read_cmd(rd_hdr, 0, 4);
+
+        for (uint32_t i = 0; i < rd_hdr_len; i++)
+            pio_sm_put_blocking(s_pio, s_sm, rd_hdr[i]);
+
+        // Collect 4 bytes from RX FIFO with timeout
+        uint8_t readback[4] = {0};
+        deadline = make_timeout_time_ms(100);
+        for (int i = 0; i < 4; i++) {
+            while (pio_sm_is_rx_fifo_empty(s_pio, s_sm)) {
+                if (time_reached(deadline)) {
+                    printf("[PIO_PSRAM_BULK] Self-test FAILED (read timeout, got %d/4 bytes)\n", i);
+                    goto selftest_fail;
+                }
+                tight_loop_contents();
+            }
+            readback[i] = (uint8_t)pio_sm_get(s_pio, s_sm);
+        }
+
+        if (readback[0] != 0xDE || readback[1] != 0xAD ||
+            readback[2] != 0xBE || readback[3] != 0xEF) {
+            printf("[PIO_PSRAM_BULK] Self-test FAILED (read %02X%02X%02X%02X, expected DEADBEEF)\n",
+                   readback[0], readback[1], readback[2], readback[3]);
+            goto selftest_fail;
+        }
     }
 
-    s_available = true;
+    goto selftest_pass;
+
+selftest_fail:
+    // Clean up all claimed resources so they don't leak
+    pio_sm_set_enabled(s_pio, s_sm, false);
+    dma_channel_unclaim(s_write_dma_chan);
+    dma_channel_unclaim(s_read_dma_chan);
+    pio_sm_unclaim(s_pio, s_sm);
+    pio_remove_program(s_pio, &psram_bulk_fudge_program, s_prog_offs);
+    s_sm = -1;
+    s_write_dma_chan = -1;
+    s_read_dma_chan = -1;
+    return false;
+
+selftest_pass:
     printf("[PIO_PSRAM_BULK] Initialised: max %d bytes/write, %d bytes/read\n",
            PIO_PSRAM_BULK_MAX_WRITE, PIO_PSRAM_BULK_MAX_READ);
     return true;

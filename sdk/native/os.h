@@ -86,6 +86,17 @@ typedef struct {
     // Get writable pointer to the current back buffer (320x320 RGB565,
     // big-endian / byte-swapped). For direct framebuffer writes.
     uint16_t* (*getBackBuffer)(void);
+    // Framebuffer post-processing effects (shaders)
+    void (*effectInvert)(void);
+    void (*effectDarken)(uint8_t factor);      // 0=black, 255=no change
+    void (*effectBrighten)(uint8_t factor);    // 0=no change, 255=white
+    void (*effectTint)(uint8_t r, uint8_t g, uint8_t b, uint8_t strength);
+    void (*effectGrayscale)(void);
+    void (*effectBlend)(const uint16_t *src, int w, int h, uint8_t alpha);
+    void (*effectPalette)(const uint16_t *lut, int lut_size);
+    void (*effectDither)(uint8_t levels);      // quantization levels
+    void (*effectScanline)(uint8_t intensity); // 0=none, 255=black lines
+    void (*effectPosterize)(uint8_t levels);   // 2-32 levels per channel
 } picocalc_display_t;
 
 // --- Filesystem (SD card) ---------------------------------------------------
@@ -160,9 +171,9 @@ typedef struct {
     void (*pushSamples)(const int16_t *samples, int count);
 } picocalc_audio_t;
 
-// --- WiFi (Pico 2W only, shares SPI1 with LCD) ------------------------------
-// The OS manages the SPI bus arbitration. Apps must not call these
-// while the display is being flushed. The OS handles this automatically.
+// --- WiFi (Pico 2W only) -----------------------------------------------------
+// CYW43 uses hardware SPI1; LCD uses PIO0 — independent buses, no arbitration
+// needed. All WiFi calls are cross-core IPC (Core 0 → Core 1).
 
 typedef enum {
     WIFI_STATUS_DISCONNECTED = 0,
@@ -472,6 +483,25 @@ typedef struct {
     void      (*resetStats)(pcvideo_t vp);
 } picocalc_video_t;
 
+// --- MOD Music Player -------------------------------------------------------
+// Tracker music playback via pocketmod. Single static instance.
+
+typedef void* pcmodplayer_t;  // opaque MOD player handle
+
+typedef struct {
+    pcmodplayer_t (*create)(void);
+    void     (*destroy)(pcmodplayer_t mp);
+    bool     (*load)(pcmodplayer_t mp, const char *path);
+    void     (*play)(pcmodplayer_t mp, bool loop);
+    void     (*stop)(pcmodplayer_t mp);
+    void     (*pause)(pcmodplayer_t mp);
+    void     (*resume)(pcmodplayer_t mp);
+    bool     (*isPlaying)(pcmodplayer_t mp);
+    void     (*setVolume)(pcmodplayer_t mp, uint8_t vol);  // 0-100
+    uint8_t  (*getVolume)(pcmodplayer_t mp);
+    void     (*setLoop)(pcmodplayer_t mp, bool loop);
+} picocalc_modplayer_t;
+
 // --- The complete OS API struct ---------------------------------------------
 // This is what gets passed to every Lua environment and future C app loaders.
 
@@ -495,6 +525,7 @@ typedef struct PicoCalcAPI {
     // --- Phase 2 additions ---
     const picocalc_graphics_t    *graphics;    // image loading/drawing
     const picocalc_video_t       *video;       // MJPEG video playback
+    const picocalc_modplayer_t   *modplayer;   // MOD tracker music
     uint32_t                      version;     // 1=Phase1, 2=Phase2
 } PicoCalcAPI;
 
