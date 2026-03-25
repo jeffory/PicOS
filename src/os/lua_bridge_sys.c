@@ -55,6 +55,11 @@ static int l_sys_sleep(lua_State *L) {
     dev_commands_poll();
     dev_commands_process();
 
+    // Break out early if exit was requested (e.g. via RPC exit_app)
+    // so the Lua debug hook can raise the exit sentinel promptly.
+    if (dev_commands_wants_exit())
+      break;
+
     uint32_t remaining = end_ms - now;
     sleep_ms(remaining < 10 ? remaining : 10);
   }
