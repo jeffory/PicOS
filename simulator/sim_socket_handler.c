@@ -34,6 +34,11 @@
 #include <SDL2/SDL_image.h>
 #include <pthread.h>
 
+// Software PNG encoder fallback for headless mode where SDL_image may not work
+#define STB_IMAGE_WRITE_IMPLEMENTATION
+#define STBI_WRITE_NO_STDIO
+#include "stb_image_write.h"
+
 // ── Circular log buffer ───────────────────────────────────────────────────────
 
 #define LOG_LINE_MAX 256
@@ -116,7 +121,7 @@ void sim_handler_clear_pending_launch_state(void) {
     s_exit_requested = false;
 }
 
-void sim_handler_check_launch(void) {
+bool sim_handler_check_launch(void) {
     if (s_exit_requested) {
         s_exit_requested = false;
         kbd_inject_buttons(BTN_ESC);
@@ -124,14 +129,19 @@ void sim_handler_check_launch(void) {
     if (s_pending_launch) {
         const char *name = s_pending_launch;
         s_pending_launch = NULL;
-        sim_socket_notify("app.started", "{\"name\":\"pending\"}");
+        char started_params[256];
+        snprintf(started_params, sizeof(started_params),
+                 "{\"name\":\"%s\"}", name);
+        sim_socket_notify("app.started", started_params);
         bool ok = launcher_launch_by_name(name);
         char params[256];
         snprintf(params, sizeof(params),
                  "{\"name\":\"%s\",\"ok\":%s}", name, ok ? "true" : "false");
         sim_socket_notify("app.exited", params);
         free((void *)name);
+        return true;
     }
+    return false;
 }
 
 // ── WiFi error injection ──────────────────────────────────────────────────────
@@ -171,15 +181,19 @@ const char *sim_wifi_get_error(void) {
 
 static bool sandbox_path(const char *path, char *out_resolved, size_t max) {
     extern char g_base_path[512];
+    // Resolve base path to absolute for consistent comparison with realpath output
+    char abs_base[1024];
+    if (!realpath(g_base_path, abs_base)) return false;
+    size_t base_len = strlen(abs_base);
+
     char full[1024];
     if (path[0] == '/') {
-        snprintf(full, sizeof(full), "%s%s", g_base_path, path);
+        snprintf(full, sizeof(full), "%s%s", abs_base, path);
     } else {
-        snprintf(full, sizeof(full), "%s/%s", g_base_path, path);
+        snprintf(full, sizeof(full), "%s/%s", abs_base, path);
     }
     if (!realpath(full, out_resolved)) return false;
-    size_t base_len = strlen(g_base_path);
-    if (strncmp(out_resolved, g_base_path, base_len) != 0) return false;
+    if (strncmp(out_resolved, abs_base, base_len) != 0) return false;
     return true;
 }
 
@@ -284,38 +298,95 @@ static int b64_enc_size(size_t len) {
 
 // ── Screenshot to PNG base64 ──────────────────────────────────────────────────
 
+// stb_image_write callback: appends to a growable buffer
+typedef struct {
+    uint8_t *data;
+    size_t   size;
+    size_t   capacity;
+} stb_png_buf_t;
+
+static void stb_png_write_func(void *context, void *data, int size) {
+    stb_png_buf_t *buf = (stb_png_buf_t *)context;
+    if (buf->size + (size_t)size > buf->capacity) {
+        size_t new_cap = buf->capacity * 2;
+        if (new_cap < buf->size + (size_t)size) new_cap = buf->size + (size_t)size;
+        uint8_t *tmp = realloc(buf->data, new_cap);
+        if (!tmp) return;
+        buf->data = tmp;
+        buf->capacity = new_cap;
+    }
+    memcpy(buf->data + buf->size, data, (size_t)size);
+    buf->size += (size_t)size;
+}
+
+// Convert RGB565 framebuffer to RGB888
+static uint8_t *rgb565_to_rgb888(const uint16_t *fb, int w, int h) {
+    uint8_t *rgb = malloc((size_t)(w * h * 3));
+    if (!rgb) return NULL;
+    for (int i = 0; i < w * h; i++) {
+        uint16_t p = fb[i];
+        rgb[i * 3 + 0] = (uint8_t)(((p >> 11) & 0x1F) * 255 / 31);
+        rgb[i * 3 + 1] = (uint8_t)(((p >> 5)  & 0x3F) * 255 / 63);
+        rgb[i * 3 + 2] = (uint8_t)((p & 0x1F) * 255 / 31);
+    }
+    return rgb;
+}
+
 static char *take_screenshot_png(int *out_len) {
     uint16_t *fb = hal_display_get_framebuffer();
     if (!fb) { *out_len = 0; return NULL; }
 
+    // Try SDL_image path first (works when a real video driver is active)
     SDL_Surface *surf = SDL_CreateRGBSurfaceFrom(
         fb, 320, 320, 16, 320 * 2,
         0xF800, 0x07E0, 0x001F, 0x0000);
-    if (!surf) { *out_len = 0; return NULL; }
+    if (surf) {
+        SDL_Surface *rgb_surf = SDL_ConvertSurfaceFormat(surf, SDL_PIXELFORMAT_RGB24, 0);
+        SDL_FreeSurface(surf);
+        if (rgb_surf) {
+            size_t buf_size = 256 * 1024;
+            uint8_t *png_buf = (uint8_t *)malloc(buf_size);
+            if (png_buf) {
+                SDL_RWops *rw = SDL_RWFromMem(png_buf, (int)buf_size);
+                if (rw) {
+                    int saved = IMG_SavePNG_RW(rgb_surf, rw, 0);
+                    Sint64 size = SDL_RWtell(rw);
+                    SDL_RWclose(rw);
+                    SDL_FreeSurface(rgb_surf);
+                    if (saved == 0 && size > 0 && (size_t)size < buf_size) {
+                        char *b64 = malloc(b64_enc_size((size_t)size) + 1);
+                        if (b64) {
+                            b64_encode(png_buf, (size_t)size, b64);
+                            free(png_buf);
+                            *out_len = (int)strlen(b64);
+                            return b64;
+                        }
+                    }
+                    free(png_buf);
+                    goto stb_fallback;
+                }
+                free(png_buf);
+            }
+            SDL_FreeSurface(rgb_surf);
+        }
+    }
 
-    SDL_Surface *rgb = SDL_ConvertSurfaceFormat(surf, SDL_PIXELFORMAT_RGB24, 0);
-    SDL_FreeSurface(surf);
+stb_fallback:;
+    // Software fallback using stb_image_write — works in headless/dummy mode
+    uint8_t *rgb = rgb565_to_rgb888(fb, 320, 320);
     if (!rgb) { *out_len = 0; return NULL; }
 
-    size_t buf_size = 256 * 1024;
-    uint8_t *png_buf = (uint8_t *)malloc(buf_size);
-    if (!png_buf) { SDL_FreeSurface(rgb); *out_len = 0; return NULL; }
+    stb_png_buf_t png = { .data = malloc(256 * 1024), .size = 0, .capacity = 256 * 1024 };
+    if (!png.data) { free(rgb); *out_len = 0; return NULL; }
 
-    SDL_RWops *rw = SDL_RWFromMem(png_buf, (int)buf_size);
-    if (!rw) { free(png_buf); SDL_FreeSurface(rgb); *out_len = 0; return NULL; }
+    int ok = stbi_write_png_to_func(stb_png_write_func, &png, 320, 320, 3, rgb, 320 * 3);
+    free(rgb);
+    if (!ok || png.size == 0) { free(png.data); *out_len = 0; return NULL; }
 
-    int saved = IMG_SavePNG_RW(rgb, rw, 1);
-    SDL_FreeSurface(rgb);
-
-    if (saved < 0) { free(png_buf); *out_len = 0; return NULL; }
-
-    Sint64 size = SDL_RWsize(rw);
-    if (size <= 0 || (size_t)size >= buf_size) { free(png_buf); *out_len = 0; return NULL; }
-
-    char *b64 = malloc(b64_enc_size((size_t)size) + 1);
-    if (!b64) { free(png_buf); *out_len = 0; return NULL; }
-    b64_encode(png_buf, (size_t)size, b64);
-    free(png_buf);
+    char *b64 = malloc(b64_enc_size(png.size) + 1);
+    if (!b64) { free(png.data); *out_len = 0; return NULL; }
+    b64_encode(png.data, png.size, b64);
+    free(png.data);
     *out_len = (int)strlen(b64);
     return b64;
 }
@@ -350,14 +421,16 @@ static char *h_launch_app(const char *params) {
         return strdup("{\"jsonrpc\":\"2.0\",\"error\":{\"code\":-32602,\"message\":\"name required\"}}");
     }
     s_pending_launch = strdup(name);
-    sim_socket_notify("app.started", "{\"name\":\"pending\"}");
-    return strdup("{\"jsonrpc\":\"2.0\",\"result\":{\"ok\":true,\"app_name\":\"pending\"}}");
+    static char buf[256];
+    snprintf(buf, sizeof(buf),
+             "{\"jsonrpc\":\"2.0\",\"result\":{\"ok\":true,\"app_name\":\"%s\"}}", name);
+    return strdup(buf);
 }
 
 static char *h_exit_app(const char *params) {
     (void)params;
-    kbd_inject_buttons(BTN_ESC);
-    s_exit_requested = true;
+    extern void dev_commands_set_exit(void);
+    dev_commands_set_exit();
     return strdup("{\"jsonrpc\":\"2.0\",\"result\":{\"ok\":true}}");
 }
 
@@ -766,14 +839,43 @@ static char *h_get_log_buffer(const char *params) {
     (void)params;
     char *log = sim_get_log_buffer();
     int count = sim_get_log_buffer_count();
-    static char buf[65536];
-    char escaped[32768];
-    json_escape(log, escaped, sizeof(escaped));
-    int n = snprintf(buf, sizeof(buf),
-                    "{\"jsonrpc\":\"2.0\",\"result\":{\"count\":%d,\"lines\":%s}}",
-                    count, escaped);
-    if ((size_t)n >= sizeof(buf)) buf[sizeof(buf) - 1] = '\0';
-    return strdup(buf);
+
+    // Build a JSON array of lines from the newline-separated log text
+    // Estimate: each line needs escaping + quotes + comma
+    size_t buf_size = 65536;
+    char *buf = malloc(buf_size);
+    if (!buf) return strdup("{\"jsonrpc\":\"2.0\",\"error\":{\"code\":-32603,\"message\":\"out of memory\"}}");
+
+    int off = snprintf(buf, buf_size,
+                       "{\"jsonrpc\":\"2.0\",\"result\":{\"count\":%d,\"lines\":[", count);
+
+    if (log && log[0]) {
+        char escaped_line[1024];
+        const char *p = log;
+        int first = 1;
+        while (*p) {
+            const char *nl = strchr(p, '\n');
+            size_t len = nl ? (size_t)(nl - p) : strlen(p);
+            // Temporarily null-terminate this line for json_escape
+            char saved = p[len];
+            ((char *)p)[len] = '\0';
+            json_escape(p, escaped_line, sizeof(escaped_line));
+            ((char *)p)[len] = saved;
+
+            int wrote = snprintf(buf + off, buf_size - (size_t)off,
+                                 "%s\"%s\"", first ? "" : ",", escaped_line);
+            if (wrote > 0) off += wrote;
+            first = 0;
+
+            if (!nl) break;
+            p = nl + 1;
+        }
+    }
+
+    snprintf(buf + off, buf_size - (size_t)off, "]}}");
+    char *result = strdup(buf);
+    free(buf);
+    return result;
 }
 
 static char *h_set_time_multiplier(const char *params) {
@@ -837,6 +939,75 @@ static char *h_get_terminal_buffer(const char *params) {
     return buf;
 }
 
+// ── Shutdown ─────────────────────────────────────────────────────────────────
+
+static char *h_shutdown(const char *params) {
+    (void)params;
+    extern volatile int g_running;
+    g_running = 0;
+    extern void dev_commands_set_exit(void);
+    dev_commands_set_exit();
+    return strdup("{\"jsonrpc\":\"2.0\",\"result\":{\"ok\":true}}");
+}
+
+// ── Clear log buffer ─────────────────────────────────────────────────────────
+
+static char *h_clear_log_buffer(const char *params) {
+    (void)params;
+    pthread_mutex_lock(&s_log_mutex);
+    s_log_head = 0;
+    s_log_count = 0;
+    pthread_mutex_unlock(&s_log_mutex);
+    return strdup("{\"jsonrpc\":\"2.0\",\"result\":{\"ok\":true}}");
+}
+
+// ── Crash log ────────────────────────────────────────────────────────────────
+
+static char *h_get_crash_log(const char *params) {
+    (void)params;
+    extern char g_crash_log_path[512];
+    FILE *f = fopen(g_crash_log_path, "r");
+    if (!f) {
+        return strdup("{\"jsonrpc\":\"2.0\",\"result\":{\"crash_log\":null}}");
+    }
+    fseek(f, 0, SEEK_END);
+    long fsize = ftell(f);
+    fseek(f, 0, SEEK_SET);
+    if (fsize <= 0 || fsize > 65536) {
+        fclose(f);
+        return strdup("{\"jsonrpc\":\"2.0\",\"result\":{\"crash_log\":null}}");
+    }
+    char *content = malloc((size_t)fsize + 1);
+    if (!content) { fclose(f); return strdup("{\"jsonrpc\":\"2.0\",\"error\":{\"code\":-32603,\"message\":\"oom\"}}"); }
+    fread(content, 1, (size_t)fsize, f);
+    content[fsize] = '\0';
+    fclose(f);
+
+    // JSON-escape the content
+    char *escaped = malloc((size_t)fsize * 2 + 128);
+    if (!escaped) { free(content); return strdup("{\"jsonrpc\":\"2.0\",\"error\":{\"code\":-32603,\"message\":\"oom\"}}"); }
+    json_escape(content, escaped, (size_t)fsize * 2 + 64);
+    free(content);
+
+    size_t resp_size = strlen(escaped) + 128;
+    char *resp = malloc(resp_size);
+    if (!resp) { free(escaped); return strdup("{\"jsonrpc\":\"2.0\",\"error\":{\"code\":-32603,\"message\":\"oom\"}}"); }
+    snprintf(resp, resp_size, "{\"jsonrpc\":\"2.0\",\"result\":{\"crash_log\":\"%s\"}}", escaped);
+    free(escaped);
+    return resp;
+}
+
+// ── Wait for idle (no app running) ──────────────────────────────────────────
+
+static char *h_wait_for_idle(const char *params) {
+    (void)params;
+    const char *name = launcher_get_running_app_name();
+    if (!name || !name[0]) {
+        return strdup("{\"jsonrpc\":\"2.0\",\"result\":{\"idle\":true}}");
+    }
+    return strdup("{\"jsonrpc\":\"2.0\",\"result\":{\"idle\":false}}");
+}
+
 // ── Dispatch ─────────────────────────────────────────────────────────────────
 
 typedef char *(*handler_fn)(const char *params);
@@ -868,6 +1039,10 @@ static struct {
     { "get_log_buffer",     h_get_log_buffer },
     { "set_time_multiplier",h_set_time_multiplier },
     { "get_terminal_buffer", h_get_terminal_buffer },
+    { "shutdown",           h_shutdown },
+    { "clear_log_buffer",   h_clear_log_buffer },
+    { "get_crash_log",      h_get_crash_log },
+    { "wait_for_idle",      h_wait_for_idle },
     { NULL, NULL },
 };
 
@@ -875,7 +1050,23 @@ static void wrap_response(int id, const char *result, char *out, size_t max) {
     snprintf(out, max, "{\"jsonrpc\":\"2.0\",\"id\":%d,", id);
     size_t base = strlen(out);
     if (result && result[0] == '{') {
-        strncpy(out + base, result + 1, max - base - 1);
+        // Handler returns full JSON-RPC envelope like {"jsonrpc":"2.0","result":...}
+        // Skip past the handler's "jsonrpc":"2.0", to avoid duplicate key
+        const char *inner = result + 1;  // skip opening '{'
+        const char *skip = strstr(inner, "\"jsonrpc\"");
+        if (skip) {
+            // Find the comma after the jsonrpc value
+            const char *after = strchr(skip, ',');
+            if (after) {
+                after++;  // skip the comma
+                while (*after == ' ' || *after == '\t') after++;
+                strncpy(out + base, after, max - base - 1);
+            } else {
+                strncpy(out + base, inner, max - base - 1);
+            }
+        } else {
+            strncpy(out + base, inner, max - base - 1);
+        }
     } else if (result) {
         snprintf(out + base, max - base, "\"result\":%s}", result);
     } else {

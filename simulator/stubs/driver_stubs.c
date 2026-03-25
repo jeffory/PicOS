@@ -9,6 +9,7 @@
 #include <dirent.h>
 #include <sys/stat.h>
 #include "../hal/hal_display.h"
+#include "../sim_socket.h"
 
 // External base path from hal_sdcard.c
 extern char g_base_path[512];
@@ -358,6 +359,8 @@ int display_get_font_height(void) {
 }
 
 void display_flush(void) {
+    // Poll socket for RPC commands (Core 0 only — safe to access framebuffer)
+    sim_socket_poll();
     // Swap buffers and copy to HAL framebuffer
     uint16_t* back = display_get_back_buffer();
     uint16_t* hal_fb = hal_display_get_framebuffer();
@@ -458,36 +461,61 @@ void display_draw_image(int x, int y, const uint16_t* data, int w, int h) {
     }
 }
 
-void display_draw_image_partial(int x, int y, const uint16_t* data, int w, int h, int src_x, int src_y, int src_w, int src_h) {
+void display_draw_image_partial(int x, int y, int img_w, int img_h,
+                                const uint16_t *data, int sx, int sy, int sw,
+                                int sh, bool flip_x, bool flip_y,
+                                uint16_t transparent_color) {
+    if (!data || sw <= 0 || sh <= 0) return;
+    // Clip source rect to image bounds
+    if (sx < 0) { sw += sx; sx = 0; }
+    if (sy < 0) { sh += sy; sy = 0; }
+    if (sx + sw > img_w) sw = img_w - sx;
+    if (sy + sh > img_h) sh = img_h - sy;
+    if (sw <= 0 || sh <= 0) return;
+
     uint16_t* fb = display_get_back_buffer();
-    for (int dy = 0; dy < src_h && y + dy < 320; dy++) {
-        for (int dx = 0; dx < src_w && x + dx < 320; dx++) {
-            if (x + dx >= 0 && y + dy >= 0) {
-                fb[(y + dy) * 320 + (x + dx)] = data[(src_y + dy) * w + (src_x + dx)];
-            }
+    for (int row = 0; row < sh; row++) {
+        int py = y + row;
+        if (py < 0 || py >= 320) continue;
+        int src_row = flip_y ? (sy + sh - 1 - row) : (sy + row);
+        for (int col = 0; col < sw; col++) {
+            int px = x + col;
+            if (px < 0 || px >= 320) continue;
+            int src_col = flip_x ? (sx + sw - 1 - col) : (sx + col);
+            uint16_t c = data[src_row * img_w + src_col];
+            if (transparent_color != 0 && c == transparent_color) continue;
+            fb[py * 320 + px] = c;
         }
     }
 }
 
-void display_draw_image_scaled_nn(int x, int y, const uint16_t* data, int w, int h, float scale) {
+void display_draw_image_scaled_nn(int x, int y, const uint16_t *data,
+                                  int src_w, int src_h, int dst_w, int dst_h,
+                                  uint16_t transparent_color) {
+    if (!data || dst_w <= 0 || dst_h <= 0 || src_w <= 0 || src_h <= 0) return;
     uint16_t* fb = display_get_back_buffer();
-    int new_w = (int)(w * scale);
-    int new_h = (int)(h * scale);
-    for (int dy = 0; dy < new_h && y + dy < 320; dy++) {
-        for (int dx = 0; dx < new_w && x + dx < 320; dx++) {
+    for (int dy = 0; dy < dst_h && y + dy < 320; dy++) {
+        for (int dx = 0; dx < dst_w && x + dx < 320; dx++) {
             if (x + dx >= 0 && y + dy >= 0) {
-                int src_x = (int)(dx / scale);
-                int src_y = (int)(dy / scale);
-                if (src_x < w && src_y < h) {
-                    fb[(y + dy) * 320 + (x + dx)] = data[src_y * w + src_x];
+                int sx = dx * src_w / dst_w;
+                int sy = dy * src_h / dst_h;
+                if (sx < src_w && sy < src_h) {
+                    uint16_t c = data[sy * src_w + sx];
+                    if (transparent_color != 0 && c == transparent_color) continue;
+                    fb[(y + dy) * 320 + (x + dx)] = c;
                 }
             }
         }
     }
 }
 
-void display_draw_image_scaled(int x, int y, const uint16_t* data, int w, int h, float scale) {
-    display_draw_image_scaled_nn(x, y, data, w, h, scale);
+void display_draw_image_scaled(int x, int y, int img_w, int img_h,
+                               const uint16_t *data, float scale, float angle,
+                               uint16_t transparent_color) {
+    if (!data || img_w <= 0 || img_h <= 0) return;
+    int dst_w = (int)(img_w * scale);
+    int dst_h = (int)(img_h * scale);
+    display_draw_image_scaled_nn(x, y, data, img_w, img_h, dst_w, dst_h, transparent_color);
 }
 
 // Keyboard stubs are now in keyboard_stub.c
@@ -678,6 +706,18 @@ void crashlog_write_lua_error(const char *app_name, const char *context, const c
     (void)app_name; (void)context;
     if (message) fprintf(stderr, "[CRASHLOG] %s\n", message);
 }
+
+// Display effects (no-op stubs for simulator)
+void display_effect_invert(void) {}
+void display_effect_darken(uint8_t factor) { (void)factor; }
+void display_effect_brighten(uint8_t factor) { (void)factor; }
+void display_effect_tint(uint8_t r, uint8_t g, uint8_t b, uint8_t strength) { (void)r; (void)g; (void)b; (void)strength; }
+void display_effect_grayscale(void) {}
+void display_effect_blend(const uint16_t *src, int w, int h, uint8_t alpha) { (void)src; (void)w; (void)h; (void)alpha; }
+void display_effect_palette(const uint16_t *lut, int lut_size) { (void)lut; (void)lut_size; }
+void display_effect_dither(uint8_t levels) { (void)levels; }
+void display_effect_scanline(uint8_t intensity) { (void)intensity; }
+void display_effect_posterize(uint8_t levels) { (void)levels; }
 
 // Audio/sound/fileplayer/mp3 are implemented in simulator/sim_audio.c
 

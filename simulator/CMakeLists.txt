@@ -228,16 +228,21 @@ set(PICOS_CORE_SOURCES
     ${PICOS_ROOT}/src/os/terminal_render.c
     ${PICOS_ROOT}/src/os/lua_bridge_terminal.c
     ${PICOS_ROOT}/src/os/lua_bridge_crypto.c
+    ${PICOS_ROOT}/src/os/lua_bridge_mod.c
+    ${PICOS_ROOT}/src/drivers/mod_player.c
     ${PICOS_ROOT}/src/os/text_input.c
     ${PICOS_ROOT}/src/os/file_browser.c
     ${PICOS_ROOT}/src/os/config.c
     ${PICOS_ROOT}/src/os/clock.c
     ${PICOS_ROOT}/src/os/tz_picker.c
     ${PICOS_ROOT}/src/os/ui.c
+    ${PICOS_ROOT}/src/os/ui_widgets.c
+    ${PICOS_ROOT}/src/os/text_wrap.c
     ${CMAKE_CURRENT_SOURCE_DIR}/stubs/dev_commands_stub.c
     ${PICOS_ROOT}/src/fonts/font_6x11.c
     ${PICOS_ROOT}/src/fonts/font_scientifica.c
     ${PICOS_ROOT}/src/os/image_decoders.cpp
+    ${PICOS_ROOT}/src/drivers/image_api.c
 )
 
 # Filter out crypto (not yet implemented in simulator)
@@ -261,6 +266,8 @@ target_include_directories(picos_simulator PRIVATE
     ${PICOS_ROOT}/src/drivers
     ${PICOS_ROOT}/src/usb
     ${PICOS_ROOT}/third_party/umm_malloc/src
+    ${PICOS_ROOT}/third_party/stb
+    ${PICOS_ROOT}/third_party/pocketmod
 )
 
 target_link_libraries(picos_simulator PRIVATE
@@ -280,6 +287,7 @@ target_compile_definitions(picos_simulator PRIVATE
     DISPLAY_SCALE=3
     SIMULATOR_BUILD=1
     WIFI_ENABLED=1
+    PICOS_PROJECT_ROOT="${PICOS_ROOT}"
 )
 
 target_compile_options(picos_simulator PRIVATE

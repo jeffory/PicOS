@@ -95,6 +95,13 @@ void hal_input_update(void) {
     pthread_mutex_unlock(&s_input_mutex);
 }
 
+void hal_input_inject_buttons(uint32_t buttons) {
+    pthread_mutex_lock(&s_input_mutex);
+    g_buttons |= buttons;
+    g_buttons_pressed |= buttons;
+    pthread_mutex_unlock(&s_input_mutex);
+}
+
 uint32_t hal_input_get_buttons(void) {
     pthread_mutex_lock(&s_input_mutex);
     uint32_t result = g_buttons;

@@ -200,22 +200,58 @@ void audio_stream_poll(void) {
 void audio_push_samples(const int16_t *samples, int count) {
     if (!s_stream_active || !samples || count <= 0) return;
 
-    // Apply master volume and push to SDL
-    int16_t buf[512];
-    int pos = 0;
-    while (pos < count) {
-        int chunk = count - pos;
-        if (chunk > 256) chunk = 256;
-        for (int i = 0; i < chunk; i++) {
-            int32_t l = (int32_t)samples[(pos + i) * 2 + 0] * s_master_volume / 100;
-            int32_t r = (int32_t)samples[(pos + i) * 2 + 1] * s_master_volume / 100;
-            if (l > 32767) l = 32767; if (l < -32768) l = -32768;
-            if (r > 32767) r = 32767; if (r < -32768) r = -32768;
-            buf[i * 2 + 0] = (int16_t)l;
-            buf[i * 2 + 1] = (int16_t)r;
+    // Resample from stream rate to SDL output rate if they differ
+    uint32_t src_rate = s_stream_sample_rate;
+    uint32_t dst_rate = SIM_SAMPLE_RATE;
+
+    if (src_rate == dst_rate || src_rate == 0) {
+        // No resampling needed — just apply volume
+        int16_t buf[512];
+        int pos = 0;
+        while (pos < count) {
+            int chunk = count - pos;
+            if (chunk > 256) chunk = 256;
+            for (int i = 0; i < chunk; i++) {
+                int32_t l = (int32_t)samples[(pos + i) * 2 + 0] * s_master_volume / 100;
+                int32_t r = (int32_t)samples[(pos + i) * 2 + 1] * s_master_volume / 100;
+                if (l > 32767) l = 32767; if (l < -32768) l = -32768;
+                if (r > 32767) r = 32767; if (r < -32768) r = -32768;
+                buf[i * 2 + 0] = (int16_t)l;
+                buf[i * 2 + 1] = (int16_t)r;
+            }
+            hal_audio_push_samples(buf, chunk);
+            pos += chunk;
         }
-        hal_audio_push_samples(buf, chunk);
-        pos += chunk;
+    } else {
+        // Linear interpolation resampling (e.g. 22050 → 44100)
+        int dst_count = (int)((int64_t)count * dst_rate / src_rate);
+        if (dst_count <= 0) return;
+
+        int16_t buf[512];
+        int dst_pos = 0;
+        while (dst_pos < dst_count) {
+            int chunk = dst_count - dst_pos;
+            if (chunk > 256) chunk = 256;
+            for (int i = 0; i < chunk; i++) {
+                // Map destination sample index to source position
+                double src_idx = (double)(dst_pos + i) * src_rate / dst_rate;
+                int idx0 = (int)src_idx;
+                double frac = src_idx - idx0;
+                int idx1 = idx0 + 1;
+                if (idx1 >= count) idx1 = count - 1;
+
+                int32_t l = (int32_t)((1.0 - frac) * samples[idx0 * 2 + 0] + frac * samples[idx1 * 2 + 0]);
+                int32_t r = (int32_t)((1.0 - frac) * samples[idx0 * 2 + 1] + frac * samples[idx1 * 2 + 1]);
+                l = l * s_master_volume / 100;
+                r = r * s_master_volume / 100;
+                if (l > 32767) l = 32767; if (l < -32768) l = -32768;
+                if (r > 32767) r = 32767; if (r < -32768) r = -32768;
+                buf[i * 2 + 0] = (int16_t)l;
+                buf[i * 2 + 1] = (int16_t)r;
+            }
+            hal_audio_push_samples(buf, chunk);
+            dst_pos += chunk;
+        }
     }
 }
 

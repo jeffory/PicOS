@@ -16,6 +16,9 @@ void set_simulator_exit_flag(volatile int *flag) {
 }
 
 void request_simulator_exit(void) {
+    // Set the global g_running flag so the Lua debug hook sees it
+    extern volatile int g_running;
+    g_running = 0;
     if (g_simulator_running) {
         *g_simulator_running = 0;
     }
@@ -180,6 +183,9 @@ void kbd_recover_i2c_bus(void) {
 }
 
 void kbd_inject_buttons(uint32_t buttons) {
+    // Inject through HAL so the next kbd_poll picks them up
+    hal_input_inject_buttons(buttons);
+    // Also set local state for immediate reads
     s_buttons |= buttons;
     s_buttons_pressed |= buttons;
 }

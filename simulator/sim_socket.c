@@ -15,8 +15,8 @@
 
 #define MAX_CLIENTS 8
 #define READ_BUF_SIZE 4096
-#define UNIX_SOCK_PATH "./picos_control"
-#define TCP_PORT 7878
+#define DEFAULT_UNIX_SOCK_PATH "./picos_control"
+#define DEFAULT_TCP_PORT 7878
 
 typedef struct {
     int fd;
@@ -32,6 +32,8 @@ static int s_tcp_fd = -1;
 static int s_max_fd = -1;
 static fd_set s_read_fds;
 static pthread_mutex_t s_notify_mutex = PTHREAD_MUTEX_INITIALIZER;
+static int s_actual_tcp_port = 0;
+static char s_unix_sock_path[256] = DEFAULT_UNIX_SOCK_PATH;
 
 static void set_nonblocking(int fd) {
     int flags = fcntl(fd, F_GETFL, 0);
@@ -129,30 +131,38 @@ static void process_requests(client_t *c) {
     }
 }
 
-void sim_socket_init(void) {
+void sim_socket_init(int tcp_port, const char *instance_id) {
     memset(s_clients, 0, sizeof(s_clients));
     for (int i = 0; i < MAX_CLIENTS; i++) s_clients[i].fd = -1;
     FD_ZERO(&s_read_fds);
     s_max_fd = -1;
 
-    unlink(UNIX_SOCK_PATH);
-    // ...
+    // Build UNIX socket path based on instance ID
+    if (instance_id && instance_id[0]) {
+        snprintf(s_unix_sock_path, sizeof(s_unix_sock_path),
+                 "./picos_control_%s", instance_id);
+    } else {
+        strncpy(s_unix_sock_path, DEFAULT_UNIX_SOCK_PATH, sizeof(s_unix_sock_path) - 1);
+    }
+
+    unlink(s_unix_sock_path);
 
     s_unix_fd = socket(AF_UNIX, SOCK_STREAM, 0);
     if (s_unix_fd >= 0) {
         set_nonblocking(s_unix_fd);
         struct sockaddr_un addr = {0};
         addr.sun_family = AF_UNIX;
-        strncpy(addr.sun_path, UNIX_SOCK_PATH, sizeof(addr.sun_path) - 1);
+        strncpy(addr.sun_path, s_unix_sock_path, sizeof(addr.sun_path) - 1);
         if (bind(s_unix_fd, (struct sockaddr *)&addr, sizeof(addr)) == 0 &&
             listen(s_unix_fd, 5) == 0) {
-            printf("[Socket] UNIX domain server listening on %s\n", UNIX_SOCK_PATH);
+            printf("[Socket] UNIX domain server listening on %s\n", s_unix_sock_path);
         } else {
             close(s_unix_fd);
             s_unix_fd = -1;
         }
     }
 
+    int bind_port = (tcp_port >= 0) ? tcp_port : DEFAULT_TCP_PORT;
     s_tcp_fd = socket(AF_INET, SOCK_STREAM, 0);
     if (s_tcp_fd >= 0) {
         int opt = 1;
@@ -161,10 +171,15 @@ void sim_socket_init(void) {
         struct sockaddr_in addr = {0};
         addr.sin_family = AF_INET;
         addr.sin_addr.s_addr = htonl(INADDR_ANY);
-        addr.sin_port = htons(TCP_PORT);
+        addr.sin_port = htons((uint16_t)bind_port);
         if (bind(s_tcp_fd, (struct sockaddr *)&addr, sizeof(addr)) == 0 &&
             listen(s_tcp_fd, 5) == 0) {
-            printf("[Socket] TCP server listening on 0.0.0.0:%d\n", TCP_PORT);
+            // Query the actual port (needed when bind_port=0 for auto-assign)
+            struct sockaddr_in bound = {0};
+            socklen_t len = sizeof(bound);
+            getsockname(s_tcp_fd, (struct sockaddr *)&bound, &len);
+            s_actual_tcp_port = ntohs(bound.sin_port);
+            printf("[Socket] TCP port: %d\n", s_actual_tcp_port);
         } else {
             close(s_tcp_fd);
             s_tcp_fd = -1;
@@ -174,6 +189,10 @@ void sim_socket_init(void) {
     if (s_unix_fd < 0 && s_tcp_fd < 0) {
         printf("[Socket] WARNING: Failed to open any socket\n");
     }
+}
+
+int sim_socket_get_port(void) {
+    return s_actual_tcp_port;
 }
 
 void sim_socket_poll(void) {
@@ -241,7 +260,7 @@ void sim_socket_close(void) {
     }
     if (s_unix_fd >= 0) { close(s_unix_fd); s_unix_fd = -1; }
     if (s_tcp_fd >= 0)  { close(s_tcp_fd);  s_tcp_fd = -1; }
-    unlink(UNIX_SOCK_PATH);
+    unlink(s_unix_sock_path);
 }
 
 void sim_socket_notify(const char *method, const char *params_json) {

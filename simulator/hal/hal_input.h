@@ -55,4 +55,7 @@ char hal_input_get_char(void);
 // Poll for character (non-blocking)
 bool hal_input_poll_char(char* out_char);
 
+// Inject button press (for RPC control)
+void hal_input_inject_buttons(uint32_t buttons);
+
 #endif // HAL_INPUT_H
