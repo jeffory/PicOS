@@ -113,10 +113,19 @@ void http_lua_fire_pending(lua_State *L) {
         lua_pop(L, 1);
     }
 
-    // If connection is closed or failed, unref all callbacks to break
-    // potential closure cycles (callbacks capturing the 'conn' object).
+    // If connection is closed or failed, unref callbacks and free the
+    // underlying C connection immediately.  Without this, the http_conn_t
+    // (and its hardware spinlock) stays allocated until Lua GC collects
+    // the userdata — which may not happen before a retry allocates a new
+    // connection, exhausting the spinlock pool.
     if (pend & (HTTP_CB_CLOSED | HTTP_CB_FAILED)) {
       http_ud_unref_all(L, ud);
+      if (ud->conn) {
+        ud->conn->lua_ud = NULL;
+        ud->conn->pending = 0;
+        g_api.http->close(ud->conn);  // = http_free: releases spinlock
+        ud->conn = NULL;
+      }
     }
   }
 }
