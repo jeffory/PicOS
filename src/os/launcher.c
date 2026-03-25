@@ -363,11 +363,14 @@ void launcher_apply_clock(uint32_t khz) {
   g_core1_pause = false;
 }
 
+static volatile const char *s_running_app_name = NULL;
+
 static bool run_app(int idx) {
   if (idx < 0 || idx >= s_app_count)
     return false;
 
   app_entry_t *app = &s_apps[idx];
+  s_running_app_name = app->name;
 
   // Free any PSRAM used by the MP3 player (from a previous Lua app)
   // so we have maximum memory for the next app.
@@ -425,6 +428,8 @@ static bool run_app(int idx) {
 
   system_menu_clear_items();
 
+  s_running_app_name = NULL;
+
   printf("[LAUNCHER] App '%s' exited (ok=%d), PSRAM free: %zu\n",
          app->name, ok, lua_psram_alloc_free_size());
 
@@ -479,16 +484,16 @@ void launcher_run(void) {
     // Socket server poll — JSON-RPC interface for MCP/automation
 #ifdef PICOS_SIMULATOR
     extern void sim_socket_poll(void);
-    extern void sim_handler_check_launch(void);
+    extern bool sim_handler_check_launch(void);
     sim_socket_poll();
-    sim_handler_check_launch();
+    bool sim_launched = sim_handler_check_launch();
 #else
-    // Stubs for bare-metal build (no simulator)
+    bool sim_launched = false;
 #endif
 
     // Handle pending launch FIRST (before exit check)
     // This ensures "launch" command works (which sets both pending_launch and exit flags)
-    bool dirty = false;
+    bool dirty = sim_launched;
     if (dev_commands_get_pending_launch()) {
       // Clear exit flag since we're launching, not exiting
       dev_commands_clear_exit();
@@ -501,6 +506,12 @@ void launcher_run(void) {
     }
 
     // Check for exit request (window close, dev command, etc.)
+#ifdef PICOS_SIMULATOR
+    {
+      extern volatile int g_running;
+      if (!g_running) dev_commands_set_exit();
+    }
+#endif
     if (dev_commands_wants_exit()) {
       printf("[LAUNCHER] Exit requested, shutting down...\n");
       fflush(stdout);
@@ -679,10 +690,22 @@ bool launcher_launch_by_name(const char *name) {
     return true;
   }
 
-  // Fall back to name match
+  // Fall back to display name match
   for (int i = 0; i < s_app_count; i++) {
     if (strcmp(s_apps[i].name, name) == 0) {
       printf("[DEV] Launching app: %s\n", name);
+      stdio_flush();
+      run_app(i);
+      return true;
+    }
+  }
+
+  // Fall back to directory name match (e.g. "hello" matches "/apps/hello")
+  for (int i = 0; i < s_app_count; i++) {
+    const char *slash = strrchr(s_apps[i].path, '/');
+    const char *dirname = slash ? slash + 1 : s_apps[i].path;
+    if (strcmp(dirname, name) == 0) {
+      printf("[DEV] Launching app by dir: %s\n", name);
       stdio_flush();
       run_app(i);
       return true;
@@ -694,6 +717,5 @@ bool launcher_launch_by_name(const char *name) {
 }
 
 const char* launcher_get_running_app_name(void) {
-  // This would need to be tracked - for now return NULL
-  return NULL;
+  return (const char*)s_running_app_name;
 }
