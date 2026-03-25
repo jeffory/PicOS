@@ -126,8 +126,10 @@ static uint8_t sd_send_cmd(uint8_t cmd, uint32_t arg) {
   if (cmd == 8)
     crc = 0x87; /* CMD8 precomputed CRC */
 
-  /* Wait for any pending write to finish before sending */
-  sd_wait_ready(200);
+  /* Wait for any pending write to finish before sending.
+   * 500ms is needed after multi-block writes (CMD25) where the card may
+   * still be doing internal housekeeping. */
+  sd_wait_ready(SD_CMD_TIMEOUT_MS);
 
   uint8_t pkt[6] = {(uint8_t)(0x40 | cmd), (uint8_t)(arg >> 24),
                     (uint8_t)(arg >> 16),  (uint8_t)(arg >> 8),
@@ -377,7 +379,9 @@ DRESULT disk_read(BYTE pdrv, BYTE *buff, LBA_t sector, UINT count) {
 
   if (count == 1) {
     /* CMD17: READ_SINGLE_BLOCK - no optimization for single blocks */
-    if (sd_send_cmd(17, addr) != 0x00) {
+    uint8_t r1 = sd_send_cmd(17, addr);
+    if (r1 != 0x00) {
+      printf("[SD_RD] CMD17 fail: R1=0x%02x sec=%lu\n", r1, (unsigned long)sector);
       sd_cs_high();
       return RES_ERROR;
     }
@@ -447,10 +451,18 @@ DRESULT disk_read(BYTE pdrv, BYTE *buff, LBA_t sector, UINT count) {
 #if FF_FS_READONLY == 0
 
 DRESULT disk_write(BYTE pdrv, const BYTE *buff, LBA_t sector, UINT count) {
+  static uint32_t s_wr_seq = 0;
   if (pdrv != 0 || (s_dstatus & STA_NOINIT))
     return RES_NOTRDY;
   if (s_dstatus & STA_PROTECT)
     return RES_WRPRT;
+
+  s_wr_seq++;
+  /* NOTE: No printf here — disk_write is called from USB IRQ context during
+   * MSC mode.  Printf writes to CDC serial which shares the USB peripheral;
+   * when the CDC TX buffer fills, printf spins waiting for USB events that
+   * can't fire (we're already in USBCTRL_IRQ), stalling MSC transfers and
+   * causing host timeouts → filesystem corruption (partial FAT writes). */
 
   uint32_t addr = s_is_sdhc ? (uint32_t)sector : (uint32_t)sector * 512;
 
@@ -458,7 +470,9 @@ DRESULT disk_write(BYTE pdrv, const BYTE *buff, LBA_t sector, UINT count) {
 
   if (count == 1) {
     /* CMD24: WRITE_BLOCK */
-    if (sd_send_cmd(24, addr) != 0x00) {
+    uint8_t r1 = sd_send_cmd(24, addr);
+    if (r1 != 0x00) {
+      printf("[SD_WR] CMD24 fail: R1=0x%02x sec=%lu buf=%p\n", r1, (unsigned long)sector, buff);
       sd_cs_high();
       return RES_ERROR;
     }
@@ -469,29 +483,37 @@ DRESULT disk_write(BYTE pdrv, const BYTE *buff, LBA_t sector, UINT count) {
     spi_byte(0xFF);                /* Dummy CRC (2 bytes)          */
     spi_byte(0xFF);
 
-    uint8_t resp = spi_byte(0xFF) & 0x1F;
-    if (resp != 0x05) {
-      sd_cs_high();
-      return RES_ERROR;
+    /* Poll for data response token — card may need several clocks */
+    {
+      absolute_time_t deadline = make_timeout_time_ms(SD_CMD_TIMEOUT_MS);
+      uint8_t resp;
+      do {
+        resp = spi_byte(0xFF);
+      } while (resp == 0xFF && !time_reached(deadline));
+      if ((resp & 0x1F) != 0x05) {
+        printf("[SD_WR] CMD24 data resp=0x%02x sec=%lu\n", resp, (unsigned long)sector);
+        sd_cs_high();
+        return RES_ERROR;
+      }
     }
 
     if (!sd_wait_ready(SD_CMD_TIMEOUT_MS)) {
+      printf("[SD_WR] CMD24 busy timeout sec=%lu\n", (unsigned long)sector);
       sd_cs_high();
       return RES_ERROR;
     }
   } else {
     /* CMD25: WRITE_MULTIPLE_BLOCK with CMD23 pre-erase optimization */
-    
-    /* CMD23: SET_BLOCK_COUNT - pre-erase blocks for faster writes */
-    /* This tells the card how many blocks we're about to write,
-     * allowing it to pre-erase and potentially improve performance */
     sd_send_cmd(23, count);
-    
-    if (sd_send_cmd(25, addr) != 0x00) {
+
+    uint8_t r1 = sd_send_cmd(25, addr);
+    if (r1 != 0x00) {
+      printf("[SD_WR] CMD25 fail: R1=0x%02x sec=%lu cnt=%u buf=%p\n", r1, (unsigned long)sector, count, buff);
       sd_cs_high();
       return RES_ERROR;
     }
 
+    UINT blk = 0;
     while (count--) {
       spi_byte(0xFF);                 /* Idle byte                */
       spi_byte(SD_TOKEN_MULTI_WRITE); /* Multi-block start token  */
@@ -499,25 +521,43 @@ DRESULT disk_write(BYTE pdrv, const BYTE *buff, LBA_t sector, UINT count) {
       spi_byte(0xFF); /* Dummy CRC               */
       spi_byte(0xFF);
 
-      uint8_t resp = spi_byte(0xFF) & 0x1F;
-      if (resp != 0x05) {
-        spi_byte(SD_TOKEN_STOP_TRAN);
-        sd_cs_high();
-        return RES_ERROR;
+      /* Poll for data response token — card may need several clocks */
+      {
+        absolute_time_t deadline = make_timeout_time_ms(SD_CMD_TIMEOUT_MS);
+        uint8_t resp;
+        do {
+          resp = spi_byte(0xFF);
+        } while (resp == 0xFF && !time_reached(deadline));
+        if ((resp & 0x1F) != 0x05) {
+          printf("[SD_WR] CMD25 blk %u resp=0x%02x sec=%lu\n", blk, resp, (unsigned long)sector);
+          spi_byte(SD_TOKEN_STOP_TRAN);
+          sd_cs_high();
+          return RES_ERROR;
+        }
       }
 
       if (!sd_wait_ready(SD_CMD_TIMEOUT_MS)) {
+        printf("[SD_WR] CMD25 blk %u busy timeout sec=%lu\n", blk, (unsigned long)sector);
         spi_byte(SD_TOKEN_STOP_TRAN);
         sd_cs_high();
         return RES_ERROR;
       }
 
       buff += 512;
+      blk++;
     }
 
-    /* Send stop token */
-    spi_byte(SD_TOKEN_STOP_TRAN);
+    /* Stop the multi-block write.  SD spec requires at least one idle
+     * byte before the Stop Tran token so the card can synchronise to a
+     * byte boundary.  After the card signals not-busy we send extra idle
+     * clocks — some cards need recovery time before accepting the next
+     * command (CMD24 for a single-sector flush from FatFs). */
+    spi_byte(0xFF);                 /* Idle byte before stop token  */
+    spi_byte(SD_TOKEN_STOP_TRAN);   /* 0xFD — end multi-block write */
+    spi_byte(0xFF);                 /* Stuff byte after stop token  */
     sd_wait_ready(SD_CMD_TIMEOUT_MS);
+    spi_byte(0xFF);                 /* Extra idle clocks            */
+    spi_byte(0xFF);
   }
 
   sd_cs_high();
