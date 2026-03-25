@@ -856,7 +856,7 @@ void display_draw_image_partial(int x, int y, int img_w, int img_h,
   if (sy + sh > img_h)
     sh = img_h - sy;
 
-  if (sw <= 0 || sh <= 0)
+  if (sw <= 0 || sh <= 0 || !data)
     return;
 
   // Use global setting if transparent_color is 0
