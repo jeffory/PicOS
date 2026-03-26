@@ -218,11 +218,15 @@ void picos_main(const PicoCalcAPI *api,
         return;
     }
 
-    // Pass -gfxmode rgb565 to i_video.c
-    char* argv[] = {"doom", "-gfxmode", "rgb565", NULL};
+    // Build path to doom1.wad in app directory
+    static char wad_path[256];
+    snprintf(wad_path, sizeof(wad_path), "%s/doom1.wad", app_dir);
+
+    // Pass -gfxmode rgb565 and -iwad pointing to the app directory
+    char* argv[] = {"doom", "-gfxmode", "rgb565", "-iwad", wad_path, NULL};
 
     // Initialize DOOM (runs one tick internally, then returns)
-    doomgeneric_Create(3, argv);
+    doomgeneric_Create(5, argv);
 
     // Main game loop — doomgeneric expects the platform to drive ticks
     while (!api->sys->shouldExit()) {

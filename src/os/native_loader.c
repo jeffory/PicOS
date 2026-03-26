@@ -225,6 +225,17 @@ static void launch_on_psp(uint32_t psp_top, picos_app_entry_t fn,
 extern volatile bool g_core1_pause;
 extern volatile bool g_core1_paused;
 
+#ifdef PICOS_SIMULATOR
+// Simulator: use Unicorn Engine to emulate the ARM ELF binary
+#include "unicorn_runner.h"
+
+static bool native_run(const app_entry_t *app) {
+  printf("[NATIVE] Loading '%s' via Unicorn Engine\n", app->name);
+  char elf_path[256];
+  snprintf(elf_path, sizeof(elf_path), "%s/main.elf", app->path);
+  return unicorn_run_app(elf_path, app->path, app->id, app->name);
+}
+#else
 static bool native_run(const app_entry_t *app) {
   printf("[NATIVE] Loading '%s'\n", app->name);
 
@@ -643,6 +654,7 @@ out:
 
   return ok;
 }
+#endif  // !PICOS_SIMULATOR
 
 static bool native_can_handle(const app_entry_t *app) {
   return app->type == APP_TYPE_NATIVE;

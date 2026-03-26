@@ -36,7 +36,7 @@
 #ifdef PICOS_PROJECT_ROOT
 #define SIM_DEFAULT_SD_CARD PICOS_PROJECT_ROOT
 #else
-#define SIM_DEFAULT_SD_CARD ".."
+#define SIM_DEFAULT_SD_CARD "."
 #endif
 
 // Global state — g_running is non-static so lua_bridge.c and sim_socket_handler.c

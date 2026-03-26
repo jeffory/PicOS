@@ -690,9 +690,9 @@ bool launcher_launch_by_name(const char *name) {
     return true;
   }
 
-  // Fall back to display name match
+  // Fall back to display name match (case-insensitive)
   for (int i = 0; i < s_app_count; i++) {
-    if (strcmp(s_apps[i].name, name) == 0) {
+    if (strcasecmp(s_apps[i].name, name) == 0) {
       printf("[DEV] Launching app: %s\n", name);
       stdio_flush();
       run_app(i);
@@ -700,12 +700,12 @@ bool launcher_launch_by_name(const char *name) {
     }
   }
 
-  // Fall back to directory name match (e.g. "hello" matches "/apps/hello")
+  // Fall back to directory name match (e.g. "doom" matches "/apps/doom")
   for (int i = 0; i < s_app_count; i++) {
     const char *slash = strrchr(s_apps[i].path, '/');
     const char *dirname = slash ? slash + 1 : s_apps[i].path;
-    if (strcmp(dirname, name) == 0) {
-      printf("[DEV] Launching app by dir: %s\n", name);
+    if (strcasecmp(dirname, name) == 0) {
+      printf("[DEV] Launching app by dir: %s (%s)\n", name, s_apps[i].name);
       stdio_flush();
       run_app(i);
       return true;
