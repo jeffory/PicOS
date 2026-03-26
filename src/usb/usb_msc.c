@@ -32,6 +32,8 @@ static volatile bool s_msc_ejected = false;  // Set by tud_msc_start_stop_cb whe
 static volatile bool s_media_changed = false; // Signals UNIT ATTENTION on next TUR
 static uint32_t s_cached_sector_count = 0;   // Cached at MSC entry, avoids SPI per query
 
+bool usb_msc_is_active(void) { return s_msc_active; }
+
 // --------------------------------------------------------------------
 // USB MSC Entry point
 // --------------------------------------------------------------------
@@ -207,10 +209,11 @@ void usb_msc_enter_mode(void) {
 // --------------------------------------------------------------------
 
 // Invoked when device is mounted by the host
-void tud_mount_cb(void) { printf("[USB MSC] Device mounted by host\n"); }
+// No printf — runs in USBCTRL_IRQ; CDC serial deadlocks here.
+void tud_mount_cb(void) { }
 
 // Invoked when device is unmounted by the host
-void tud_umount_cb(void) { printf("[USB MSC] Device unmounted by host\n"); }
+void tud_umount_cb(void) { }
 
 // Invoked to determine max LUN
 uint8_t tud_msc_get_maxlun_cb(void) { return 0; }
@@ -247,7 +250,7 @@ bool tud_msc_start_stop_cb(uint8_t lun, uint8_t power_condition, bool start,
   (void)power_condition;
   (void)start;
   if (load_eject) {
-    printf("[USB MSC] Host ejected device\n");
+    // No printf — runs in USBCTRL_IRQ; CDC serial deadlocks here.
     s_msc_ejected = true;
   }
   return true;

@@ -29,6 +29,10 @@
 #include <string.h>
 #include <stdio.h>
 
+/* usb_msc_is_active() — suppress printf when called from USB IRQ context.
+ * Forward-declared here to avoid adding src/usb/ to diskio include paths. */
+extern bool usb_msc_is_active(void);
+
 /* ─── Timing / protocol constants ───────────────────────────────────────────
  */
 
@@ -381,7 +385,8 @@ DRESULT disk_read(BYTE pdrv, BYTE *buff, LBA_t sector, UINT count) {
     /* CMD17: READ_SINGLE_BLOCK - no optimization for single blocks */
     uint8_t r1 = sd_send_cmd(17, addr);
     if (r1 != 0x00) {
-      printf("[SD_RD] CMD17 fail: R1=0x%02x sec=%lu\n", r1, (unsigned long)sector);
+      if (!usb_msc_is_active())
+        printf("[SD_RD] CMD17 fail: R1=0x%02x sec=%lu\n", r1, (unsigned long)sector);
       sd_cs_high();
       return RES_ERROR;
     }
@@ -409,16 +414,19 @@ DRESULT disk_read(BYTE pdrv, BYTE *buff, LBA_t sector, UINT count) {
       
       if (!success) {
         s_optimized_fail_count++;
-        printf("[SD] Optimized multi-block read failed (attempt %d)\n", 
-               s_optimized_fail_count);
-        
+        if (!usb_msc_is_active())
+          printf("[SD] Optimized multi-block read failed (attempt %d)\n",
+                 s_optimized_fail_count);
+
         /* After 2 consecutive failures, permanently disable for this session */
         if (s_optimized_fail_count >= 2) {
           s_use_optimized_read = false;
           if (!s_optimized_disabled_logged) {
-            printf("[SD] Optimized multi-block read disabled after %d failures\n",
-                   s_optimized_fail_count);
-            printf("[SD] Set sd_optimized_read=0 in config to disable permanently\n");
+            if (!usb_msc_is_active()) {
+              printf("[SD] Optimized multi-block read disabled after %d failures\n",
+                     s_optimized_fail_count);
+              printf("[SD] Set sd_optimized_read=0 in config to disable permanently\n");
+            }
             s_optimized_disabled_logged = true;
           }
         }
@@ -458,11 +466,12 @@ DRESULT disk_write(BYTE pdrv, const BYTE *buff, LBA_t sector, UINT count) {
     return RES_WRPRT;
 
   s_wr_seq++;
-  /* NOTE: No printf here — disk_write is called from USB IRQ context during
-   * MSC mode.  Printf writes to CDC serial which shares the USB peripheral;
-   * when the CDC TX buffer fills, printf spins waiting for USB events that
-   * can't fire (we're already in USBCTRL_IRQ), stalling MSC transfers and
-   * causing host timeouts → filesystem corruption (partial FAT writes). */
+  /* NOTE: disk_write is called from USB IRQ context during MSC mode.
+   * Printf writes to CDC serial which shares the USB peripheral; when
+   * the CDC TX buffer fills, printf spins waiting for USB events that
+   * can't fire (we're already in USBCTRL_IRQ) → deadlock → host timeout
+   * → filesystem corruption.  All printf below guarded by
+   * usb_msc_is_active() check.  Same applies to disk_read(). */
 
   uint32_t addr = s_is_sdhc ? (uint32_t)sector : (uint32_t)sector * 512;
 
@@ -472,7 +481,8 @@ DRESULT disk_write(BYTE pdrv, const BYTE *buff, LBA_t sector, UINT count) {
     /* CMD24: WRITE_BLOCK */
     uint8_t r1 = sd_send_cmd(24, addr);
     if (r1 != 0x00) {
-      printf("[SD_WR] CMD24 fail: R1=0x%02x sec=%lu buf=%p\n", r1, (unsigned long)sector, buff);
+      if (!usb_msc_is_active())
+        printf("[SD_WR] CMD24 fail: R1=0x%02x sec=%lu buf=%p\n", r1, (unsigned long)sector, buff);
       sd_cs_high();
       return RES_ERROR;
     }
@@ -491,14 +501,16 @@ DRESULT disk_write(BYTE pdrv, const BYTE *buff, LBA_t sector, UINT count) {
         resp = spi_byte(0xFF);
       } while (resp == 0xFF && !time_reached(deadline));
       if ((resp & 0x1F) != 0x05) {
-        printf("[SD_WR] CMD24 data resp=0x%02x sec=%lu\n", resp, (unsigned long)sector);
+        if (!usb_msc_is_active())
+          printf("[SD_WR] CMD24 data resp=0x%02x sec=%lu\n", resp, (unsigned long)sector);
         sd_cs_high();
         return RES_ERROR;
       }
     }
 
     if (!sd_wait_ready(SD_CMD_TIMEOUT_MS)) {
-      printf("[SD_WR] CMD24 busy timeout sec=%lu\n", (unsigned long)sector);
+      if (!usb_msc_is_active())
+        printf("[SD_WR] CMD24 busy timeout sec=%lu\n", (unsigned long)sector);
       sd_cs_high();
       return RES_ERROR;
     }
@@ -508,7 +520,8 @@ DRESULT disk_write(BYTE pdrv, const BYTE *buff, LBA_t sector, UINT count) {
 
     uint8_t r1 = sd_send_cmd(25, addr);
     if (r1 != 0x00) {
-      printf("[SD_WR] CMD25 fail: R1=0x%02x sec=%lu cnt=%u buf=%p\n", r1, (unsigned long)sector, count, buff);
+      if (!usb_msc_is_active())
+        printf("[SD_WR] CMD25 fail: R1=0x%02x sec=%lu cnt=%u buf=%p\n", r1, (unsigned long)sector, count, buff);
       sd_cs_high();
       return RES_ERROR;
     }
@@ -529,7 +542,8 @@ DRESULT disk_write(BYTE pdrv, const BYTE *buff, LBA_t sector, UINT count) {
           resp = spi_byte(0xFF);
         } while (resp == 0xFF && !time_reached(deadline));
         if ((resp & 0x1F) != 0x05) {
-          printf("[SD_WR] CMD25 blk %u resp=0x%02x sec=%lu\n", blk, resp, (unsigned long)sector);
+          if (!usb_msc_is_active())
+            printf("[SD_WR] CMD25 blk %u resp=0x%02x sec=%lu\n", blk, resp, (unsigned long)sector);
           spi_byte(SD_TOKEN_STOP_TRAN);
           sd_cs_high();
           return RES_ERROR;
@@ -537,7 +551,8 @@ DRESULT disk_write(BYTE pdrv, const BYTE *buff, LBA_t sector, UINT count) {
       }
 
       if (!sd_wait_ready(SD_CMD_TIMEOUT_MS)) {
-        printf("[SD_WR] CMD25 blk %u busy timeout sec=%lu\n", blk, (unsigned long)sector);
+        if (!usb_msc_is_active())
+          printf("[SD_WR] CMD25 blk %u busy timeout sec=%lu\n", blk, (unsigned long)sector);
         spi_byte(SD_TOKEN_STOP_TRAN);
         sd_cs_high();
         return RES_ERROR;
