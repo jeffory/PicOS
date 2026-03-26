@@ -69,6 +69,7 @@ local SfxEditorMod   = load_module("sfx_editor")
 local MusicDataMod   = load_module("music_data")
 local MusicPlayerMod = load_module("music_player")
 local MusicEditorMod = load_module("music_editor")
+local MemViewerMod   = load_module("mem_viewer")
 
 ------------------------------------------------------------
 -- Display layout constants (320x320, scientifica 6x11)
@@ -108,6 +109,7 @@ local sprite_editor = SpriteEditor.new(SpriteCanvas, Palette, DrawTools, Sprites
 local sfx_editor = SfxEditorMod.new(Synth, SfxDataMod, pc.audio)
 local music_editor = MusicEditorMod.new(
     MusicPlayerMod, MusicDataMod, Synth, sfx_editor.data, pc.audio)
+local mem_viewer = MemViewerMod.new()
 local project = nil
 local mode = "browser"
 local running = true
@@ -238,10 +240,11 @@ local function browser_open_project()
         editor:retokenize(1)
     end
 
-    -- Initialize sprite, SFX, and music editors with project path
+    -- Initialize all editors with project path
     sprite_editor:init(project.base_path, fs)
     sfx_editor:init(project.base_path, fs)
     music_editor:init(project.base_path, fs)
+    mem_viewer:init(project.base_path, fs)
 
     mode = "code"
     tabs:set_active(1)
@@ -414,11 +417,12 @@ local function handle_code_input()
     local do_repeat = repeat_timer > REPEAT_DELAY and
                       (repeat_timer - REPEAT_DELAY) % REPEAT_RATE == 0
 
-    -- Tab switching: F1-F4
+    -- Tab switching: F1-F4, Ctrl+F5=Mem
     if btn(pressed, BTN.F1) then tabs:set_active(1); mode = "code"; return end
     if btn(pressed, BTN.F2) then tabs:set_active(2); mode = "sprites"; return end
     if btn(pressed, BTN.F3) then tabs:set_active(3); mode = "sfx"; return end
     if btn(pressed, BTN.F4) then tabs:set_active(4); mode = "music"; return end
+    if is_ctrl and btn(pressed, BTN.F5) then tabs:set_active(5); mode = "mem"; return end
 
     -- F5 = Run
     if btn(pressed, BTN.F5) then
@@ -581,11 +585,12 @@ local function handle_sprite_input()
     local char = input.getChar()
     local is_ctrl = (held & BTN.CTRL) ~= 0
 
-    -- Tab switching: F1-F4
+    -- Tab switching: F1-F4, Ctrl+F5=Mem
     if btn(pressed, BTN.F1) then tabs:set_active(1); mode = "code"; return end
     if btn(pressed, BTN.F2) then tabs:set_active(2); mode = "sprites"; return end
     if btn(pressed, BTN.F3) then tabs:set_active(3); mode = "sfx"; return end
     if btn(pressed, BTN.F4) then tabs:set_active(4); mode = "music"; return end
+    if is_ctrl and btn(pressed, BTN.F5) then tabs:set_active(5); mode = "mem"; return end
 
     -- Escape = back to browser
     if btn(pressed, BTN.ESC) then
@@ -628,11 +633,12 @@ local function handle_sfx_input()
     local char = input.getChar()
     local is_ctrl = (held & BTN.CTRL) ~= 0
 
-    -- Tab switching: F1-F4
+    -- Tab switching: F1-F4, Ctrl+F5=Mem
     if btn(pressed, BTN.F1) then sfx_editor:stop_sfx(); tabs:set_active(1); mode = "code"; return end
     if btn(pressed, BTN.F2) then sfx_editor:stop_sfx(); tabs:set_active(2); mode = "sprites"; return end
     if btn(pressed, BTN.F3) then tabs:set_active(3); mode = "sfx"; return end
     if btn(pressed, BTN.F4) then sfx_editor:stop_sfx(); tabs:set_active(4); mode = "music"; return end
+    if is_ctrl and btn(pressed, BTN.F5) then sfx_editor:stop_sfx(); tabs:set_active(5); mode = "mem"; return end
 
     -- Escape = back to browser
     if btn(pressed, BTN.ESC) then
@@ -679,11 +685,12 @@ local function handle_music_input()
     local char = input.getChar()
     local is_ctrl = (held & BTN.CTRL) ~= 0
 
-    -- Tab switching: F1-F4
+    -- Tab switching: F1-F4, Ctrl+F5=Mem
     if btn(pressed, BTN.F1) then music_editor:stop(); tabs:set_active(1); mode = "code"; return end
     if btn(pressed, BTN.F2) then music_editor:stop(); tabs:set_active(2); mode = "sprites"; return end
     if btn(pressed, BTN.F3) then music_editor:stop(); tabs:set_active(3); mode = "sfx"; return end
     if btn(pressed, BTN.F4) then tabs:set_active(4); mode = "music"; return end
+    if is_ctrl and btn(pressed, BTN.F5) then music_editor:stop(); tabs:set_active(5); mode = "mem"; return end
 
     -- Escape = back to browser
     if btn(pressed, BTN.ESC) then
@@ -714,38 +721,53 @@ local function handle_music_input()
 end
 
 ------------------------------------------------------------
--- Stub modes
+-- Memory viewer mode
 ------------------------------------------------------------
 
-local function draw_stub_mode(title)
-    draw_header("PicoForge")
+local function draw_mem_mode()
+    draw_header(project and (project.name .. " - Memory") or "PicoForge")
     tabs:draw(disp)
-    disp.fillRect(0, CONTENT_Y, SCREEN_W, CONTENT_H, 0x0000)
-    local msg = title .. " - Coming Soon"
-    local x = math.floor((SCREEN_W - #msg * 6) / 2)
-    local y = CONTENT_Y + math.floor(CONTENT_H / 2) - 6
-    disp.drawText(x, y, msg, 0x7BEF)
-    draw_footer("F1-F4: Switch tabs  Esc: Back")
+    mem_viewer:draw(disp)
+    draw_footer(mem_viewer:get_footer_text())
     disp.flush()
 end
 
-local function handle_stub_input()
+local function handle_mem_input()
     input.update()
     local pressed = input.getButtonsPressed()
+    local held = input.getButtons()
+    local char = input.getChar()
+    local is_ctrl = (held & BTN.CTRL) ~= 0
 
+    -- Tab switching: F1-F4
     if btn(pressed, BTN.F1) then tabs:set_active(1); mode = "code"; return end
     if btn(pressed, BTN.F2) then tabs:set_active(2); mode = "sprites"; return end
     if btn(pressed, BTN.F3) then tabs:set_active(3); mode = "sfx"; return end
     if btn(pressed, BTN.F4) then tabs:set_active(4); mode = "music"; return end
 
+    -- Escape = back to browser (unless in edit mode or file list)
     if btn(pressed, BTN.ESC) then
-        if project and project:any_modified() then
-            local ok = pc.ui.confirm("Save changes?")
-            if ok then project:save_all(fs) end
+        local handled = mem_viewer:handle_button(pressed, held, char, BTN)
+        if not handled then
+            if project and project:any_modified() then
+                local ok = pc.ui.confirm("Save changes?")
+                if ok then project:save_all(fs) end
+            end
+            project = nil
+            mode = "browser"
         end
-        project = nil
-        mode = "browser"
+        return
     end
+
+    -- Ctrl+S = save file
+    if is_ctrl and char and char:lower() == "s" then
+        mem_viewer:save_file(fs)
+        return
+    end
+
+    -- Forward to mem viewer
+    mem_viewer:handle_button(pressed, held, char, BTN)
+    mem_viewer:check_pending_load(fs)
 end
 
 ------------------------------------------------------------
@@ -771,8 +793,8 @@ while running do
         draw_music_mode()
         handle_music_input()
     elseif mode == "mem" then
-        draw_stub_mode("Memory Viewer")
-        handle_stub_input()
+        draw_mem_mode()
+        handle_mem_input()
     end
 
     sys.sleep(16)
