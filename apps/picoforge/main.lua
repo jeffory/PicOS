@@ -52,12 +52,17 @@ end
 -- Load modules
 ------------------------------------------------------------
 
-local Buffer    = load_module("buffer")
-local Tokenizer = load_module("tokenizer")
-local Tabs      = load_module("ui_tabs")
-local Project   = load_module("project")
-local EditorMod = load_module("editor")
-local Runner    = load_module("runner")
+local Buffer       = load_module("buffer")
+local Tokenizer    = load_module("tokenizer")
+local Tabs         = load_module("ui_tabs")
+local Project      = load_module("project")
+local EditorMod    = load_module("editor")
+local Runner       = load_module("runner")
+local SpriteCanvas = load_module("sprite_canvas")
+local Palette      = load_module("palette")
+local DrawTools    = load_module("draw_tools")
+local Spritesheet  = load_module("spritesheet")
+local SpriteEditor = load_module("sprite_editor")
 
 ------------------------------------------------------------
 -- Display layout constants (320x320, scientifica 6x11)
@@ -93,6 +98,7 @@ term:setCursorBlink(true)
 term:setFont(1)  -- scientifica 6x11
 
 local editor = EditorMod.new(term, Buffer, Tokenizer)
+local sprite_editor = SpriteEditor.new(SpriteCanvas, Palette, DrawTools, Spritesheet)
 local project = nil
 local mode = "browser"
 local running = true
@@ -222,6 +228,9 @@ local function browser_open_project()
         editor:set_buffer(buf)
         editor:retokenize(1)
     end
+
+    -- Initialize sprite editor with project path
+    sprite_editor:init(project.base_path, fs)
 
     mode = "code"
     tabs:set_active(1)
@@ -543,6 +552,53 @@ local function handle_code_input()
 end
 
 ------------------------------------------------------------
+-- Sprite mode
+------------------------------------------------------------
+
+local function draw_sprite_mode()
+    draw_header(project and (project.name .. " - Sprites") or "PicoForge")
+    tabs:draw(disp)
+    sprite_editor:draw(disp)
+    draw_footer(sprite_editor:get_footer_text())
+    disp.flush()
+end
+
+local function handle_sprite_input()
+    input.update()
+    local pressed = input.getButtonsPressed()
+    local held = input.getButtons()
+    local char = input.getChar()
+    local is_ctrl = (held & BTN.CTRL) ~= 0
+
+    -- Tab switching: F1-F4
+    if btn(pressed, BTN.F1) then tabs:set_active(1); mode = "code"; return end
+    if btn(pressed, BTN.F2) then tabs:set_active(2); mode = "sprites"; return end
+    if btn(pressed, BTN.F3) then tabs:set_active(3); mode = "sfx"; return end
+    if btn(pressed, BTN.F4) then tabs:set_active(4); mode = "music"; return end
+
+    -- Escape = back to browser
+    if btn(pressed, BTN.ESC) then
+        if project and project:any_modified() then
+            local ok = pc.ui.confirm("Save changes?")
+            if ok then project:save_all(fs) end
+        end
+        project = nil
+        mode = "browser"
+        return
+    end
+
+    -- Ctrl+S = save sprites
+    if is_ctrl and char and char:lower() == "s" then
+        sprite_editor:save(fs)
+        if project then project:save_all(fs) end
+        return
+    end
+
+    -- Forward to sprite editor
+    sprite_editor:handle_button(pressed, held, char, BTN)
+end
+
+------------------------------------------------------------
 -- Stub modes
 ------------------------------------------------------------
 
@@ -591,8 +647,8 @@ while running do
         draw_code_mode()
         handle_code_input()
     elseif mode == "sprites" then
-        draw_stub_mode("Sprite Editor")
-        handle_stub_input()
+        draw_sprite_mode()
+        handle_sprite_input()
     elseif mode == "sfx" then
         draw_stub_mode("SFX Editor")
         handle_stub_input()
