@@ -1,0 +1,8 @@
+{
+  "id": "com.picoforge.ide",
+  "name": "PicoForge",
+  "description": "Mini IDE for PicOS - edit, run, and debug Lua projects",
+  "version": "0.1.0",
+  "author": "PicOS",
+  "requirements": ["root-filesystem", "audio"]
+}
