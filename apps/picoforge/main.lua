@@ -63,9 +63,12 @@ local Palette      = load_module("palette")
 local DrawTools    = load_module("draw_tools")
 local Spritesheet  = load_module("spritesheet")
 local SpriteEditor = load_module("sprite_editor")
-local Synth        = load_module("synth")
-local SfxDataMod   = load_module("sfx_data")
-local SfxEditorMod = load_module("sfx_editor")
+local Synth          = load_module("synth")
+local SfxDataMod     = load_module("sfx_data")
+local SfxEditorMod   = load_module("sfx_editor")
+local MusicDataMod   = load_module("music_data")
+local MusicPlayerMod = load_module("music_player")
+local MusicEditorMod = load_module("music_editor")
 
 ------------------------------------------------------------
 -- Display layout constants (320x320, scientifica 6x11)
@@ -103,6 +106,8 @@ term:setFont(1)  -- scientifica 6x11
 local editor = EditorMod.new(term, Buffer, Tokenizer)
 local sprite_editor = SpriteEditor.new(SpriteCanvas, Palette, DrawTools, Spritesheet)
 local sfx_editor = SfxEditorMod.new(Synth, SfxDataMod, pc.audio)
+local music_editor = MusicEditorMod.new(
+    MusicPlayerMod, MusicDataMod, Synth, sfx_editor.data, pc.audio)
 local project = nil
 local mode = "browser"
 local running = true
@@ -233,9 +238,10 @@ local function browser_open_project()
         editor:retokenize(1)
     end
 
-    -- Initialize sprite and SFX editors with project path
+    -- Initialize sprite, SFX, and music editors with project path
     sprite_editor:init(project.base_path, fs)
     sfx_editor:init(project.base_path, fs)
+    music_editor:init(project.base_path, fs)
 
     mode = "code"
     tabs:set_active(1)
@@ -655,6 +661,59 @@ local function handle_sfx_input()
 end
 
 ------------------------------------------------------------
+-- Music mode
+------------------------------------------------------------
+
+local function draw_music_mode()
+    draw_header(project and (project.name .. " - Music") or "PicoForge")
+    tabs:draw(disp)
+    music_editor:draw(disp)
+    draw_footer(music_editor:get_footer_text())
+    disp.flush()
+end
+
+local function handle_music_input()
+    input.update()
+    local pressed = input.getButtonsPressed()
+    local held = input.getButtons()
+    local char = input.getChar()
+    local is_ctrl = (held & BTN.CTRL) ~= 0
+
+    -- Tab switching: F1-F4
+    if btn(pressed, BTN.F1) then music_editor:stop(); tabs:set_active(1); mode = "code"; return end
+    if btn(pressed, BTN.F2) then music_editor:stop(); tabs:set_active(2); mode = "sprites"; return end
+    if btn(pressed, BTN.F3) then music_editor:stop(); tabs:set_active(3); mode = "sfx"; return end
+    if btn(pressed, BTN.F4) then tabs:set_active(4); mode = "music"; return end
+
+    -- Escape = back to browser
+    if btn(pressed, BTN.ESC) then
+        music_editor:stop()
+        if project and project:any_modified() then
+            local ok = pc.ui.confirm("Save changes?")
+            if ok then project:save_all(fs) end
+        end
+        project = nil
+        mode = "browser"
+        return
+    end
+
+    -- Ctrl+S = save music + SFX
+    if is_ctrl and char and char:lower() == "s" then
+        music_editor:save(fs)
+        sfx_editor:save(fs)
+        if project then project:save_all(fs) end
+        return
+    end
+
+    -- Forward to music editor
+    music_editor:handle_button(pressed, held, char, BTN)
+
+    -- Update number entry timer and audio
+    music_editor:update()
+    music_editor:update_audio()
+end
+
+------------------------------------------------------------
 -- Stub modes
 ------------------------------------------------------------
 
@@ -709,8 +768,8 @@ while running do
         draw_sfx_mode()
         handle_sfx_input()
     elseif mode == "music" then
-        draw_stub_mode("Music Editor")
-        handle_stub_input()
+        draw_music_mode()
+        handle_music_input()
     elseif mode == "mem" then
         draw_stub_mode("Memory Viewer")
         handle_stub_input()
