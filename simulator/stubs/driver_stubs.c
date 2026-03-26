@@ -761,3 +761,21 @@ pc_image_t *image_new_blank(int width, int height) {
     printf("[SIM] image_new_blank() not implemented in simulator\n");
     return NULL;
 }
+
+void image_free(pc_image_t *img) {
+    (void)img;
+}
+
+void image_draw(const pc_image_t *img, int x, int y) {
+    (void)img; (void)x; (void)y;
+}
+
+void image_draw_region(const pc_image_t *img,
+                       int sx, int sy, int sw, int sh,
+                       int dx, int dy) {
+    (void)img; (void)sx; (void)sy; (void)sw; (void)sh; (void)dx; (void)dy;
+}
+
+void image_draw_scaled(const pc_image_t *img, int x, int y, int dst_w, int dst_h) {
+    (void)img; (void)x; (void)y; (void)dst_w; (void)dst_h;
+}

@@ -237,12 +237,25 @@ char *uc_read_string(uc_engine *uc, uint32_t addr) {
     if (addr == 0) return NULL;
     char *buf = s_str_buf[s_str_idx];
     s_str_idx = (s_str_idx + 1) & 3;
-    uc_err err = uc_mem_read(uc, addr, buf, sizeof(s_str_buf[0]) - 1);
-    if (err != UC_ERR_OK) {
-        buf[0] = '\0';
-        return buf;
+    // Read in small chunks to avoid crossing memory region boundaries.
+    // A bulk uc_mem_read that spans past a mapped region zeroes the buffer.
+    size_t max = sizeof(s_str_buf[0]) - 1;
+    size_t pos = 0;
+    while (pos < max) {
+        size_t chunk = 64;
+        if (pos + chunk > max) chunk = max - pos;
+        uc_err err = uc_mem_read(uc, addr + pos, &buf[pos], chunk);
+        if (err != UC_ERR_OK) {
+            buf[pos] = '\0';
+            return buf;
+        }
+        // Check for NUL within this chunk
+        for (size_t i = pos; i < pos + chunk; i++) {
+            if (buf[i] == '\0') return buf;
+        }
+        pos += chunk;
     }
-    buf[sizeof(s_str_buf[0]) - 1] = '\0';
+    buf[max] = '\0';
     return buf;
 }
 

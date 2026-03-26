@@ -679,10 +679,22 @@ bool launcher_launch_by_name(const char *name) {
     return true;
   }
 
-  // Fall back to name match
+  // Fall back to name match (case-insensitive)
   for (int i = 0; i < s_app_count; i++) {
-    if (strcmp(s_apps[i].name, name) == 0) {
+    if (strcasecmp(s_apps[i].name, name) == 0) {
       printf("[DEV] Launching app: %s\n", name);
+      stdio_flush();
+      run_app(i);
+      return true;
+    }
+  }
+
+  // Fall back to directory name match
+  for (int i = 0; i < s_app_count; i++) {
+    const char *dir = strrchr(s_apps[i].path, '/');
+    dir = dir ? dir + 1 : s_apps[i].path;
+    if (strcasecmp(dir, name) == 0) {
+      printf("[DEV] Launching app by dir: %s (%s)\n", name, s_apps[i].name);
       stdio_flush();
       run_app(i);
       return true;

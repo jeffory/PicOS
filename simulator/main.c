@@ -25,7 +25,7 @@
 
 // Simulator configuration
 #define SIM_WINDOW_TITLE "PicOS Simulator"
-#define SIM_DEFAULT_SD_CARD "./assets/sd_card"
+#define SIM_DEFAULT_SD_CARD "."
 
 // Global state
 static volatile sig_atomic_t g_running = 1;
