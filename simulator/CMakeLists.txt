@@ -192,6 +192,21 @@ target_include_directories(sim_network PUBLIC
 target_link_libraries(sim_network PUBLIC CURL::libcurl Threads::Threads)
 target_compile_definitions(sim_network PUBLIC PICOS_SIMULATOR=1 WIFI_ENABLED=1)
 
+# ── Unicorn Engine (ARM emulation for native apps) ─────────────────────────
+include(FetchContent)
+FetchContent_Declare(
+    unicorn
+    GIT_REPOSITORY https://github.com/unicorn-engine/unicorn.git
+    GIT_TAG        2.1.1
+    GIT_SHALLOW    TRUE
+)
+# Build Unicorn as static library, disable unneeded architectures
+set(UNICORN_BUILD_SHARED OFF CACHE BOOL "" FORCE)
+set(UNICORN_ARCH "arm" CACHE STRING "" FORCE)
+set(UNICORN_INSTALL OFF CACHE BOOL "" FORCE)
+set(BUILD_SHARED_LIBS OFF CACHE BOOL "" FORCE)
+FetchContent_MakeAvailable(unicorn)
+
 # ── Main Simulator Executable ───────────────────────────────────────────────
 set(PICOS_CORE_SOURCES
     ${PICOS_ROOT}/src/os/launcher.c
@@ -238,6 +253,8 @@ set(PICOS_CORE_SOURCES
     ${PICOS_ROOT}/src/fonts/font_6x11.c
     ${PICOS_ROOT}/src/fonts/font_scientifica.c
     ${PICOS_ROOT}/src/os/image_decoders.cpp
+    ${PICOS_ROOT}/src/os/text_wrap.c
+    ${PICOS_ROOT}/src/os/ui_widgets.c
 )
 
 # Filter out crypto (not yet implemented in simulator)
@@ -250,10 +267,13 @@ add_executable(picos_simulator
     main.c
     sim_socket.c
     sim_socket_handler.c
+    unicorn_runner.c
+    unicorn_trampolines.c
     ${PICOS_CORE_SOURCES}
 )
 
 target_include_directories(picos_simulator PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}
     ${CMAKE_CURRENT_SOURCE_DIR}/stubs
     ${PICOS_ROOT}/src
     ${PICOS_ROOT}/src/os
@@ -261,6 +281,7 @@ target_include_directories(picos_simulator PRIVATE
     ${PICOS_ROOT}/src/drivers
     ${PICOS_ROOT}/src/usb
     ${PICOS_ROOT}/third_party/umm_malloc/src
+    ${unicorn_SOURCE_DIR}/include
 )
 
 target_link_libraries(picos_simulator PRIVATE
@@ -268,6 +289,7 @@ target_link_libraries(picos_simulator PRIVATE
     sim_network
     lua_sim
     image_decoders_sim
+    unicorn
     SDL2::SDL2
     SDL2_image::SDL2_image
     Threads::Threads
@@ -288,6 +310,10 @@ target_compile_options(picos_simulator PRIVATE
     -O2
     -g
 )
+
+# Unicorn Engine's crc32c.c and PNGdec's crc32.c both define crc32 —
+# they are unrelated implementations; allow the linker to pick the first one.
+target_link_options(picos_simulator PRIVATE -Wl,--allow-multiple-definition)
 
 # ── Install / Run ───────────────────────────────────────────────────────────
 set_target_properties(picos_simulator PROPERTIES
