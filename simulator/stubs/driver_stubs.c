@@ -724,6 +724,14 @@ void display_effect_posterize(uint8_t levels) { (void)levels; }
 // Native audio callback
 void (*g_native_audio_callback)(void) = NULL;
 
+// Audio ring buffer stubs
+uint32_t audio_ring_free(void) { return 4096; }
+void audio_stream_debug(uint32_t *isr_count, uint32_t *underruns, uint32_t *ring_used) {
+    if (isr_count) *isr_count = 0;
+    if (underruns) *underruns = 0;
+    if (ring_used) *ring_used = 0;
+}
+
 // umm_malloc stubs (simulator maps to standard malloc)
 size_t umm_free_heap_size(void) { return 8 * 1024 * 1024; }
 void* umm_malloc(size_t size) {
@@ -764,24 +772,6 @@ void video_player_set_audio_volume(void* player, uint8_t volume) { (void)player;
 uint8_t video_player_get_audio_volume(void* player) { (void)player; return 100; }
 void video_player_set_audio_muted(void* player, bool muted) { (void)player; (void)muted; }
 bool video_player_get_audio_muted(void* player) { (void)player; return false; }
-
-// ── Display effect stubs ────────────────────────────────────────────────────
-void display_effect_invert(void) {}
-void display_effect_darken(uint8_t factor) { (void)factor; }
-void display_effect_brighten(uint8_t factor) { (void)factor; }
-void display_effect_tint(uint8_t r, uint8_t g, uint8_t b, uint8_t strength) {
-    (void)r; (void)g; (void)b; (void)strength;
-}
-void display_effect_grayscale(void) {}
-void display_effect_blend(const uint16_t *src, int w, int h, uint8_t alpha) {
-    (void)src; (void)w; (void)h; (void)alpha;
-}
-void display_effect_palette(const uint16_t *lut, int lut_size) {
-    (void)lut; (void)lut_size;
-}
-void display_effect_dither(uint8_t levels) { (void)levels; }
-void display_effect_scanline(uint8_t intensity) { (void)intensity; }
-void display_effect_posterize(uint8_t levels) { (void)levels; }
 
 // ── g_api global ────────────────────────────────────────────────────────────
 #include "os.h"
