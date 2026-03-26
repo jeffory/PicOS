@@ -500,7 +500,8 @@ int main(int argc, char** argv) {
     // Wait for Core 1 to finish
     hal_thread_join(&core1);
 
-    // Cleanup
+    // Cleanup — stop socket thread first, then close sockets
+    sim_socket_shutdown();
     sim_socket_close();
     hal_psram_shutdown();
     hal_sdcard_shutdown();

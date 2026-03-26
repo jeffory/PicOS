@@ -1010,7 +1010,7 @@ async def put_file(local_path: str, remote_path: str, device: str | None = None)
     """Upload a file to the PicOS SD card (simulator: copies to host filesystem)."""
     if not HARDWARE_MODE:
         try:
-            sim_apps = os.environ.get("PICOS_SIMULATOR_SD", "./assets/sd_card")
+            sim_apps = os.environ.get("PICOS_SIMULATOR_SD", ".")
             dest = Path(sim_apps) / remote_path.lstrip("/")
             dest.parent.mkdir(parents=True, exist_ok=True)
             shutil.copy(local_path, dest)
@@ -1027,7 +1027,7 @@ async def get_file(remote_path: str, local_path: str, device: str | None = None)
     """Download a file from the PicOS SD card (simulator: copies from host filesystem)."""
     if not HARDWARE_MODE:
         try:
-            sim_apps = os.environ.get("PICOS_SIMULATOR_SD", "./assets/sd_card")
+            sim_apps = os.environ.get("PICOS_SIMULATOR_SD", ".")
             src = Path(sim_apps) / remote_path.lstrip("/")
             shutil.copy(src, local_path)
             return f"Copied from simulator: {src} -> {local_path}"

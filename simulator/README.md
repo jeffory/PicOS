@@ -53,7 +53,7 @@ make -j4
 ## Usage
 
 ```bash
-# Run with default SD card path (./assets/sd_card)
+# Run with default SD card path (.)
 ./picos_simulator
 
 # Run with custom SD card path

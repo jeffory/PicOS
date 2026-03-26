@@ -30,6 +30,10 @@ static int l_sys_getBattery(lua_State *L) {
 static int l_sys_log(lua_State *L) {
   const char *msg = luaL_checkstring(L, 1);
   printf("[APP] %s\n", msg);
+#ifdef PICOS_SIMULATOR
+  extern void sim_log_append(const char *line);
+  sim_log_append(msg);
+#endif
   return 0;
 }
 

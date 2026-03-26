@@ -65,12 +65,8 @@ static void menu_lua_hook(lua_State *L, lua_Debug *ar) {
   dev_commands_poll();
   dev_commands_process();
 #ifdef PICOS_SIMULATOR
-  // Poll the RPC socket so JSON-RPC commands (including shutdown) work
-  // while a Lua app is running.  Without this, sim_socket_poll() only runs
-  // in the launcher's main loop, which is blocked inside lua_pcall().
-  extern void sim_socket_poll(void);
-  sim_socket_poll();
-  // Check the global running flag (set by signal handler or shutdown RPC)
+  // Socket polling is handled by the dedicated socket thread.
+  // Check the global running flag (set by signal handler or shutdown RPC).
   extern volatile int g_running;
   if (!g_running) {
     dev_commands_set_exit();

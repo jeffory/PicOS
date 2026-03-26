@@ -481,11 +481,10 @@ void launcher_run(void) {
     dev_commands_poll();
     dev_commands_process();
 
-    // Socket server poll — JSON-RPC interface for MCP/automation
+    // Socket server — JSON-RPC interface for MCP/automation
+    // Polling is handled by the dedicated socket thread; just check for pending launches.
 #ifdef PICOS_SIMULATOR
-    extern void sim_socket_poll(void);
     extern bool sim_handler_check_launch(void);
-    sim_socket_poll();
     bool sim_launched = sim_handler_check_launch();
 #else
     bool sim_launched = false;

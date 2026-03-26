@@ -8,6 +8,7 @@
 #include <string.h>
 #include <dirent.h>
 #include <sys/stat.h>
+#include <sys/statvfs.h>
 #include "../hal/hal_display.h"
 #include "../sim_socket.h"
 
@@ -359,8 +360,7 @@ int display_get_font_height(void) {
 }
 
 void display_flush(void) {
-    // Poll socket for RPC commands (Core 0 only — safe to access framebuffer)
-    sim_socket_poll();
+    // Socket polling is handled by the dedicated socket thread.
     // Swap buffers and copy to HAL framebuffer
     uint16_t* back = display_get_back_buffer();
     uint16_t* hal_fb = hal_display_get_framebuffer();
@@ -686,9 +686,23 @@ size_t sdcard_fsize_handle(void* f) {
 }
 int sdcard_fwrite(void* f, const void* buf, int len) { return (int)hal_sdcard_write(f, buf, (size_t)len); }
 size_t sdcard_fsize(const char* path) { return (size_t)hal_sdcard_size(path); }
-bool sdcard_mkdir(const char* path) { return hal_sdcard_mkdir(path); }
-bool sdcard_delete(const char* path) { (void)path; return false; }
-bool sdcard_rename(const char* oldpath, const char* newpath) { (void)oldpath; (void)newpath; return false; }
+bool sdcard_mkdir(const char* path) { return hal_sdcard_mkdir(path) == 0; }
+bool sdcard_delete(const char* path) {
+    extern char g_base_path[512];
+    char full[1024];
+    if (path[0] == '/') snprintf(full, sizeof(full), "%s%s", g_base_path, path);
+    else snprintf(full, sizeof(full), "%s/%s", g_base_path, path);
+    return remove(full) == 0;
+}
+bool sdcard_rename(const char* oldpath, const char* newpath) {
+    extern char g_base_path[512];
+    char full_old[1024], full_new[1024];
+    if (oldpath[0] == '/') snprintf(full_old, sizeof(full_old), "%s%s", g_base_path, oldpath);
+    else snprintf(full_old, sizeof(full_old), "%s/%s", g_base_path, oldpath);
+    if (newpath[0] == '/') snprintf(full_new, sizeof(full_new), "%s%s", g_base_path, newpath);
+    else snprintf(full_new, sizeof(full_new), "%s/%s", g_base_path, newpath);
+    return rename(full_old, full_new) == 0;
+}
 bool sdcard_copy(const char* src, const char* dst,
                  void (*progress_cb)(uint32_t done, uint32_t total, void* user),
                  void* user) {
@@ -696,9 +710,16 @@ bool sdcard_copy(const char* src, const char* dst,
 }
 bool sdcard_stat(const char* path, void* st) { (void)path; (void)st; return false; }
 bool sdcard_disk_info(uint32_t* out_free_kb, uint32_t* out_total_kb) {
-    if (out_free_kb) *out_free_kb = 0;
-    if (out_total_kb) *out_total_kb = 0;
-    return false;
+    extern char g_base_path[512];
+    struct statvfs st;
+    if (statvfs(g_base_path, &st) != 0) {
+        if (out_free_kb) *out_free_kb = 0;
+        if (out_total_kb) *out_total_kb = 0;
+        return false;
+    }
+    if (out_total_kb) *out_total_kb = (uint32_t)((st.f_blocks * st.f_frsize) / 1024);
+    if (out_free_kb)  *out_free_kb  = (uint32_t)((st.f_bavail * st.f_frsize) / 1024);
+    return true;
 }
 
 // Crashlog stub

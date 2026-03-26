@@ -1138,10 +1138,8 @@ static void tramp_sys_poll(uc_engine *uc) {
     // Poll keyboard + check for exit
     kbd_poll();
 
-    // Process socket commands (screenshot, exit, etc.) while emulation runs.
-    // Without this, the socket handler is blocked by uc_emu_start().
-    extern void sim_socket_poll(void);
-    sim_socket_poll();
+    // Socket commands (screenshot, exit, etc.) are handled by the dedicated
+    // socket thread — no need to poll here.
 
     if (kbd_consume_menu_press()) {
         if (system_menu_show_for_native()) {

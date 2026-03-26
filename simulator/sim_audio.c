@@ -197,6 +197,16 @@ void audio_stream_poll(void) {
     // No-op in simulator
 }
 
+uint32_t audio_ring_free(void) {
+    return 4096; // Always report space available in simulator
+}
+
+void audio_stream_debug(uint32_t *isr_count, uint32_t *underruns, uint32_t *ring_used) {
+    if (isr_count) *isr_count = 0;
+    if (underruns) *underruns = 0;
+    if (ring_used) *ring_used = 0;
+}
+
 void audio_push_samples(const int16_t *samples, int count) {
     if (!s_stream_active || !samples || count <= 0) return;
 

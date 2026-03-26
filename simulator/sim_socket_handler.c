@@ -68,9 +68,8 @@ char *sim_get_log_buffer(void) {
     static char buf[65536];
     buf[0] = '\0';
     pthread_mutex_lock(&s_log_mutex);
-    int start = (s_log_head + LOG_BUFFER_LINES - s_log_count) % LOG_BUFFER_LINES;
     for (int i = 0; i < s_log_count; i++) {
-        int idx = (start + i) % LOG_BUFFER_LINES;
+        int idx = (s_log_head + i) % LOG_BUFFER_LINES;
         size_t len = strlen(buf);
         size_t line_len = strlen(s_log_lines[idx]);
         if (len + line_len + 2 < sizeof(buf)) {
@@ -192,8 +191,22 @@ static bool sandbox_path(const char *path, char *out_resolved, size_t max) {
     } else {
         snprintf(full, sizeof(full), "%s/%s", abs_base, path);
     }
-    if (!realpath(full, out_resolved)) return false;
-    if (strncmp(out_resolved, abs_base, base_len) != 0) return false;
+    // Try realpath first (works for existing files)
+    if (realpath(full, out_resolved)) {
+        return strncmp(out_resolved, abs_base, base_len) == 0;
+    }
+    // For new files: resolve the parent directory and append the filename
+    char parent[1024];
+    snprintf(parent, sizeof(parent), "%s", full);
+    char *slash = strrchr(parent, '/');
+    if (!slash) return false;
+    char filename[256];
+    snprintf(filename, sizeof(filename), "%s", slash + 1);
+    *slash = '\0';
+    char resolved_parent[1024];
+    if (!realpath(parent, resolved_parent)) return false;
+    if (strncmp(resolved_parent, abs_base, base_len) != 0) return false;
+    snprintf(out_resolved, max, "%s/%s", resolved_parent, filename);
     return true;
 }
 
@@ -280,13 +293,14 @@ static const char s_b64[] =
 static int b64_encode(const uint8_t *src, size_t len, char *out) {
     size_t i = 0, j = 0;
     while (i < len) {
+        size_t remain = len - i;
         uint32_t b = (uint32_t)src[i++] << 16;
-        if (i < len) b |= (uint32_t)src[i++] << 8;
-        if (i < len) b |= (uint32_t)src[i++] << 0;
+        if (remain > 1) b |= (uint32_t)src[i++] << 8;
+        if (remain > 2) b |= (uint32_t)src[i++] << 0;
         out[j++] = s_b64[(b >> 18) & 0x3F];
         out[j++] = s_b64[(b >> 12) & 0x3F];
-        out[j++] = i > len   ? '=' : s_b64[(b >>  6) & 0x3F];
-        out[j++] = i > len-1 ? '=' : s_b64[(b >>  0) & 0x3F];
+        out[j++] = remain > 1 ? s_b64[(b >>  6) & 0x3F] : '=';
+        out[j++] = remain > 2 ? s_b64[(b >>  0) & 0x3F] : '=';
     }
     out[j] = '\0';
     return (int)j;
@@ -565,30 +579,42 @@ static char *h_read_file(const char *params) {
 }
 
 static size_t b64_decode_inplace(char *b64, size_t len) {
-    size_t out_len = 0;
-    size_t i = 0, j = 0;
+    static const unsigned char LUT[256] = {
+        ['A']=0+1,['B']=1+1,['C']=2+1,['D']=3+1,['E']=4+1,['F']=5+1,['G']=6+1,['H']=7+1,
+        ['I']=8+1,['J']=9+1,['K']=10+1,['L']=11+1,['M']=12+1,['N']=13+1,['O']=14+1,['P']=15+1,
+        ['Q']=16+1,['R']=17+1,['S']=18+1,['T']=19+1,['U']=20+1,['V']=21+1,['W']=22+1,['X']=23+1,
+        ['Y']=24+1,['Z']=25+1,['a']=26+1,['b']=27+1,['c']=28+1,['d']=29+1,['e']=30+1,['f']=31+1,
+        ['g']=32+1,['h']=33+1,['i']=34+1,['j']=35+1,['k']=36+1,['l']=37+1,['m']=38+1,['n']=39+1,
+        ['o']=40+1,['p']=41+1,['q']=42+1,['r']=43+1,['s']=44+1,['t']=45+1,['u']=46+1,['v']=47+1,
+        ['w']=48+1,['x']=49+1,['y']=50+1,['z']=51+1,['0']=52+1,['1']=53+1,['2']=54+1,['3']=55+1,
+        ['4']=56+1,['5']=57+1,['6']=58+1,['7']=59+1,['8']=60+1,['9']=61+1,['+']=62+1,['/']=63+1,
+    };
+    // Standard base64: process 4 chars at a time into 3 bytes
+    size_t j = 0;
+    size_t i = 0;
     while (i < len) {
-        int v = 0; int clen = 0;
-        for (int k = 0; k < 4 && i < len; k++) {
-            char c = b64[i++];
-            if (c == '=' || c == 0) break;
-            int cv = -1;
-            if (c >= 'A' && c <= 'Z') cv = c - 'A' + 0;
-            else if (c >= 'a' && c <= 'z') cv = c - 'a' + 26;
-            else if (c >= '0' && c <= '9') cv = c - '0' + 52;
-            else if (c == '+') cv = 62;
-            else if (c == '/') cv = 63;
-            else continue;
-            v = (v << 6) | cv;
-            clen++;
+        uint32_t sextet[4] = {0};
+        int valid = 0;
+        for (int k = 0; k < 4 && i < len; ) {
+            unsigned char c = (unsigned char)b64[i++];
+            if (c == '=' || c == '\0') { i = len; break; }  // padding = end
+            if (c == ' ' || c == '\n' || c == '\r' || c == '\t') continue;
+            unsigned char v = LUT[c];
+            if (v == 0) continue;  // invalid char
+            sextet[k] = v - 1;
+            valid++;
+            k++;
         }
-        for (int k = clen - 2; k >= 0; k--) {
-            b64[j++] = (char)((v >> (k * 8)) & 0xFF);
-            out_len++;
+        if (valid >= 2) {
+            uint32_t triple = (sextet[0] << 18) | (sextet[1] << 12) |
+                              (sextet[2] << 6)  |  sextet[3];
+            b64[j++] = (char)((triple >> 16) & 0xFF);
+            if (valid >= 3) b64[j++] = (char)((triple >> 8) & 0xFF);
+            if (valid >= 4) b64[j++] = (char)(triple & 0xFF);
         }
     }
     b64[j] = '\0';
-    return out_len;
+    return j;
 }
 
 static char *h_write_file(const char *params) {
@@ -1079,7 +1105,7 @@ static void wrap_response(int id, const char *result, char *out, size_t max) {
 char *sim_handler_dispatch(const char *request, const char *end) {
     int id = 0;
     char method[128] = {0};
-    static char params[8192];
+    char *params = NULL;
 
     if ((size_t)(end - request) < 9 || strncmp(request, "{\"jsonrpc\"", 9) != 0) {
         return strdup("{\"jsonrpc\":\"2.0\",\"error\":{\"code\":-32600,\"message\":\"Invalid request\"}}");
@@ -1112,7 +1138,6 @@ char *sim_handler_dispatch(const char *request, const char *end) {
     while (*m && *m != '"' && mi < sizeof(method) - 1) method[mi++] = *m++;
     method[mi] = '\0';
 
-    params[0] = '\0';
     const char *params_start = strstr(request, "\"params\"");
     if (params_start && params_start < end) {
         const char *colon = strchr(params_start, ':');
@@ -1128,25 +1153,37 @@ char *sim_handler_dispatch(const char *request, const char *end) {
                     end_brace++;
                 }
                 size_t len = (size_t)(end_brace - p);
-                if (len < sizeof(params)) {
+                params = malloc(len + 1);
+                if (params) {
                     memcpy(params, p, len);
                     params[len] = '\0';
                 }
             }
         }
     }
+    if (!params) {
+        params = malloc(4);
+        if (params) { params[0] = '\0'; }
+    }
 
+    char *ret = NULL;
     for (int i = 0; s_handlers[i].name; i++) {
         if (strcmp(s_handlers[i].name, method) == 0) {
-            char *result = s_handlers[i].fn(params);
-            if (!result) return strdup("{\"jsonrpc\":\"2.0\",\"error\":{\"code\":-32603,\"message\":\"handler returned null\"}}");
-            static char resp_buf[1024 * 1024];
-            wrap_response(id, result, resp_buf, sizeof(resp_buf));
-            free(result);
-            return strdup(resp_buf);
+            char *result = s_handlers[i].fn(params ? params : "");
+            if (!result) {
+                ret = strdup("{\"jsonrpc\":\"2.0\",\"error\":{\"code\":-32603,\"message\":\"handler returned null\"}}");
+            } else {
+                static char resp_buf[1024 * 1024];
+                wrap_response(id, result, resp_buf, sizeof(resp_buf));
+                free(result);
+                ret = strdup(resp_buf);
+            }
+            free(params);
+            return ret;
         }
     }
 
+    free(params);
     static char err[256];
     snprintf(err, sizeof(err),
              "{\"jsonrpc\":\"2.0\",\"id\":%d,\"error\":{\"code\":-32601,\"message\":\"method not found: %s\"}}",
