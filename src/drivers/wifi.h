@@ -60,6 +60,10 @@ void wifi_poll(void);
 void wifi_set_http_required(bool required);
 bool wifi_get_http_required(void);
 
+// Returns true if internet connectivity has been verified (TCP to 8.8.8.8:53).
+// This goes beyond wifi_get_status() == CONNECTED which only means DHCP is done.
+bool wifi_has_internet(void);
+
 // ── Core 0 → Core 1 request queue ────────────────────────────────────────────
 //
 // Core 0 (Lua main loop) must never call mg_* functions directly. Instead it

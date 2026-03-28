@@ -48,7 +48,8 @@ void usb_msc_enter_mode(void) {
   // 1. Disconnect WiFi and pause Core 1 to prevent SPI/I2C contention
   //    Core 1 runs WiFi/HTTP/audio tasks every 5ms which can interfere
   //    with USB MSC operations and cause keyboard I2C timeouts.
-  bool was_connected = (wifi_get_status() == WIFI_STATUS_CONNECTED);
+  wifi_status_t wst = wifi_get_status();
+  bool was_connected = (wst == WIFI_STATUS_CONNECTED || wst == WIFI_STATUS_ONLINE);
   if (was_connected) {
     printf("[USB MSC] Disconnecting WiFi...\n");
     wifi_disconnect();

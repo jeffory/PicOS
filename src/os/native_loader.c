@@ -140,17 +140,21 @@ static void show_error(const char *line1, const char *line2) {
 // stacks are completely independent: app stack pressure and interrupt stacking
 // do not interfere with each other.
 //
-// 8 KB gives comfortable headroom for the GBC emulator's call depth and any
-// local arrays allocated on the stack.  The buffer lives in SRAM (fast) and
-// is a module-level static so it is zero-initialised.
-#define NATIVE_STACK_SIZE (8 * 1024)
-uint8_t s_native_stack[NATIVE_STACK_SIZE] __attribute__((aligned(8)));
+// 64 KB is allocated from PSRAM (via umm_malloc) at launch time, giving
+// plenty of headroom for deep recursion (e.g. Doom's BSP tree traversal).
+// Stack accesses go through the cached XIP alias for performance.
+#define NATIVE_STACK_SIZE (64 * 1024)
+
+// Pointer to the dynamically-allocated stack buffer.  Read by the HardFault
+// handler (main.c) to detect PSP stack overflow.  NULL when no native app
+// is running.
+uint8_t *g_native_stack_base = NULL;
 
 // Stack canary: the bottom NATIVE_STACK_GUARD_WORDS words are filled with a
 // sentinel before launch and checked afterwards.  If the stack overflows into
 // this guard zone the corruption is detected and reported.  The stack grows
-// downward from s_native_stack+NATIVE_STACK_SIZE, so the bottom of the buffer
-// is the last area to be reached by overflow.
+// downward from the top of the buffer, so the bottom is the last area to be
+// reached by overflow.
 #define NATIVE_STACK_CANARY      0xDEADBEEFu
 #define NATIVE_STACK_GUARD_WORDS 8   // 32 bytes
 
@@ -257,6 +261,7 @@ static bool native_run(const app_entry_t *app) {
   bool ok = false;
   uint8_t *load_base = NULL;
   uint8_t *code_buf = NULL;
+  uint8_t *stack_buf = NULL;
   sdfile_t f = NULL;
   Elf32_Phdr *phdr_table = NULL;
 
@@ -611,11 +616,18 @@ static bool native_run(const app_entry_t *app) {
 
   picos_app_entry_t entry_fn = (picos_app_entry_t)entry_addr;
 
-  uint32_t *guard = (uint32_t *)s_native_stack;
+  stack_buf = (uint8_t *)umm_malloc(NATIVE_STACK_SIZE);
+  if (!stack_buf) {
+    show_error("Out of memory for app stack", NULL);
+    goto out;
+  }
+  g_native_stack_base = stack_buf;
+
+  uint32_t *guard = (uint32_t *)stack_buf;
   for (int i = 0; i < NATIVE_STACK_GUARD_WORDS; i++)
     guard[i] = NATIVE_STACK_CANARY;
 
-  uint32_t stack_top = (uint32_t)(s_native_stack + NATIVE_STACK_SIZE);
+  uint32_t stack_top = (uint32_t)(stack_buf + NATIVE_STACK_SIZE);
 
   g_core1_pause = false;
 
@@ -637,6 +649,7 @@ static bool native_run(const app_entry_t *app) {
 out:
   // ── 9. Cleanup ─────────────────────────────────────────────────────────────
   g_native_audio_callback = NULL;
+  g_native_stack_base = NULL;
   g_core1_pause = true;
   while (!g_core1_paused)
     sleep_ms(1);
@@ -644,6 +657,8 @@ out:
   audio_stop_tone();
   if (code_buf)
     free(code_buf);
+  if (stack_buf)
+    umm_free(stack_buf);
   if (load_base)
     umm_free(load_base);
   if (phdr_table)

@@ -389,7 +389,8 @@ static bool run_app(int idx) {
   // causes SPI timing failures ("hdr mismatch" errors) that stall Core 1.
   if (app->system_clock_khz > 0 && !app->has_http && wifi_is_available()) {
     wifi_status_t wst = wifi_get_status();
-    if (wst == WIFI_STATUS_CONNECTED || wst == WIFI_STATUS_CONNECTING) {
+    if (wst == WIFI_STATUS_CONNECTED || wst == WIFI_STATUS_CONNECTING ||
+        wst == WIFI_STATUS_ONLINE) {
       wifi_disconnect();
       // Wait for Core 1 to process the disconnect request before pausing it
       // for the clock change. wifi_disconnect() queues via IPC ring buffer.
@@ -404,7 +405,8 @@ static bool run_app(int idx) {
   wifi_set_http_required(app->has_http);
 
   if (app->has_http && wifi_is_available()) {
-    if (wifi_get_status() != WIFI_STATUS_CONNECTED) {
+    wifi_status_t wst2 = wifi_get_status();
+    if (wst2 != WIFI_STATUS_CONNECTED && wst2 != WIFI_STATUS_ONLINE) {
       const char *ssid = config_get("wifi_ssid");
       const char *pass = config_get("wifi_pass");
       if (ssid && ssid[0])

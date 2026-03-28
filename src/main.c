@@ -30,9 +30,10 @@ extern uint32_t __StackBottom; // lowest valid address (4KB below StackTop)
 // to UART+USB so we can identify the crash address.  UART stdio is polling-
 // based, so this works even with interrupts disabled inside the fault handler.
 
-// Native app stack bounds (defined in native_loader.c).
-// Used to detect PSP stack overflow correctly in the hardfault handler.
-extern uint8_t s_native_stack[];
+// Native app stack base pointer (defined in native_loader.c).
+// Dynamically allocated from PSRAM; NULL when no native app is running.
+// Used to detect PSP stack overflow in the hardfault handler.
+extern uint8_t *g_native_stack_base;
 
 static void __attribute__((used)) hardfault_c(uint32_t *frame, uint32_t exc_return) {
   // ARM exception frame layout (8 words pushed by hardware on entry):
@@ -70,8 +71,8 @@ static void __attribute__((used)) hardfault_c(uint32_t *frame, uint32_t exc_retu
   bool stack_overflow;
   uint32_t stack_limit;
   if (on_psp) {
-    stack_limit = (uint32_t)(uintptr_t)s_native_stack;
-    stack_overflow = (sp_at_fault < stack_limit);
+    stack_limit = (uint32_t)(uintptr_t)g_native_stack_base;
+    stack_overflow = g_native_stack_base && (sp_at_fault < stack_limit);
   } else {
     stack_limit = (uint32_t)(uintptr_t)&__StackBottom;
     stack_overflow = (sp_at_fault < stack_limit);
@@ -212,6 +213,7 @@ void __attribute__((naked)) isr_hardfault(void) {
 #include "os/ota_update.h"
 #include "os/perf.h"
 #include "os/system_menu.h"
+#include "os/toast.h"
 #include "os/terminal.h"
 #include "os/terminal_render.h"
 #include "os/text_input.h"
@@ -224,6 +226,14 @@ void __attribute__((naked)) isr_hardfault(void) {
 // reference.
 
 PicoCalcAPI g_api;
+
+// Wrapper that composites toast notifications before flushing to display.
+// Assigned to g_api.display->flush so all callers (Lua, native, launcher)
+// see toasts without modifying their render loops.
+static void display_flush_with_toasts(void) {
+    toast_draw();
+    display_flush();
+}
 
 static picocalc_tcp_t s_tcp_impl = {
     .connect = (pctcp_t (*)(const char *, uint16_t, bool))tcp_connect,
@@ -253,7 +263,7 @@ static picocalc_display_t s_display_impl = {
     .drawCircle = display_draw_circle,
     .fillCircle = display_fill_circle,
     .drawText = display_draw_text,
-    .flush = display_flush,
+    .flush = display_flush_with_toasts,
     .getWidth = display_get_width_fn,
     .getHeight = display_get_height_fn,
     .setBrightness = display_set_brightness,
@@ -532,6 +542,23 @@ static picocalc_terminal_t s_terminal_impl = {
     .calculateLineWraps = terminal_calculateLineWraps,
 };
 
+static bool fs_mkdir(const char *path) {
+    return sdcard_mkdir(path);
+}
+
+static bool fs_delete(const char *path) {
+    return sdcard_delete(path);
+}
+
+static bool fs_rename(const char *src, const char *dst) {
+    return sdcard_rename(src, dst);
+}
+
+static bool fs_is_dir(const char *path) {
+    sdcard_stat_t st;
+    return sdcard_stat(path, &st) && st.is_dir;
+}
+
 static picocalc_fs_t s_fs_impl = {
     .open = fs_open,
     .read = fs_read,
@@ -543,6 +570,10 @@ static picocalc_fs_t s_fs_impl = {
     .seek = fs_seek,
     .tell = fs_tell,
     .listDir = fs_list_dir,
+    .mkdir = fs_mkdir,
+    .deleteFile = fs_delete,
+    .renameFile = fs_rename,
+    .isDir = fs_is_dir,
 };
 
 // ── HTTP impl ─────────────────────────────────────────────────────────────────
@@ -616,6 +647,11 @@ static void http_setReadBufferSize_w(pchttp_t c, int bytes) {
     http_set_recv_buf((http_conn_t *)c, (uint32_t)bytes);
 }
 
+static bool http_isComplete_w(pchttp_t c) {
+    http_conn_t *hc = (http_conn_t *)c;
+    return hc->state == HTTP_STATE_DONE || hc->state == HTTP_STATE_FAILED;
+}
+
 static const picocalc_http_t s_http_impl = {
     .newConn           = http_newConn_w,
     .get               = http_get_w,
@@ -631,6 +667,7 @@ static const picocalc_http_t s_http_impl = {
     .setConnectTimeout = http_setConnectTimeout_w,
     .setReadTimeout    = http_setReadTimeout_w,
     .setReadBufferSize = http_setReadBufferSize_w,
+    .isComplete        = http_isComplete_w,
 };
 
 // ── Sound player impl ─────────────────────────────────────────────────────────
@@ -1439,6 +1476,7 @@ int main(void) {
   // Initialise WiFi hardware (auto-connects if credentials are in config)
   ui_draw_splash("Initialising WiFi...", NULL);
   watchdog_update();
+  toast_init();
   wifi_init();
   http_init();
   tcp_init();

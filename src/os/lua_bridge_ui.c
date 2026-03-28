@@ -2,6 +2,7 @@
 #include "../../third_party/lua-5.4/src/lauxlib.h"
 #include "ui_widgets.h"
 #include "text_wrap.h"
+#include "toast.h"
 #include "umm_malloc.h"
 
 // ── picocalc.ui.*
@@ -246,6 +247,13 @@ static int l_ui_drawToast(lua_State *L) {
   return 0;
 }
 
+// picocalc.ui.toast(text) — push a system toast notification (auto-dismisses)
+static int l_ui_toast(lua_State *L) {
+  const char *text = luaL_checkstring(L, 1);
+  toast_push(text, TOAST_ICON_NONE);
+  return 0;
+}
+
 // picocalc.ui.drawButton(x, y, w, label, focused, [pressed])
 static int l_ui_drawButton(lua_State *L) {
   int x = (int)luaL_checkinteger(L, 1);
@@ -307,6 +315,7 @@ static const luaL_Reg l_ui_lib[] = {{"drawHeader",    l_ui_drawHeader},
                                     {"drawRadio",     l_ui_drawRadio},
                                     {"drawDivider",   l_ui_drawDivider},
                                     {"drawToast",     l_ui_drawToast},
+                                    {"toast",         l_ui_toast},
                                     {"drawButton",    l_ui_drawButton},
                                     {"wrapText",      l_ui_wrapText},
                                     {NULL, NULL}};

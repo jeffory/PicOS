@@ -119,6 +119,14 @@ typedef struct {
                         void (*callback)(const char *name, bool is_dir,
                                          uint32_t size, void *user),
                         void *user);
+    // Create a directory. Returns true on success or if already exists.
+    bool     (*mkdir)(const char *path);
+    // Delete a file or empty directory. Returns true on success.
+    bool     (*deleteFile)(const char *path);
+    // Rename/move a file. Returns true on success.
+    bool     (*renameFile)(const char *src, const char *dst);
+    // Check if path is a directory. Returns true if it exists and is a directory.
+    bool     (*isDir)(const char *path);
 } picocalc_fs_t;
 
 // --- System -----------------------------------------------------------------
@@ -178,8 +186,9 @@ typedef struct {
 typedef enum {
     WIFI_STATUS_DISCONNECTED = 0,
     WIFI_STATUS_CONNECTING,
-    WIFI_STATUS_CONNECTED,
+    WIFI_STATUS_CONNECTED,      // IP assigned, internet NOT verified
     WIFI_STATUS_FAILED,
+    WIFI_STATUS_ONLINE,         // Internet connectivity confirmed
 } wifi_status_t;
 
 typedef struct {
@@ -295,6 +304,9 @@ typedef struct {
     void  (*setConnectTimeout)(pchttp_t c, int seconds);
     void  (*setReadTimeout)(pchttp_t c, int seconds);
     void  (*setReadBufferSize)(pchttp_t c, int bytes);
+    // Returns true when the request has completed (success or failure).
+    // Use getStatus()/getError() to determine outcome.
+    bool  (*isComplete)(pchttp_t c);
 } picocalc_http_t;
 
 // --- Sound Player -----------------------------------------------------------

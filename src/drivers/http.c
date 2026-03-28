@@ -160,6 +160,8 @@ void http_ev_fn(struct mg_connection *nc, int ev, void *ev_data) {
 
   if (ev == MG_EV_CONNECT) {
     c->state = HTTP_STATE_SENDING;
+    c->deadline_connect = 0; // connected — cancel connect timeout
+    c->deadline_read = to_ms_since_boot(get_absolute_time()) + c->read_timeout_ms;
     printf("[HTTP] Connected, sending %s (%u bytes) %s\n", c->method,
            (unsigned)strlen(c->path), c->path);
     http_build_and_send_request(nc, c);
@@ -239,6 +241,7 @@ void http_ev_fn(struct mg_connection *nc, int ev, void *ev_data) {
 
     c->headers_done = true;
     c->state = HTTP_STATE_BODY;
+    c->deadline_read = to_ms_since_boot(get_absolute_time()) + c->read_timeout_ms;
     pending_set(c, HTTP_CB_HEADERS);
 
     // Trigger Mongoose streaming detach: clear the recv buffer so Mongoose
@@ -267,6 +270,7 @@ void http_ev_fn(struct mg_connection *nc, int ev, void *ev_data) {
         if (written > 0) {
           mg_iobuf_del(&nc->recv, 0, written);  // FREE only what was actually copied
           c->body_received += written;
+          c->deadline_read = to_ms_since_boot(get_absolute_time()) + c->read_timeout_ms;
           pending_set(c, HTTP_CB_REQUEST);  // Fire Lua callback with new data
         }
       }
@@ -581,6 +585,8 @@ static bool start_request(http_conn_t *c, const char *method, const char *path,
 
   // Mark as queued so http_close_all() and http_free() know to wait
   c->state = HTTP_STATE_QUEUED;
+  c->deadline_connect = to_ms_since_boot(get_absolute_time()) + c->connect_timeout_ms;
+  c->deadline_read = 0;
 
   // Push to Core 1's request queue — it will call mg_http_connect() /
   // mg_printf() / etc. from within drain_requests().
@@ -675,6 +681,38 @@ void http_poll(void) {}
 // can call it safely every poll cycle.
 void http_fire_c_pending(void) {
   // Future: iterate s_conns, check pending flags, call C callbacks.
+}
+
+// ── Timeout enforcement (called from wifi_poll on Core 1) ───────────────────
+
+void http_check_timeouts(void) {
+  uint32_t now = to_ms_since_boot(get_absolute_time());
+  for (int i = 0; i < HTTP_MAX_CONNECTIONS; i++) {
+    http_conn_t *c = &s_conns[i];
+    if (!c->in_use) continue;
+
+    // Connect timeout: covers QUEUED → CONNECTING → SENDING
+    if ((c->state == HTTP_STATE_QUEUED || c->state == HTTP_STATE_CONNECTING ||
+         c->state == HTTP_STATE_SENDING) &&
+        c->deadline_connect > 0 && now > c->deadline_connect) {
+      conn_fail(c, "connect timeout (%ums)", (unsigned)c->connect_timeout_ms);
+      if (c->pcb) {
+        ((struct mg_connection *)c->pcb)->is_closing = 1;
+        c->pcb = NULL;
+      }
+      c->deadline_connect = 0;
+    }
+    // Read timeout: covers HEADERS and BODY (idle — no data arriving)
+    else if ((c->state == HTTP_STATE_HEADERS || c->state == HTTP_STATE_BODY) &&
+             c->deadline_read > 0 && now > c->deadline_read) {
+      conn_fail(c, "read timeout (%ums)", (unsigned)c->read_timeout_ms);
+      if (c->pcb) {
+        ((struct mg_connection *)c->pcb)->is_closing = 1;
+        c->pcb = NULL;
+      }
+      c->deadline_read = 0;
+    }
+  }
 }
 
 // ── Custom Mongoose Allocator ────────────────────────────────────────────────

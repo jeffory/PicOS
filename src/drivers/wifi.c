@@ -3,6 +3,7 @@
 #include "../os/clock.h"
 #include "../os/config.h"
 #include "../os/system_menu.h"
+#include "../os/toast.h"
 #include "display.h"
 #include "http.h"
 
@@ -32,6 +33,12 @@ static uint32_t s_connect_start_ms = 0;
 static int      s_connect_retries  = 0;
 #define WIFI_CONNECT_TIMEOUT_MS  15000  // 15 seconds per attempt
 #define WIFI_MAX_RETRIES         3
+
+// SNTP retry
+static uint8_t  s_sntp_retries = 0;
+static uint32_t s_sntp_next_retry_ms = 0;
+#define SNTP_MAX_RETRIES    3
+#define SNTP_RETRY_DELAY_MS 5000
 
 static struct mg_mgr s_mgr;
 static struct mg_tcpip_if s_ifp;
@@ -67,6 +74,51 @@ bool wifi_req_push(const conn_req_t *req) {
   return true;
 }
 
+// ── Internet connectivity check
+// ──────────────────────────────────────────────────────────────────────
+// After WiFi associates and gets an IP, we verify actual internet
+// reachability with a lightweight TCP connect to 8.8.8.8:53 (Google DNS).
+// No DNS dependency, no TLS, minimal overhead.
+
+static bool     s_internet_ok = false;
+static uint32_t s_connectivity_check_ms = 0;
+static struct mg_connection *s_check_conn = NULL;
+
+#define CONNECTIVITY_CHECK_INTERVAL_MS  60000   // recheck every 60s
+#define CONNECTIVITY_CHECK_RETRY_MS     10000   // retry faster on failure
+
+static void connectivity_cb(struct mg_connection *c, int ev, void *ev_data) {
+  (void)ev_data;
+  if (ev == MG_EV_CONNECT) {
+    printf("WiFi: connectivity check OK\n");
+    s_internet_ok = true;
+    s_check_conn = NULL;
+    c->is_closing = 1;
+    s_connectivity_check_ms =
+        to_ms_since_boot(get_absolute_time()) + CONNECTIVITY_CHECK_INTERVAL_MS;
+  } else if (ev == MG_EV_ERROR) {
+    printf("WiFi: connectivity check failed: %s\n", (char *)ev_data);
+    s_internet_ok = false;
+    s_check_conn = NULL;
+    c->is_closing = 1;
+    toast_push("No internet connection", TOAST_ICON_WIFI);
+    s_connectivity_check_ms =
+        to_ms_since_boot(get_absolute_time()) + CONNECTIVITY_CHECK_RETRY_MS;
+  } else if (ev == MG_EV_CLOSE) {
+    s_check_conn = NULL;
+  }
+}
+
+static void start_connectivity_check(void) {
+  if (s_check_conn) return; // already in progress
+  s_check_conn = mg_connect(&s_mgr, "tcp://8.8.8.8:53", connectivity_cb, NULL);
+  if (!s_check_conn) {
+    s_internet_ok = false;
+    s_connectivity_check_ms =
+        to_ms_since_boot(get_absolute_time()) + CONNECTIVITY_CHECK_RETRY_MS;
+  }
+}
+
 // ── SNTP
 // ──────────────────────────────────────────────────────────────────────
 
@@ -75,6 +127,7 @@ static void sntp_cb(struct mg_connection *c, int ev, void *ev_data) {
     int64_t *t = (int64_t *)ev_data;
     printf("WiFi: SNTP sync OK, time: %lld\n", *t);
     clock_sntp_set((unsigned)(*t / 1000));
+    s_sntp_retries = 0;
     c->is_closing = 1;
     if (!s_http_required && s_auto_connected &&
         system_menu_get_wifi_auto_disconnect()) {
@@ -83,6 +136,18 @@ static void sntp_cb(struct mg_connection *c, int ev, void *ev_data) {
       // reentrancy into the CYW43 driver. Set a flag; wifi_poll() will
       // perform the disconnect safely after mg_mgr_poll() returns.
       s_disconnect_pending = true;
+    }
+  } else if (ev == MG_EV_ERROR) {
+    printf("WiFi: SNTP error: %s\n", (char *)ev_data);
+    c->is_closing = 1;
+    if (s_sntp_retries < SNTP_MAX_RETRIES) {
+      s_sntp_retries++;
+      s_sntp_next_retry_ms = to_ms_since_boot(get_absolute_time()) + SNTP_RETRY_DELAY_MS;
+      printf("WiFi: SNTP retry %d/%d in %dms\n", s_sntp_retries, SNTP_MAX_RETRIES,
+             SNTP_RETRY_DELAY_MS);
+    } else {
+      printf("WiFi: SNTP failed after %d retries\n", SNTP_MAX_RETRIES);
+      toast_push("Time sync failed", TOAST_ICON_ERROR);
     }
   } else if (ev == MG_EV_CLOSE) {
     // SNTP closed
@@ -104,14 +169,26 @@ static void tcpip_cb(struct mg_tcpip_if *ifp, int ev, void *ev_data) {
       s_status = WIFI_STATUS_CONNECTED;
       s_connect_start_ms = 0;
       s_connect_retries = 0;
-      mg_snprintf(s_ip, sizeof(s_ip), "%M", mg_print_ip, &ifp->ip);
+      s_internet_ok = false;
+      // Schedule connectivity check 2s after IP assignment
+      s_connectivity_check_ms = to_ms_since_boot(get_absolute_time()) + 2000;
+      { uint32_t save = spin_lock_blocking(s_req_lock);
+        mg_snprintf(s_ip, sizeof(s_ip), "%M", mg_print_ip, &ifp->ip);
+        spin_unlock(s_req_lock, save);
+      }
       printf("WiFi: connected  IP=%s\n", s_ip);
       start_sntp();
     } else if (state == MG_TCPIP_STATE_DOWN) {
       if (s_status == WIFI_STATUS_CONNECTED) {
         s_status = WIFI_STATUS_DISCONNECTED;
-        s_ip[0] = '\0';
+        { uint32_t save = spin_lock_blocking(s_req_lock);
+          s_ip[0] = '\0';
+          spin_unlock(s_req_lock, save);
+        }
+        s_internet_ok = false;
+        s_connectivity_check_ms = 0;
         printf("WiFi: disconnected\n");
+        toast_push("WiFi disconnected", TOAST_ICON_WIFI);
       }
     }
   } else if (ev == MG_TCPIP_EV_WIFI_CONNECT_ERR) {
@@ -350,18 +427,34 @@ void wifi_disconnect(void) {
 
 wifi_status_t wifi_get_status(void) {
   if (s_ifp.state == MG_TCPIP_STATE_READY)
-    return WIFI_STATUS_CONNECTED;
+    return s_internet_ok ? WIFI_STATUS_ONLINE : WIFI_STATUS_CONNECTED;
   return s_status;
 }
 
-const char *wifi_get_ip(void) {
-  if (wifi_get_status() != WIFI_STATUS_CONNECTED)
-    return NULL;
-  mg_snprintf(s_ip, sizeof(s_ip), "%M", mg_print_ip, &s_ifp.ip);
-  return s_ip[0] ? s_ip : NULL;
+bool wifi_has_internet(void) {
+  return s_internet_ok && s_ifp.state == MG_TCPIP_STATE_READY;
 }
 
-const char *wifi_get_ssid(void) { return s_ssid[0] ? s_ssid : NULL; }
+const char *wifi_get_ip(void) {
+  wifi_status_t st = wifi_get_status();
+  if (st != WIFI_STATUS_CONNECTED && st != WIFI_STATUS_ONLINE)
+    return NULL;
+  // Copy under lock to prevent torn reads from Core 1 writes
+  static char s_ip_copy[20];
+  uint32_t save = spin_lock_blocking(s_req_lock);
+  mg_snprintf(s_ip, sizeof(s_ip), "%M", mg_print_ip, &s_ifp.ip);
+  memcpy(s_ip_copy, s_ip, sizeof(s_ip_copy));
+  spin_unlock(s_req_lock, save);
+  return s_ip_copy[0] ? s_ip_copy : NULL;
+}
+
+const char *wifi_get_ssid(void) {
+  static char s_ssid_copy[64];
+  uint32_t save = spin_lock_blocking(s_req_lock);
+  memcpy(s_ssid_copy, s_ssid, sizeof(s_ssid_copy));
+  spin_unlock(s_req_lock, save);
+  return s_ssid_copy[0] ? s_ssid_copy : NULL;
+}
 
 void wifi_set_http_required(bool required) { s_http_required = required; }
 bool wifi_get_http_required(void) { return s_http_required; }
@@ -382,10 +475,15 @@ void wifi_poll(void) {
 
   // Skip Mongoose polling when disconnected to save power
   wifi_status_t st = wifi_get_status();
-  if (st != WIFI_STATUS_CONNECTED && st != WIFI_STATUS_CONNECTING)
+  if (st != WIFI_STATUS_CONNECTED && st != WIFI_STATUS_CONNECTING &&
+      st != WIFI_STATUS_ONLINE)
     return;
 
   mg_mgr_poll(&s_mgr, 0);
+
+  // Enforce HTTP and TCP connection/read timeouts
+  http_check_timeouts();
+  tcp_check_timeouts();
 
   // Connect timeout: if stuck in CONNECTING, retry or give up
   if (s_status == WIFI_STATUS_CONNECTING && s_connect_start_ms > 0) {
@@ -404,9 +502,30 @@ void wifi_poll(void) {
         printf("WiFi: connect failed after %d retries\n", WIFI_MAX_RETRIES);
         mg_wifi_disconnect();
         s_status = WIFI_STATUS_FAILED;
+        toast_push("WiFi connection failed", TOAST_ICON_WIFI);
         s_connect_start_ms = 0;
         s_connect_retries = 0;
       }
+    }
+  }
+
+  // Internet connectivity check timer
+  if (s_connectivity_check_ms > 0 &&
+      (st == WIFI_STATUS_CONNECTED || st == WIFI_STATUS_ONLINE)) {
+    uint32_t now_ms = to_ms_since_boot(get_absolute_time());
+    if (now_ms >= s_connectivity_check_ms) {
+      s_connectivity_check_ms = 0;
+      start_connectivity_check();
+    }
+  }
+
+  // SNTP retry timer
+  if (s_sntp_next_retry_ms > 0 &&
+      (st == WIFI_STATUS_CONNECTED || st == WIFI_STATUS_ONLINE)) {
+    uint32_t now_ms = to_ms_since_boot(get_absolute_time());
+    if (now_ms >= s_sntp_next_retry_ms) {
+      s_sntp_next_retry_ms = 0;
+      start_sntp();
     }
   }
 
@@ -416,8 +535,12 @@ void wifi_poll(void) {
     s_disconnect_pending = false;
     mg_wifi_disconnect();
     s_status = WIFI_STATUS_DISCONNECTED;
-    s_ssid[0] = '\0';
-    s_ip[0] = '\0';
+    { uint32_t save = spin_lock_blocking(s_req_lock);
+      s_ssid[0] = '\0';
+      s_ip[0] = '\0';
+      spin_unlock(s_req_lock, save);
+    }
+    s_internet_ok = false;
     printf("WiFi: disconnected (SNTP deferred)\n");
   }
 }

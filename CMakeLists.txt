@@ -234,6 +234,7 @@ add_executable(picocalc_os
     src/os/lua_bridge_3d.c
     src/os/lua_bridge_ui.c
     src/os/ui_widgets.c
+    src/os/toast.c
     src/os/text_wrap.c
     src/os/lua_bridge_audio.c
     src/os/lua_bridge_sound.c

@@ -43,12 +43,18 @@ static int l_wifi_getSSID(lua_State *L) {
   return 1;
 }
 
+static int l_wifi_hasInternet(lua_State *L) {
+  lua_pushboolean(L, wifi_has_internet());
+  return 1;
+}
+
 static const luaL_Reg l_wifi_lib[] = {{"isAvailable", l_wifi_isAvailable},
                                       {"connect", l_wifi_connect},
                                       {"disconnect", l_wifi_disconnect},
                                       {"getStatus", l_wifi_getStatus},
                                       {"getIP", l_wifi_getIP},
                                       {"getSSID", l_wifi_getSSID},
+                                      {"hasInternet", l_wifi_hasInternet},
                                       {NULL, NULL}};
 
 
@@ -565,6 +571,7 @@ static int l_network_getStatus(lua_State *L) {
   int ret = 0;
   switch (st) {
   case WIFI_STATUS_CONNECTED:
+  case WIFI_STATUS_ONLINE:
     ret = 1;
     break; // kStatusConnected
   case WIFI_STATUS_CONNECTING:
@@ -611,6 +618,7 @@ void lua_bridge_network_init(lua_State *L) {
   lua_pushinteger(L, WIFI_STATUS_CONNECTING); lua_setfield(L, -2, "STATUS_CONNECTING");
   lua_pushinteger(L, WIFI_STATUS_CONNECTED); lua_setfield(L, -2, "STATUS_CONNECTED");
   lua_pushinteger(L, WIFI_STATUS_FAILED); lua_setfield(L, -2, "STATUS_FAILED");
+  lua_pushinteger(L, WIFI_STATUS_ONLINE); lua_setfield(L, -2, "STATUS_ONLINE");
   lua_pop(L, 1);
 
   // Install HTTP connection metatable
