@@ -350,43 +350,8 @@ static char *take_screenshot_png(int *out_len) {
     uint16_t *fb = hal_display_get_framebuffer();
     if (!fb) { *out_len = 0; return NULL; }
 
-    // Try SDL_image path first (works when a real video driver is active)
-    SDL_Surface *surf = SDL_CreateRGBSurfaceFrom(
-        fb, 320, 320, 16, 320 * 2,
-        0xF800, 0x07E0, 0x001F, 0x0000);
-    if (surf) {
-        SDL_Surface *rgb_surf = SDL_ConvertSurfaceFormat(surf, SDL_PIXELFORMAT_RGB24, 0);
-        SDL_FreeSurface(surf);
-        if (rgb_surf) {
-            size_t buf_size = 256 * 1024;
-            uint8_t *png_buf = (uint8_t *)malloc(buf_size);
-            if (png_buf) {
-                SDL_RWops *rw = SDL_RWFromMem(png_buf, (int)buf_size);
-                if (rw) {
-                    int saved = IMG_SavePNG_RW(rgb_surf, rw, 0);
-                    Sint64 size = SDL_RWtell(rw);
-                    SDL_RWclose(rw);
-                    SDL_FreeSurface(rgb_surf);
-                    if (saved == 0 && size > 0 && (size_t)size < buf_size) {
-                        char *b64 = malloc(b64_enc_size((size_t)size) + 1);
-                        if (b64) {
-                            b64_encode(png_buf, (size_t)size, b64);
-                            free(png_buf);
-                            *out_len = (int)strlen(b64);
-                            return b64;
-                        }
-                    }
-                    free(png_buf);
-                    goto stb_fallback;
-                }
-                free(png_buf);
-            }
-            SDL_FreeSurface(rgb_surf);
-        }
-    }
-
-stb_fallback:;
-    // Software fallback using stb_image_write — works in headless/dummy mode
+    // Always use stb_image_write — the SDL_image path produces corrupt PNGs
+    // when the simulator runs headless or with the dummy video driver.
     uint8_t *rgb = rgb565_to_rgb888(fb, 320, 320);
     if (!rgb) { *out_len = 0; return NULL; }
 
@@ -514,6 +479,19 @@ static char *h_inject_char(const char *params) {
 static char *h_screenshot(const char *params) {
     char format[16] = "png";
     json_get_str(params, "format", format, sizeof(format));
+
+    // Debug: dump framebuffer state
+    {
+        uint16_t *fb = hal_display_get_framebuffer();
+        if (fb) {
+            int nz = 0;
+            for (int i = 0; i < 320*320; i++) { if (fb[i] != 0) nz++; }
+            fprintf(stderr, "[SCREENSHOT] fb=%p nonzero=%d first=[%04x %04x %04x]\n",
+                    (void*)fb, nz, fb[0], fb[160*320+160], fb[319*320+319]);
+        } else {
+            fprintf(stderr, "[SCREENSHOT] fb is NULL!\n");
+        }
+    }
 
     char *data;
     int len;
@@ -821,7 +799,8 @@ static char *h_get_wifi_state(const char *params) {
     const char *ssid = wifi_get_ssid();
     const char *ip = wifi_get_ip();
     const char *status_str = "disconnected";
-    if (st == WIFI_STATUS_CONNECTED) status_str = "connected";
+    if (st == WIFI_STATUS_ONLINE) status_str = "online";
+    else if (st == WIFI_STATUS_CONNECTED) status_str = "connected";
     else if (st == WIFI_STATUS_CONNECTING) status_str = "connecting";
     static char buf[256];
     snprintf(buf, sizeof(buf),
@@ -839,7 +818,7 @@ static char *h_set_wifi_state(const char *params) {
     json_get_int(params, "error_code", &error_code);
 
     s_wifi_error.enabled = true;
-    if (strcmp(status, "connected") == 0) {
+    if (strcmp(status, "connected") == 0 || strcmp(status, "online") == 0) {
         s_wifi_error.mode = WIFI_NORMAL;
         s_wifi_error.enabled = false;
     } else if (strcmp(status, "disconnected") == 0) {
@@ -1034,6 +1013,192 @@ static char *h_wait_for_idle(const char *params) {
     return strdup("{\"jsonrpc\":\"2.0\",\"result\":{\"idle\":false}}");
 }
 
+// ── Display diagnostics ─────────────────────────────────────────────────────
+
+static uint16_t s_diff_reference[320 * 320];
+static bool s_diff_has_reference = false;
+
+static char *h_display_stats(const char *params) {
+    uint16_t *fb = hal_display_get_framebuffer();
+    if (!fb) {
+        return strdup("{\"jsonrpc\":\"2.0\",\"error\":{\"code\":-32603,\"message\":\"no framebuffer\"}}");
+    }
+
+    const int total = 320 * 320;
+    int nonzero = 0;
+    int first_nz_x = -1, first_nz_y = -1;
+    uint16_t first_nz_val = 0;
+
+    // 8KB bitset for counting unique RGB565 values (65536 bits = 8192 bytes)
+    uint8_t seen[8192];
+    memset(seen, 0, sizeof(seen));
+
+    for (int i = 0; i < total; i++) {
+        uint16_t px = fb[i];
+        if (px != 0) {
+            nonzero++;
+            if (first_nz_x < 0) {
+                first_nz_x = i % 320;
+                first_nz_y = i / 320;
+                first_nz_val = px;
+            }
+        }
+        seen[px >> 3] |= (1 << (px & 7));
+    }
+
+    int unique = 0;
+    for (int i = 0; i < 8192; i++) {
+        uint8_t b = seen[i];
+        while (b) { unique += b & 1; b >>= 1; }
+    }
+
+    // Optional pixel_at query
+    int qx = -1, qy = -1;
+    json_get_int(params, "x", &qx);
+    json_get_int(params, "y", &qy);
+
+    char pixel_at[128] = "";
+    if (qx >= 0 && qx < 320 && qy >= 0 && qy < 320) {
+        uint16_t px = fb[qy * 320 + qx];
+        int r = ((px >> 11) & 0x1F) << 3;
+        int g = ((px >> 5) & 0x3F) << 2;
+        int b = (px & 0x1F) << 3;
+        snprintf(pixel_at, sizeof(pixel_at),
+            ",\"pixel_at\":{\"x\":%d,\"y\":%d,\"rgb565\":%u,\"r\":%d,\"g\":%d,\"b\":%d}",
+            qx, qy, px, r, g, b);
+    }
+
+    char first_nz[128] = "null";
+    if (first_nz_x >= 0) {
+        snprintf(first_nz, sizeof(first_nz),
+            "{\"x\":%d,\"y\":%d,\"rgb565\":%u}", first_nz_x, first_nz_y, first_nz_val);
+    }
+
+    char *resp = malloc(512);
+    if (!resp) return strdup("{\"jsonrpc\":\"2.0\",\"error\":{\"code\":-32603,\"message\":\"oom\"}}");
+    snprintf(resp, 512,
+        "{\"jsonrpc\":\"2.0\",\"result\":{\"nonzero_pixels\":%d,\"total_pixels\":%d,"
+        "\"unique_colors\":%d,\"first_nonzero\":%s%s}}",
+        nonzero, total, unique, first_nz, pixel_at);
+    return resp;
+}
+
+static char *h_display_diff(const char *params) {
+    uint16_t *fb = hal_display_get_framebuffer();
+    if (!fb) {
+        return strdup("{\"jsonrpc\":\"2.0\",\"error\":{\"code\":-32603,\"message\":\"no framebuffer\"}}");
+    }
+
+    char action[16] = "";
+    json_get_str(params, "action", action, sizeof(action));
+
+    if (strcmp(action, "capture") == 0) {
+        memcpy(s_diff_reference, fb, 320 * 320 * sizeof(uint16_t));
+        s_diff_has_reference = true;
+        return strdup("{\"jsonrpc\":\"2.0\",\"result\":{\"captured\":true}}");
+    }
+
+    if (strcmp(action, "compare") == 0) {
+        if (!s_diff_has_reference) {
+            return strdup("{\"jsonrpc\":\"2.0\",\"error\":{\"code\":-32602,\"message\":\"no reference captured\"}}");
+        }
+
+        const int total = 320 * 320;
+        int changed = 0;
+        int min_x = 320, min_y = 320, max_x = -1, max_y = -1;
+
+        for (int i = 0; i < total; i++) {
+            if (fb[i] != s_diff_reference[i]) {
+                changed++;
+                int x = i % 320;
+                int y = i / 320;
+                if (x < min_x) min_x = x;
+                if (x > max_x) max_x = x;
+                if (y < min_y) min_y = y;
+                if (y > max_y) max_y = y;
+            }
+        }
+
+        double pct = (changed * 100.0) / total;
+        char bbox[128] = "null";
+        if (changed > 0) {
+            snprintf(bbox, sizeof(bbox), "{\"x\":%d,\"y\":%d,\"w\":%d,\"h\":%d}",
+                min_x, min_y, max_x - min_x + 1, max_y - min_y + 1);
+        }
+
+        char *resp = malloc(256);
+        if (!resp) return strdup("{\"jsonrpc\":\"2.0\",\"error\":{\"code\":-32603,\"message\":\"oom\"}}");
+        snprintf(resp, 256,
+            "{\"jsonrpc\":\"2.0\",\"result\":{\"changed_pixels\":%d,\"total_pixels\":%d,"
+            "\"change_pct\":%.2f,\"bbox\":%s}}",
+            changed, total, pct, bbox);
+        return resp;
+    }
+
+    return strdup("{\"jsonrpc\":\"2.0\",\"error\":{\"code\":-32602,\"message\":\"action must be capture or compare\"}}");
+}
+
+static char *h_get_pixel(const char *params) {
+    uint16_t *fb = hal_display_get_framebuffer();
+    if (!fb) {
+        return strdup("{\"jsonrpc\":\"2.0\",\"error\":{\"code\":-32603,\"message\":\"no framebuffer\"}}");
+    }
+
+    int x = -1, y = -1, w = 1, h = 1;
+    json_get_int(params, "x", &x);
+    json_get_int(params, "y", &y);
+    json_get_int(params, "w", &w);
+    json_get_int(params, "h", &h);
+
+    if (x < 0 || y < 0 || x >= 320 || y >= 320) {
+        return strdup("{\"jsonrpc\":\"2.0\",\"error\":{\"code\":-32602,\"message\":\"x,y required and must be 0-319\"}}");
+    }
+    if (w < 1) w = 1;
+    if (h < 1) h = 1;
+    if (w > 16) w = 16;
+    if (h > 16) h = 16;
+    if (x + w > 320) w = 320 - x;
+    if (y + h > 320) h = 320 - y;
+
+    if (w == 1 && h == 1) {
+        uint16_t px = fb[y * 320 + x];
+        int r = ((px >> 11) & 0x1F) << 3;
+        int g = ((px >> 5) & 0x3F) << 2;
+        int b = (px & 0x1F) << 3;
+
+        char *resp = malloc(256);
+        if (!resp) return strdup("{\"jsonrpc\":\"2.0\",\"error\":{\"code\":-32603,\"message\":\"oom\"}}");
+        snprintf(resp, 256,
+            "{\"jsonrpc\":\"2.0\",\"result\":{\"x\":%d,\"y\":%d,\"rgb565\":%u,\"r\":%d,\"g\":%d,\"b\":%d}}",
+            x, y, px, r, g, b);
+        return resp;
+    }
+
+    // Region mode — return array of pixels
+    size_t buf_size = 64 + (size_t)(w * h) * 8;
+    char *pixels = malloc(buf_size);
+    if (!pixels) return strdup("{\"jsonrpc\":\"2.0\",\"error\":{\"code\":-32603,\"message\":\"oom\"}}");
+    pixels[0] = '\0';
+    size_t off = 0;
+
+    for (int row = y; row < y + h; row++) {
+        for (int col = x; col < x + w; col++) {
+            uint16_t px = fb[row * 320 + col];
+            off += (size_t)snprintf(pixels + off, buf_size - off, "%s%u",
+                off > 0 ? "," : "", px);
+        }
+    }
+
+    size_t resp_size = off + 256;
+    char *resp = malloc(resp_size);
+    if (!resp) { free(pixels); return strdup("{\"jsonrpc\":\"2.0\",\"error\":{\"code\":-32603,\"message\":\"oom\"}}"); }
+    snprintf(resp, resp_size,
+        "{\"jsonrpc\":\"2.0\",\"result\":{\"x\":%d,\"y\":%d,\"w\":%d,\"h\":%d,\"pixels\":[%s]}}",
+        x, y, w, h, pixels);
+    free(pixels);
+    return resp;
+}
+
 // ── Dispatch ─────────────────────────────────────────────────────────────────
 
 typedef char *(*handler_fn)(const char *params);
@@ -1069,6 +1234,9 @@ static struct {
     { "clear_log_buffer",   h_clear_log_buffer },
     { "get_crash_log",      h_get_crash_log },
     { "wait_for_idle",      h_wait_for_idle },
+    { "display_stats",      h_display_stats },
+    { "display_diff",       h_display_diff },
+    { "get_pixel",          h_get_pixel },
     { NULL, NULL },
 };
 

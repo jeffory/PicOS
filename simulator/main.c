@@ -438,10 +438,12 @@ int main(int argc, char** argv) {
     
     hal_timing_init();
 
-    // Initialize networking (before Core 1 starts)
+    // Initialize toast system and networking (before Core 1 starts)
+    extern void toast_init(void);
     extern void http_init(void);
     extern void tcp_init(void);
     extern void wifi_init(void);
+    toast_init();
     http_init();
     tcp_init();
     wifi_init();

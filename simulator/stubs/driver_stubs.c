@@ -359,14 +359,34 @@ int display_get_font_height(void) {
     return FONT_H;
 }
 
+static int s_display_flush_count = 0;
+
 void display_flush(void) {
     // Socket polling is handled by the dedicated socket thread.
     // Swap buffers and copy to HAL framebuffer
     uint16_t* back = display_get_back_buffer();
     uint16_t* hal_fb = hal_display_get_framebuffer();
+    s_display_flush_count++;
     if (hal_fb) {
+        if (s_display_flush_count <= 5 || (s_display_flush_count % 500) == 0) {
+            // Debug: sample a few pixels to verify data is flowing
+            int nonzero = 0;
+            for (int i = 0; i < 320*320; i++) { if (back[i] != 0) nonzero++; }
+            fprintf(stderr, "[DISPLAY] flush #%d: back=%p hal_fb=%p nonzero_pixels=%d first=[%04x %04x %04x %04x]\n",
+                    s_display_flush_count, (void*)back, (void*)hal_fb, nonzero,
+                    back[0], back[1], back[160*320+160], back[319*320+319]);
+        }
         memcpy(hal_fb, back, 320 * 320 * sizeof(uint16_t));
+        if (s_display_flush_count <= 5 || (s_display_flush_count % 500) == 0) {
+            // Verify HAL buffer was written
+            int nz = 0;
+            for (int i = 0; i < 320*320; i++) { if (hal_fb[i] != 0) nz++; }
+            fprintf(stderr, "[DISPLAY] hal_fb after memcpy: nonzero=%d first=[%04x %04x] ptr=%p\n",
+                    nz, hal_fb[0], hal_fb[160*320+160], (void*)hal_fb);
+        }
         hal_display_present();
+    } else {
+        fprintf(stderr, "[DISPLAY] flush: hal_fb is NULL!\n");
     }
     // Swap buffer index
     g_current_buffer = 1 - g_current_buffer;
@@ -678,11 +698,15 @@ int sdcard_fseek(void* f, long offset, int whence) {
     return hal_sdcard_seek(f, offset); 
 }
 long sdcard_ftell(void* f) { return hal_sdcard_tell(f); }
-size_t sdcard_fsize_handle(void* f) { 
-    long pos = hal_sdcard_tell(f);
-    hal_sdcard_seek(f, 0);
-    hal_sdcard_seek(f, 0); // go to end would need SEEK_END support
-    return (size_t)pos; 
+size_t sdcard_fsize_handle(void* f) {
+    if (!f) return 0;
+    /* hal_sdcard_seek only supports SEEK_SET, so use fseek/ftell directly */
+    FILE *fp = (FILE *)f;
+    long pos = ftell(fp);
+    fseek(fp, 0, SEEK_END);
+    long size = ftell(fp);
+    fseek(fp, pos, SEEK_SET);
+    return (size_t)(size > 0 ? size : 0);
 }
 int sdcard_fwrite(void* f, const void* buf, int len) { return (int)hal_sdcard_write(f, buf, (size_t)len); }
 size_t sdcard_fsize(const char* path) { return (size_t)hal_sdcard_size(path); }
@@ -708,7 +732,25 @@ bool sdcard_copy(const char* src, const char* dst,
                  void* user) {
     (void)src; (void)dst; (void)progress_cb; (void)user; return false;
 }
-bool sdcard_stat(const char* path, void* st) { (void)path; (void)st; return false; }
+bool sdcard_stat(const char* path, void* st_out) {
+    extern char g_base_path[512];
+    char full_path[1024];
+    if (path[0] == '/') {
+        snprintf(full_path, sizeof(full_path), "%s%s", g_base_path, path);
+    } else {
+        snprintf(full_path, sizeof(full_path), "%s/%s", g_base_path, path);
+    }
+    struct stat host_st;
+    if (stat(full_path, &host_st) != 0) return false;
+    // sdcard_stat_t layout: uint32_t size, bool is_dir, uint16_t fdate, uint16_t ftime
+    typedef struct { uint32_t size; bool is_dir; uint16_t fdate; uint16_t ftime; } sim_stat_t;
+    sim_stat_t *out = (sim_stat_t *)st_out;
+    out->size = (uint32_t)host_st.st_size;
+    out->is_dir = S_ISDIR(host_st.st_mode);
+    out->fdate = 0;
+    out->ftime = 0;
+    return true;
+}
 bool sdcard_disk_info(uint32_t* out_free_kb, uint32_t* out_total_kb) {
     extern char g_base_path[512];
     struct statvfs st;
@@ -830,3 +872,10 @@ void image_draw_region(const pc_image_t *img,
 void image_draw_scaled(const pc_image_t *img, int x, int y, int dst_w, int dst_h) {
     (void)img; (void)x; (void)y; (void)dst_w; (void)dst_h;
 }
+
+// --- Basic runner stub ---
+#include "../../src/os/app_runner.h"
+#include "../../src/os/launcher_types.h"
+static bool basic_stub_can_handle(const app_entry_t *app) { (void)app; return false; }
+static bool basic_stub_run(const app_entry_t *app) { (void)app; return false; }
+const AppRunner g_basic_runner = {"basic", basic_stub_can_handle, basic_stub_run};

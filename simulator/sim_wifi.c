@@ -43,10 +43,10 @@ extern void sim_tcp_poll(void);
 // ── WiFi API implementation ─────────────────────────────────────────────────
 
 void wifi_init(void) {
-    s_status = WIFI_STATUS_CONNECTED;
+    s_status = WIFI_STATUS_ONLINE;
     strncpy(s_ssid, "SimulatorWiFi", sizeof(s_ssid));
     strncpy(s_ip, "192.168.1.100", sizeof(s_ip));
-    printf("[WiFi] Simulator mock WiFi initialized (always connected)\n");
+    printf("[WiFi] Simulator mock WiFi initialized (always online)\n");
 }
 
 extern bool sim_wifi_is_available(void);
@@ -59,7 +59,7 @@ void wifi_connect(const char *ssid, const char *password) {
     (void)password;
     strncpy(s_ssid, ssid, sizeof(s_ssid) - 1);
     s_ssid[sizeof(s_ssid) - 1] = '\0';
-    s_status = WIFI_STATUS_CONNECTED;
+    s_status = WIFI_STATUS_ONLINE;
     printf("[WiFi] Mock connect to '%s' — instant success\n", ssid);
 }
 
@@ -74,7 +74,12 @@ wifi_status_t wifi_get_status(void) {
 }
 
 const char *wifi_get_ip(void) {
-    return s_status == WIFI_STATUS_CONNECTED ? s_ip : NULL;
+    return (s_status == WIFI_STATUS_CONNECTED || s_status == WIFI_STATUS_ONLINE)
+               ? s_ip : NULL;
+}
+
+bool wifi_has_internet(void) {
+    return s_status == WIFI_STATUS_ONLINE;
 }
 
 const char *wifi_get_ssid(void) {
@@ -142,7 +147,7 @@ void wifi_poll(void) {
             break;
         case CONN_REQ_WIFI_CONNECT:
             strncpy(s_ssid, req.ssid, sizeof(s_ssid) - 1);
-            s_status = WIFI_STATUS_CONNECTED;
+            s_status = WIFI_STATUS_ONLINE;
             break;
         case CONN_REQ_WIFI_DISCONNECT:
             s_status = WIFI_STATUS_DISCONNECTED;

@@ -43,6 +43,7 @@ extern char *uc_read_string(uc_engine *uc, uint32_t addr);
 #define EMU_FB_BASE         0xD0000000u
 #define EMU_API_BASE        0xE0000000u
 #define EMU_TRAMP_BASE      0xF0000000u
+#define EMU_REVCALL_BASE    0xF0010000u
 #define EMU_HEAP_BASE       0x40000000u
 #define EMU_HEAP_SIZE       (4u * 1024 * 1024)
 
@@ -342,6 +343,10 @@ enum {
     SLOT_FS_SEEK,
     SLOT_FS_TELL,
     SLOT_FS_LIST_DIR,
+    SLOT_FS_MKDIR,
+    SLOT_FS_DELETE_FILE,
+    SLOT_FS_RENAME_FILE,
+    SLOT_FS_IS_DIR,
     SLOT_FS_END,
 
     // picocalc_sys_t (11 functions)
@@ -474,8 +479,7 @@ enum {
     SLOT_HTTP_SET_CONNECT_TIMEOUT,
     SLOT_HTTP_SET_READ_TIMEOUT,
     SLOT_HTTP_SET_READ_BUFFER_SIZE,
-    // 1 padding slot
-    SLOT_HTTP_PAD1,
+    SLOT_HTTP_IS_COMPLETE,
     SLOT_HTTP_END,
 
     // picocalc_soundplayer_t (35 functions)
@@ -671,12 +675,37 @@ static void byteswap_rgb565(uint16_t *buf, int count) {
     }
 }
 
+// When drawImageNN writes directly to the back buffer, flush should NOT
+// overwrite from EMU_FB_BASE (which the app never wrote to).
+static int s_back_buffer_dirty = 0;
+
+static int s_flush_count = 0;
+
 static void tramp_display_flush(uc_engine *uc) {
-    // Copy the emulated framebuffer into the simulator's back buffer,
-    // then present via the normal display_flush() path.
-    uint16_t *back = display_get_back_buffer();
-    uc_mem_read(uc, EMU_FB_BASE, back, 320 * 320 * sizeof(uint16_t));
-    byteswap_rgb565(back, 320 * 320);
+    (void)uc;
+    s_flush_count++;
+    if (s_flush_count <= 5 || (s_flush_count % 100) == 0) {
+        printf("[UNICORN] display_flush #%d (dirty=%d)\n", s_flush_count, s_back_buffer_dirty);
+        fflush(stdout);
+    }
+    if (!s_back_buffer_dirty) {
+        // Copy the emulated framebuffer into the simulator's back buffer,
+        // then present via the normal display_flush() path.
+        uint16_t *back = display_get_back_buffer();
+        uc_mem_read(uc, EMU_FB_BASE, back, 320 * 320 * sizeof(uint16_t));
+        if (s_flush_count <= 5 || (s_flush_count % 500) == 0) {
+            // Debug: show raw values BEFORE byteswap
+            fprintf(stderr, "[UNICORN] pre-swap: [%04x %04x %04x %04x] center=%04x\n",
+                    back[0], back[1], back[2], back[3], back[160*320+160]);
+        }
+        byteswap_rgb565(back, 320 * 320);
+        if (s_flush_count <= 5 || (s_flush_count % 500) == 0) {
+            fprintf(stderr, "[UNICORN] post-swap: [%04x %04x %04x %04x] center=%04x\n",
+                    back[0], back[1], back[2], back[3], back[160*320+160]);
+        }
+    }
+    s_back_buffer_dirty = 0;
+
     display_flush();
 }
 
@@ -722,6 +751,7 @@ static void tramp_display_draw_image_nn(uc_engine *uc) {
         }
     }
     free(buf);
+    s_back_buffer_dirty = 1;  // Tell flush() not to overwrite from EMU_FB_BASE
 }
 
 static void tramp_display_flush_rows(uc_engine *uc) {
@@ -787,10 +817,9 @@ static void tramp_fs_open(uc_engine *uc) {
     char *mode = uc_read_string(uc, mode_addr);
     void *f = sdcard_fopen(path ? path : "", mode ? mode : "r");
     uint32_t handle = f ? handle_wrap(f) : 0;
-    if (!f) {
-        fprintf(stderr, "[TRAMP] fs_open('%s', '%s') -> FAIL\n",
-                path ? path : "(null)", mode ? mode : "(null)");
-    }
+    fprintf(stderr, "[TRAMP] fs_open('%s', '%s') -> %s (handle=%u)\n",
+            path ? path : "(null)", mode ? mode : "(null)",
+            f ? "OK" : "FAIL", handle);
     write_reg(uc, UC_ARM_REG_R0, handle);
 }
 
@@ -809,6 +838,7 @@ static void tramp_fs_read(uc_engine *uc) {
         return;
     }
     int read_bytes = sdcard_fread(f, host_buf, len);
+    fprintf(stderr, "[TRAMP] fs_read(handle=%u, len=%d) -> %d bytes\n", handle, len, read_bytes);
     if (read_bytes > 0) {
         uc_mem_write(uc, buf_addr, host_buf, read_bytes);
     }
@@ -863,6 +893,7 @@ static void tramp_fs_fsize(uc_engine *uc) {
     uint32_t handle = read_reg(uc, UC_ARM_REG_R0);
     void *f = handle_unwrap(handle);
     int sz = f ? (int)sdcard_fsize_handle(f) : 0;
+    fprintf(stderr, "[TRAMP] fs_fsize(handle=%u) -> %d\n", handle, sz);
     write_reg(uc, UC_ARM_REG_R0, (uint32_t)sz);
 }
 
@@ -886,8 +917,11 @@ static void tramp_fs_list_dir(uc_engine *uc) {
     uint32_t cb_addr   = read_reg(uc, UC_ARM_REG_R1);
     uint32_t user_addr = read_reg(uc, UC_ARM_REG_R2);
     char *path = uc_read_string(uc, path_addr);
+    fprintf(stderr, "[TRAMP] fs_list_dir('%s', cb=0x%08x, user=0x%08x)\n",
+            path ? path : "(null)", cb_addr, user_addr);
 
     if (!path || cb_addr == 0) {
+        fprintf(stderr, "[TRAMP] fs_list_dir: NULL path or callback, aborting\n");
         write_reg(uc, UC_ARM_REG_R0, 0);
         return;
     }
@@ -942,6 +976,7 @@ static void tramp_fs_list_dir(uc_engine *uc) {
         count++;
     }
     closedir(dir);
+    fprintf(stderr, "[TRAMP] fs_list_dir: found %d entries, calling callbacks\n", count);
 
     // Now call the ARM callback for each entry via nested emulation
     for (int i = 0; i < count; i++) {
@@ -963,22 +998,27 @@ static void tramp_fs_list_dir(uc_engine *uc) {
         write_reg(uc, UC_ARM_REG_R2, entries[i].size);
         write_reg(uc, UC_ARM_REG_R3, user_addr);
 
-        // Set LR to 0 so the callback returns to address 0 (which stops emulation)
-        uint32_t zero = 0;
-        uc_reg_write(uc, UC_ARM_REG_LR, &zero);
+        // Set LR to REVCALL_BASE (contains SVC #254). When the callback
+        // does BX LR, it executes SVC #254 which triggers uc_emu_stop.
+        uint32_t lr_val = EMU_REVCALL_BASE | 1u;  // Thumb bit
+        uc_reg_write(uc, UC_ARM_REG_LR, &lr_val);
 
         // Run nested emulation for the callback
         uint32_t callback_addr = cb_addr | 1u;  // Ensure Thumb bit
+        if (i < 3) {
+            fprintf(stderr, "[TRAMP] listDir callback[%d] '%s' cb=0x%08x\n",
+                    i, entries[i].name, callback_addr);
+        }
         uc_err err = uc_emu_start(uc, callback_addr, 0, 0, 0);
         if (err != UC_ERR_OK) {
             uint32_t pc;
             uc_reg_read(uc, UC_ARM_REG_PC, &pc);
-            // PC=0 with FETCH_UNMAPPED means normal return
-            if (!(err == UC_ERR_FETCH_UNMAPPED && pc == 0)) {
-                fprintf(stderr, "[UNICORN] listDir callback error: %s (PC=0x%08x)\n",
-                        uc_strerror(err), pc);
-                break;
-            }
+            fprintf(stderr, "[UNICORN] listDir callback[%d] error: %s (PC=0x%08x)\n",
+                    i, uc_strerror(err), pc);
+            break;
+        }
+        if (i < 3) {
+            fprintf(stderr, "[TRAMP] listDir callback[%d] returned OK\n", i);
         }
 
         // Restore registers
@@ -992,6 +1032,49 @@ static void tramp_fs_list_dir(uc_engine *uc) {
 
     write_reg(uc, UC_ARM_REG_R0, (uint32_t)count);
     #undef MAX_ENTRIES
+}
+
+// Forward declarations for FS operations (implemented in driver_stubs.c)
+extern bool sdcard_mkdir(const char *path);
+extern bool sdcard_delete(const char *path);
+extern bool sdcard_rename(const char *oldpath, const char *newpath);
+
+static void tramp_fs_mkdir(uc_engine *uc) {
+    uint32_t path_addr = read_reg(uc, UC_ARM_REG_R0);
+    char *path = uc_read_string(uc, path_addr);
+    bool ok = sdcard_mkdir(path ? path : "");
+    write_reg(uc, UC_ARM_REG_R0, ok ? 1 : 0);
+}
+
+static void tramp_fs_delete_file(uc_engine *uc) {
+    uint32_t path_addr = read_reg(uc, UC_ARM_REG_R0);
+    char *path = uc_read_string(uc, path_addr);
+    bool ok = sdcard_delete(path ? path : "");
+    write_reg(uc, UC_ARM_REG_R0, ok ? 1 : 0);
+}
+
+static void tramp_fs_rename_file(uc_engine *uc) {
+    uint32_t src_addr = read_reg(uc, UC_ARM_REG_R0);
+    uint32_t dst_addr = read_reg(uc, UC_ARM_REG_R1);
+    char *src = uc_read_string(uc, src_addr);
+    char *dst = uc_read_string(uc, dst_addr);
+    bool ok = sdcard_rename(src ? src : "", dst ? dst : "");
+    write_reg(uc, UC_ARM_REG_R0, ok ? 1 : 0);
+}
+
+static void tramp_fs_is_dir(uc_engine *uc) {
+    uint32_t path_addr = read_reg(uc, UC_ARM_REG_R0);
+    char *path = uc_read_string(uc, path_addr);
+    extern char g_base_path[512];
+    char full_path[1024];
+    if (path && path[0] == '/') {
+        snprintf(full_path, sizeof(full_path), "%s%s", g_base_path, path);
+    } else {
+        snprintf(full_path, sizeof(full_path), "%s/%s", g_base_path, path ? path : "");
+    }
+    struct stat st;
+    bool is_dir = (stat(full_path, &st) == 0 && S_ISDIR(st.st_mode));
+    write_reg(uc, UC_ARM_REG_R0, is_dir ? 1 : 0);
 }
 
 // =============================================================================
@@ -1540,6 +1623,13 @@ static void tramp_http_set_read_buffer_size(uc_engine *uc) {
     int bytes = (int)read_reg(uc, UC_ARM_REG_R1);
     http_conn_t *c = handle_unwrap(handle);
     if (c) http_set_recv_buf(c, bytes);
+}
+
+static void tramp_http_is_complete(uc_engine *uc) {
+    uint32_t handle = read_reg(uc, UC_ARM_REG_R0);
+    http_conn_t *c = handle_unwrap(handle);
+    bool complete = c && (c->state == HTTP_STATE_DONE || c->state == HTTP_STATE_FAILED);
+    write_reg(uc, UC_ARM_REG_R0, complete ? 1 : 0);
 }
 
 // =============================================================================
@@ -2419,6 +2509,10 @@ void unicorn_tramp_init(uc_engine *uc) {
     s_dispatch[SLOT_FS_SEEK]      = tramp_fs_seek;
     s_dispatch[SLOT_FS_TELL]      = tramp_fs_tell;
     s_dispatch[SLOT_FS_LIST_DIR]  = tramp_fs_list_dir;
+    s_dispatch[SLOT_FS_MKDIR]     = tramp_fs_mkdir;
+    s_dispatch[SLOT_FS_DELETE_FILE] = tramp_fs_delete_file;
+    s_dispatch[SLOT_FS_RENAME_FILE] = tramp_fs_rename_file;
+    s_dispatch[SLOT_FS_IS_DIR]    = tramp_fs_is_dir;
 
     // System
     s_dispatch[SLOT_SYS_GET_TIME_MS]       = tramp_sys_get_time_ms;
@@ -2536,6 +2630,7 @@ void unicorn_tramp_init(uc_engine *uc) {
     s_dispatch[SLOT_HTTP_SET_CONNECT_TIMEOUT]= tramp_http_set_connect_timeout;
     s_dispatch[SLOT_HTTP_SET_READ_TIMEOUT]   = tramp_http_set_read_timeout;
     s_dispatch[SLOT_HTTP_SET_READ_BUFFER_SIZE]= tramp_http_set_read_buffer_size;
+    s_dispatch[SLOT_HTTP_IS_COMPLETE]        = tramp_http_is_complete;
 
     // Soundplayer
     s_dispatch[SLOT_SND_SAMPLE_LOAD]       = tramp_snd_sample_load;
@@ -2697,7 +2792,7 @@ void unicorn_build_api_struct(uc_engine *uc, uint32_t api_base, uint32_t tramp_b
     uint32_t display_count = SLOT_DISPLAY_END - SLOT_DISPLAY_CLEAR;
     sub_base = write_func_table(uc, sub_base, tramp_base, SLOT_DISPLAY_CLEAR, display_count);
 
-    // picocalc_fs_t (10 function pointers)
+    // picocalc_fs_t (14 function pointers)
     uint32_t fs_addr = sub_base;
     uint32_t fs_count = SLOT_FS_END - SLOT_FS_OPEN;
     sub_base = write_func_table(uc, sub_base, tramp_base, SLOT_FS_OPEN, fs_count);

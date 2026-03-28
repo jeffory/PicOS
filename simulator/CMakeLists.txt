@@ -225,6 +225,7 @@ set(PICOS_CORE_SOURCES
     ${PICOS_ROOT}/src/os/lua_bridge_graphics.c
     ${PICOS_ROOT}/src/os/lua_bridge_3d.c
     ${PICOS_ROOT}/src/os/lua_bridge_ui.c
+    ${PICOS_ROOT}/src/os/toast.c
     ${PICOS_ROOT}/src/os/lua_bridge_audio.c
     ${PICOS_ROOT}/src/os/lua_bridge_sound.c
     ${PICOS_ROOT}/src/os/lua_bridge_repl.c
