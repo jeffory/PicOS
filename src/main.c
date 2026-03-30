@@ -206,6 +206,7 @@ void __attribute__((naked)) isr_hardfault(void) {
 #include "hardware.h"
 #include "os/appconfig.h"
 #include "os/config.h"
+#include "os/core1_alloc.h"
 #include "os/crypto.h"
 #include "os/launcher.h"
 #include "os/lua_psram_alloc.h"
@@ -281,6 +282,9 @@ static picocalc_display_t s_display_impl = {
     .effectDither = display_effect_dither,
     .effectScanline = display_effect_scanline,
     .effectPosterize = display_effect_posterize,
+    .fillVLine = display_fill_vline,
+    .drawTexturedColumn = display_draw_textured_column,
+    .fillVLineGradient = display_fill_vline_gradient,
 };
 
 static uint32_t sys_getTimeMs(void) {
@@ -643,8 +647,8 @@ static void http_setReadTimeout_w(pchttp_t c, int seconds) {
     ((http_conn_t *)c)->read_timeout_ms = (uint32_t)(seconds * 1000);
 }
 
-static void http_setReadBufferSize_w(pchttp_t c, int bytes) {
-    http_set_recv_buf((http_conn_t *)c, (uint32_t)bytes);
+static bool http_setReadBufferSize_w(pchttp_t c, int bytes) {
+    return http_set_recv_buf((http_conn_t *)c, (uint32_t)bytes);
 }
 
 static bool http_isComplete_w(pchttp_t c) {
@@ -1432,21 +1436,6 @@ int main(void) {
   g_api.fs = &s_fs_impl;
   watchdog_update();
 
-  // Check for pending OTA firmware update (must be before Core 1 launch)
-  if (ota_check_pending()) {
-    ui_draw_splash("Applying firmware update...", "DO NOT POWER OFF!");
-    watchdog_update();
-    if (!ota_apply_update()) {
-      // Update failed — show error briefly, continue normal boot
-      display_clear(COLOR_BLACK);
-      display_draw_text(8, 8, "Firmware update failed!", COLOR_RED, COLOR_BLACK);
-      display_draw_text(8, 24, "Booting previous firmware.", COLOR_GRAY, COLOR_BLACK);
-      display_flush();
-      watchdog_update();
-      sleep_ms(3000);
-    }
-    // ota_apply_update reboots on success, so we only get here on failure
-  }
   watchdog_update();
 
   if (s_had_crash) {
@@ -1460,8 +1449,42 @@ int main(void) {
   }
 
   // Initialize the PSRAM allocator BEFORE anything that uses it
-  // (config_load, WiFi, Lua, etc.)
+  // (SD card file ops use umm_malloc for FIL/FILINFO structs, config_load,
+  // WiFi, Lua, OTA update, etc.)
   lua_psram_alloc_init();
+  {
+    void *pool = lua_psram_get_core1_pool();
+    size_t pool_size = lua_psram_get_core1_pool_size();
+    if (pool && pool_size > 0) {
+      core1_alloc_init(pool, pool_size);
+      printf("[MAIN] Core 1 allocator: %u KB at %p\n",
+             (unsigned)(pool_size / 1024), pool);
+    }
+  }
+  watchdog_update();
+
+  // Check for pending OTA firmware update (must be before Core 1 launch).
+  // Primary: watchdog scratch register set by ota_trigger_update().
+  // Fallback: /system/update.bin exists on SD (manually placed firmware).
+  bool ota_pending = ota_check_pending();
+  if (!ota_pending && sdcard_fsize(OTA_BIN_PATH) > 0) {
+    printf("[OTA] Found %s on SD — filesystem fallback trigger\n", OTA_BIN_PATH);
+    ota_pending = true;
+  }
+  if (ota_pending) {
+    ui_draw_splash("Applying firmware update...", "DO NOT POWER OFF!");
+    watchdog_update();
+    if (!ota_apply_update()) {
+      // Update failed — show error briefly, continue normal boot
+      display_clear(COLOR_BLACK);
+      display_draw_text(8, 8, "Firmware update failed!", COLOR_RED, COLOR_BLACK);
+      display_draw_text(8, 24, "Booting previous firmware.", COLOR_GRAY, COLOR_BLACK);
+      display_flush();
+      watchdog_update();
+      sleep_ms(3000);
+    }
+    // ota_apply_update reboots on success, so we only get here on failure
+  }
   watchdog_update();
 
   // Write crash log from previous boot (if any) — must be after PSRAM init

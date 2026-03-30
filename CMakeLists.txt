@@ -245,6 +245,7 @@ add_executable(picocalc_os
     src/os/lua_bridge_game_scene.c
     src/os/lua_bridge_game_save.c
     src/os/lua_psram_alloc.c
+    src/os/core1_alloc.c
     src/os/system_menu.c
     src/os/screenshot.c
     src/os/terminal.c

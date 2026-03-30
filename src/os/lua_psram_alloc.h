@@ -20,3 +20,9 @@ size_t lua_psram_alloc_total_size(void);
 // Used by the Lua debug hook to trigger GC before allocations start failing.
 #define PSRAM_LOW_WATERMARK (512u * 1024u)
 bool lua_psram_alloc_is_low(void);
+
+// Core 1 dedicated memory pool accessors.
+// Returns a pointer to the 128KB region at the end of the PSRAM allocation
+// (NULL on boards without RP2350 PSRAM).
+void  *lua_psram_get_core1_pool(void);
+size_t lua_psram_get_core1_pool_size(void);

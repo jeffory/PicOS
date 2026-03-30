@@ -10,16 +10,21 @@
 // Referenced by UMM_CRITICAL_ENTRY/EXIT in umm_malloc_cfgport.h.
 critical_section_t g_umm_critsec;
 
-// Allocate 6 MB of PSRAM for the Lua VM heap
+// Allocate PSRAM for the Lua VM heap.
+// On RP2350, reserve 128KB at the end of the 6MB region for Core 1's
+// dedicated allocator (WiFi/Mongoose) to eliminate cross-core contention.
 #ifdef PICOS_SIMULATOR
-static uint8_t *s_lua_psram_heap = NULL;
-uint32_t UMM_MALLOC_CFG_HEAP_SIZE = 8 * 1024 * 1024;
+  #define CORE1_POOL_SIZE 0
+  static uint8_t *s_lua_psram_heap = NULL;
+  uint32_t UMM_MALLOC_CFG_HEAP_SIZE = 8 * 1024 * 1024;
 #elif defined(PICO_RP2350)
-static uint8_t *s_lua_psram_heap = (uint8_t *)0x11200000;
-uint32_t UMM_MALLOC_CFG_HEAP_SIZE = 6 * 1024 * 1024;
+  #define CORE1_POOL_SIZE (128 * 1024)
+  static uint8_t *s_lua_psram_heap = (uint8_t *)0x11200000;
+  uint32_t UMM_MALLOC_CFG_HEAP_SIZE = 6 * 1024 * 1024 - CORE1_POOL_SIZE;
 #else
-static uint8_t s_lua_psram_heap[256 * 1024]; // Fallback to 256K on regular Pico
-uint32_t UMM_MALLOC_CFG_HEAP_SIZE = sizeof(s_lua_psram_heap);
+  #define CORE1_POOL_SIZE 0
+  static uint8_t s_lua_psram_heap[256 * 1024]; // Fallback to 256K on regular Pico
+  uint32_t UMM_MALLOC_CFG_HEAP_SIZE = sizeof(s_lua_psram_heap);
 #endif
 
 // Satisfy umm_malloc.c externs even if we explicitly use umm_init_heap
@@ -100,4 +105,16 @@ lua_State *lua_psram_newstate(void) {
     lua_setwarnf(L, l_warnfoff, L);
   }
   return L;
+}
+
+void *lua_psram_get_core1_pool(void) {
+#if CORE1_POOL_SIZE > 0
+    return s_lua_psram_heap + UMM_MALLOC_CFG_HEAP_SIZE;
+#else
+    return NULL;
+#endif
+}
+
+size_t lua_psram_get_core1_pool_size(void) {
+    return CORE1_POOL_SIZE;
 }
