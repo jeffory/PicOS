@@ -31,8 +31,9 @@
 
 // Maximum virtual address range accepted for a native app image.
 // Rejects malformed or malicious ELFs before attempting a heap allocation.
-// 5 MB is generous — real apps are well under 512 KB, but DOOM needs ~4MB.
-#define NATIVE_MAX_IMAGE_SIZE (5u * 1024u * 1024u)
+// 7 MB covers apps like TIC-80 (~5.4 MB with 4 MB sbrk heap in BSS).
+// The real limit is available PSRAM (6 MB on Pimoroni Pico Plus 2 W).
+#define NATIVE_MAX_IMAGE_SIZE (7u * 1024u * 1024u)
 
 // =============================================================================
 // Minimal ELF32 type definitions
@@ -251,8 +252,10 @@ static bool native_run(const app_entry_t *app) {
   // Wait for Core 1 to acknowledge the pause (explicit handshake).
   // The old sleep_ms(10) was a race: Core 1 could be mid-umm_malloc()
   // during DNS resolution when the flag is set.
-  while (!g_core1_paused)
+  for (int i = 0; i < 200 && !g_core1_paused; i++)
     sleep_ms(1);
+  if (!g_core1_paused)
+    printf("[NATIVE] Core 1 pause timeout (200ms) — proceeding anyway\n");
 
   // ── 1. Open ELF from SD card ──────────────────────────────────────────────
   char elf_path[160];
@@ -362,7 +365,7 @@ static bool native_run(const app_entry_t *app) {
          (unsigned long)mem_min, (unsigned long)mem_max);
 
   if (image_size > NATIVE_MAX_IMAGE_SIZE) {
-    show_error("ELF: image too large (>5MB)", NULL);
+    show_error("ELF: image too large (>7MB)", NULL);
     goto out;
   }
 
@@ -651,8 +654,10 @@ out:
   g_native_audio_callback = NULL;
   g_native_stack_base = NULL;
   g_core1_pause = true;
-  while (!g_core1_paused)
+  for (int i = 0; i < 200 && !g_core1_paused; i++)
     sleep_ms(1);
+  if (!g_core1_paused)
+    printf("[NATIVE] Core 1 pause timeout (200ms) at cleanup\n");
   audio_stop_stream();
   audio_stop_tone();
   if (code_buf)

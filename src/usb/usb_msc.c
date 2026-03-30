@@ -57,9 +57,10 @@ void usb_msc_enter_mode(void) {
   
   // Pause Core 1 completely - wait for acknowledgment to ensure it's stopped
   g_core1_pause = true;
-  while (!g_core1_paused) {
+  for (int i = 0; i < 500 && !g_core1_paused; i++)
     sleep_ms(1);
-  }
+  if (!g_core1_paused)
+    printf("[USB_MSC] Core 1 pause timeout (500ms)\n");
   printf("[USB MSC] Core 1 paused (WiFi/HTTP/audio halted)\n");
 
   // 2. Ensure FS Info has valid free cluster count, then unmount FatFS.
