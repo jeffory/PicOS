@@ -1,6 +1,7 @@
 #include "hardware/clocks.h"
 #include "hardware/gpio.h"
 #include "hardware/structs/xip.h"
+#include "hardware/xip_cache.h"
 #include "hardware/watchdog.h"
 #include "pico/bootrom.h"
 #include "pico/multicore.h"
@@ -1457,6 +1458,14 @@ int main(void) {
     size_t pool_size = lua_psram_get_core1_pool_size();
     if (pool && pool_size > 0) {
       core1_alloc_init(pool, pool_size);
+      // Flush dirty cache lines so Core 1 sees the init block header.
+      // core1_alloc_init writes through Core 0's write-back XIP cache;
+      // Core 1 has its own cache and would read stale zeros on a cold miss.
+#ifndef PICOS_SIMULATOR
+      __asm volatile ("dsb sy" ::: "memory");
+      xip_cache_clean_all();
+      __asm volatile ("isb sy" ::: "memory");
+#endif
       printf("[MAIN] Core 1 allocator: %u KB at %p\n",
              (unsigned)(pool_size / 1024), pool);
     }

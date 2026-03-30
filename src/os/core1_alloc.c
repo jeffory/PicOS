@@ -14,7 +14,7 @@
 typedef struct block {
     uint32_t       magic;   // BLOCK_MAGIC when valid
     uint32_t       size;    // total block size including header
-    struct block  *next;    // next free block (only valid when free)
+    struct block  *next;    // next block in pool (used or free); NULL at end
     uint32_t       used;    // 1 = allocated, 0 = free
 } block_t;
 
@@ -67,6 +67,11 @@ void *core1_malloc(size_t size) {
 }
 
 void *core1_calloc(size_t count, size_t size) {
+    if (count == 0 || size == 0) return NULL;
+    if (size > SIZE_MAX / count) {
+        printf("[CORE1_ALLOC] calloc overflow: %zu * %zu\n", count, size);
+        return NULL;
+    }
     size_t total = count * size;
     void *p = core1_malloc(total);
     if (p) memset(p, 0, total);
@@ -77,6 +82,10 @@ void core1_free(void *ptr) {
     if (!ptr) return;
 
     block_t *b = (block_t *)((uint8_t *)ptr - HEADER_SIZE);
+    if (!core1_owns(b)) {
+        printf("[CORE1_ALLOC] free out of range: %p\n", ptr);
+        return;
+    }
     if (b->magic != BLOCK_MAGIC) {
         printf("[CORE1_ALLOC] bad free: %p (magic=%08x)\n", ptr, (unsigned)b->magic);
         return;
