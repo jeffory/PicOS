@@ -12,6 +12,7 @@
 #include "pico/multicore.h"
 #include "pico/stdlib.h"
 
+#include <stdatomic.h>
 #include <stdio.h>
 #include <string.h>
 #include <time.h>
@@ -50,22 +51,25 @@ static struct mg_tcpip_driver_pico_w_data s_driver_data;
 #define REQ_QUEUE_SIZE 8
 #define REQ_QUEUE_MASK (REQ_QUEUE_SIZE - 1)
 
-static conn_req_t  s_req_queue[REQ_QUEUE_SIZE];
-static uint8_t     s_req_head = 0;  // next write index (Core 0)
-static uint8_t     s_req_tail = 0;  // next read  index (Core 1)
-static spin_lock_t *s_req_lock;
+static conn_req_t      s_req_queue[REQ_QUEUE_SIZE];
+static _Atomic uint8_t s_req_head = 0;  // written by Core 0 (producer)
+static _Atomic uint8_t s_req_tail = 0;  // written by Core 1 (consumer)
+
+// Separate spinlock for WiFi state (s_ip, s_ssid) — NOT for the queue
+static spin_lock_t *s_state_lock;
 
 bool wifi_req_push(const conn_req_t *req) {
-  uint32_t save = spin_lock_blocking(s_req_lock);
-  uint8_t next = (s_req_head + 1) & REQ_QUEUE_MASK;
-  if (next == s_req_tail) {
-    spin_unlock(s_req_lock, save);
+  uint8_t head = atomic_load_explicit(&s_req_head, memory_order_relaxed);
+  uint8_t next = (head + 1) & REQ_QUEUE_MASK;
+  uint8_t tail = atomic_load_explicit(&s_req_tail, memory_order_acquire);
+
+  if (next == tail) {
     printf("WiFi: request queue full, dropping request type=%d\n", (int)req->type);
     return false;
   }
-  s_req_queue[s_req_head] = *req;
-  s_req_head = next;
-  spin_unlock(s_req_lock, save);
+
+  s_req_queue[head] = *req;
+  atomic_store_explicit(&s_req_head, next, memory_order_release);
 
   // Ring doorbell to wake Core 1 immediately (<1us) instead of waiting
   // for the 5ms polling timer.  Core 1's doorbell ISR sets the tick flag.
@@ -101,7 +105,7 @@ static void connectivity_cb(struct mg_connection *c, int ev, void *ev_data) {
     s_internet_ok = false;
     s_check_conn = NULL;
     c->is_closing = 1;
-    toast_push("No internet connection", TOAST_ICON_WIFI);
+    toast_push("No internet connection", TOAST_STYLE_WARNING);
     s_connectivity_check_ms =
         to_ms_since_boot(get_absolute_time()) + CONNECTIVITY_CHECK_RETRY_MS;
   } else if (ev == MG_EV_CLOSE) {
@@ -147,7 +151,7 @@ static void sntp_cb(struct mg_connection *c, int ev, void *ev_data) {
              SNTP_RETRY_DELAY_MS);
     } else {
       printf("WiFi: SNTP failed after %d retries\n", SNTP_MAX_RETRIES);
-      toast_push("Time sync failed", TOAST_ICON_ERROR);
+      toast_push("Time sync failed", TOAST_STYLE_ERROR);
     }
   } else if (ev == MG_EV_CLOSE) {
     // SNTP closed
@@ -172,23 +176,23 @@ static void tcpip_cb(struct mg_tcpip_if *ifp, int ev, void *ev_data) {
       s_internet_ok = false;
       // Schedule connectivity check 2s after IP assignment
       s_connectivity_check_ms = to_ms_since_boot(get_absolute_time()) + 2000;
-      { uint32_t save = spin_lock_blocking(s_req_lock);
+      { uint32_t save = spin_lock_blocking(s_state_lock);
         mg_snprintf(s_ip, sizeof(s_ip), "%M", mg_print_ip, &ifp->ip);
-        spin_unlock(s_req_lock, save);
+        spin_unlock(s_state_lock, save);
       }
       printf("WiFi: connected  IP=%s\n", s_ip);
       start_sntp();
     } else if (state == MG_TCPIP_STATE_DOWN) {
       if (s_status == WIFI_STATUS_CONNECTED) {
         s_status = WIFI_STATUS_DISCONNECTED;
-        { uint32_t save = spin_lock_blocking(s_req_lock);
+        { uint32_t save = spin_lock_blocking(s_state_lock);
           s_ip[0] = '\0';
-          spin_unlock(s_req_lock, save);
+          spin_unlock(s_state_lock, save);
         }
         s_internet_ok = false;
         s_connectivity_check_ms = 0;
         printf("WiFi: disconnected\n");
-        toast_push("WiFi disconnected", TOAST_ICON_WIFI);
+        toast_push("WiFi disconnected", TOAST_STYLE_WARNING);
       }
     }
   } else if (ev == MG_TCPIP_EV_WIFI_CONNECT_ERR) {
@@ -205,17 +209,16 @@ static void tcpip_cb(struct mg_tcpip_if *ifp, int ev, void *ev_data) {
 // Executes queued mg_* operations that Core 0 cannot safely call directly.
 static void drain_requests(void) {
   for (;;) {
-    // Pop one entry under spinlock
-    uint32_t save = spin_lock_blocking(s_req_lock);
-    if (s_req_head == s_req_tail) {
-      spin_unlock(s_req_lock, save);
-      break;
-    }
-    conn_req_t req = s_req_queue[s_req_tail];
-    s_req_tail = (s_req_tail + 1) & REQ_QUEUE_MASK;
-    spin_unlock(s_req_lock, save);
+    uint8_t tail = atomic_load_explicit(&s_req_tail, memory_order_relaxed);
+    uint8_t head = atomic_load_explicit(&s_req_head, memory_order_acquire);
 
-    // Process without holding the spinlock
+    if (head == tail)
+      break;
+
+    conn_req_t req = s_req_queue[tail];
+    atomic_store_explicit(&s_req_tail, (tail + 1) & REQ_QUEUE_MASK,
+                          memory_order_release);
+
     switch (req.type) {
 
       case CONN_REQ_HTTP_START: {
@@ -280,6 +283,12 @@ static void drain_requests(void) {
         http_conn_t *c = req.conn;
         if (!c || !c->pcb) break;
         struct mg_connection *nc = (struct mg_connection *)c->pcb;
+        // Clear fn_data BEFORE marking for close.  If the pool slot is
+        // freed (http_free) and reallocated before Mongoose fires
+        // MG_EV_CLOSE, fn_data would point to the NEW connection's
+        // struct — causing use-after-free corruption.  The null check
+        // in http_ev_fn() safely skips the stale MG_EV_CLOSE.
+        nc->fn_data = NULL;
         nc->is_closing = 1;
         c->pcb = NULL;
         break;
@@ -340,11 +349,11 @@ static void drain_requests(void) {
 // ─────────────────────────────────────────────────────────────────
 
 void wifi_init(void) {
-  // Claim a hardware spinlock for the request queue
+  // Claim a hardware spinlock for WiFi state protection (s_ip, s_ssid)
   int lock_num = spin_lock_claim_unused(true);
-  s_req_lock = spin_lock_instance(lock_num);
-  s_req_head = 0;
-  s_req_tail = 0;
+  s_state_lock = spin_lock_instance(lock_num);
+  atomic_store(&s_req_head, 0);
+  atomic_store(&s_req_tail, 0);
 
   // Claim doorbell for IPC wake-up (Core 0 rings, Core 1 handles)
   multicore_doorbell_claim(WIFI_IPC_DOORBELL, 0x3);  // both cores
@@ -441,18 +450,18 @@ const char *wifi_get_ip(void) {
     return NULL;
   // Copy under lock to prevent torn reads from Core 1 writes
   static char s_ip_copy[20];
-  uint32_t save = spin_lock_blocking(s_req_lock);
+  uint32_t save = spin_lock_blocking(s_state_lock);
   mg_snprintf(s_ip, sizeof(s_ip), "%M", mg_print_ip, &s_ifp.ip);
   memcpy(s_ip_copy, s_ip, sizeof(s_ip_copy));
-  spin_unlock(s_req_lock, save);
+  spin_unlock(s_state_lock, save);
   return s_ip_copy[0] ? s_ip_copy : NULL;
 }
 
 const char *wifi_get_ssid(void) {
   static char s_ssid_copy[64];
-  uint32_t save = spin_lock_blocking(s_req_lock);
+  uint32_t save = spin_lock_blocking(s_state_lock);
   memcpy(s_ssid_copy, s_ssid, sizeof(s_ssid_copy));
-  spin_unlock(s_req_lock, save);
+  spin_unlock(s_state_lock, save);
   return s_ssid_copy[0] ? s_ssid_copy : NULL;
 }
 
@@ -476,8 +485,9 @@ void wifi_poll(void) {
   // Skip Mongoose polling when disconnected to save power
   wifi_status_t st = wifi_get_status();
   if (st != WIFI_STATUS_CONNECTED && st != WIFI_STATUS_CONNECTING &&
-      st != WIFI_STATUS_ONLINE)
+      st != WIFI_STATUS_ONLINE) {
     return;
+  }
 
   mg_mgr_poll(&s_mgr, 0);
 
@@ -502,7 +512,7 @@ void wifi_poll(void) {
         printf("WiFi: connect failed after %d retries\n", WIFI_MAX_RETRIES);
         mg_wifi_disconnect();
         s_status = WIFI_STATUS_FAILED;
-        toast_push("WiFi connection failed", TOAST_ICON_WIFI);
+        toast_push("WiFi connection failed", TOAST_STYLE_WARNING);
         s_connect_start_ms = 0;
         s_connect_retries = 0;
       }
@@ -535,10 +545,10 @@ void wifi_poll(void) {
     s_disconnect_pending = false;
     mg_wifi_disconnect();
     s_status = WIFI_STATUS_DISCONNECTED;
-    { uint32_t save = spin_lock_blocking(s_req_lock);
+    { uint32_t save = spin_lock_blocking(s_state_lock);
       s_ssid[0] = '\0';
       s_ip[0] = '\0';
-      spin_unlock(s_req_lock, save);
+      spin_unlock(s_state_lock, save);
     }
     s_internet_ok = false;
     printf("WiFi: disconnected (SNTP deferred)\n");
