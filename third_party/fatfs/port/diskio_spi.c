@@ -39,6 +39,7 @@ extern bool usb_msc_is_active(void);
 #define SD_INIT_BAUD (400 * 1000) /* 400 kHz during card init      */
 #define SD_CMD_TIMEOUT_MS 500     /* R1 / data token wait limit     */
 #define SD_INIT_TIMEOUT_MS 2000   /* ACMD41 init loop limit         */
+#define SD_MULTI_TIMEOUT_MS 5000  /* Total multi-block transfer limit */
 
 /* R1 response flags */
 #define SD_R1_IDLE 0x01
@@ -60,23 +61,6 @@ extern bool usb_msc_is_active(void);
 
 static volatile DSTATUS s_dstatus = STA_NOINIT;
 static bool s_is_sdhc = false; /* true: block addressing        */
-
-/* ─── Optimized multi-block read state ──────────────────────────────────────
- */
-
-static volatile bool s_use_optimized_read = true;  /* Set to false on failure */
-static volatile int s_optimized_fail_count = 0;     /* Track consecutive failures */
-static volatile bool s_optimized_disabled_logged = false; /* Log disable only once */
-
-/* Forward declaration for config check */
-extern const char *config_get(const char *key);
-
-/* Check if optimized reads are enabled via config (default: enabled) */
-static bool sd_optimized_read_enabled(void) {
-  const char *val = config_get("sd_optimized_read");
-  /* If key doesn't exist or is not "0", optimized reads are enabled */
-  return (val == NULL) || (val[0] != '0') || (val[1] != '\0');
-}
 
 /* ─── SPI low-level helpers ─────────────────────────────────────────────────
  */
@@ -253,17 +237,24 @@ static bool sd_init_card(void) {
   return true;
 }
 
+/* Forward declarations for recovery functions (defined below disk_write) */
+static void sd_bus_recovery(void);
+static bool sd_try_reinit(uint8_t r1);
+
 /* ─── FatFS disk interface ──────────────────────────────────────────────────
  */
 
 DSTATUS disk_initialize(BYTE pdrv) {
   if (pdrv != 0)
     return STA_NOINIT;
+  if (sd_init_card()) {
+    s_dstatus = 0;
+    return s_dstatus;
+  }
+  /* Basic init failed — try bus recovery for stuck cards */
+  sd_bus_recovery();
+  sleep_ms(100);
   s_dstatus = sd_init_card() ? 0 : STA_NOINIT;
-  /* Reset optimization state on init */
-  s_use_optimized_read = true;
-  s_optimized_fail_count = 0;
-  s_optimized_disabled_logged = false;
   return s_dstatus;
 }
 
@@ -273,77 +264,25 @@ DSTATUS disk_status(BYTE pdrv) {
   return s_dstatus;
 }
 
-/* Optimized multi-block read using single SPI transfer.
- * Returns true on success, false on failure (caller should use fallback).
- * This is the uf2loader approach - receive all blocks in one transfer.
+/* Multi-block read using CMD18 with per-block token polling.
+ * Polls for each 0xFE data token individually — compatible with all SD cards.
  */
-static bool sd_read_multi_optimized(BYTE *buff, uint32_t addr, UINT count) {
+static bool sd_read_multi(BYTE *buff, uint32_t addr, UINT count) {
   /* Send CMD18: READ_MULTIPLE_BLOCK */
   if (sd_send_cmd(18, addr) != 0x00) {
     return false;
   }
 
-  /* Wait for first data token */
-  absolute_time_t deadline = make_timeout_time_ms(SD_CMD_TIMEOUT_MS);
-  uint8_t tok;
-  do {
-    tok = spi_byte(0xFF);
-  } while (tok != SD_TOKEN_DATA_START && !time_reached(deadline));
-  
-  if (tok != SD_TOKEN_DATA_START) {
-    sd_send_cmd(12, 0); /* STOP_TRANSMISSION */
-    spi_byte(0xFF);
-    return false;
-  }
+  absolute_time_t outer_deadline = make_timeout_time_ms(SD_MULTI_TIMEOUT_MS);
 
-  /* Optimized path: receive all blocks in one large transfer.
-   * This eliminates per-block token polling overhead.
-   * The card sends: 0xFE [512 bytes] [2 CRC] 0xFE [512 bytes] [2 CRC] ...
-   * We read the 0xFE tokens as if they were data - they get overwritten
-   * by the actual data blocks in subsequent transfers. */
-  UINT blocks_remaining = count;
-  while (blocks_remaining > 0) {
-    /* Read one block (512 bytes) */
-    spi_recv_buf(buff, 512);
-    buff += 512;
-    blocks_remaining--;
-    
-    /* Discard CRC (2 bytes) */
-    spi_byte(0xFF);
-    spi_byte(0xFF);
-    
-    /* If there are more blocks, the next 0xFE token should already be 
-     * on the bus from the card. Read and verify it. */
-    if (blocks_remaining > 0) {
-      tok = spi_byte(0xFF);
-      if (tok != SD_TOKEN_DATA_START) {
-        /* Token mismatch - card didn't send expected data token */
-        sd_send_cmd(12, 0); /* STOP_TRANSMISSION */
-        spi_byte(0xFF);
-        return false;
-      }
-    }
-  }
-
-  /* CMD12: STOP_TRANSMISSION */
-  sd_send_cmd(12, 0);
-  spi_byte(0xFF); /* Discard stuff byte */
-  sd_wait_ready(SD_CMD_TIMEOUT_MS);
-  
-  return true;
-}
-
-/* Standard per-block multi-block read (fallback).
- * More compatible with all SD cards but slower.
- */
-static bool sd_read_multi_fallback(BYTE *buff, uint32_t addr, UINT count) {
-  /* Send CMD18: READ_MULTIPLE_BLOCK */
-  if (sd_send_cmd(18, addr) != 0x00) {
-    return false;
-  }
-
-  UINT original_count = count;
   while (count--) {
+    if (time_reached(outer_deadline)) {
+      printf("[SD] multi-block read total timeout (%dms)\n",
+             SD_MULTI_TIMEOUT_MS);
+      sd_send_cmd(12, 0);
+      spi_byte(0xFF);
+      return false;
+    }
     absolute_time_t deadline = make_timeout_time_ms(SD_CMD_TIMEOUT_MS);
     uint8_t tok;
     do {
@@ -373,22 +312,27 @@ DRESULT disk_read(BYTE pdrv, BYTE *buff, LBA_t sector, UINT count) {
   if (pdrv != 0 || (s_dstatus & STA_NOINIT))
     return RES_NOTRDY;
 
-  /* Check if optimized reads are enabled via config */
-  bool optimized_enabled = sd_optimized_read_enabled();
-
   /* SDSC uses byte address; SDHC uses block address */
   uint32_t addr = s_is_sdhc ? (uint32_t)sector : (uint32_t)sector * 512;
 
   sd_cs_low();
 
   if (count == 1) {
-    /* CMD17: READ_SINGLE_BLOCK - no optimization for single blocks */
+    /* CMD17: READ_SINGLE_BLOCK */
     uint8_t r1 = sd_send_cmd(17, addr);
     if (r1 != 0x00) {
-      if (!usb_msc_is_active())
-        printf("[SD_RD] CMD17 fail: R1=0x%02x sec=%lu\n", r1, (unsigned long)sector);
+      /* Card may have spontaneously reset.  Try reinit and retry once. */
       sd_cs_high();
-      return RES_ERROR;
+      if (sd_try_reinit(r1)) {
+        sd_cs_low();
+        r1 = sd_send_cmd(17, addr);
+      }
+      if (r1 != 0x00) {
+        if (!usb_msc_is_active())
+          printf("[SD_RD] CMD17 fail: R1=0x%02x sec=%lu\n", r1, (unsigned long)sector);
+        sd_cs_high();
+        return RES_ERROR;
+      }
     }
 
     absolute_time_t deadline = make_timeout_time_ms(SD_CMD_TIMEOUT_MS);
@@ -405,47 +349,17 @@ DRESULT disk_read(BYTE pdrv, BYTE *buff, LBA_t sector, UINT count) {
     spi_byte(0xFF); /* CRC high */
     spi_byte(0xFF); /* CRC low  */
   } else {
-    /* Multi-block read with optimized path and fallback */
-    bool success = false;
-    
-    /* Try optimized path if enabled and not permanently disabled */
-    if (optimized_enabled && s_use_optimized_read) {
-      success = sd_read_multi_optimized(buff, addr, count);
-      
-      if (!success) {
-        s_optimized_fail_count++;
-        if (!usb_msc_is_active())
-          printf("[SD] Optimized multi-block read failed (attempt %d)\n",
-                 s_optimized_fail_count);
-
-        /* After 2 consecutive failures, permanently disable for this session */
-        if (s_optimized_fail_count >= 2) {
-          s_use_optimized_read = false;
-          if (!s_optimized_disabled_logged) {
-            if (!usb_msc_is_active()) {
-              printf("[SD] Optimized multi-block read disabled after %d failures\n",
-                     s_optimized_fail_count);
-              printf("[SD] Set sd_optimized_read=0 in config to disable permanently\n");
-            }
-            s_optimized_disabled_logged = true;
-          }
-        }
-        
-        /* Re-initialize card and CS line for fallback attempt */
-        sd_cs_high();
-        sleep_ms(1);
+    /* Multi-block read via CMD18 with per-block token polling */
+    if (!sd_read_multi(buff, addr, count)) {
+      /* Reinit and retry the entire multi-block read once */
+      sd_cs_high();
+      if (sd_try_reinit(0x01 /* assume idle-state reset */)) {
         sd_cs_low();
+        if (!sd_read_multi(buff, addr, count)) {
+          sd_cs_high();
+          return RES_ERROR;
+        }
       } else {
-        /* Success - reset failure count */
-        s_optimized_fail_count = 0;
-      }
-    }
-    
-    /* Use fallback if optimized failed or was disabled */
-    if (!success) {
-      success = sd_read_multi_fallback(buff, addr, count);
-      if (!success) {
-        sd_cs_high();
         return RES_ERROR;
       }
     }
@@ -457,6 +371,123 @@ DRESULT disk_read(BYTE pdrv, BYTE *buff, LBA_t sector, UINT count) {
 }
 
 #if FF_FS_READONLY == 0
+
+/* SRAM staging buffer — eliminates XIP cache / QMI contention when writing
+ * data that lives in PSRAM (e.g. FIL->buf allocated via umm_malloc).
+ * CPU reads from PSRAM cached alias can stall on QMI bus contention with
+ * Core 1 (WiFi/TLS), causing irregular SPI clock gaps. */
+static uint8_t s_wr_staging[512];
+
+/* ─── Core 1 pause during SD writes ─────────────────────────────────────────
+ * CYW43 WiFi draws significant current on Core 1.  Combined with SD card
+ * flash programming current, the 3.3 V rail droops below the card's minimum
+ * operating voltage → spontaneous card reset (R1 idle bit).  Pausing Core 1
+ * during writes eliminates the concurrent power draw.  The TCP stack handles
+ * the brief (~5-20 ms per sector) interruption via retransmission. */
+extern volatile bool g_core1_pause;
+extern volatile bool g_core1_paused;
+
+static inline void sd_pause_core1(void) {
+  if (usb_msc_is_active()) return; /* already in IRQ — can't wait */
+  g_core1_pause = true;
+  /* Spin until Core 1 acknowledges the pause.  Core 1 checks this flag
+   * between wifi_poll() iterations — during active TLS, mg_mgr_poll()
+   * can block for 50-100 ms (record decryption), so 200 ms is needed
+   * to guarantee at least one check opportunity.  Without a confirmed
+   * pause, the combined CYW43 + SD flash-programming current droops
+   * the 3.3 V rail below the card's minimum → spontaneous card reset. */
+  for (int i = 0; i < 200 && !g_core1_paused; i++)
+    sleep_ms(1);
+  if (!g_core1_paused && !usb_msc_is_active())
+    printf("[SD_WR] Core 1 pause timeout (200 ms) — write may fail\n");
+}
+
+static inline void sd_resume_core1(void) {
+  g_core1_pause = false;
+}
+
+/* ─── Aggressive bus recovery ──────────────────────────────────────────────
+ * When the card enters an unresponsive state (R1=0xFF), the SPI interface
+ * may be stuck mid-transaction.  A card that brownout-reset during WiFi
+ * activity (without any SPI communication) reverts to native SD mode and
+ * needs a full re-entry sequence.
+ *
+ * Recovery steps (per SD Physical Layer Simplified Spec):
+ *   1. CMD12 (STOP_TRANSMISSION) to abort any in-progress operation
+ *   2. ≥800 dummy clocks with CS high to flush stuck state machines
+ *   3. Delay for internal card housekeeping
+ */
+static void sd_bus_recovery(void) {
+  spi_set_baudrate(SD_SPI_PORT, SD_INIT_BAUD);
+
+  /* Abort any in-progress multi-block operation */
+  sd_cs_low();
+  sd_send_cmd(12, 0);
+  spi_byte(0xFF);
+  sd_wait_ready(SD_CMD_TIMEOUT_MS);
+  sd_cs_high();
+
+  /* 800 dummy clocks (100 bytes × 8 bits) with CS high.  A card stuck
+   * mid-transaction needs clocks to complete its internal operation.
+   * The spec requires ≥74 for init; deeply stuck cards need more. */
+  for (int i = 0; i < 100; i++)
+    spi_byte(0xFF);
+}
+
+/* Try to recover a card that has become unresponsive.  Handles both
+ * transient resets (R1 idle bit, from brief power droop) and deep
+ * lockups (R1=0xFF, from prolonged brownout during WiFi activity).
+ *
+ * Three escalating attempts:
+ *   1. Quick reinit (10 ms delay) — handles transient card resets
+ *   2. Bus recovery + reinit (100 ms) — handles stuck SPI transactions
+ *   3. Extended delay + bus recovery (500 ms) — handles deep lockup
+ *
+ * Returns true if the card was successfully recovered. */
+static bool sd_try_reinit(uint8_t r1) {
+  if (r1 == 0x00)
+    return false; /* No error — nothing to reinit */
+
+  if (!usb_msc_is_active())
+    printf("[SD] Card error (R1=0x%02x), recovering...\n", r1);
+
+  /* Attempt 1: Quick reinit — sufficient for transient resets */
+  sd_cs_high();
+  sleep_ms(10);
+  if (sd_init_card()) {
+    if (!usb_msc_is_active())
+      printf("[SD] Recovered (quick reinit)\n");
+    return true;
+  }
+
+  /* Attempt 2: Bus recovery + reinit — clears stuck SPI state */
+  if (!usb_msc_is_active())
+    printf("[SD] Quick reinit failed, trying bus recovery...\n");
+  sd_bus_recovery();
+  sleep_ms(100);
+  if (sd_init_card()) {
+    if (!usb_msc_is_active())
+      printf("[SD] Recovered (bus recovery)\n");
+    return true;
+  }
+
+  /* Attempt 3: Extended delay — card may need time to finish internal
+   * flash operations (erase/program) before it can accept commands. */
+  if (!usb_msc_is_active())
+    printf("[SD] Bus recovery failed, trying extended delay...\n");
+  sleep_ms(500);
+  sd_bus_recovery();
+  sleep_ms(100);
+  if (sd_init_card()) {
+    if (!usb_msc_is_active())
+      printf("[SD] Recovered (extended delay)\n");
+    return true;
+  }
+
+  if (!usb_msc_is_active())
+    printf("[SD] Recovery failed after 3 attempts\n");
+  return false;
+}
 
 DRESULT disk_write(BYTE pdrv, const BYTE *buff, LBA_t sector, UINT count) {
   static uint32_t s_wr_seq = 0;
@@ -475,22 +506,43 @@ DRESULT disk_write(BYTE pdrv, const BYTE *buff, LBA_t sector, UINT count) {
 
   uint32_t addr = s_is_sdhc ? (uint32_t)sector : (uint32_t)sector * 512;
 
+  /* Per-sector Core 1 pause is counterproductive — the rapid pause/resume
+   * cycling gives Core 1 brief CYW43 activity windows between every 512B
+   * write, making the problem worse.  Callers that need clean SD writes
+   * (OTA updater, USB MSC) should pause Core 1 once for the entire batch
+   * using g_core1_pause directly, matching the USB MSC pattern. */
+  // sd_pause_core1();
+
+  DRESULT result = RES_OK;
+
   sd_cs_low();
 
   if (count == 1) {
     /* CMD24: WRITE_BLOCK */
     uint8_t r1 = sd_send_cmd(24, addr);
     if (r1 != 0x00) {
-      if (!usb_msc_is_active())
-        printf("[SD_WR] CMD24 fail: R1=0x%02x sec=%lu buf=%p\n", r1, (unsigned long)sector, buff);
-      sd_cs_high();
-      return RES_ERROR;
+      /* Card may have spontaneously reset (power droop, noise).
+       * If R1 has idle bit, re-init card and retry once. */
+      if (sd_try_reinit(r1)) {
+        sd_cs_low();
+        r1 = sd_send_cmd(24, addr);
+      }
+      if (r1 != 0x00) {
+        if (!usb_msc_is_active())
+          printf("[SD_WR] CMD24 fail: R1=0x%02x sec=%lu buf=%p\n", r1, (unsigned long)sector, buff);
+        sd_cs_high();
+        result = RES_ERROR;
+        goto out;
+      }
     }
 
-    spi_byte(0xFF);                /* One idle byte before token   */
-    spi_byte(SD_TOKEN_DATA_START); /* Data start token             */
-    spi_send_buf(buff, 512);       /* 512 bytes of payload         */
-    spi_byte(0xFF);                /* Dummy CRC (2 bytes)          */
+    /* Stage data in SRAM to avoid PSRAM/XIP stalls during SPI transfer */
+    memcpy(s_wr_staging, buff, 512);
+
+    spi_byte(0xFF);                    /* One idle byte before token   */
+    spi_byte(SD_TOKEN_DATA_START);     /* Data start token             */
+    spi_send_buf(s_wr_staging, 512);   /* 512 bytes of payload         */
+    spi_byte(0xFF);                    /* Dummy CRC (2 bytes)          */
     spi_byte(0xFF);
 
     /* Poll for data response token — card may need several clocks */
@@ -504,7 +556,8 @@ DRESULT disk_write(BYTE pdrv, const BYTE *buff, LBA_t sector, UINT count) {
         if (!usb_msc_is_active())
           printf("[SD_WR] CMD24 data resp=0x%02x sec=%lu\n", resp, (unsigned long)sector);
         sd_cs_high();
-        return RES_ERROR;
+        result = RES_ERROR;
+        goto out;
       }
     }
 
@@ -512,7 +565,8 @@ DRESULT disk_write(BYTE pdrv, const BYTE *buff, LBA_t sector, UINT count) {
       if (!usb_msc_is_active())
         printf("[SD_WR] CMD24 busy timeout sec=%lu\n", (unsigned long)sector);
       sd_cs_high();
-      return RES_ERROR;
+      result = RES_ERROR;
+      goto out;
     }
   } else {
     /* CMD25: WRITE_MULTIPLE_BLOCK with CMD23 pre-erase optimization */
@@ -520,17 +574,40 @@ DRESULT disk_write(BYTE pdrv, const BYTE *buff, LBA_t sector, UINT count) {
 
     uint8_t r1 = sd_send_cmd(25, addr);
     if (r1 != 0x00) {
-      if (!usb_msc_is_active())
-        printf("[SD_WR] CMD25 fail: R1=0x%02x sec=%lu cnt=%u buf=%p\n", r1, (unsigned long)sector, count, buff);
-      sd_cs_high();
-      return RES_ERROR;
+      if (sd_try_reinit(r1)) {
+        sd_cs_low();
+        sd_send_cmd(23, count);
+        r1 = sd_send_cmd(25, addr);
+      }
+      if (r1 != 0x00) {
+        if (!usb_msc_is_active())
+          printf("[SD_WR] CMD25 fail: R1=0x%02x sec=%lu cnt=%u buf=%p\n", r1, (unsigned long)sector, count, buff);
+        sd_cs_high();
+        result = RES_ERROR;
+        goto out;
+      }
     }
 
     UINT blk = 0;
+    absolute_time_t outer_deadline = make_timeout_time_ms(SD_MULTI_TIMEOUT_MS);
     while (count--) {
+      if (time_reached(outer_deadline)) {
+        if (!usb_msc_is_active())
+          printf("[SD] multi-block write total timeout (%dms)\n",
+                 SD_MULTI_TIMEOUT_MS);
+        spi_byte(SD_TOKEN_STOP_TRAN);
+        spi_byte(0xFF);
+        sd_wait_ready(SD_CMD_TIMEOUT_MS);
+        sd_cs_high();
+        result = RES_ERROR;
+        goto out;
+      }
+      /* Stage data in SRAM */
+      memcpy(s_wr_staging, buff, 512);
+
       spi_byte(0xFF);                 /* Idle byte                */
       spi_byte(SD_TOKEN_MULTI_WRITE); /* Multi-block start token  */
-      spi_send_buf(buff, 512);
+      spi_send_buf(s_wr_staging, 512);
       spi_byte(0xFF); /* Dummy CRC               */
       spi_byte(0xFF);
 
@@ -546,7 +623,8 @@ DRESULT disk_write(BYTE pdrv, const BYTE *buff, LBA_t sector, UINT count) {
             printf("[SD_WR] CMD25 blk %u resp=0x%02x sec=%lu\n", blk, resp, (unsigned long)sector);
           spi_byte(SD_TOKEN_STOP_TRAN);
           sd_cs_high();
-          return RES_ERROR;
+          result = RES_ERROR;
+          goto out;
         }
       }
 
@@ -555,7 +633,8 @@ DRESULT disk_write(BYTE pdrv, const BYTE *buff, LBA_t sector, UINT count) {
           printf("[SD_WR] CMD25 blk %u busy timeout sec=%lu\n", blk, (unsigned long)sector);
         spi_byte(SD_TOKEN_STOP_TRAN);
         sd_cs_high();
-        return RES_ERROR;
+        result = RES_ERROR;
+        goto out;
       }
 
       buff += 512;
@@ -577,7 +656,10 @@ DRESULT disk_write(BYTE pdrv, const BYTE *buff, LBA_t sector, UINT count) {
 
   sd_cs_high();
   spi_byte(0xFF);
-  return RES_OK;
+
+out:
+  // sd_resume_core1();  /* see sd_pause_core1 comment above */
+  return result;
 }
 
 #endif /* FF_FS_READONLY */
