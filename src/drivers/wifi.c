@@ -21,7 +21,7 @@
 // ─────────────────────────────────────────────────────────────────────
 
 static bool s_available = false;
-static wifi_status_t s_status = WIFI_STATUS_DISCONNECTED;
+static _Atomic wifi_status_t s_status = WIFI_STATUS_DISCONNECTED;
 static char s_ssid[64] = {0};
 static char s_pass[64] = {0};
 static char s_ip[20] = {0};
@@ -84,7 +84,7 @@ bool wifi_req_push(const conn_req_t *req) {
 // reachability with a lightweight TCP connect to 8.8.8.8:53 (Google DNS).
 // No DNS dependency, no TLS, minimal overhead.
 
-static bool     s_internet_ok = false;
+static _Atomic bool     s_internet_ok = false;
 static uint32_t s_connectivity_check_ms = 0;
 static struct mg_connection *s_check_conn = NULL;
 
