@@ -266,8 +266,11 @@ int32_t tud_msc_read10_cb(uint8_t lun, uint32_t lba, uint32_t offset,
   if (!s_msc_active)
     return -1;
 
-  // No mutex — Core 1 is paused during MSC mode, nothing else uses SPI0
+  // Defense-in-depth: Core 1 is paused during MSC mode so the mutex is
+  // uncontended, but acquire it anyway to guard against future changes.
+  recursive_mutex_enter_blocking(&g_sdcard_mutex);
   DRESULT res = disk_read(0, (BYTE *)buffer, lba, bufsize / msc_block_size);
+  recursive_mutex_exit(&g_sdcard_mutex);
   if (res != RES_OK)
     return -1;
 
@@ -287,8 +290,11 @@ int32_t tud_msc_write10_cb(uint8_t lun, uint32_t lba, uint32_t offset,
   if (!s_msc_active)
     return -1;
 
-  // No mutex — Core 1 is paused during MSC mode, nothing else uses SPI0
+  // Defense-in-depth: Core 1 is paused during MSC mode so the mutex is
+  // uncontended, but acquire it anyway to guard against future changes.
+  recursive_mutex_enter_blocking(&g_sdcard_mutex);
   DRESULT res = disk_write(0, (const BYTE *)buffer, lba, bufsize / msc_block_size);
+  recursive_mutex_exit(&g_sdcard_mutex);
   if (res != RES_OK)
     return -1;
 
