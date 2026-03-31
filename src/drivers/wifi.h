@@ -9,9 +9,8 @@
 // =============================================================================
 // WiFi Driver — CYW43 on Pimoroni Pico Plus 2W
 //
-// SPI1 is shared between the LCD and the CYW43 WiFi chip. All CYW43
-// operations are serialised behind display_spi_lock() / display_spi_unlock()
-// to prevent bus conflicts with LCD DMA transfers.
+// CYW43 WiFi chip on SPI1. LCD uses PIO0 SPI (separate bus, no contention).
+// Core 1 exclusively owns all Mongoose/CYW43 operations.
 //
 // Connection is non-blocking: call wifi_connect(), then poll wifi_get_status()
 // or let the OS Lua hook drive wifi_poll() automatically in the background.
