@@ -18,6 +18,7 @@
 
 #include "umm_malloc.h"
 
+#include <stdatomic.h>
 #include <stdint.h>
 #include <string.h>
 #include <stdio.h>
@@ -59,8 +60,8 @@ static mutex_t      s_mp3_mutex;
 #define MAX_ERRORS_PER_UPDATE  32
 
 static uint8_t *s_pcm_ring = NULL;
-static volatile size_t s_ring_rd = 0;
-static volatile size_t s_ring_wr = 0;
+static _Atomic size_t s_ring_rd = 0;
+static _Atomic size_t s_ring_wr = 0;
 static bool s_use_pio_psram = false;
 static uint32_t s_pio_psram_base = 0;
 
@@ -77,11 +78,12 @@ static uint8_t s_pio_read_buf[STAGING_BUF_SIZE] __attribute__((aligned(4)));
 #define FED_RING_SIZE  (64 * 1024)
 static bool     s_fed_mode = false;
 static uint8_t *s_fed_ring_buf = NULL; // umm_malloc'd in QMI PSRAM
-static volatile uint32_t s_fed_wr = 0; // written by Core 0
-static volatile uint32_t s_fed_rd = 0; // read by Core 1
+static _Atomic uint32_t s_fed_wr = 0; // written by Core 0
+static _Atomic uint32_t s_fed_rd = 0; // read by Core 1
 
 static inline uint32_t fed_ring_available(void) {
-    uint32_t wr = s_fed_wr, rd = s_fed_rd;
+    uint32_t wr = atomic_load_explicit(&s_fed_wr, memory_order_acquire);
+    uint32_t rd = atomic_load_explicit(&s_fed_rd, memory_order_acquire);
     return (wr >= rd) ? (wr - rd) : (FED_RING_SIZE - rd + wr);
 }
 
@@ -90,7 +92,7 @@ static inline uint32_t fed_ring_free(void) {
 }
 
 static void fed_ring_read(uint8_t *dst, uint32_t len) {
-    uint32_t rd = s_fed_rd;
+    uint32_t rd = atomic_load_explicit(&s_fed_rd, memory_order_acquire);
     uint32_t to_end = FED_RING_SIZE - rd;
     if (len <= to_end) {
         memcpy(dst, s_fed_ring_buf + rd, len);
@@ -98,11 +100,12 @@ static void fed_ring_read(uint8_t *dst, uint32_t len) {
         memcpy(dst, s_fed_ring_buf + rd, to_end);
         memcpy(dst + to_end, s_fed_ring_buf, len - to_end);
     }
-    s_fed_rd = (rd + len) % FED_RING_SIZE;
+    atomic_store_explicit(&s_fed_rd, (rd + len) % FED_RING_SIZE, memory_order_release);
 }
 
 static inline size_t __time_critical_func(ring_available)(void) {
-    size_t wr = s_ring_wr, rd = s_ring_rd;
+    size_t wr = atomic_load_explicit(&s_ring_wr, memory_order_acquire);
+    size_t rd = atomic_load_explicit(&s_ring_rd, memory_order_acquire);
     return (wr >= rd) ? (wr - rd) : (PCM_RING_SIZE - rd + wr);
 }
 
@@ -112,7 +115,7 @@ static inline size_t __time_critical_func(ring_free)(void) {
 
 static void ring_write(const uint8_t *data, size_t len) {
     while (len > 0) {
-        size_t wr = s_ring_wr;
+        size_t wr = atomic_load_explicit(&s_ring_wr, memory_order_relaxed);
         size_t free_space = ring_free();
         if (free_space == 0) break;
 
@@ -134,7 +137,7 @@ static void ring_write(const uint8_t *data, size_t len) {
                 memcpy(s_pcm_ring, data + to_end, chunk - to_end);
             }
         }
-        s_ring_wr = (wr + chunk) % PCM_RING_SIZE;
+        atomic_store_explicit(&s_ring_wr, (wr + chunk) % PCM_RING_SIZE, memory_order_release);
         data += chunk;
         len -= chunk;
     }
@@ -170,7 +173,7 @@ static void refill_staging_buf(void) {
     size_t to_read = (space < avail) ? space : avail;
     if (to_read == 0) return;
 
-    size_t rd = s_ring_rd;
+    size_t rd = atomic_load_explicit(&s_ring_rd, memory_order_relaxed);
     size_t to_end = PCM_RING_SIZE - rd;
 
     if (s_use_pio_psram) {
@@ -188,7 +191,7 @@ static void refill_staging_buf(void) {
             memcpy(s_staging_buf + s_staging_avail + to_end, s_pcm_ring, to_read - to_end);
         }
     }
-    s_ring_rd = (rd + to_read) % PCM_RING_SIZE;
+    atomic_store_explicit(&s_ring_rd, (rd + to_read) % PCM_RING_SIZE, memory_order_release);
     s_staging_avail += to_read;
 }
 
@@ -903,7 +906,7 @@ uint32_t mp3_player_feed(const uint8_t *data, uint32_t len) {
     uint32_t to_write = (len < free_space) ? len : free_space;
     if (to_write == 0) return 0;
 
-    uint32_t wr = s_fed_wr;
+    uint32_t wr = atomic_load_explicit(&s_fed_wr, memory_order_relaxed);
     uint32_t to_end = FED_RING_SIZE - wr;
     if (to_write <= to_end) {
         memcpy(s_fed_ring_buf + wr, data, to_write);
@@ -911,7 +914,7 @@ uint32_t mp3_player_feed(const uint8_t *data, uint32_t len) {
         memcpy(s_fed_ring_buf + wr, data, to_end);
         memcpy(s_fed_ring_buf, data + to_end, to_write - to_end);
     }
-    s_fed_wr = (wr + to_write) % FED_RING_SIZE;
+    atomic_store_explicit(&s_fed_wr, (wr + to_write) % FED_RING_SIZE, memory_order_release);
     return to_write;
 }
 

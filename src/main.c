@@ -8,6 +8,7 @@
 #include "pico/stdlib.h"
 
 #include <stdarg.h>
+#include <stdatomic.h>
 #include <stdio.h>
 #include <stdlib.h>
 
@@ -21,6 +22,10 @@
 void display_clear(uint16_t color);
 int  display_draw_text(int x, int y, const char *text, uint16_t fg, uint16_t bg);
 void display_flush(void);
+
+// Forward declarations for launcher functions used in hardfault_c.
+const char* launcher_get_running_app_name(void);
+uint32_t    launcher_get_app_uptime_ms(void);
 
 // Linker symbols for the main stack limits (see boot2/memmap_*.ld)
 extern uint32_t __StackTop;    // initial SP (stack grows DOWN from here)
@@ -50,6 +55,11 @@ static void __attribute__((used)) hardfault_c(uint32_t *frame, uint32_t exc_retu
   uint32_t mmar = *(volatile uint32_t *)0xE000ED34u; // MMFAR (if MMFARVALID)
   uint32_t ccr = *(volatile uint32_t *)0xE000ED14u;  // SCB CCR
 
+  // Grab app context before anything else (best-effort, pointers may be bad).
+  const char *app_name = launcher_get_running_app_name();
+  uint32_t uptime_ms = launcher_get_app_uptime_ms();
+  uint32_t uptime_sec = uptime_ms / 1000u;
+
   // Persist fault data in watchdog scratch registers so it survives a
   // watchdog reset and can be dumped to SD on next boot.
   #define CRASH_MAGIC 0xDEAD1234u
@@ -60,7 +70,10 @@ static void __attribute__((used)) hardfault_c(uint32_t *frame, uint32_t exc_retu
   watchdog_hw->scratch[4] = cfsr;
   watchdog_hw->scratch[5] = hfsr;
   watchdog_hw->scratch[6] = bfar;
-  watchdog_hw->scratch[7] = exc_return;
+  // Pack PSP bit (bit 31) + uptime in seconds (bits 0-30) into scratch[7].
+  // EXC_RETURN only needs bit 2 (PSP vs MSP) for crash log decoding.
+  watchdog_hw->scratch[7] = ((exc_return & 4u) ? (1u << 31) : 0u)
+                           | (uptime_sec & 0x7FFFFFFFu);
 
   // frame IS the MSP/PSP just after the hardware pushed the 8-word exception
   // frame.  Pre-fault SP = frame + 32 (8 words × 4 bytes).
@@ -81,6 +94,11 @@ static void __attribute__((used)) hardfault_c(uint32_t *frame, uint32_t exc_retu
 
   // ── UART output (always works — polling-based, no IRQ required) ────────────
   printf("\n!!! HARDFAULT !!!\n");
+  if (app_name)
+    printf("  App  = %s (uptime %lum %lus)\n",
+           app_name, (unsigned long)(uptime_sec / 60u), (unsigned long)(uptime_sec % 60u));
+  else
+    printf("  App  = (none -- OS/launcher)\n");
   printf("  PC   = 0x%08lx\n", (unsigned long)pc);
   printf("  LR   = 0x%08lx\n", (unsigned long)lr);
   printf("  R0   = 0x%08lx\n", (unsigned long)r0);
@@ -124,26 +142,33 @@ static void __attribute__((used)) hardfault_c(uint32_t *frame, uint32_t exc_retu
   snprintf(ln, sizeof(ln), "!!! HARDFAULT !!!");
   display_draw_text(4,  4, ln, 0xF800, 0x0000); // red
 
+  if (app_name)
+    snprintf(ln, sizeof(ln), "App: %.28s (%lum %lus)",
+             app_name, (unsigned long)(uptime_sec / 60u), (unsigned long)(uptime_sec % 60u));
+  else
+    snprintf(ln, sizeof(ln), "App: (none -- OS/launcher)");
+  display_draw_text(4, 18, ln, 0x07FF, 0x0000); // cyan
+
   snprintf(ln, sizeof(ln), "PC %08lx  LR %08lx", (unsigned long)pc, (unsigned long)lr);
-  display_draw_text(4, 20, ln, 0xFFFF, 0x0000);
+  display_draw_text(4, 34, ln, 0xFFFF, 0x0000);
 
   snprintf(ln, sizeof(ln), "SP %08lx  lim %08lx%s",
            (unsigned long)sp_at_fault,
            (unsigned long)stack_limit,
            stack_overflow ? " OVFL!" : "");
-  display_draw_text(4, 36, ln, stack_overflow ? 0xF800 : 0xFFFF, 0x0000);
+  display_draw_text(4, 48, ln, stack_overflow ? 0xF800 : 0xFFFF, 0x0000);
 
   snprintf(ln, sizeof(ln), "Stack: %s", on_psp ? "PSP (native app)" : "MSP (OS)");
-  display_draw_text(4, 52, ln, 0x07E0, 0x0000); // green
+  display_draw_text(4, 62, ln, 0x07E0, 0x0000); // green
 
   snprintf(ln, sizeof(ln), "CFSR %08lx  HFSR %08lx", (unsigned long)cfsr, (unsigned long)hfsr);
-  display_draw_text(4, 68, ln, 0xFFFF, 0x0000);
+  display_draw_text(4, 76, ln, 0xFFFF, 0x0000);
 
   snprintf(ln, sizeof(ln), "BFAR %08lx  MMAR %08lx", (unsigned long)bfar, (unsigned long)mmar);
-  display_draw_text(4, 84, ln, 0xFFFF, 0x0000);
+  display_draw_text(4, 90, ln, 0xFFFF, 0x0000);
 
   // Decode CFSR fault type flags on-screen
-  int y = 104;
+  int y = 108;
   uint16_t warn = 0xFD20; // orange
   if (cfsr & (1u<<17)) { display_draw_text(4, y, "INVSTATE: invalid CPU state", warn, 0); y += 14; }
   if (cfsr & (1u<<16)) { display_draw_text(4, y, "UNDEFINSTR", warn, 0);                  y += 14; }
@@ -1117,12 +1142,12 @@ static const picocalc_modplayer_t s_modplayer_impl = {
 // Set to true to temporarily pause Core 1's Mongoose/WiFi polling.
 // Used during native app loading to eliminate PSRAM heap contention between
 // Core 1's umm_malloc/umm_free and the ELF loader on Core 0.
-volatile bool g_core1_pause = false;
-volatile bool g_core1_paused = false; // acknowledgment flag for Core 1 pause handshake
+_Atomic bool g_core1_pause = false;
+_Atomic bool g_core1_paused = false; // acknowledgment flag for Core 1 pause handshake
 
 // Optional audio callback for native apps (e.g. DOOM) that offload mixing
 // to Core 1.  Set by the app at startup, cleared on exit.
-void (*g_native_audio_callback)(void) = NULL;
+_Atomic(void (*)(void)) g_native_audio_callback = NULL;
 
 static repeating_timer_t s_core1_timer;
 static volatile bool s_core1_tick_pending = false;
@@ -1158,13 +1183,15 @@ static void core1_entry(void) {
   alarm_pool_add_repeating_timer_ms(pool, -1, core1_timer_callback, NULL, &s_core1_timer);
 
   while (true) {
-    if (g_core1_pause) {
-      g_core1_paused = true; // signal Core 0 that we've stopped
-      while (g_core1_pause) {
+    if (atomic_load(&g_core1_pause)) {
+      atomic_store(&g_core1_paused, true);
+      __dmb(); // ensure paused flag visible to Core 0 before we spin
+      while (atomic_load(&g_core1_pause)) {
         watchdog_update(); // keep watchdog alive while paused
         sleep_ms(1);
       }
-      g_core1_paused = false;
+      atomic_store(&g_core1_paused, false);
+      __dmb(); // ensure resumed state visible to Core 0
       continue;
     }
 
@@ -1178,8 +1205,9 @@ static void core1_entry(void) {
       mp3_player_update();
       fileplayer_update();
       mod_player_update();
-      if (g_native_audio_callback)
-        g_native_audio_callback();
+      void (*audio_cb)(void) = atomic_load(&g_native_audio_callback);
+      if (audio_cb)
+        audio_cb();
     }
 
     __wfi();
@@ -1208,10 +1236,14 @@ static void crash_log_save(void) {
 
   uint32_t cfsr = s_crash_data[4];
   uint32_t hfsr = s_crash_data[5];
+  // scratch[7] packing: bit 31 = PSP flag, bits 0-30 = uptime in seconds
+  bool was_psp = (s_crash_data[7] & (1u << 31)) != 0;
+  uint32_t crash_uptime_sec = s_crash_data[7] & 0x7FFFFFFFu;
 
   char line[512];
   int n = snprintf(line, sizeof(line),
     "--- HARDFAULT ---\n"
+    "  Uptime: %lum %lus\n"
     "  PC   = 0x%08lx\n"
     "  LR   = 0x%08lx\n"
     "  SP   = 0x%08lx\n"
@@ -1219,10 +1251,11 @@ static void crash_log_save(void) {
     "  HFSR = 0x%08lx\n"
     "  BFAR = 0x%08lx\n"
     "  Stack: %s\n",
+    (unsigned long)(crash_uptime_sec / 60u), (unsigned long)(crash_uptime_sec % 60u),
     (unsigned long)s_crash_data[1], (unsigned long)s_crash_data[2],
     (unsigned long)s_crash_data[3], (unsigned long)cfsr,
     (unsigned long)hfsr, (unsigned long)s_crash_data[6],
-    (s_crash_data[7] & 4u) ? "PSP (native app)" : "MSP (OS)");
+    was_psp ? "PSP (native app)" : "MSP (OS)");
 
   // Decode CFSR/HFSR flags into human-readable text
   if (cfsr & (1u<<17)) n += snprintf(line+n, sizeof(line)-n, "  INVSTATE: invalid CPU state\n");

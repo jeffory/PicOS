@@ -6,6 +6,7 @@
 #include "../hardware.h"
 #include "hardware/gpio.h"
 #include <malloc.h>
+#include <stdatomic.h>
 
 // ── picocalc.sys.* ───────────────────────────────────────────────────────────
 
@@ -75,6 +76,26 @@ static int l_sys_reboot(lua_State *L) {
   watchdog_enable(1, true);
   for (;;)
     tight_loop_contents();
+  return 0;
+}
+
+// Pause Core 1 (WiFi, audio, HTTP) for safe batch SD writes.
+// Matches the USB MSC pattern: caller must resumeBackground() when done.
+extern _Atomic bool g_core1_pause;
+extern _Atomic bool g_core1_paused;
+
+static int l_sys_pauseBackground(lua_State *L) {
+  (void)L;
+  g_core1_pause = true;
+  for (int i = 0; i < 500 && !g_core1_paused; i++)
+    sleep_ms(1);
+  lua_pushboolean(L, g_core1_paused);
+  return 1;
+}
+
+static int l_sys_resumeBackground(lua_State *L) {
+  (void)L;
+  g_core1_pause = false;
   return 0;
 }
 
@@ -279,6 +300,8 @@ static const luaL_Reg l_sys_lib[] = {{"getMemInfo", l_sys_getMemInfo},
                                      {"applyUpdate", l_sys_applyUpdate},
                                      {"addMenuItem", l_sys_addMenuItem},
                                      {"clearMenuItems", l_sys_clearMenuItems},
+                                     {"pauseBackground", l_sys_pauseBackground},
+                                     {"resumeBackground", l_sys_resumeBackground},
                                      {"triggerFault", l_sys_trigger_fault},
                                      {"loadlib", l_sys_loadlib},
                                      {NULL, NULL}};

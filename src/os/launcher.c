@@ -18,6 +18,8 @@
 #include "ui.h"
 #include "umm_malloc.h"
 
+#include <stdatomic.h>
+
 #include "../dev_commands.h"
 #include "pico/stdlib.h"
 #include "hardware/clocks.h"
@@ -280,7 +282,8 @@ static const AppRunner *s_runners[] = {
 // ── App launcher
 // ──────────────────────────────────────────────────────────────
 
-extern volatile bool g_core1_pause;
+extern _Atomic bool g_core1_pause;
+extern _Atomic bool g_core1_paused;
 
 void launcher_apply_clock(uint32_t khz) {
   if (khz == 0) khz = 200000; // Default OS clock
@@ -292,7 +295,10 @@ void launcher_apply_clock(uint32_t khz) {
 
   // 1. Pause Core 1 background tasks (WiFi/Audio) to avoid bus corruption
   g_core1_pause = true;
-  sleep_ms(2); // Give Core 1 a moment to notice and hit its sleep_ms(1)
+  for (int i = 0; i < 200 && !g_core1_paused; i++)
+    sleep_ms(1);
+  if (!g_core1_paused)
+    printf("[LAUNCHER] Core 1 pause timeout (200ms) during clock change\n");
 
   // 2. Up-clocking: Raise voltage BEFORE increasing frequency
   if (khz > current_khz) {
@@ -364,6 +370,7 @@ void launcher_apply_clock(uint32_t khz) {
 }
 
 static volatile const char *s_running_app_name = NULL;
+static volatile uint32_t s_app_launch_time_ms = 0;
 
 static bool run_app(int idx) {
   if (idx < 0 || idx >= s_app_count)
@@ -371,6 +378,7 @@ static bool run_app(int idx) {
 
   app_entry_t *app = &s_apps[idx];
   s_running_app_name = app->name;
+  s_app_launch_time_ms = to_ms_since_boot(get_absolute_time());
 
   // Free any PSRAM used by the MP3 player (from a previous Lua app)
   // so we have maximum memory for the next app.
@@ -431,6 +439,7 @@ static bool run_app(int idx) {
   system_menu_clear_items();
 
   s_running_app_name = NULL;
+  s_app_launch_time_ms = 0;
 
   printf("[LAUNCHER] App '%s' exited (ok=%d), PSRAM free: %zu\n",
          app->name, ok, lua_psram_alloc_free_size());
@@ -719,4 +728,10 @@ bool launcher_launch_by_name(const char *name) {
 
 const char* launcher_get_running_app_name(void) {
   return (const char*)s_running_app_name;
+}
+
+uint32_t launcher_get_app_uptime_ms(void) {
+  uint32_t t = s_app_launch_time_ms;
+  if (t == 0) return 0;
+  return to_ms_since_boot(get_absolute_time()) - t;
 }

@@ -12,6 +12,7 @@
 #include "hardware/watchdog.h"
 #include "hardware/xip_cache.h"
 
+#include <stdatomic.h>
 #include <stdint.h>
 #include <stdlib.h>
 #include <string.h>
@@ -227,8 +228,8 @@ static void launch_on_psp(uint32_t psp_top, picos_app_entry_t fn,
 // =============================================================================
 
 // Declared in main.c — pauses Core 1's Mongoose/WiFi polling loop.
-extern volatile bool g_core1_pause;
-extern volatile bool g_core1_paused;
+extern _Atomic bool g_core1_pause;
+extern _Atomic bool g_core1_paused;
 
 #ifdef PICOS_SIMULATOR
 // Simulator: use Unicorn Engine to emulate the ARM ELF binary
@@ -472,6 +473,16 @@ static bool native_run(const app_entry_t *app) {
 
   // ── 6. Apply relocations (dual-bias for split mode) ───────────────────────
   {
+    // Guard against underflow from malformed ELF segment layout
+    if (!split_mode && mem_min > (uint32_t)(uintptr_t)load_base) {
+      show_error("ELF: invalid segment layout", NULL);
+      goto out;
+    }
+    if (split_mode && data_vaddr_start > (uint32_t)(uintptr_t)load_base) {
+      show_error("ELF: invalid segment layout", NULL);
+      goto out;
+    }
+
     uint32_t code_bias = split_mode ? (uint32_t)code_buf - code_vaddr : 0;
     uint32_t data_bias = split_mode ? (uint32_t)load_base - data_vaddr_start
                                     : (uint32_t)load_base - mem_min;
@@ -637,21 +648,24 @@ static bool native_run(const app_entry_t *app) {
   launch_on_psp(stack_top, entry_fn,
                 (const PicoCalcAPI *)&g_api, app->path, app->id, app->name);
 
+  ok = true;
   for (int i = 0; i < NATIVE_STACK_GUARD_WORDS; i++) {
     if (guard[i] != NATIVE_STACK_CANARY) {
-      printf("[NATIVE] WARNING: stack overflow detected in '%s' "
+      printf("[NATIVE] ERROR: stack overflow detected in '%s' "
              "(canary[%d] = 0x%08lx)\n",
              app->name, i, (unsigned long)guard[i]);
+      ok = false;
       break;
     }
   }
 
-  printf("[NATIVE] App '%s' returned\n", app->name);
-  ok = true;
+  printf("[NATIVE] App '%s' returned%s\n", app->name,
+         ok ? "" : " (with stack overflow)");
 
 out:
   // ── 9. Cleanup ─────────────────────────────────────────────────────────────
-  g_native_audio_callback = NULL;
+  __dmb(); // ensure all app writes visible before clearing callback
+  atomic_store(&g_native_audio_callback, NULL);
   g_native_stack_base = NULL;
   g_core1_pause = true;
   for (int i = 0; i < 200 && !g_core1_paused; i++)

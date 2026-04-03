@@ -1,5 +1,8 @@
 #pragma once
 
+#ifndef __cplusplus
+#include <stdatomic.h>
+#endif
 #include <stdint.h>
 #include <stdbool.h>
 
@@ -147,6 +150,13 @@ typedef struct {
     void (*effectDither)(uint8_t levels);
     void (*effectScanline)(uint8_t intensity);
     void (*effectPosterize)(uint8_t levels);
+    // Raycasting primitives
+    void (*fillVLine)(int x, int y0, int y1, uint16_t color);
+    void (*drawTexturedColumn)(int x, int y0, int y1,
+                               const uint16_t *tex, int tex_w, int tex_h,
+                               int tex_x, int tex_y0, int tex_y1);
+    void (*fillVLineGradient)(int x, int y0, int y1,
+                              uint16_t color_top, uint16_t color_bottom);
 } picocalc_display_t;
 
 // --- Filesystem (SD card) ---------------------------------------------------
@@ -361,7 +371,7 @@ typedef struct {
     void  (*setByteRange)(pchttp_t c, int from, int to);
     void  (*setConnectTimeout)(pchttp_t c, int seconds);
     void  (*setReadTimeout)(pchttp_t c, int seconds);
-    void  (*setReadBufferSize)(pchttp_t c, int bytes);
+    bool  (*setReadBufferSize)(pchttp_t c, int bytes);
     // Returns true when the request has completed (success or failure).
     // Use getStatus()/getError() to determine outcome.
     bool  (*isComplete)(pchttp_t c);
@@ -605,4 +615,6 @@ extern PicoCalcAPI g_api;
 // Optional audio callback for native apps that need Core 1 mixing.
 // Set by the native app at startup, cleared on exit. Called every 5ms
 // from core1_entry() alongside mp3_player_update()/fileplayer_update().
-extern void (*g_native_audio_callback)(void);
+#ifndef __cplusplus
+extern _Atomic(void (*)(void)) g_native_audio_callback;
+#endif

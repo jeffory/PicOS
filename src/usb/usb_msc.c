@@ -11,6 +11,8 @@
 #include "../os/os.h"
 #include "../os/ui.h"
 
+#include <stdatomic.h>
+
 // Define BYTE/LBA_t and other FatFs types manually before diskio.h
 // just in case they are missing from diskio.h inclusion order
 #include <stdint.h>
@@ -39,8 +41,8 @@ bool usb_msc_is_active(void) { return s_msc_active; }
 // --------------------------------------------------------------------
 
 // Declared in main.c - pauses Core 1's background tasks (WiFi, HTTP, audio)
-extern volatile bool g_core1_pause;
-extern volatile bool g_core1_paused;
+extern _Atomic bool g_core1_pause;
+extern _Atomic bool g_core1_paused;
 
 void usb_msc_enter_mode(void) {
   printf("[USB MSC] Entering USB Mass Storage mode\n");
