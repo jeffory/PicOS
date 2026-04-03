@@ -6183,16 +6183,17 @@ static void handle_tls_recv(struct mg_connection *c) {
   if (io->size - io->len < min && !mg_iobuf_resize(io, io->len + min)) {
     mg_error(c, "oom");
   } else {
+    size_t space = io->size - io->len;
     // Decrypt data directly into c->recv
     long n = mg_tls_recv(c, io->buf != NULL ? &io->buf[io->len] : io->buf,
-                         io->size - io->len);
+                         space);
     if (n == MG_IO_ERR) {
       mg_error(c, "TLS recv error");
     } else if (n > 0) {
       // Decrypted successfully - trigger MG_EV_READ
       io->len += (size_t) n;
       mg_call(c, MG_EV_READ, &n);
-    }  // else n < 0: outstanding data to be moved to c->recv
+    }
   }
 }
 

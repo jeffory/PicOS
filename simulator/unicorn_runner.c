@@ -418,6 +418,14 @@ static bool load_elf(uc_engine *uc, const char *path, uint32_t *out_entry) {
     printf("[UNICORN] ELF image: %u bytes (vaddr 0x%08x..0x%08x)\n",
            image_size, mem_min, mem_max);
 
+    if (image_size > EMU_CODE_SIZE) {
+        fprintf(stderr, "[UNICORN] ELF image too large (%u bytes > %u byte code region)\n",
+                image_size, (uint32_t)EMU_CODE_SIZE);
+        free(phdrs);
+        fclose(f);
+        return false;
+    }
+
     // Load base: remap from original vaddr to our code region
     uint32_t load_bias = EMU_CODE_BASE - mem_min;
 
