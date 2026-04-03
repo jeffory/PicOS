@@ -3,14 +3,21 @@
 // Flow:
 //   1. Lua app downloads .bin to /system/update.bin
 //   2. Lua calls picocalc.sys.applyUpdate(path) → ota_trigger_update()
-//   3. ota_trigger_update() validates the file, sets scratch[0]=OTA_MAGIC, reboots
+//   3. ota_trigger_update() validates the file, sets scratch[1]=OTA_MAGIC, reboots
 //   4. On next boot, main() calls ota_check_pending() + ota_apply_update()
-//   5. ota_apply_update() reads .bin from SD, erases+programs flash, reboots
+//   5. ota_apply_update() pre-reads .bin into PSRAM, then an SRAM-resident
+//      function erases+programs all flash sectors and reboots.
 //
 // Safety:
 //   - Flash writer runs BEFORE Core 1 launch (no Mongoose, no audio ISRs)
-//   - SD SPI0 and display PIO0 are independent of flash XIP
-//   - All buffers are in SRAM (stack or static), not PSRAM
+//   - Entire firmware pre-read into PSRAM before any flash writes begin
+//   - Flash write loop is SRAM-resident and never calls flash-resident code
+//     (the old firmware's code is overwritten sector-by-sector, so calling
+//     back into flash would execute new firmware code at old addresses)
+//   - Sector 0 (boot stage 2 + vector table) written last — if the write is
+//     interrupted, the old firmware's boot code remains intact
+//   - SRAM staging buffer used for flash_range_program (QMI bus may be
+//     locked to CS0 during flash operations, making PSRAM on CS1 inaccessible)
 
 #include "ota_update.h"
 
@@ -26,6 +33,7 @@
 
 #include "../drivers/display.h"
 #include "../drivers/sdcard.h"
+#include "umm_malloc.h"
 #include "ui.h"
 
 // Maximum firmware size: 2MB (flash is 4MB, but leave headroom)
@@ -183,26 +191,83 @@ static bool ota_validate_header(const uint8_t *data, int len) {
     return true;
 }
 
-// ── Flash writer (SRAM-resident) ────────────────────────────────────────────
-// This function MUST execute from SRAM because flash is unavailable during
-// erase/program operations. The Pico SDK macro ensures correct placement.
+// ── SRAM-resident flash writer ──────────────────────────────────────────────
+// This function runs entirely from SRAM and NEVER calls back into flash.
+// Once flash writes begin, the old firmware's code is progressively
+// overwritten — any call to a flash-resident function would execute the NEW
+// firmware's code at the OLD addresses, causing undefined behaviour.
+//
+// The function writes sectors 1..N first (deferring sector 0 so the old
+// boot code stays intact as long as possible), then writes sector 0 last,
+// and reboots without returning to flash.
+//
+// fw_data:  firmware image in PSRAM (QMI CS1, accessible between flash ops)
+// fw_size:  total firmware size in bytes
+//
+// This function does NOT return.
 
-static void __no_inline_not_in_flash_func(ota_flash_sector)(
-    uint32_t offset, const uint8_t *data, uint32_t len) {
-    // Disable interrupts — no ISRs can run while flash is being written.
-    // Core 1 is not started yet, so no multicore_lockout needed.
-    uint32_t ints = save_and_disable_interrupts();
+static void __no_inline_not_in_flash_func(ota_write_and_reboot)(
+    const uint8_t *fw_data, uint32_t fw_size) {
 
-    flash_range_erase(offset, FLASH_SECTOR_SIZE);
-    flash_range_program(offset, data, len);
+    // SRAM staging buffer — flash_range_program reads from this during
+    // erase/program when the QMI bus is locked to CS0 (flash), so the
+    // source must be in SRAM, not PSRAM.
+    static uint8_t staging[FLASH_SECTOR_SIZE];
 
-    restore_interrupts(ints);
+    // Write sectors 1..N (defer sector 0)
+    for (uint32_t off = FLASH_SECTOR_SIZE; off < fw_size;
+         off += FLASH_SECTOR_SIZE) {
+        uint32_t chunk = fw_size - off;
+        if (chunk > FLASH_SECTOR_SIZE) chunk = FLASH_SECTOR_SIZE;
+
+        // Copy PSRAM → SRAM staging (byte loop — no flash-resident memcpy)
+        for (uint32_t i = 0; i < chunk; i++)
+            staging[i] = fw_data[off + i];
+        for (uint32_t i = chunk; i < FLASH_SECTOR_SIZE; i++)
+            staging[i] = 0xFF; // pad to full sector
+
+        uint32_t ints = save_and_disable_interrupts();
+        flash_range_erase(off, FLASH_SECTOR_SIZE);
+        flash_range_program(off, staging, FLASH_SECTOR_SIZE);
+        restore_interrupts(ints);
+
+        // Feed watchdog directly (watchdog_update is in flash)
+        watchdog_hw->load = 10u * 1000u * 1000u; // ~10 s reload
+    }
+
+    // Commit sector 0 (boot stage 2 + vector table) — last write
+    {
+        uint32_t chunk = fw_size < FLASH_SECTOR_SIZE ? fw_size : FLASH_SECTOR_SIZE;
+        for (uint32_t i = 0; i < chunk; i++)
+            staging[i] = fw_data[i];
+        for (uint32_t i = chunk; i < FLASH_SECTOR_SIZE; i++)
+            staging[i] = 0xFF;
+
+        uint32_t ints = save_and_disable_interrupts();
+        flash_range_erase(0, FLASH_SECTOR_SIZE);
+        flash_range_program(0, staging, FLASH_SECTOR_SIZE);
+        restore_interrupts(ints);
+    }
+
+    // Clear scratch registers and reboot into new firmware.
+    // Cannot call watchdog_reboot() (flash-resident) — use direct reset.
+    watchdog_hw->scratch[0] = 0; // clear boot counter
+    watchdog_hw->scratch[OTA_SCRATCH_IDX] = 0; // clear OTA flag
+
+    // ARM System Reset via AIRCR register (direct write — no flash code).
+    // PPB_BASE + M33_AIRCR_OFFSET = 0xE000ED0C (Application Interrupt and
+    // Reset Control Register).  VECTKEY=0x05FA, SYSRESETREQ=bit 2.
+    volatile uint32_t *aircr = (volatile uint32_t *)(PPB_BASE + M33_AIRCR_OFFSET);
+    __dmb(); // data memory barrier
+    *aircr = (0x05FAu << 16) | (1u << 2);
+    __dmb();
+    while (1) { /* wait for reset */ }
 }
 
 // ── Public API ──────────────────────────────────────────────────────────────
 
 bool ota_check_pending(void) {
-    return watchdog_hw->scratch[0] == OTA_MAGIC;
+    return watchdog_hw->scratch[OTA_SCRATCH_IDX] == OTA_MAGIC;
 }
 
 bool ota_apply_update(void) {
@@ -228,92 +293,92 @@ bool ota_apply_update(void) {
         goto fail;
     }
 
+    // ── Pre-read entire firmware into PSRAM ─────────────────────────────────
+    // The flash write loop is SRAM-resident and cannot call flash-resident
+    // code (SD card, FatFS, display, etc.) because those flash regions get
+    // overwritten during the update.  Pre-reading into PSRAM means the write
+    // loop only needs PSRAM reads and SRAM staging — no SD card access.
+    ota_show_status("Loading firmware...", "Reading from SD card", COLOR_WHITE);
+    watchdog_update();
+
+    uint8_t *fw_buf = (uint8_t *)umm_malloc((uint32_t)file_size);
+    if (!fw_buf) {
+        ota_show_status("Update failed!", "Not enough memory", COLOR_RED);
+        printf("[OTA] umm_malloc(%d) failed\n", file_size);
+        goto fail;
+    }
+
     sdfile_t f = sdcard_fopen(OTA_BIN_PATH, "r");
     if (!f) {
         ota_show_status("Update failed!", "Cannot open firmware file", COLOR_RED);
         printf("[OTA] Cannot open %s\n", OTA_BIN_PATH);
+        umm_free(fw_buf);
         goto fail;
     }
 
-    // Read and validate the first sector (contains vector table)
-    uint8_t sector_buf[FLASH_SECTOR_SIZE]; // 4KB on stack — fits in main stack
-    int n = sdcard_fread(f, sector_buf, FLASH_SECTOR_SIZE);
-    if (n < (int)OTA_MIN_SIZE) {
-        ota_show_status("Update failed!", "Cannot read firmware header", COLOR_RED);
-        sdcard_fclose(f);
-        goto fail;
-    }
-
-    if (!ota_validate_header(sector_buf, n)) {
-        ota_show_status("Update failed!", "Invalid firmware header", COLOR_RED);
-        sdcard_fclose(f);
-        goto fail;
-    }
-
-    ota_show_status("Writing firmware...", "DO NOT POWER OFF!", COLOR_YELLOW);
-    sleep_ms(500); // Brief pause so user can read the warning
-    watchdog_update();
-
-    // ── Flash erase + program loop ──────────────────────────────────────────
-    // Process the first sector we already read, then continue reading.
-    uint32_t offset = 0;
+    // Read in chunks with progress
     uint32_t total = (uint32_t)file_size;
-    bool first_sector = true;
-
-    // Pad the last read to a full sector (flash_range_program needs page-aligned)
-    if (n < (int)FLASH_SECTOR_SIZE)
-        memset(sector_buf + n, 0xFF, FLASH_SECTOR_SIZE - (uint32_t)n);
-
-    while (offset < total) {
-        if (!first_sector) {
-            n = sdcard_fread(f, sector_buf, FLASH_SECTOR_SIZE);
-            if (n <= 0) break;
-            // Pad partial last sector with 0xFF (erased flash value)
-            if (n < (int)FLASH_SECTOR_SIZE)
-                memset(sector_buf + n, 0xFF, FLASH_SECTOR_SIZE - (uint32_t)n);
-        }
-        first_sector = false;
-
-        // Write this sector to flash
-        ota_flash_sector(offset, sector_buf, FLASH_SECTOR_SIZE);
-
-        offset += FLASH_SECTOR_SIZE;
-
-        // Update progress display and watchdog
-        ota_show_progress(offset < total ? offset : total, total);
+    uint32_t bytes_read = 0;
+    while (bytes_read < total) {
+        int n = sdcard_fread(f, fw_buf + bytes_read, FLASH_SECTOR_SIZE);
+        if (n <= 0) break;
+        bytes_read += (uint32_t)n;
+        ota_show_progress(bytes_read, total);
         watchdog_update();
     }
-
     sdcard_fclose(f);
 
-    // Verify we wrote the expected amount
-    if (offset < total) {
-        ota_show_status("Update failed!", "Incomplete write - DO NOT REBOOT", COLOR_RED);
-        printf("[OTA] Incomplete write: %lu of %lu bytes\n",
-               (unsigned long)offset, (unsigned long)total);
-        // Don't delete the .bin — user can retry
+    if (bytes_read < total) {
+        ota_show_status("Update failed!", "SD card read error", COLOR_RED);
+        printf("[OTA] Read only %lu of %lu bytes\n",
+               (unsigned long)bytes_read, (unsigned long)total);
+        umm_free(fw_buf);
         goto fail;
     }
 
-    printf("[OTA] Flash write complete: %lu bytes\n", (unsigned long)total);
+    // Validate vector table from the pre-read buffer
+    if (!ota_validate_header(fw_buf, (int)total)) {
+        ota_show_status("Update failed!", "Invalid firmware header", COLOR_RED);
+        umm_free(fw_buf);
+        goto fail;
+    }
 
-    // Clean up: delete the update files
-    ota_show_status("Update complete!", "Rebooting...", COLOR_GREEN);
-    sdcard_delete(OTA_BIN_PATH);
-    sdcard_delete(OTA_HASH_PATH);
+    printf("[OTA] Firmware loaded into PSRAM: %lu bytes\n", (unsigned long)total);
 
-    // Clear OTA flag and reboot into new firmware
-    watchdog_hw->scratch[0] = 0;
+    // ── Rename update files BEFORE flash writes ─────────────────────────────
+    // After flash writes begin, SD card functions (flash-resident) can't be
+    // called.  Rename now so the file doesn't re-trigger on next boot.
+    sdcard_delete(OTA_BIN_PATH ".flashed");
+    sdcard_delete(OTA_HASH_PATH ".flashed");
+    if (!sdcard_rename(OTA_BIN_PATH, OTA_BIN_PATH ".flashed")) {
+        printf("[OTA] Rename failed, deleting %s\n", OTA_BIN_PATH);
+        sdcard_delete(OTA_BIN_PATH);
+    }
+    if (!sdcard_rename(OTA_HASH_PATH, OTA_HASH_PATH ".flashed")) {
+        sdcard_delete(OTA_HASH_PATH);
+    }
+
+    // ── Write firmware to flash ─────────────────────────────────────────────
+    // Point of no return — this function does not return.  It writes all
+    // flash sectors from PSRAM (SRAM-resident, no flash code called),
+    // clears scratch registers, and reboots into the new firmware.
+    ota_show_status("Writing firmware...", "DO NOT POWER OFF!", COLOR_YELLOW);
     sleep_ms(500);
-    watchdog_reboot(0, 0, 0);
+    watchdog_update();
+    stdio_flush();
+
+    printf("[OTA] Starting flash write (%lu bytes)...\n", (unsigned long)total);
+    stdio_flush();
+
+    // This call never returns
+    ota_write_and_reboot(fw_buf, total);
 
     // Unreachable
     while (1) tight_loop_contents();
-    return true;
 
 fail:
     // Clear the OTA flag so we don't loop on failed updates
-    watchdog_hw->scratch[0] = 0;
+    watchdog_hw->scratch[OTA_SCRATCH_IDX] = 0;
     return false;
 }
 
@@ -366,7 +431,7 @@ bool ota_trigger_update(const char *bin_path, const char **out_err) {
     stdio_flush();
 
     // Set OTA magic and reboot
-    watchdog_hw->scratch[0] = OTA_MAGIC;
+    watchdog_hw->scratch[OTA_SCRATCH_IDX] = OTA_MAGIC;
     sleep_ms(100);
     watchdog_reboot(0, 0, 0);
 
