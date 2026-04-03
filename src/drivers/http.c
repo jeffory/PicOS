@@ -5,6 +5,7 @@
 #include "mongoose.h"
 #include "pico/stdlib.h"
 
+#include <stdarg.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -559,6 +560,10 @@ void http_free(http_conn_t *c) {
          (to_ms_since_boot(get_absolute_time()) - start_ms) < 200) {
     sleep_ms(1);
   }
+  if (c->pcb != NULL || c->state == HTTP_STATE_QUEUED)
+    printf("[HTTP] http_free: timeout waiting for Core 1 (conn %d)\n",
+           (int)(c - s_conns));
+  __dmb(); // ensure Core 1 writes visible before we free buffers
 
   umm_free(c->path);
   c->path = NULL;

@@ -405,6 +405,14 @@ static int l_fs_stat(lua_State *L) {
   return 1;
 }
 
+// ── picocalc.fs.ensureReady() → true/false ───────────────────────────────────
+// Probes the SD card and attempts recovery if unresponsive.  Call before
+// critical multi-write operations after long network activity.
+static int l_fs_ensureReady(lua_State *L) {
+  lua_pushboolean(L, sdcard_ensure_ready());
+  return 1;
+}
+
 // ── picocalc.fs.diskInfo() → {free, total}  (values in KB) ──────────────────
 static int l_fs_diskInfo(lua_State *L) {
   uint32_t free_kb = 0, total_kb = 0;
@@ -464,6 +472,11 @@ static int l_fs_glob(lua_State *L) {
   return 1;
 }
 
+static int l_fs_setSlowMode(lua_State *L) {
+  sd_set_slow_mode(lua_toboolean(L, 1));
+  return 0;
+}
+
 static const luaL_Reg l_fs_lib[] = {
     {"open",     l_fs_open},     {"read",     l_fs_read},
     {"write",    l_fs_write},    {"close",    l_fs_close},
@@ -474,7 +487,8 @@ static const luaL_Reg l_fs_lib[] = {
     {"browse",   l_fs_browse},
     {"delete",   l_fs_delete},   {"rename",   l_fs_rename},
     {"copy",     l_fs_copy},     {"stat",     l_fs_stat},
-    {"diskInfo", l_fs_diskInfo}, {"glob",     l_fs_glob},
+    {"diskInfo", l_fs_diskInfo}, {"ensureReady", l_fs_ensureReady},
+    {"glob",     l_fs_glob},     {"setSlowMode", l_fs_setSlowMode},
     {NULL, NULL}};
 
 

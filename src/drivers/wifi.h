@@ -63,6 +63,12 @@ bool wifi_get_http_required(void);
 // This goes beyond wifi_get_status() == CONNECTED which only means DHCP is done.
 bool wifi_has_internet(void);
 
+// Returns true once the CYW43 hardware disconnect has actually completed on
+// Core 1. wifi_disconnect() is async (queue-based); this flag lets callers
+// wait for the radio to power down before performing voltage-sensitive
+// operations like SD flash programming.
+bool wifi_hw_disconnected(void);
+
 // ── Core 0 → Core 1 request queue ────────────────────────────────────────────
 //
 // Core 0 (Lua main loop) must never call mg_* functions directly. Instead it

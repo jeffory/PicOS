@@ -25,6 +25,7 @@ static _Atomic wifi_status_t s_status = WIFI_STATUS_DISCONNECTED;
 static char s_ssid[64] = {0};
 static char s_pass[64] = {0};
 static char s_ip[20] = {0};
+static _Atomic bool s_hw_disconnected = true; // true once mg_wifi_disconnect() has completed
 static bool s_http_required = false;
 static volatile bool s_disconnect_pending = false; // deferred disconnect from SNTP callback
 static bool s_auto_connected = false;    // true only for boot auto-connect
@@ -340,6 +341,7 @@ static void drain_requests(void) {
 
       case CONN_REQ_WIFI_DISCONNECT:
         mg_wifi_disconnect();
+        atomic_store_explicit(&s_hw_disconnected, true, memory_order_release);
         break;
     }
   }
@@ -396,18 +398,21 @@ void wifi_connect(const char *ssid, const char *password) {
   if (!s_available || !ssid || !ssid[0])
     return;
 
-  strncpy(s_ssid, ssid, sizeof(s_ssid) - 1);
-  s_ssid[sizeof(s_ssid) - 1] = '\0';
+  { uint32_t save = spin_lock_blocking(s_state_lock);
+    strncpy(s_ssid, ssid, sizeof(s_ssid) - 1);
+    s_ssid[sizeof(s_ssid) - 1] = '\0';
 
-  if (password) {
-    strncpy(s_pass, password, sizeof(s_pass) - 1);
-    s_pass[sizeof(s_pass) - 1] = '\0';
-  } else {
-    s_pass[0] = '\0';
+    if (password) {
+      strncpy(s_pass, password, sizeof(s_pass) - 1);
+      s_pass[sizeof(s_pass) - 1] = '\0';
+    } else {
+      s_pass[0] = '\0';
+    }
+
+    s_ip[0] = '\0';
+    spin_unlock(s_state_lock, save);
   }
-
   s_status = WIFI_STATUS_CONNECTING;
-  s_ip[0] = '\0';
   s_connect_start_ms = to_ms_since_boot(get_absolute_time());
   s_connect_retries = 0;
   s_auto_connected = false; // user/app-initiated, don't auto-disconnect after SNTP
@@ -425,6 +430,7 @@ void wifi_disconnect(void) {
 
   // Update status immediately so callers see DISCONNECTED right away
   s_status = WIFI_STATUS_DISCONNECTED;
+  atomic_store_explicit(&s_hw_disconnected, false, memory_order_release);
   s_ssid[0] = '\0';
   s_ip[0] = '\0';
   printf("WiFi: disconnect queued\n");
@@ -442,6 +448,10 @@ wifi_status_t wifi_get_status(void) {
 
 bool wifi_has_internet(void) {
   return s_internet_ok && s_ifp.state == MG_TCPIP_STATE_READY;
+}
+
+bool wifi_hw_disconnected(void) {
+  return atomic_load_explicit(&s_hw_disconnected, memory_order_acquire);
 }
 
 const char *wifi_get_ip(void) {

@@ -99,24 +99,32 @@ void http_lua_fire_pending(lua_State *L) {
     // Fire in order: headers → data → complete → closed
     if ((pend & HTTP_CB_HEADERS) && ud->cb_headers != LUA_NOREF) {
       lua_rawgeti(L, LUA_REGISTRYINDEX, ud->cb_headers);
-      if (lua_pcall(L, 0, 0, 0) != LUA_OK)
+      if (lua_pcall(L, 0, 0, 0) != LUA_OK) {
+        printf("[HTTP-LUA] headers callback error: %s\n", lua_tostring(L, -1));
         lua_pop(L, 1);
+      }
     }
     if ((pend & HTTP_CB_REQUEST) && ud->cb_request != LUA_NOREF) {
       lua_rawgeti(L, LUA_REGISTRYINDEX, ud->cb_request);
-      if (lua_pcall(L, 0, 0, 0) != LUA_OK)
+      if (lua_pcall(L, 0, 0, 0) != LUA_OK) {
+        printf("[HTTP-LUA] request callback error: %s\n", lua_tostring(L, -1));
         lua_pop(L, 1);
+      }
     }
     if ((pend & HTTP_CB_COMPLETE) && ud->cb_complete != LUA_NOREF) {
       lua_rawgeti(L, LUA_REGISTRYINDEX, ud->cb_complete);
-      if (lua_pcall(L, 0, 0, 0) != LUA_OK)
+      if (lua_pcall(L, 0, 0, 0) != LUA_OK) {
+        printf("[HTTP-LUA] complete callback error: %s\n", lua_tostring(L, -1));
         lua_pop(L, 1);
+      }
     }
     if ((pend & (HTTP_CB_CLOSED | HTTP_CB_FAILED)) &&
         ud->cb_closed != LUA_NOREF) {
       lua_rawgeti(L, LUA_REGISTRYINDEX, ud->cb_closed);
-      if (lua_pcall(L, 0, 0, 0) != LUA_OK)
+      if (lua_pcall(L, 0, 0, 0) != LUA_OK) {
+        printf("[HTTP-LUA] closed callback error: %s\n", lua_tostring(L, -1));
         lua_pop(L, 1);
+      }
     }
 
     // If connection is closed or failed, unref callbacks and free the
@@ -316,8 +324,8 @@ static int l_http_setReadTimeout(lua_State *L) {
 // failure, so callers should check the return value before sending a request.
 static int l_http_setReadBufferSize(lua_State *L) {
   http_ud_t *ud = check_http_open(L, 1);
-  g_api.http->setReadBufferSize(ud->conn, (int)luaL_checkinteger(L, 2));
-  lua_pushboolean(L, true);
+  bool ok = g_api.http->setReadBufferSize(ud->conn, (int)luaL_checkinteger(L, 2));
+  lua_pushboolean(L, ok);
   return 1;
 }
 
@@ -424,8 +432,8 @@ static int l_http_read(lua_State *L) {
     if (req > 0 && (uint32_t)req < want)
       want = (uint32_t)req;
   }
-  if (want > 65536)
-    want = 65536;
+  if (want > 131072)
+    want = 131072;
 
   uint8_t *tmp = umm_malloc(want);
   if (!tmp) {
@@ -591,8 +599,18 @@ static int l_network_getStatus(lua_State *L) {
   return 1;
 }
 
+// picocalc.network.isHwDisconnected() -> boolean
+// Returns true once the CYW43 hardware has actually completed disconnection.
+// wifi.disconnect() is async; this lets Lua code wait for the radio to power
+// down before voltage-sensitive operations (e.g. SD flash writes during OTA).
+static int l_network_isHwDisconnected(lua_State *L) {
+  lua_pushboolean(L, wifi_hw_disconnected());
+  return 1;
+}
+
 static const luaL_Reg l_network_lib[] = {{"setEnabled", l_network_setEnabled},
                                          {"getStatus", l_network_getStatus},
+                                         {"isHwDisconnected", l_network_isHwDisconnected},
                                          {NULL, NULL}};
 
 
