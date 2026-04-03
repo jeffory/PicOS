@@ -51,3 +51,5 @@ sim_*.log
 
 tests/e2e/__pycache__/
 *.patch
+
+saves/
