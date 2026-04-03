@@ -30,6 +30,11 @@ void sdcard_apply_clock(void);
 // Returns true if an SD card is currently mounted
 bool sdcard_is_mounted(void);
 
+// Verify the card is responsive; if not, attempt full recovery (bus reset +
+// remount).  Call before critical multi-write operations (e.g. OTA update)
+// when the card may have gone unresponsive during long WiFi activity.
+bool sdcard_ensure_ready(void);
+
 // Remount (e.g. after card swap). Returns true on success.
 bool sdcard_remount(void);
 
@@ -94,6 +99,13 @@ bool sdcard_stat(const char *path, sdcard_stat_t *out);
 
 // Returns free and total space in KB for the mounted volume.
 bool sdcard_disk_info(uint32_t *out_free_kb, uint32_t *out_total_kb);
+
+// ── SPI speed control ────────────────────────────────────────────────────────
+
+// Drop SPI0 to 1 MHz (slow=true) for writes during CYW43 radio activity,
+// or restore full speed (slow=false). CYW43 EMI corrupts SPI0 at 25 MHz;
+// 1 MHz has enough noise margin to be immune.
+void sd_set_slow_mode(bool slow);
 
 // ── Convenience: read entire file into a heap-allocated buffer ─────────────-
 // Caller must free() the returned pointer. Returns NULL on error.

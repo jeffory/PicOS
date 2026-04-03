@@ -569,8 +569,19 @@ DRESULT disk_write(BYTE pdrv, const BYTE *buff, LBA_t sector, UINT count) {
       goto out;
     }
   } else {
-    /* CMD25: WRITE_MULTIPLE_BLOCK with CMD23 pre-erase optimization */
-    sd_send_cmd(23, count);
+    /* CMD25: WRITE_MULTIPLE_BLOCK with CMD23 pre-erase optimization.
+     * CMD23 (SET_BLOCK_COUNT) is optional — if the card rejects it
+     * (e.g. still busy with internal housekeeping from prior writes),
+     * recover and retry before issuing CMD25. */
+    uint8_t r23 = sd_send_cmd(23, count);
+    if (r23 != 0x00) {
+      if (!usb_msc_is_active())
+        printf("[SD_WR] CMD23 fail: R1=0x%02x cnt=%u, recovering\n", r23, count);
+      if (sd_try_reinit(r23)) {
+        sd_cs_low();
+        sd_send_cmd(23, count); /* best-effort retry; CMD23 is optional */
+      }
+    }
 
     uint8_t r1 = sd_send_cmd(25, addr);
     if (r1 != 0x00) {
@@ -732,4 +743,17 @@ DRESULT disk_ioctl(BYTE pdrv, BYTE cmd, void *buff) {
   default:
     return RES_PARERR;
   }
+}
+
+/* ─── SPI speed control ────────────────────────────────────────────────────
+ *
+ * CYW43 radio EMI corrupts SPI0 at 25 MHz (see hardware.h SD_SPI_BAUD).
+ * Callers that write to SD while the CYW43 may still be active can drop
+ * to a safe speed (1 MHz) where the noise margin is large enough.
+ */
+
+#define SD_SAFE_BAUD (1000 * 1000) /* 1 MHz — immune to CYW43 EMI */
+
+void sd_set_slow_mode(bool slow) {
+  spi_set_baudrate(SD_SPI_PORT, slow ? SD_SAFE_BAUD : SD_SPI_BAUD);
 }

@@ -31,7 +31,8 @@
 #define SD_PIN_SCK 18  // GP18 / SPI0 SCK
 #define SD_PIN_MOSI 19 // GP19 / SPI0 TX
 #define SD_SPI_BAUD                                                            \
-  (40 * 1000 * 1000) // 40 MHz (most modern SD cards support this in SPI mode)
+  (25 * 1000 * 1000) // 25 MHz — SD spec SPI-mode max; 40 MHz caused card
+                      // resets (R1=0x3f) during heavy WiFi/PSRAM activity
 
 // --- Keyboard: STM32F103 via I2C1 -------------------------------------------
 // Pins confirmed from working constellation-pico Rust project (official
