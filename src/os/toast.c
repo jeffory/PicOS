@@ -9,9 +9,22 @@
 #define TOAST_MSG_MAX    64
 #define TOAST_DURATION_MS 3000
 
+// Background colors per toast style
+#define TOAST_COLOR_INFO    RGB565(40,  40,  40)    // Default gray
+#define TOAST_COLOR_SUCCESS RGB565(20,  80,  30)    // Green
+#define TOAST_COLOR_WARNING RGB565(120, 80,  10)    // Amber
+#define TOAST_COLOR_ERROR   RGB565(120, 25,  25)    // Red
+
+static const uint16_t s_toast_colors[] = {
+    TOAST_COLOR_INFO,
+    TOAST_COLOR_SUCCESS,
+    TOAST_COLOR_WARNING,
+    TOAST_COLOR_ERROR,
+};
+
 typedef struct {
     char     msg[TOAST_MSG_MAX];
-    uint8_t  icon;
+    uint8_t  style;
     uint32_t expire_ms;  // 0 = empty slot
 } toast_entry_t;
 
@@ -29,7 +42,7 @@ void toast_init(void) {
     memset(&s_active, 0, sizeof(s_active));
 }
 
-void toast_push(const char *msg, uint8_t icon) {
+void toast_push(const char *msg, uint8_t style) {
     if (!msg || !msg[0]) return;
 
     uint32_t save = spin_lock_blocking(s_lock);
@@ -40,7 +53,7 @@ void toast_push(const char *msg, uint8_t icon) {
     }
     strncpy(s_queue[s_head].msg, msg, TOAST_MSG_MAX - 1);
     s_queue[s_head].msg[TOAST_MSG_MAX - 1] = '\0';
-    s_queue[s_head].icon = icon;
+    s_queue[s_head].style = style;
     s_queue[s_head].expire_ms = 0;  // set when dequeued for display
     s_head = next;
     spin_unlock(s_lock, save);
@@ -68,6 +81,7 @@ bool toast_draw(void) {
     if (s_active.expire_ms == 0) return false;
 
     // Draw toast near the bottom of the 320px display, above footer area
-    ui_widget_toast(280, s_active.msg);
+    uint16_t color = (s_active.style < 4) ? s_toast_colors[s_active.style] : s_toast_colors[0];
+    ui_widget_toast(280, s_active.msg, color);
     return true;
 }

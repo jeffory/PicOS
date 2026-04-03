@@ -57,8 +57,8 @@ void ui_widget_radio(int x, int y, bool selected, bool focused);
 // Horizontal divider line
 void ui_widget_divider(int x, int y, int w, uint16_t color);
 
-// Toast notification bar
-void ui_widget_toast(int y, const char *text);
+// Toast notification bar (bg_color=0 uses default UW_TOAST_BG)
+void ui_widget_toast(int y, const char *text, uint16_t bg_color);
 
 // Button with centered label
 void ui_widget_button(int x, int y, int w,

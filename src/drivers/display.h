@@ -52,6 +52,23 @@ void display_fill_triangle(int x0, int y0, int x1, int y1, int x2, int y2,
 void display_draw_circle(int cx, int cy, int r, uint16_t color);
 void display_fill_circle(int cx, int cy, int r, uint16_t color);
 
+// Fast vertical line fill (stride-based, no Bresenham overhead).
+// Ideal for raycasting column rendering — one bounds check, then pointer walk.
+void display_fill_vline(int x, int y0, int y1, uint16_t color);
+
+// Draw a textured vertical column by sampling a vertical strip from a texture
+// and scaling it to fill screen rows y0..y1. Uses 16.16 fixed-point stepping.
+// tex_x selects the texture column; tex_y0..tex_y1 is the texture row range
+// mapped onto the screen range. Texture pixels must be host byte order RGB565.
+void display_draw_textured_column(int x, int y0, int y1,
+                                  const uint16_t *tex, int tex_w, int tex_h,
+                                  int tex_x, int tex_y0, int tex_y1);
+
+// Gradient vertical line — interpolates between two RGB565 colors.
+// Useful for distance-shaded floor/ceiling columns in raycasting.
+void display_fill_vline_gradient(int x, int y0, int y1,
+                                 uint16_t color_top, uint16_t color_bottom);
+
 // Text rendering using the active bitmap font (default: 6x8)
 // Returns pixel width of the rendered text
 int display_draw_text(int x, int y, const char *text, uint16_t fg, uint16_t bg);
