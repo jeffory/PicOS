@@ -461,10 +461,64 @@ void display_fill_circle(int x, int y, int r, uint16_t color) {
 }
 
 void display_fill_triangle(int x0, int y0, int x1, int y1, int x2, int y2, uint16_t color) {
-    // Simple triangle fill - stub
-    (void)x0; (void)y0; (void)x1; (void)y1; (void)x2; (void)y2; (void)color;
+    // Sort vertices by Y coordinate
+    if (y0 > y1) { int t; t=y0; y0=y1; y1=t; t=x0; x0=x1; x1=t; }
+    if (y0 > y2) { int t; t=y0; y0=y2; y2=t; t=x0; x0=x2; x2=t; }
+    if (y1 > y2) { int t; t=y1; y1=y2; y2=t; t=x1; x1=x2; x2=t; }
+    if (y0 == y2) return;
+    float inv_dy02 = 1.0f / (float)(y2 - y0);
+    if (y0 == y1) {
+        for (int y = y0; y <= y2; y++) {
+            float t = (float)(y - y0) * inv_dy02;
+            int xa = x0 + (int)((x2 - x0) * t);
+            int xb = x1 + (int)((x2 - x1) * t);
+            if (xa > xb) { int tmp = xa; xa = xb; xb = tmp; }
+            display_draw_line(xa, y, xb, y, color);
+        }
+    } else if (y1 == y2) {
+        float inv_dy01 = 1.0f / (float)(y1 - y0);
+        for (int y = y0; y <= y1; y++) {
+            float t = (float)(y - y0) * inv_dy01;
+            int xa = x0 + (int)((x1 - x0) * t);
+            int xb = x0 + (int)((x2 - x0) * t);
+            if (xa > xb) { int tmp = xa; xa = xb; xb = tmp; }
+            display_draw_line(xa, y, xb, y, color);
+        }
+    } else {
+        float inv_dy01 = 1.0f / (float)(y1 - y0);
+        float inv_dy12 = 1.0f / (float)(y2 - y1);
+        for (int y = y0; y <= y1; y++) {
+            float t_short = (float)(y - y0) * inv_dy01;
+            float t_long  = (float)(y - y0) * inv_dy02;
+            int xa = x0 + (int)((x1 - x0) * t_short);
+            int xb = x0 + (int)((x2 - x0) * t_long);
+            if (xa > xb) { int tmp = xa; xa = xb; xb = tmp; }
+            display_draw_line(xa, y, xb, y, color);
+        }
+        for (int y = y1; y <= y2; y++) {
+            float t_short = (float)(y - y1) * inv_dy12;
+            float t_long  = (float)(y - y0) * inv_dy02;
+            int xa = x1 + (int)((x2 - x1) * t_short);
+            int xb = x0 + (int)((x2 - x0) * t_long);
+            if (xa > xb) { int tmp = xa; xa = xb; xb = tmp; }
+            display_draw_line(xa, y, xb, y, color);
+        }
+    }
 }
 
+void display_draw_textured_column(int x, int y0, int y1,
+                                  const uint16_t *tex, int tex_w, int tex_h,
+                                  int tex_x, int tex_y0, int tex_y1) {
+    (void)tex; (void)tex_w; (void)tex_h; (void)tex_x; (void)tex_y0; (void)tex_y1;
+    display_draw_line(x, y0, x, y1, 0x7BEF); // gray stub
+}
+void display_fill_vline(int x, int y0, int y1, uint16_t color) {
+    display_draw_line(x, y0, x, y1, color);
+}
+void display_fill_vline_gradient(int x, int y0, int y1, uint16_t color_top, uint16_t color_bottom) {
+    (void)color_bottom;
+    display_draw_line(x, y0, x, y1, color_top);
+}
 void display_set_scroll_area(int y, int h) { (void)y; (void)h; }
 void display_set_scroll_offset(int offset) { (void)offset; }
 void display_set_transparent_color(uint16_t color) { (void)color; }
@@ -552,6 +606,8 @@ void usb_msc_enter_mode(void) {
 // SD card stubs
 void sdcard_remount(void) {}
 void sdcard_apply_clock(void) {}
+bool sdcard_ensure_ready(void) { return true; }
+void sd_set_slow_mode(bool slow) { (void)slow; }
 
 bool sdcard_fexists(const char* path) {
     extern char g_base_path[512];
@@ -800,7 +856,7 @@ void display_effect_posterize(uint8_t levels) { (void)levels; }
 // Audio/sound/fileplayer/mp3 are implemented in simulator/sim_audio.c
 
 // Native audio callback
-void (*g_native_audio_callback)(void) = NULL;
+_Atomic(void (*)(void)) g_native_audio_callback = NULL;
 
 // Audio ring buffer stubs
 uint32_t audio_ring_free(void) { return 4096; }

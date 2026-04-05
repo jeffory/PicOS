@@ -117,7 +117,7 @@ extern const char *wifi_get_ssid(void);
 extern bool wifi_is_available(void);
 
 // Native audio callback
-extern void (*g_native_audio_callback)(void);
+// g_native_audio_callback declared in os.h as _Atomic
 
 // HTTP (from sim_http.c)
 extern http_conn_t *http_alloc(void);

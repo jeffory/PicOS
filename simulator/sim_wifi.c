@@ -94,6 +94,10 @@ bool wifi_get_http_required(void) {
     return s_http_required;
 }
 
+bool wifi_hw_disconnected(void) {
+    return false;
+}
+
 // ── IPC queue ───────────────────────────────────────────────────────────────
 
 bool wifi_req_push(const conn_req_t *req) {
