@@ -5,8 +5,9 @@ local display = picocalc.display
 local input = picocalc.input
 local sys = picocalc.sys
 local net = picocalc.network
-local config = picocalc.config
+local config = picocalc.sysconfig
 local fs = picocalc.fs
+local ui = picocalc.ui
 
 -- GitHub Releases API configuration
 local GH_API_HOST  = "api.github.com"
@@ -29,7 +30,6 @@ local GREEN = 0x07E0
 local YELLOW = 0xFFE0
 local CYAN = 0x07FF
 local GRAY = 0x8410
-local DKGRAY = 0x4208
 
 -- Screens
 local SCR_MAIN = 1
@@ -37,9 +37,8 @@ local SCR_CHECKING = 2
 local SCR_AVAILABLE = 3
 local SCR_DOWNLOADING = 4
 local SCR_DONE = 5
-local SCR_ERROR = 6
-local SCR_UP_TO_DATE = 7
-local SCR_CONFIRM = 8
+local SCR_UP_TO_DATE = 6
+local SCR_CONFIRM = 7
 
 local current_screen = SCR_MAIN
 local error_msg = ""
@@ -57,12 +56,64 @@ local remote_hash_url = nil
 local download_received = 0
 local download_total = 0
 local download_file = nil
+local download_complete = false
+local download_conn_id = 0  -- incremented per connection to detect stale callbacks
+
+-- Retry state
+local MAX_DOWNLOAD_RETRIES = 3
+local download_retries = 0
+local download_retry_needed = false
+local download_retry_url = nil  -- full URL for retrying
 
 -- ── Helpers ─────────────────────────────────────────────────────────────────
 
 local function draw_centered(y, text, fg, bg)
     local tw = display.textWidth(text)
     display.drawText(math.floor((W - tw) / 2), y, text, fg, bg or BLACK)
+end
+
+local function wrap_text(text, max_width)
+    if not text or #text == 0 then
+        return function() end
+    end
+
+    local function do_wrap()
+        local lines = {}
+        local line = ""
+        
+        for word in text:gmatch("%S+") do
+            local test = (line == "") and word or (line .. " " .. word)
+            local test_w = display.textWidth(test)
+            if test_w and test_w > max_width then
+                if line ~= "" then
+                    table.insert(lines, line)
+                end
+                line = word
+                while display.textWidth(line) and display.textWidth(line) > max_width do
+                    local cut = #line
+                    while cut > 1 and display.textWidth(line:sub(1, cut)) 
+                          and display.textWidth(line:sub(1, cut)) > max_width do
+                        cut = cut - 1
+                    end
+                    table.insert(lines, line:sub(1, cut))
+                    line = line:sub(cut + 1)
+                end
+            else
+                line = test
+            end
+        end
+        if line ~= "" then
+            table.insert(lines, line)
+        end
+        
+        local i = 0
+        return function()
+            i = i + 1
+            return lines[i]
+        end
+    end
+
+    return do_wrap()
 end
 
 local function version_newer(remote, local_ver)
@@ -133,15 +184,17 @@ local function check_for_update()
 
     local status = net.getStatus()
     if status ~= net.kStatusConnected then
-        error_msg = "WiFi not connected.\nConnect via Settings first."
-        current_screen = SCR_ERROR
+        error_msg = "WiFi not connected"
+        ui.toast(error_msg, ui.TOAST_ERROR)
+        current_screen = SCR_MAIN
         return
     end
 
     local conn = net.http.new(GH_API_HOST, 443, true)
     if not conn then
         error_msg = "Cannot connect to GitHub API."
-        current_screen = SCR_ERROR
+        ui.toast(error_msg, ui.TOAST_ERROR)
+        current_screen = SCR_MAIN
         return
     end
 
@@ -155,26 +208,31 @@ local function check_for_update()
     conn:setRequestCallback(function()
         local avail = conn:getBytesAvailable()
         if avail > 0 then
-            body = body .. conn:read()
+            local data = conn:read()
+            body = body .. data
         end
     end)
 
     conn:setRequestCompleteCallback(function()
         local http_status = conn:getResponseStatus()
+        print("[UPDATER] API response: status=" .. tostring(http_status) .. " body_len=" .. tostring(#body))
         conn:close()
         current_conn = nil
 
         if http_status ~= 200 then
             error_msg = "GitHub API returned HTTP " .. tostring(http_status)
-            current_screen = SCR_ERROR
+            ui.toast(error_msg, ui.TOAST_ERROR)
+            current_screen = SCR_MAIN
             return
         end
 
         -- Parse release info
         local tag = json_get(body, "tag_name")
+        print("[UPDATER] tag_name=" .. tostring(tag))
         if not tag then
             error_msg = "Invalid response from GitHub API."
-            current_screen = SCR_ERROR
+            ui.toast(error_msg, ui.TOAST_ERROR)
+            current_screen = SCR_MAIN
             return
         end
 
@@ -208,7 +266,8 @@ local function check_for_update()
         current_conn = nil
         if current_screen == SCR_CHECKING then
             error_msg = "Connection closed unexpectedly."
-            current_screen = SCR_ERROR
+            ui.toast(error_msg, ui.TOAST_ERROR)
+            current_screen = SCR_MAIN
         end
     end)
 
@@ -219,7 +278,8 @@ local function check_for_update()
 
     if not conn:get(GH_API_PATH, headers) then
         error_msg = "Failed to send request."
-        current_screen = SCR_ERROR
+        ui.toast(error_msg, ui.TOAST_ERROR)
+        current_screen = SCR_MAIN
         current_conn = nil
     end
 end
@@ -262,6 +322,7 @@ local function download_hash_file(url, redirect_count)
 
     conn:setRequestCompleteCallback(function()
         local http_status = conn:getResponseStatus()
+
         local resp_headers = conn:getResponseHeaders()
         conn:close()
         current_conn = nil
@@ -303,135 +364,330 @@ local function download_hash_file(url, redirect_count)
     end
 end
 
+-- Fallback for servers that don't support Range requests
+local function download_fallback(host, port, ssl, path)
+    -- Close any previous connection before starting a new one
+    if current_conn then
+        current_conn:close()
+        current_conn = nil
+    end
+
+    local conn = net.http.new(host, port, ssl)
+    if not conn then
+        error_msg = "Cannot connect to download server."
+        ui.toast(error_msg, ui.TOAST_ERROR)
+        current_screen = SCR_MAIN
+        return
+    end
+
+    conn:setConnectTimeout(30)
+    conn:setReadTimeout(60)
+    if not conn:setReadBufferSize(32 * 1024) then
+        error_msg = "Failed to allocate download buffer"
+        ui.toast(error_msg, ui.TOAST_ERROR)
+        current_screen = SCR_MAIN
+        conn:close()
+        return
+    end
+    current_conn = conn
+    download_complete = false
+
+    -- Capture connection identity to detect stale callbacks
+    download_conn_id = download_conn_id + 1
+    local my_conn_id = download_conn_id
+
+    -- Buffer download data in PSRAM instead of writing to SD during download.
+    -- Writing to SD while WiFi is active causes 3.3V rail droop (combined
+    -- CYW43 + SD flash programming current) → card reset (R1=0x3f) on every
+    -- write.  Buffering in PSRAM and flushing after the connection closes
+    -- eliminates the concurrent power draw.
+    local chunks = {}
+
+    conn:setRequestCallback(function()
+        if my_conn_id ~= download_conn_id then return end
+        if download_complete then return end
+
+        local status = conn:getResponseStatus()
+        if status and status ~= 200 then return end
+
+        -- Drain ALL available data from ring buffer into memory
+        while true do
+            local avail = conn:getBytesAvailable()
+            if avail <= 0 then break end
+            local data = conn:read()
+            if not data or #data == 0 then break end
+
+            -- Cap data at Content-Length to avoid extra bytes
+            if download_total > 0 then
+                local remaining = download_total - download_received
+                if remaining <= 0 then break end
+                if #data > remaining then
+                    data = data:sub(1, remaining)
+                end
+            end
+
+            chunks[#chunks + 1] = data
+            download_received = download_received + #data
+        end
+    end)
+
+    conn:setRequestCompleteCallback(function()
+        if my_conn_id ~= download_conn_id then return end
+
+        -- Capture status BEFORE closing connection
+        local http_status = conn:getResponseStatus()
+        local conn_err = conn:getError()
+        print("[UPDATER] Complete: status=" .. tostring(http_status) ..
+              " received=" .. download_received .. " total=" .. download_total ..
+              " err=" .. tostring(conn_err))
+
+        if http_status and http_status >= 300 and http_status < 400 then
+            local resp_headers = conn:getResponseHeaders()
+            local location = resp_headers and resp_headers["location"]
+            if location then
+                conn:close()
+                if current_conn == conn then current_conn = nil end
+                chunks = {}
+                local h, p, s, pa = parse_url(location)
+                if h then
+                    download_fallback(h, p, s, pa)
+                else
+                    error_msg = "Invalid redirect URL."
+                    ui.toast(error_msg, ui.TOAST_ERROR)
+                    current_screen = SCR_MAIN
+                end
+                return
+            end
+        end
+
+        -- If connection had an error, signal retry
+        if conn_err then
+            print("[UPDATER] Download failed with error: " .. conn_err)
+            conn:close()
+            if current_conn == conn then current_conn = nil end
+            chunks = {}
+            download_retry_needed = true
+            return
+        end
+
+        -- Drain ALL remaining buffered data into memory
+        while true do
+            local avail = conn:getBytesAvailable()
+            if avail <= 0 then break end
+            local data = conn:read()
+            if not data or #data == 0 then break end
+
+            if download_total > 0 then
+                local remaining = download_total - download_received
+                if remaining <= 0 then break end
+                if #data > remaining then
+                    data = data:sub(1, remaining)
+                end
+            end
+
+            chunks[#chunks + 1] = data
+            download_received = download_received + #data
+        end
+
+        -- Check HTTP status before writing to SD
+        if http_status and http_status ~= 200 then
+            conn:close()
+            if current_conn == conn then current_conn = nil end
+            chunks = {}
+            error_msg = "Download failed: HTTP " .. tostring(http_status)
+            ui.toast(error_msg, ui.TOAST_ERROR)
+            current_screen = SCR_MAIN
+            return
+        end
+
+        -- Verify we received the expected amount
+        if download_total > 0 and download_received ~= download_total then
+            print("[UPDATER] Size mismatch: received=" .. download_received ..
+                  " expected=" .. download_total)
+            conn:close()
+            if current_conn == conn then current_conn = nil end
+            chunks = {}
+            download_retry_needed = true
+            return
+        end
+
+        if download_received < 256 then
+            print("[UPDATER] Download too small (" .. download_received .. " bytes)")
+            conn:close()
+            if current_conn == conn then current_conn = nil end
+            chunks = {}
+            download_retry_needed = true
+            return
+        end
+
+        -- Fully shut down WiFi and pause Core 1 before writing to SD.
+        -- Matches the USB MSC pattern: CYW43 transient current during
+        -- wifi_poll() causes voltage sag → SD card resets (R1=0x3f).
+        -- Per-sector pause/resume is counterproductive (gives Core 1
+        -- brief activity windows between writes); pausing once for the
+        -- entire batch eliminates the interference completely.
+        conn:close()
+        if current_conn == conn then current_conn = nil end
+
+        -- Let Core 1 process the connection close
+        sys.sleep(100)
+
+        -- Disconnect WiFi to reduce CYW43 baseline current draw.
+        -- wifi.disconnect() is async (queues to Core 1 ring buffer).
+        -- Poll for actual hardware deassociation before proceeding.
+        picocalc.wifi.disconnect()
+        local hw_start = sys.getTimeMs()
+        while not picocalc.network.isHwDisconnected() do
+            sys.sleep(10)
+            if sys.getTimeMs() - hw_start > 2000 then
+                print("[UPDATER] WARNING: WiFi hardware disconnect timed out")
+                break
+            end
+        end
+
+        -- Pause Core 1 entirely (WiFi, audio, HTTP polling all stop)
+        local paused = sys.pauseBackground()
+        if not paused then
+            print("[UPDATER] WARNING: Core 1 did not acknowledge pause")
+        end
+
+        -- Drop SPI0 to 1 MHz — immune to CYW43 EMI even with radio
+        -- stuck active (mg_wifi_disconnect only deassociates, radio
+        -- stays powered in RX/scanning mode).
+        fs.setSlowMode(true)
+
+        -- With Core 1 stopped, verify SD card is responsive
+        if not fs.ensureReady() then
+            print("[UPDATER] SD card not responding after recovery")
+            fs.setSlowMode(false)
+            sys.resumeBackground()
+            chunks = {}
+            error_msg = "SD card not responding"
+            ui.toast(error_msg, ui.TOAST_ERROR)
+            current_screen = SCR_MAIN
+            return
+        end
+
+        -- Flush buffered data to SD card (Core 1 is paused for entire batch)
+        print("[UPDATER] Writing " .. download_received .. " bytes to SD...")
+        download_file = fs.open(BIN_PATH, "w")
+        if not download_file then
+            fs.setSlowMode(false)
+            sys.resumeBackground()
+            chunks = {}
+            error_msg = "Failed to open file for writing."
+            ui.toast(error_msg, ui.TOAST_ERROR)
+            current_screen = SCR_MAIN
+            return
+        end
+
+        local write_ok = true
+        for i = 1, #chunks do
+            local written = fs.write(download_file, chunks[i])
+            if not written or written < 0 then
+                print("[UPDATER] SD write failed at chunk " .. i ..
+                      " (written=" .. tostring(written) .. ")")
+                write_ok = false
+                break
+            end
+        end
+        fs.close(download_file)
+        download_file = nil
+        chunks = {}  -- free PSRAM
+
+        -- Restore full SPI0 speed and resume Core 1
+        fs.setSlowMode(false)
+        sys.resumeBackground()
+
+        if not write_ok then
+            fs.delete(BIN_PATH)
+            download_retry_needed = true
+            return
+        end
+
+        -- Verify file size on disk
+        local actual_size = fs.size(BIN_PATH)
+        print("[UPDATER] Verification: actual_size=" .. tostring(actual_size) ..
+              " expected=" .. tostring(download_total))
+        if download_total > 0 and actual_size ~= download_total then
+            print("[UPDATER] Size mismatch on disk, will retry")
+            fs.delete(BIN_PATH)
+            download_retry_needed = true
+            return
+        end
+
+        if not actual_size or actual_size < 256 then
+            print("[UPDATER] File empty or too small, will retry")
+            fs.delete(BIN_PATH)
+            download_retry_needed = true
+            return
+        end
+
+        download_complete = true
+        current_screen = SCR_DONE
+        print("[UPDATER] Firmware saved successfully")
+
+        if remote_hash_url then
+            download_hash_file(remote_hash_url)
+        end
+    end)
+
+    conn:setHeadersReadCallback(function()
+        if my_conn_id ~= download_conn_id then return end
+        local hdrs = conn:getResponseHeaders()
+        if hdrs and hdrs["content-length"] then
+            local cl = tonumber(hdrs["content-length"])
+            if cl and cl > 0 then
+                download_total = cl
+                print("[DEBUG] Headers: Content-Length=" .. tostring(download_total))
+            end
+        end
+    end)
+
+    conn:setConnectionClosedCallback(function()
+        if my_conn_id ~= download_conn_id then return end  -- stale
+        if current_conn == conn then current_conn = nil end
+
+        -- If download already completed successfully, nothing to do
+        if download_complete then return end
+
+        -- If we're not in downloading state, already handled
+        if current_screen ~= SCR_DOWNLOADING then return end
+
+        -- Connection closed unexpectedly during download
+        chunks = {}
+        error_msg = "Download interrupted."
+        ui.toast(error_msg, ui.TOAST_ERROR)
+        current_screen = SCR_MAIN
+    end)
+
+    if not conn:get(path, {["User-Agent"] = "PicOS-Updater/1.0"}) then
+        error_msg = "Failed to start download."
+        ui.toast(error_msg, ui.TOAST_ERROR)
+        current_screen = SCR_MAIN
+        current_conn = nil
+    end
+end
+
 local function fetch_firmware(url, redirect_count)
     redirect_count = redirect_count or 0
     if redirect_count >= MAX_REDIRECTS then
         error_msg = "Too many redirects."
-        current_screen = SCR_ERROR
+        ui.toast(error_msg, ui.TOAST_ERROR)
+        current_screen = SCR_MAIN
         return
     end
 
     local host, port, ssl, path = parse_url(url)
     if not host then
         error_msg = "Invalid download URL."
-        current_screen = SCR_ERROR
+        ui.toast(error_msg, ui.TOAST_ERROR)
+        current_screen = SCR_MAIN
         return
     end
 
-    local conn = net.http.new(host, port, ssl)
-    if not conn then
-        error_msg = "Cannot connect to download server."
-        current_screen = SCR_ERROR
-        return
-    end
-
-    conn:setConnectTimeout(30)
-    conn:setReadTimeout(60)
-    -- Allocate large buffer for the binary (or redirect response)
-    conn:setReadBufferSize(2 * 1024 * 1024)
-    current_conn = conn
-
-    conn:setRequestCompleteCallback(function()
-        local http_status = conn:getResponseStatus()
-        local resp_headers = conn:getResponseHeaders()
-        conn:close()
-        current_conn = nil
-
-        -- Handle redirects (GitHub sends 302 to objects.githubusercontent.com)
-        if http_status and http_status >= 300 and http_status < 400 then
-            local location = resp_headers and resp_headers["location"]
-            if location then
-                fetch_firmware(location, redirect_count + 1)
-                return
-            end
-            error_msg = "Redirect without Location header."
-            current_screen = SCR_ERROR
-            return
-        end
-
-        if http_status ~= 200 then
-            error_msg = "Download failed: HTTP " .. tostring(http_status)
-            if download_file then
-                fs.close(download_file)
-                download_file = nil
-            end
-            fs.remove(BIN_PATH)
-            current_screen = SCR_ERROR
-            return
-        end
-
-        -- Write body data to file
-        local avail = conn:getBytesAvailable()
-        if avail > 0 then
-            local data = conn:read()
-            if data and #data > 0 then
-                if not download_file then
-                    download_file = fs.open(BIN_PATH, "w")
-                end
-                if download_file then
-                    fs.write(download_file, data)
-                    download_received = download_received + #data
-                end
-            end
-        end
-
-        if download_file then
-            fs.close(download_file)
-            download_file = nil
-        end
-
-        -- Now download the hash file
-        if remote_hash_url then
-            download_hash_file(remote_hash_url)
-        else
-            current_screen = SCR_DONE
-        end
-    end)
-
-    conn:setRequestCallback(function()
-        -- Accumulate data during download for progress display
-        local avail = conn:getBytesAvailable()
-        if avail > 0 then
-            local data = conn:read()
-            if data and #data > 0 then
-                if not download_file then
-                    download_file = fs.open(BIN_PATH, "w")
-                end
-                if download_file then
-                    fs.write(download_file, data)
-                    download_received = download_received + #data
-                end
-            end
-        end
-    end)
-
-    conn:setHeadersReadCallback(function()
-        local hdrs = conn:getResponseHeaders()
-        if hdrs and hdrs["content-length"] then
-            local cl = tonumber(hdrs["content-length"])
-            if cl and cl > 0 then
-                download_total = cl
-            end
-        end
-    end)
-
-    conn:setConnectionClosedCallback(function()
-        current_conn = nil
-        if download_file then
-            fs.close(download_file)
-            download_file = nil
-        end
-        if current_screen == SCR_DOWNLOADING then
-            error_msg = "Download interrupted."
-            current_screen = SCR_ERROR
-        end
-    end)
-
-    if not conn:get(path, {["User-Agent"] = "PicOS-Updater/1.0"}) then
-        error_msg = "Failed to start download."
-        current_screen = SCR_ERROR
-        current_conn = nil
-    end
+    -- Use fallback download with smaller buffer (512KB) to avoid OOM
+    download_fallback(host, port, ssl, path)
 end
 
 local function start_download()
@@ -439,10 +695,21 @@ local function start_download()
     download_received = 0
     download_total = remote_size
     download_file = nil
+    download_retries = 0
+    download_retry_needed = false
+    download_retry_url = remote_bin_url
+
+    -- Delete old file to ensure we start fresh
+    if fs.exists(BIN_PATH) then
+        fs.delete(BIN_PATH)
+    end
+    print("[UPDATER] start_download: remote_size=" .. tostring(remote_size) ..
+          " url=" .. tostring(remote_bin_url))
 
     if not remote_bin_url then
         error_msg = "No download URL available."
-        current_screen = SCR_ERROR
+        ui.toast(error_msg, ui.TOAST_ERROR)
+        current_screen = SCR_MAIN
         return
     end
 
@@ -451,159 +718,127 @@ end
 
 -- ── Drawing ─────────────────────────────────────────────────────────────────
 
-local function draw_header()
-    display.fillRect(0, 0, W, 20, DKGRAY)
-    draw_centered(4, "System Update", WHITE, DKGRAY)
-end
-
 local function draw_main()
     display.clear(BLACK)
-    draw_header()
+    ui.drawHeader("System Update")
 
     local ver = sys.getVersion()
-    display.drawText(8, 40, "Current firmware:", GRAY, BLACK)
-    display.drawText(8, 56, "  Version " .. ver, WHITE, BLACK)
+    display.drawText(8, 50, "Current firmware:", GRAY, BLACK)
+    display.drawText(8, 66, "  Version " .. ver, WHITE, BLACK)
 
-    draw_centered(100, "Press Enter to check", CYAN, BLACK)
-    draw_centered(116, "for updates", CYAN, BLACK)
+    draw_centered(110, "Press Enter to check", CYAN, BLACK)
+    draw_centered(126, "for updates", CYAN, BLACK)
 
-    display.drawText(8, H - 16, "ESC: Exit", GRAY, BLACK)
+    ui.drawFooter("ESC: Exit", "")
     display.flush()
 end
 
 local function draw_checking()
     display.clear(BLACK)
-    draw_header()
-    draw_centered(140, "Checking for updates...", WHITE, BLACK)
-    display.drawText(8, H - 16, "ESC: Cancel", GRAY, BLACK)
+    ui.drawHeader("System Update")
+    ui.drawSpinner(W / 2, 140, 12, frame)
+    draw_centered(165, "Checking for updates...", WHITE, BLACK)
+    ui.drawFooter("ESC: Cancel", "")
     display.flush()
 end
 
 local function draw_up_to_date()
     display.clear(BLACK)
-    draw_header()
-    draw_centered(120, "Firmware is up to date!", GREEN, BLACK)
+    ui.drawHeader("System Update")
+    draw_centered(130, "Firmware is up to date!", GREEN, BLACK)
     local ver = sys.getVersion()
-    draw_centered(140, "Version " .. ver, GRAY, BLACK)
-    draw_centered(180, "Enter: Reflash current version", CYAN, BLACK)
-    display.drawText(8, H - 16, "ESC: Back", GRAY, BLACK)
+    draw_centered(150, "Version " .. ver, GRAY, BLACK)
+    draw_centered(190, "Enter: Reflash current version", CYAN, BLACK)
+    ui.drawFooter("ESC: Back", "")
     display.flush()
 end
 
 local function draw_available()
     display.clear(BLACK)
-    draw_header()
+    ui.drawHeader("System Update")
 
-    display.drawText(8, 40, "Update available!", GREEN, BLACK)
+    display.drawText(8, 50, "Update available!", GREEN, BLACK)
 
     local ver = sys.getVersion()
-    display.drawText(8, 64, "Current: " .. ver, GRAY, BLACK)
-    display.drawText(8, 80, "New:     " .. (remote_version or "?"), WHITE, BLACK)
+    display.drawText(8, 74, "Current: " .. ver, GRAY, BLACK)
+
+    local y = 90
+    local max_w = W - 16
+    for wrapped in wrap_text("New:     " .. (remote_version or "?"), max_w) do
+        display.drawText(8, y, wrapped, WHITE, BLACK)
+        y = y + 14
+    end
 
     if remote_size > 0 then
         local size_kb = math.floor(remote_size / 1024)
-        display.drawText(8, 100, "Size: " .. size_kb .. " KB", GRAY, BLACK)
+        display.drawText(8, 110, "Size: " .. size_kb .. " KB", GRAY, BLACK)
     end
 
     if remote_changelog then
-        display.drawText(8, 124, "Changes:", YELLOW, BLACK)
-        -- Simple word-wrap for changelog
-        local y = 140
-        local line = ""
-        for word in remote_changelog:gmatch("%S+") do
-            if display.textWidth(line .. " " .. word) > W - 16 then
-                display.drawText(8, y, line, WHITE, BLACK)
-                y = y + 12
-                line = word
-                if y > H - 40 then break end
-            else
-                line = (line == "") and word or (line .. " " .. word)
-            end
-        end
-        if line ~= "" and y <= H - 40 then
-            display.drawText(8, y, line, WHITE, BLACK)
+        display.drawText(8, 134, "Changes:", YELLOW, BLACK)
+        local y = 150
+        local max_w = W - 16
+        for wrapped in wrap_text(remote_changelog, max_w) do
+            display.drawText(8, y, wrapped, WHITE, BLACK)
+            y = y + 12
+            if y > H - 50 then break end
         end
     end
 
-    draw_centered(H - 32, "Enter: Download & Install", CYAN, BLACK)
-    display.drawText(8, H - 16, "ESC: Cancel", GRAY, BLACK)
+    ui.drawFooter("ESC: Cancel", "Enter: Download")
     display.flush()
 end
 
 local function draw_downloading()
     display.clear(BLACK)
-    draw_header()
+    ui.drawHeader("System Update")
 
     draw_centered(120, "Downloading firmware...", WHITE, BLACK)
 
-    -- Progress bar
-    local bar_x, bar_y, bar_w, bar_h = 40, 150, 240, 16
-    display.fillRect(bar_x, bar_y, bar_w, bar_h, DKGRAY)
+    local progress = 0
     if download_total > 0 then
-        local fill = math.floor(bar_w * download_received / download_total)
-        if fill > 0 then
-            display.fillRect(bar_x, bar_y, fill, bar_h, GREEN)
-        end
+        progress = download_received / download_total
     end
-    display.drawRect(bar_x, bar_y, bar_w, bar_h, WHITE)
+    ui.drawProgress(40, 150, 240, 16, progress, GREEN)
 
-    local pct = 0
-    if download_total > 0 then
-        pct = math.floor(download_received * 100 / download_total)
-    end
+    local pct = math.floor(progress * 100)
     local kb_done = math.floor(download_received / 1024)
     local kb_total = math.floor(download_total / 1024)
     local status = string.format("%d%%  (%dK / %dK)", pct, kb_done, kb_total)
-    draw_centered(bar_y + bar_h + 8, status, WHITE, BLACK)
+    draw_centered(174, status, WHITE, BLACK)
 
-    display.drawText(8, H - 16, "ESC: Cancel", GRAY, BLACK)
+    ui.drawFooter("ESC: Cancel", "")
     display.flush()
 end
 
 local function draw_done()
     display.clear(BLACK)
-    draw_header()
+    ui.drawHeader("System Update")
 
-    draw_centered(100, "Download complete!", GREEN, BLACK)
-    draw_centered(120, "Ready to install.", WHITE, BLACK)
+    draw_centered(110, "Download complete!", GREEN, BLACK)
+    draw_centered(130, "Ready to install.", WHITE, BLACK)
 
-    draw_centered(160, "The device will reboot", YELLOW, BLACK)
-    draw_centered(176, "to apply the update.", YELLOW, BLACK)
+    draw_centered(170, "The device will reboot", YELLOW, BLACK)
+    draw_centered(186, "to apply the update.", YELLOW, BLACK)
 
-    draw_centered(H - 32, "Enter: Install Now", CYAN, BLACK)
-    display.drawText(8, H - 16, "ESC: Cancel", GRAY, BLACK)
-    display.flush()
-end
-
-local function draw_error()
-    display.clear(BLACK)
-    draw_header()
-
-    display.drawText(8, 80, "Error:", RED, BLACK)
-    -- Word-wrap error message
-    local y = 100
-    for line in error_msg:gmatch("[^\n]+") do
-        display.drawText(8, y, line, WHITE, BLACK)
-        y = y + 14
-    end
-
-    display.drawText(8, H - 16, "ESC: Back", GRAY, BLACK)
+    ui.drawFooter("ESC: Cancel", "Enter: Install Now")
     display.flush()
 end
 
 local function draw_confirm()
     display.clear(BLACK)
-    draw_header()
+    ui.drawHeader("System Update")
 
-    draw_centered(100, "Apply firmware update?", YELLOW, BLACK)
-    draw_centered(120, "Version " .. (remote_version or "?"), WHITE, BLACK)
+    draw_centered(110, "Apply firmware update?", YELLOW, BLACK)
+    draw_centered(130, "Version " .. (remote_version or "?"), WHITE, BLACK)
 
-    draw_centered(160, "The device will reboot.", GRAY, BLACK)
-    draw_centered(176, "Do not power off during", GRAY, BLACK)
-    draw_centered(192, "the update process.", GRAY, BLACK)
+    draw_centered(170, "The device will reboot.", GRAY, BLACK)
+    draw_centered(186, "Do not power off during", GRAY, BLACK)
+    draw_centered(202, "the update process.", GRAY, BLACK)
 
     draw_centered(240, "Enter: Yes, Install", GREEN, BLACK)
     draw_centered(260, "ESC: No, Cancel", RED, BLACK)
+    ui.drawFooter("ESC: No", "Enter: Install")
     display.flush()
 end
 
@@ -646,13 +881,12 @@ while true do
             -- Apply the update (this reboots on success)
             local ok, err = sys.applyUpdate(BIN_PATH)
             if not ok then
-                error_msg = "Failed to apply update:\n" .. (err or "unknown error")
-                current_screen = SCR_ERROR
+                error_msg = "Failed to apply update: " .. (err or "unknown error")
+                ui.toast(error_msg, ui.TOAST_ERROR)
+                current_screen = SCR_MAIN
             end
         elseif current_screen == SCR_UP_TO_DATE then
             start_download()
-        elseif current_screen == SCR_ERROR then
-            current_screen = SCR_MAIN
         end
     end
 
@@ -661,7 +895,27 @@ while true do
     if current_screen == SCR_DOWNLOADING then needs_draw = true end
     if current_screen == SCR_CHECKING then
         frame = frame + 1
-        if frame % 10 == 0 then needs_draw = true end
+        needs_draw = true
+    end
+
+    -- Handle download retry (checked each frame during SCR_DOWNLOADING)
+    if download_retry_needed and current_screen == SCR_DOWNLOADING then
+        download_retry_needed = false
+        download_retries = download_retries + 1
+        if download_retries <= MAX_DOWNLOAD_RETRIES then
+            print("[UPDATER] Retrying download, attempt " .. download_retries .. "/" .. MAX_DOWNLOAD_RETRIES)
+            download_received = 0
+            download_total = remote_size
+            download_file = nil
+            if fs.exists(BIN_PATH) then
+                fs.delete(BIN_PATH)
+            end
+            fetch_firmware(download_retry_url or remote_bin_url)
+        else
+            error_msg = "Download failed after " .. MAX_DOWNLOAD_RETRIES .. " attempts"
+            ui.toast(error_msg, ui.TOAST_ERROR)
+            current_screen = SCR_MAIN
+        end
     end
 
     if needs_draw then
@@ -670,7 +924,6 @@ while true do
         elseif current_screen == SCR_AVAILABLE then draw_available()
         elseif current_screen == SCR_DOWNLOADING then draw_downloading()
         elseif current_screen == SCR_DONE then draw_done()
-        elseif current_screen == SCR_ERROR then draw_error()
         elseif current_screen == SCR_UP_TO_DATE then draw_up_to_date()
         elseif current_screen == SCR_CONFIRM then draw_confirm()
         end
