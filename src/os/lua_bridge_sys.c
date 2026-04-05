@@ -4,6 +4,8 @@
 #include "version.h"
 #include "../dev_commands.h"
 #include "../hardware.h"
+#include "../drivers/pio_psram.h"
+#include "perf.h"
 #include "hardware/gpio.h"
 #include <malloc.h>
 #include <stdatomic.h>
@@ -174,7 +176,7 @@ static int l_sys_getMemInfo(lua_State *L) {
 
   struct mallinfo mi = mallinfo();
 
-  lua_createtable(L, 0, 5);
+  lua_createtable(L, 0, 10);
   lua_pushinteger(L, (lua_Integer)psram_free);
   lua_setfield(L, -2, "psram_free");
   lua_pushinteger(L, (lua_Integer)psram_used);
@@ -185,6 +187,17 @@ static int l_sys_getMemInfo(lua_State *L) {
   lua_setfield(L, -2, "sram_free");
   lua_pushinteger(L, (lua_Integer)mi.uordblks);
   lua_setfield(L, -2, "sram_used");
+
+  // PIO PSRAM (mainboard 8MB via PIO1)
+  lua_pushboolean(L, pio_psram_available());
+  lua_setfield(L, -2, "pio_psram_available");
+  lua_pushinteger(L, (lua_Integer)pio_psram_size());
+  lua_setfield(L, -2, "pio_psram_size");
+
+  // XIP cache hit rate (0-100%, or -1 if no accesses)
+  lua_pushinteger(L, (lua_Integer)perf_xip_cache_hit_rate());
+  lua_setfield(L, -2, "xip_cache_hit_rate");
+
   return 1;
 }
 
