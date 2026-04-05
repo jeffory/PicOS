@@ -1,4 +1,6 @@
 // driver_stubs.c - Stubs for PicOS driver functions
+#define _XOPEN_SOURCE 500  // for nftw()
+#include <ftw.h>
 #include <stdint.h>
 #include <stdbool.h>
 #include <stdio.h>
@@ -717,6 +719,19 @@ bool sdcard_delete(const char* path) {
     if (path[0] == '/') snprintf(full, sizeof(full), "%s%s", g_base_path, path);
     else snprintf(full, sizeof(full), "%s/%s", g_base_path, path);
     return remove(full) == 0;
+}
+// Recursive delete helper using nftw
+static int nftw_remove_cb(const char *fpath, const struct stat *sb,
+                          int typeflag, struct FTW *ftwbuf) {
+    (void)sb; (void)typeflag; (void)ftwbuf;
+    return remove(fpath);
+}
+bool sdcard_delete_recursive(const char* path) {
+    extern char g_base_path[512];
+    char full[1024];
+    if (path[0] == '/') snprintf(full, sizeof(full), "%s%s", g_base_path, path);
+    else snprintf(full, sizeof(full), "%s/%s", g_base_path, path);
+    return nftw(full, nftw_remove_cb, 64, FTW_DEPTH | FTW_PHYS) == 0;
 }
 bool sdcard_rename(const char* oldpath, const char* newpath) {
     extern char g_base_path[512];

@@ -75,6 +75,10 @@ int sdcard_list_dir(const char *path,
 // Delete a file or empty directory.
 bool sdcard_delete(const char *path);
 
+// Recursively delete a directory and all its contents.
+// Returns true if the directory and all contents were deleted.
+bool sdcard_delete_recursive(const char *path);
+
 // Rename or move a file/directory. Both paths must be on the same volume.
 bool sdcard_rename(const char *src, const char *dst);
 

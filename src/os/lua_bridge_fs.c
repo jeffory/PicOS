@@ -314,6 +314,23 @@ static int l_fs_delete(lua_State *L) {
   return 2;
 }
 
+// ── picocalc.fs.deleteRecursive(path) → ok [, err] ──────────────────────────
+static int l_fs_delete_recursive(lua_State *L) {
+  const char *path = luaL_checkstring(L, 1);
+  if (!fs_sandbox_check(L, path, true)) {
+    lua_pushboolean(L, false);
+    lua_pushstring(L, "permission denied");
+    return 2;
+  }
+  if (sdcard_delete_recursive(path)) {
+    lua_pushboolean(L, true);
+    return 1;
+  }
+  lua_pushboolean(L, false);
+  lua_pushstring(L, "delete failed");
+  return 2;
+}
+
 // ── picocalc.fs.rename(src, dst) → ok [, err] ────────────────────────────────
 static int l_fs_rename(lua_State *L) {
   const char *src = luaL_checkstring(L, 1);
@@ -485,7 +502,8 @@ static const luaL_Reg l_fs_lib[] = {
     {"size",     l_fs_size},     {"listDir",  l_fs_listDir},
     {"mkdir",    l_fs_mkdir},    {"appPath",  l_fs_appPath},
     {"browse",   l_fs_browse},
-    {"delete",   l_fs_delete},   {"rename",   l_fs_rename},
+    {"delete",   l_fs_delete},   {"deleteRecursive", l_fs_delete_recursive},
+    {"rename",   l_fs_rename},
     {"copy",     l_fs_copy},     {"stat",     l_fs_stat},
     {"diskInfo", l_fs_diskInfo}, {"ensureReady", l_fs_ensureReady},
     {"glob",     l_fs_glob},     {"setSlowMode", l_fs_setSlowMode},

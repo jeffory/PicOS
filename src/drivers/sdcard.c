@@ -426,6 +426,35 @@ bool sdcard_delete(const char *path) {
     return ok;
 }
 
+// Recursively delete a directory and all its contents.
+static void delete_recursive_cb(const sdcard_entry_t *entry, void *user) {
+    char *parent = (char *)user;
+    char path[512];
+    snprintf(path, sizeof(path), "%s/%s", parent, entry->name);
+    if (entry->is_dir) {
+        sdcard_delete_recursive(path);
+    } else {
+        sdcard_delete(path);
+    }
+}
+
+bool sdcard_delete_recursive(const char *path) {
+    if (!s_mounted) return false;
+
+    sdcard_stat_t st;
+    if (!sdcard_stat(path, &st)) return false;
+
+    if (!st.is_dir) {
+        return sdcard_delete(path);
+    }
+
+    // Delete contents first, then the empty directory
+    char path_copy[512];
+    snprintf(path_copy, sizeof(path_copy), "%s", path);
+    sdcard_list_dir(path, delete_recursive_cb, path_copy);
+    return sdcard_delete(path);
+}
+
 bool sdcard_rename(const char *src, const char *dst) {
     if (!s_mounted) return false;
     recursive_mutex_enter_blocking(&g_sdcard_mutex);
