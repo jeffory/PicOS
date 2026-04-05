@@ -3,5 +3,8 @@
     "name": "Burn-In Fixer",
     "description": "Exercises screen pixels to reduce LCD burn-in and stuck pixels",
     "version": "1.0",
-    "author": "PicOS"
+    "author": "PicOS",
+    "category": "system",
+    "repo": "jeffory/picos-apps",
+    "min_firmware": "1.0.0"
 }

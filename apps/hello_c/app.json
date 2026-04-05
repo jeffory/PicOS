@@ -1,1 +1,9 @@
-{"id":"com.example.hello","name":"Hello C","version":"1.0","description":"Native C demo"}
+{
+    "id": "com.example.hello",
+    "name": "Hello C",
+    "version": "1.0",
+    "description": "Native C demo",
+    "category": "demos",
+    "repo": "jeffory/picos-apps",
+    "min_firmware": "1.0.0"
+}

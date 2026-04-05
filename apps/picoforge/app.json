@@ -4,5 +4,8 @@
   "description": "Mini IDE for PicOS - edit, run, and debug Lua projects",
   "version": "0.1.0",
   "author": "PicOS",
-  "requirements": ["root-filesystem", "audio"]
+  "requirements": ["root-filesystem", "audio"],
+  "category": "tools",
+  "repo": "jeffory/picos-apps",
+  "min_firmware": "1.0.0"
 }

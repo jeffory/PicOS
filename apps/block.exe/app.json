@@ -3,5 +3,8 @@
     "name": "block.exe",
     "description": "A Tetris clone with neon graphics",
     "author": "PicOS",
-    "version": "1.0.0"
+    "version": "1.0.0",
+    "category": "games",
+    "repo": "jeffory/picos-apps",
+    "min_firmware": "1.0.0"
 }
