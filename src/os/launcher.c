@@ -5,6 +5,7 @@
 #include "native_loader.h"
 #include "../drivers/audio.h"
 #include "../drivers/display.h"
+#include "../drivers/image_api.h"
 #include "../drivers/keyboard.h"
 #include "../drivers/mp3_player.h"
 #include "../drivers/sdcard.h"
@@ -155,6 +156,8 @@ static void on_app_dir(const sdcard_entry_t *entry, void *user) {
     app->has_http            = json_has_requirement(json, "http");
     app->has_audio           = json_has_requirement(json, "audio");
     json_get_int(json, "system_clock_khz", &app->system_clock_khz);
+    if (!json_get_string(json, "category", app->category, sizeof(app->category)))
+      app->category[0] = '\0';
 
     umm_free(json);
   } else {
@@ -163,6 +166,17 @@ static void on_app_dir(const sdcard_entry_t *entry, void *user) {
     strncpy(app->name, entry->name, sizeof(app->name));
     app->description[0] = '\0';
     strncpy(app->version, "?", sizeof(app->version));
+    app->category[0] = '\0';
+  }
+
+  // Try to load app icon (PNG first, then BMP)
+  app->icon = NULL;
+  char icon_path[160];
+  snprintf(icon_path, sizeof(icon_path), "/apps/%s/icon.png", entry->name);
+  app->icon = image_load(icon_path);
+  if (!app->icon) {
+    snprintf(icon_path, sizeof(icon_path), "/apps/%s/icon.bmp", entry->name);
+    app->icon = image_load(icon_path);
   }
 
   s_app_count++;
@@ -174,6 +188,14 @@ static int compare_app_name(const void *a, const void *b) {
 }
 
 static void scan_apps(void) {
+  // Free previously loaded icons before rescan
+  for (int i = 0; i < s_app_count; i++) {
+    if (s_apps[i].icon) {
+      image_free((pc_image_t *)s_apps[i].icon);
+      s_apps[i].icon = NULL;
+    }
+  }
+
   s_app_count = 0;
   memset(s_apps, 0, sizeof(app_entry_t) * MAX_APPS);
   printf("[LAUNCHER] Scanning /apps directory...\n");
@@ -185,14 +207,82 @@ static void scan_apps(void) {
   fflush(stdout);
 }
 
-// ── Launcher rendering
-// ────────────────────────────────────────────────────────
+// ── Category system ──────────────────────────────────────────────────────────
+
+typedef enum {
+  CAT_GAMES = 0,
+  CAT_TOOLS,
+  CAT_SYSTEM,
+  CAT_DEMOS,
+  CAT_EMULATORS,
+  CAT_NETWORK,
+  CAT_COUNT,
+  CAT_ALL  // virtual: unfiltered
+} category_t;
+
+static const char *s_cat_names[CAT_COUNT] = {
+    "Games", "Tools", "System", "Demos", "Emulators", "Network"};
+
+static const uint16_t s_cat_colors[CAT_COUNT] = {
+    RGB565(255, 100, 50),   // Games: orange
+    RGB565(100, 180, 255),  // Tools: blue
+    RGB565(160, 160, 160),  // System: gray
+    RGB565(255, 200, 50),   // Demos: yellow
+    RGB565(150, 100, 255),  // Emulators: purple
+    RGB565(50, 200, 150),   // Network: teal
+};
+
+// Per-category app indices into s_apps[]
+static int s_cat_indices[CAT_COUNT][MAX_APPS];
+static int s_cat_counts[CAT_COUNT];
+
+static category_t parse_category(const char *cat_str) {
+  if (!cat_str || !cat_str[0]) return CAT_DEMOS;  // default
+  if (strcasecmp(cat_str, "games") == 0) return CAT_GAMES;
+  if (strcasecmp(cat_str, "tools") == 0) return CAT_TOOLS;
+  if (strcasecmp(cat_str, "system") == 0) return CAT_SYSTEM;
+  if (strcasecmp(cat_str, "demos") == 0) return CAT_DEMOS;
+  if (strcasecmp(cat_str, "emulators") == 0) return CAT_EMULATORS;
+  if (strcasecmp(cat_str, "network") == 0) return CAT_NETWORK;
+  return CAT_DEMOS;
+}
+
+static void build_category_indices(void) {
+  memset(s_cat_counts, 0, sizeof(s_cat_counts));
+  for (int i = 0; i < s_app_count; i++) {
+    category_t cat = parse_category(s_apps[i].category);
+    if (cat < CAT_COUNT)
+      s_cat_indices[cat][s_cat_counts[cat]++] = i;
+  }
+}
+
+// ── Launcher rendering ──────────────────────────────────────────────────────
 
 #define ITEM_H 28
 #define LIST_X 8
 #define LIST_Y 32
 #define LIST_VISIBLE 9
-#define DESC_SCROLL_RESET_PAUSE 40  // frames to pause at start before re-scrolling
+#define DESC_SCROLL_RESET_PAUSE 40
+
+#define GRID_X      8
+#define GRID_Y      34
+#define TILE_W      96
+#define TILE_H      88
+#define TILE_GAP    8
+#define GRID_COLS   3
+#define GRID_ROWS   2
+#define ALL_APPS_Y  220
+#define ICON_SIZE   20  // app icon size in list view
+
+typedef enum {
+  VIEW_HOME,      // category grid
+  VIEW_CATEGORY,  // filtered app list
+  VIEW_ALL,       // all apps list
+} launcher_view_t;
+
+static launcher_view_t s_view = VIEW_HOME;
+static category_t s_current_cat = CAT_GAMES;
+static int s_home_sel = 0;  // 0..5 = tiles, 6 = "All Apps"
 
 static int s_selected = 0;
 static int s_scroll = 0;
@@ -201,6 +291,7 @@ static int s_desc_scroll_timer = 0;
 
 void launcher_refresh_apps(void) {
   scan_apps();
+  build_category_indices();
   s_selected = 0;
   s_scroll = 0;
 }
@@ -213,62 +304,282 @@ void launcher_refresh_apps(void) {
 #define C_BATTERY_OK COLOR_GREEN
 #define C_BATTERY_LO COLOR_RED
 #define C_BORDER RGB565(60, 60, 100)
+#define C_TILE_BG RGB565(25, 25, 40)
+#define C_TILE_SEL RGB565(40, 60, 120)
 
-static void draw_header(void) { ui_draw_header("PicOS"); }
+// ── Procedural category icons (32x32, drawn with display primitives) ────────
 
-static void draw_footer(void) {
-  ui_draw_footer("Enter:Launch  Esc:Exit app  F10:Menu", NULL);
+static void draw_cat_icon_games(int cx, int cy, uint16_t color) {
+  // Gamepad: body rect + two circle buttons + dpad
+  display_fill_rect(cx - 14, cy - 6, 28, 12, color);
+  display_fill_circle(cx - 7, cy, 3, COLOR_WHITE);
+  display_fill_circle(cx + 7, cy, 3, COLOR_WHITE);
+  // Dpad
+  display_fill_rect(cx - 2, cy - 5, 4, 10, COLOR_WHITE);
+  display_fill_rect(cx - 5, cy - 2, 10, 4, COLOR_WHITE);
 }
 
-static void draw_launcher(void) {
+static void draw_cat_icon_tools(int cx, int cy, uint16_t color) {
+  // Wrench shape
+  display_fill_circle(cx - 6, cy - 6, 5, color);
+  display_fill_circle(cx - 6, cy - 6, 2, C_TILE_BG);
+  display_draw_line(cx - 3, cy - 3, cx + 8, cy + 8, color);
+  display_draw_line(cx - 2, cy - 3, cx + 9, cy + 8, color);
+  display_fill_rect(cx + 5, cy + 5, 6, 6, color);
+}
+
+static void draw_cat_icon_system(int cx, int cy, uint16_t color) {
+  // Gear: circle with notches
+  display_fill_circle(cx, cy, 8, color);
+  display_fill_circle(cx, cy, 4, C_TILE_BG);
+  // Notches (small rects at cardinal + diagonal points)
+  for (int a = 0; a < 8; a++) {
+    int dx = (a == 0 || a == 4) ? 0 : ((a < 4) ? 1 : -1);
+    int dy = (a == 2 || a == 6) ? 0 : ((a < 2 || a > 6) ? -1 : 1);
+    display_fill_rect(cx + dx * 9 - 2, cy + dy * 9 - 2, 4, 4, color);
+  }
+}
+
+static void draw_cat_icon_demos(int cx, int cy, uint16_t color) {
+  // Star / diamond shape
+  display_draw_line(cx, cy - 10, cx + 7, cy, color);
+  display_draw_line(cx + 7, cy, cx, cy + 10, color);
+  display_draw_line(cx, cy + 10, cx - 7, cy, color);
+  display_draw_line(cx - 7, cy, cx, cy - 10, color);
+  display_fill_circle(cx, cy, 4, color);
+}
+
+static void draw_cat_icon_emulators(int cx, int cy, uint16_t color) {
+  // Retro screen with antenna
+  display_fill_rect(cx - 10, cy - 6, 20, 14, color);
+  display_fill_rect(cx - 8, cy - 4, 16, 10, C_TILE_BG);
+  // Antenna
+  display_draw_line(cx - 4, cy - 6, cx - 8, cy - 12, color);
+  display_draw_line(cx + 4, cy - 6, cx + 8, cy - 12, color);
+}
+
+static void draw_cat_icon_network(int cx, int cy, uint16_t color) {
+  // Globe: circle with cross lines
+  display_draw_circle(cx, cy, 9, color);
+  display_draw_circle(cx, cy, 10, color);
+  display_draw_line(cx - 10, cy, cx + 10, cy, color);
+  display_draw_line(cx, cy - 10, cx, cy + 10, color);
+  // Latitude arcs (simplified as ellipse-ish lines)
+  display_draw_line(cx - 5, cy - 8, cx + 5, cy - 8, color);
+  display_draw_line(cx - 5, cy + 8, cx + 5, cy + 8, color);
+}
+
+static void draw_category_icon(int cx, int cy, category_t cat) {
+  uint16_t color = (cat < CAT_COUNT) ? s_cat_colors[cat] : COLOR_GRAY;
+  switch (cat) {
+    case CAT_GAMES:    draw_cat_icon_games(cx, cy, color); break;
+    case CAT_TOOLS:    draw_cat_icon_tools(cx, cy, color); break;
+    case CAT_SYSTEM:   draw_cat_icon_system(cx, cy, color); break;
+    case CAT_DEMOS:    draw_cat_icon_demos(cx, cy, color); break;
+    case CAT_EMULATORS:draw_cat_icon_emulators(cx, cy, color); break;
+    case CAT_NETWORK:  draw_cat_icon_network(cx, cy, color); break;
+    default: break;
+  }
+}
+
+// ── Fallback app icon (colored square with first letter) ────────────────────
+
+static void draw_fallback_icon(int x, int y, int size, const char *name,
+                               const char *category) {
+  category_t cat = parse_category(category);
+  uint16_t color = (cat < CAT_COUNT) ? s_cat_colors[cat] : COLOR_GRAY;
+  display_fill_rect(x, y, size, size, color);
+  if (name && name[0]) {
+    char letter[2] = {name[0], '\0'};
+    int tx = x + (size - 6) / 2;
+    int ty = y + (size - 8) / 2;
+    display_draw_text(tx, ty, letter, COLOR_WHITE, color);
+  }
+}
+
+// ── Draw app icon (image or fallback) ───────────────────────────────────────
+
+static void draw_app_icon(int x, int y, int size, const app_entry_t *app) {
+  if (app->icon) {
+    image_draw_scaled((pc_image_t *)app->icon, x, y, size, size);
+  } else {
+    draw_fallback_icon(x, y, size, app->name, app->category);
+  }
+}
+
+// ── Home view (category grid) ───────────────────────────────────────────────
+
+static void draw_home_view(void) {
   display_clear(C_BG);
-  draw_header();
-  draw_footer();
+  ui_draw_header("PicOS");
 
   if (s_app_count == 0) {
-    display_draw_text(8, LIST_Y + 8, "No apps found.", C_TEXT_DIM, C_BG);
-    display_draw_text(8, LIST_Y + 20, "Copy apps to /apps/ on SD card.",
+    display_draw_text(8, GRID_Y + 30, "No apps found.", C_TEXT_DIM, C_BG);
+    display_draw_text(8, GRID_Y + 44, "Copy apps to /apps/ on SD.",
                       C_TEXT_DIM, C_BG);
+    ui_draw_footer("", NULL);
     display_flush();
     return;
   }
 
-  for (int i = 0; i < LIST_VISIBLE && (i + s_scroll) < s_app_count; i++) {
-    int idx  = i + s_scroll;
-    int y    = LIST_Y + i * ITEM_H;
-    bool sel = (idx == s_selected);
+  // Draw 3x2 grid of category tiles
+  for (int r = 0; r < GRID_ROWS; r++) {
+    for (int c = 0; c < GRID_COLS; c++) {
+      int cat = r * GRID_COLS + c;
+      int tx = GRID_X + c * (TILE_W + TILE_GAP);
+      int ty = GRID_Y + r * (TILE_H + TILE_GAP);
+      bool sel = (s_home_sel == cat);
+      int count = s_cat_counts[cat];
+
+      // Tile background
+      uint16_t bg = sel ? C_TILE_SEL : C_TILE_BG;
+      display_fill_rect(tx, ty, TILE_W, TILE_H, bg);
+
+      // Selection border
+      if (sel) {
+        display_draw_rect(tx, ty, TILE_W, TILE_H, s_cat_colors[cat]);
+        display_draw_rect(tx + 1, ty + 1, TILE_W - 2, TILE_H - 2,
+                          s_cat_colors[cat]);
+      }
+
+      // Category icon (centered in top portion)
+      int icon_cx = tx + TILE_W / 2;
+      int icon_cy = ty + 28;
+      draw_category_icon(icon_cx, icon_cy, (category_t)cat);
+
+      // Category name (centered)
+      const char *name = s_cat_names[cat];
+      int name_w = display_text_width(name);
+      display_draw_text(tx + (TILE_W - name_w) / 2, ty + 52, name, C_TEXT, bg);
+
+      // App count
+      char count_str[16];
+      snprintf(count_str, sizeof(count_str), "(%d)", count);
+      int count_w = display_text_width(count_str);
+      uint16_t count_color = count > 0 ? C_TEXT_DIM : RGB565(80, 80, 80);
+      display_draw_text(tx + (TILE_W - count_w) / 2, ty + 66, count_str,
+                        count_color, bg);
+    }
+  }
+
+  // "All Apps" bar
+  bool all_sel = (s_home_sel == CAT_COUNT);
+  uint16_t all_bg = all_sel ? C_SEL_BG : C_TILE_BG;
+  display_fill_rect(GRID_X, ALL_APPS_Y, FB_WIDTH - GRID_X * 2, ITEM_H, all_bg);
+  if (all_sel) {
+    display_draw_rect(GRID_X, ALL_APPS_Y, FB_WIDTH - GRID_X * 2, ITEM_H,
+                      RGB565(100, 140, 255));
+  }
+  char all_label[32];
+  snprintf(all_label, sizeof(all_label), "All Apps (%d)", s_app_count);
+  int all_w = display_text_width(all_label);
+  display_draw_text((FB_WIDTH - all_w) / 2, ALL_APPS_Y + 10, all_label, C_TEXT,
+                    all_bg);
+
+  ui_draw_footer("Arrows:Select  Enter:Open  F10:Menu", NULL);
+  display_flush();
+}
+
+// ── App list view (filtered or all) ─────────────────────────────────────────
+
+static int list_count(void) {
+  if (s_view == VIEW_ALL) return s_app_count;
+  if (s_current_cat < CAT_COUNT) return s_cat_counts[s_current_cat];
+  return 0;
+}
+
+static int list_app_idx(int list_idx) {
+  if (s_view == VIEW_ALL) return list_idx;
+  if (s_current_cat < CAT_COUNT && list_idx < s_cat_counts[s_current_cat])
+    return s_cat_indices[s_current_cat][list_idx];
+  return 0;
+}
+
+static void draw_app_list(void) {
+  display_clear(C_BG);
+
+  // Header with category name
+  if (s_view == VIEW_CATEGORY && s_current_cat < CAT_COUNT)
+    ui_draw_header(s_cat_names[s_current_cat]);
+  else
+    ui_draw_header("All Apps");
+
+  int count = list_count();
+
+  if (count == 0) {
+    display_draw_text(8, LIST_Y + 20, "No apps in this category.",
+                      C_TEXT_DIM, C_BG);
+    ui_draw_footer("ESC:Back", NULL);
+    display_flush();
+    return;
+  }
+
+  int text_x = LIST_X + ICON_SIZE + 4;  // shifted right for icon
+
+  for (int i = 0; i < LIST_VISIBLE && (i + s_scroll) < count; i++) {
+    int list_idx = i + s_scroll;
+    int app_idx = list_app_idx(list_idx);
+    int y = LIST_Y + i * ITEM_H;
+    bool sel = (list_idx == s_selected);
 
     uint16_t bg = sel ? C_SEL_BG : C_BG;
     display_fill_rect(LIST_X - 4, y, FB_WIDTH - LIST_X * 2 + 8, ITEM_H - 2, bg);
 
-    display_draw_text(LIST_X, y + 4, s_apps[idx].name, C_TEXT, bg);
-    if (s_apps[idx].description[0]) {
-      int max_w = FB_WIDTH - LIST_X * 2 - 4;
-      int tw = display_text_width(s_apps[idx].description);
-      if (tw > max_w) {
-        const char *p = s_apps[idx].description + (sel ? s_desc_scroll : 0);
+    // App icon
+    draw_app_icon(LIST_X, y + 4, ICON_SIZE, &s_apps[app_idx]);
+
+    // App name
+    display_draw_text(text_x, y + 4, s_apps[app_idx].name, C_TEXT, bg);
+
+    // Version (right-aligned)
+    if (s_apps[app_idx].version[0]) {
+      int vw = display_text_width(s_apps[app_idx].version);
+      display_draw_text(FB_WIDTH - 8 - vw, y + 4, s_apps[app_idx].version,
+                        C_TEXT_DIM, bg);
+    }
+
+    // Description
+    if (s_apps[app_idx].description[0]) {
+      int max_w = FB_WIDTH - text_x - 8;
+      int tw = display_text_width(s_apps[app_idx].description);
+      if (tw > max_w && sel) {
+        const char *p = s_apps[app_idx].description + s_desc_scroll;
         int avail = strlen(p);
         char buf[64];
-        int out_len = (avail * 6 > max_w * 6) ? (max_w / 6 + 1) : avail;
+        int out_len = (max_w / 6 + 1);
+        if (out_len > avail) out_len = avail;
         if (out_len > 63) out_len = 63;
         strncpy(buf, p, out_len);
         buf[out_len] = '\0';
-        display_draw_text(LIST_X, y + 15, buf, C_TEXT_DIM, bg);
+        display_draw_text(text_x, y + 15, buf, C_TEXT_DIM, bg);
       } else {
-        display_draw_text(LIST_X, y + 15, s_apps[idx].description, C_TEXT_DIM, bg);
+        display_draw_text(text_x, y + 15, s_apps[app_idx].description,
+                          C_TEXT_DIM, bg);
       }
     }
   }
 
   // Scrollbar
-  if (s_app_count > LIST_VISIBLE) {
-    int bar_h = (LIST_VISIBLE * ITEM_H) * LIST_VISIBLE / s_app_count;
-    int bar_y = LIST_Y + (LIST_VISIBLE * ITEM_H) * s_scroll / s_app_count;
+  if (count > LIST_VISIBLE) {
+    int bar_h = (LIST_VISIBLE * ITEM_H) * LIST_VISIBLE / count;
+    if (bar_h < 4) bar_h = 4;
+    int bar_y = LIST_Y + (LIST_VISIBLE * ITEM_H) * s_scroll / count;
     display_fill_rect(FB_WIDTH - 6, LIST_Y, 4, LIST_VISIBLE * ITEM_H, C_BORDER);
     display_fill_rect(FB_WIDTH - 6, bar_y, 4, bar_h, C_TEXT);
   }
 
+  ui_draw_footer("ESC:Back  Enter:Launch  F10:Menu", NULL);
   display_flush();
+}
+
+// ── Unified draw dispatch ───────────────────────────────────────────────────
+
+static void draw_current_view(void) {
+  switch (s_view) {
+    case VIEW_HOME:     draw_home_view(); break;
+    case VIEW_CATEGORY: draw_app_list();  break;
+    case VIEW_ALL:      draw_app_list();  break;
+  }
 }
 
 // ── Runner dispatch table ─────────────────────────────────────────────────────
@@ -450,6 +761,197 @@ static bool run_app(int idx) {
 // ── Public interface
 // ──────────────────────────────────────────────────────────
 
+// ── Input: Home view grid navigation ────────────────────────────────────────
+
+static bool handle_home_input(uint32_t pressed, bool *dirty) {
+  if (pressed & BTN_UP) {
+    if (s_home_sel == CAT_COUNT) {
+      // "All Apps" → bottom row
+      s_home_sel = GRID_COLS + (s_home_sel % GRID_COLS);
+      if (s_home_sel >= CAT_COUNT) s_home_sel = CAT_COUNT - 1;
+    } else if (s_home_sel >= GRID_COLS) {
+      s_home_sel -= GRID_COLS;  // move up one row
+    } else {
+      s_home_sel = CAT_COUNT;   // wrap: top row → "All Apps"
+    }
+    *dirty = true;
+  }
+  if (pressed & BTN_DOWN) {
+    if (s_home_sel == CAT_COUNT) {
+      s_home_sel = 0;   // wrap: "All Apps" → top row
+    } else if (s_home_sel < GRID_COLS) {
+      s_home_sel += GRID_COLS;  // move to bottom row
+      if (s_home_sel >= CAT_COUNT) s_home_sel = CAT_COUNT - 1;
+    } else {
+      s_home_sel = CAT_COUNT;   // bottom row → "All Apps"
+    }
+    *dirty = true;
+  }
+  if (pressed & BTN_LEFT) {
+    if (s_home_sel < CAT_COUNT && (s_home_sel % GRID_COLS) > 0) {
+      s_home_sel--;
+      *dirty = true;
+    }
+  }
+  if (pressed & BTN_RIGHT) {
+    if (s_home_sel < CAT_COUNT && (s_home_sel % GRID_COLS) < GRID_COLS - 1
+        && s_home_sel + 1 < CAT_COUNT) {
+      s_home_sel++;
+      *dirty = true;
+    }
+  }
+  if (pressed & BTN_ENTER) {
+    if (s_home_sel == CAT_COUNT) {
+      // "All Apps"
+      s_view = VIEW_ALL;
+      s_selected = 0;
+      s_scroll = 0;
+      s_desc_scroll = 0;
+      s_desc_scroll_timer = 0;
+    } else if (s_home_sel < CAT_COUNT) {
+      // Enter a category (skip if empty)
+      if (s_cat_counts[s_home_sel] > 0) {
+        s_view = VIEW_CATEGORY;
+        s_current_cat = (category_t)s_home_sel;
+        s_selected = 0;
+        s_scroll = 0;
+        s_desc_scroll = 0;
+        s_desc_scroll_timer = 0;
+      }
+    }
+    *dirty = true;
+  }
+  return false;
+}
+
+// ── Input: App list navigation ──────────────────────────────────────────────
+
+static bool handle_list_input(uint32_t pressed, bool *dirty) {
+  int count = list_count();
+
+  if (pressed & BTN_ESC) {
+    s_view = VIEW_HOME;
+    *dirty = true;
+    return false;
+  }
+
+  if (pressed & BTN_UP) {
+    if (count > 0) {
+      if (s_selected > 0) s_selected--;
+      else s_selected = count - 1;
+      if (s_selected < s_scroll) s_scroll = s_selected;
+      if (s_selected >= s_scroll + LIST_VISIBLE)
+        s_scroll = s_selected - LIST_VISIBLE + 1;
+      s_desc_scroll = 0;
+      s_desc_scroll_timer = 0;
+      *dirty = true;
+    }
+  }
+  if (pressed & BTN_DOWN) {
+    if (count > 0) {
+      if (s_selected < count - 1) s_selected++;
+      else s_selected = 0;
+      if (s_selected >= s_scroll + LIST_VISIBLE)
+        s_scroll = s_selected - LIST_VISIBLE + 1;
+      if (s_selected < s_scroll) s_scroll = s_selected;
+      s_desc_scroll = 0;
+      s_desc_scroll_timer = 0;
+      *dirty = true;
+    }
+  }
+  if (pressed & BTN_LEFT) {
+    if (count > 0) {
+      int new_sel = s_selected - LIST_VISIBLE;
+      if (new_sel < 0) new_sel = 0;
+      if (new_sel != s_selected) {
+        s_selected = new_sel;
+        if (s_selected < s_scroll) s_scroll = s_selected;
+        s_desc_scroll = 0;
+        s_desc_scroll_timer = 0;
+        *dirty = true;
+      }
+    }
+  }
+  if (pressed & BTN_RIGHT) {
+    if (count > 0) {
+      int new_sel = s_selected + LIST_VISIBLE;
+      if (new_sel >= count) new_sel = count - 1;
+      if (new_sel != s_selected) {
+        s_selected = new_sel;
+        if (s_selected >= s_scroll + LIST_VISIBLE)
+          s_scroll = s_selected - LIST_VISIBLE + 1;
+        s_desc_scroll = 0;
+        s_desc_scroll_timer = 0;
+        *dirty = true;
+      }
+    }
+  }
+  if (pressed & BTN_ENTER) {
+    if (count > 0 && s_selected < count) {
+      int app_idx = list_app_idx(s_selected);
+      size_t free_mem = lua_psram_alloc_free_size();
+      printf("[LAUNCHER] PSRAM free before launch: %zu bytes\n", free_mem);
+
+      // Preserve view state across app launch
+      launcher_view_t saved_view = s_view;
+      category_t saved_cat = s_current_cat;
+
+      run_app(app_idx);
+      kbd_clear_state();
+      scan_apps();
+      build_category_indices();
+
+      // Restore view state
+      s_view = saved_view;
+      s_current_cat = saved_cat;
+      s_desc_scroll = 0;
+      s_desc_scroll_timer = 0;
+
+      // Clamp selection if app count changed
+      int new_count = list_count();
+      if (s_selected >= new_count) s_selected = new_count > 0 ? new_count - 1 : 0;
+      if (s_scroll > s_selected) s_scroll = s_selected;
+
+      *dirty = true;
+    }
+  }
+  return false;
+}
+
+// ── Description scroll update (for list views) ─────────────────────────────
+
+static void update_desc_scroll(bool *dirty) {
+  if (s_view == VIEW_HOME) return;
+
+  int count = list_count();
+  s_desc_scroll_timer++;
+  if (s_desc_scroll_timer >= 10) {
+    s_desc_scroll_timer = 0;
+    if (s_selected < count) {
+      int app_idx = list_app_idx(s_selected);
+      if (s_apps[app_idx].description[0]) {
+        int text_x = LIST_X + ICON_SIZE + 4;
+        int max_w = FB_WIDTH - text_x - 8;
+        int tw = display_text_width(s_apps[app_idx].description);
+        int desc_len = strlen(s_apps[app_idx].description);
+        int max_scroll = desc_len - (max_w / 6);
+        if (tw > max_w) {
+          if (s_desc_scroll < max_scroll) {
+            s_desc_scroll++;
+            *dirty = true;
+          } else {
+            s_desc_scroll = 0;
+            s_desc_scroll_timer = -DESC_SCROLL_RESET_PAUSE;
+            *dirty = true;
+          }
+        }
+      }
+    }
+  }
+}
+
+// ── Main entry point ────────────────────────────────────────────────────────
+
 void launcher_run(void) {
   if (!s_apps) {
     s_apps = umm_malloc(sizeof(app_entry_t) * MAX_APPS);
@@ -460,7 +962,8 @@ void launcher_run(void) {
     memset(s_apps, 0, sizeof(app_entry_t) * MAX_APPS);
   }
   scan_apps();
-  
+  build_category_indices();
+
   // Check for simulator auto-launch
 #ifdef PICOS_SIMULATOR
   extern const char* simulator_get_auto_launch_app(void);
@@ -469,7 +972,6 @@ void launcher_run(void) {
     printf("[LAUNCHER] Auto-launching: %s\n", auto_launch);
     fflush(stdout);
     if (launcher_launch_by_name(auto_launch)) {
-      // App launched successfully, it will return here when done
       printf("[LAUNCHER] Auto-launched app exited, returning to launcher\n");
       fflush(stdout);
     } else {
@@ -478,22 +980,18 @@ void launcher_run(void) {
     }
   }
 #else
-  (void)0; // simulator_get_auto_launch_app stub
+  (void)0;
 #endif
-  
-  draw_launcher();
+
+  draw_current_view();
 
   while (true) {
     kbd_poll();
-    watchdog_update(); // kick watchdog every frame
-    // wifi_poll() is now driven by Core 1 — do not call from Core 0
+    watchdog_update();
 
-    // Poll serial dev commands (ping, screenshot, exit, launch, etc.)
     dev_commands_poll();
     dev_commands_process();
 
-    // Socket server — JSON-RPC interface for MCP/automation
-    // Polling is handled by the dedicated socket thread; just check for pending launches.
 #ifdef PICOS_SIMULATOR
     extern bool sim_handler_check_launch(void);
     bool sim_launched = sim_handler_check_launch();
@@ -501,21 +999,18 @@ void launcher_run(void) {
     bool sim_launched = false;
 #endif
 
-    // Handle pending launch FIRST (before exit check)
-    // This ensures "launch" command works (which sets both pending_launch and exit flags)
     bool dirty = sim_launched;
     if (dev_commands_get_pending_launch()) {
-      // Clear exit flag since we're launching, not exiting
       dev_commands_clear_exit();
       if (launcher_launch_by_name(dev_commands_get_pending_launch())) {
         kbd_clear_state();
         scan_apps();
+        build_category_indices();
         dirty = true;
       }
       dev_commands_clear_pending_launch();
     }
 
-    // Check for exit request (window close, dev command, etc.)
 #ifdef PICOS_SIMULATOR
     {
       extern volatile int g_running;
@@ -529,7 +1024,6 @@ void launcher_run(void) {
       break;
     }
 
-    // Handle dev command flags
     if (dev_commands_wants_list()) {
       launcher_list_apps();
       dev_commands_clear_list();
@@ -558,104 +1052,22 @@ void launcher_run(void) {
 
     uint32_t pressed = kbd_get_buttons_pressed();
 
-    if (pressed & BTN_UP) {
-      if (s_app_count > 0) {
-        if (s_selected > 0)
-          s_selected--;
-        else
-          s_selected = s_app_count - 1;  // wrap to bottom
-        if (s_selected < s_scroll)
-          s_scroll = s_selected;
-        if (s_selected >= s_scroll + LIST_VISIBLE)
-          s_scroll = s_selected - LIST_VISIBLE + 1;
-        s_desc_scroll = 0;
-        s_desc_scroll_timer = 0;
-        dirty = true;
-      }
-    }
-    if (pressed & BTN_DOWN) {
-      if (s_app_count > 0) {
-        if (s_selected < s_app_count - 1)
-          s_selected++;
-        else
-          s_selected = 0;  // wrap to top
-        if (s_selected >= s_scroll + LIST_VISIBLE)
-          s_scroll = s_selected - LIST_VISIBLE + 1;
-        if (s_selected < s_scroll)
-          s_scroll = s_selected;
-        s_desc_scroll = 0;
-        s_desc_scroll_timer = 0;
-        dirty = true;
-      }
-    }
-
-    if (pressed & BTN_LEFT) {
-      if (s_app_count > 0) {
-        int new_sel = s_selected - LIST_VISIBLE;
-        if (new_sel < 0) new_sel = 0;
-        if (new_sel != s_selected) {
-          s_selected = new_sel;
-          if (s_selected < s_scroll)
-            s_scroll = s_selected;
-          s_desc_scroll = 0;
-          s_desc_scroll_timer = 0;
-          dirty = true;
-        }
-      }
-    }
-    if (pressed & BTN_RIGHT) {
-      if (s_app_count > 0) {
-        int new_sel = s_selected + LIST_VISIBLE;
-        if (new_sel >= s_app_count) new_sel = s_app_count - 1;
-        if (new_sel != s_selected) {
-          s_selected = new_sel;
-          if (s_selected >= s_scroll + LIST_VISIBLE)
-            s_scroll = s_selected - LIST_VISIBLE + 1;
-          s_desc_scroll = 0;
-          s_desc_scroll_timer = 0;
-          dirty = true;
-        }
-      }
-    }
-
-    if (pressed & BTN_ENTER) {
-      size_t free_mem = lua_psram_alloc_free_size();
-      printf("[LAUNCHER] PSRAM free before launch: %zu bytes\n", free_mem);
-      run_app(s_selected);
-      kbd_clear_state();
-      scan_apps();
-      s_desc_scroll = 0;
-      s_desc_scroll_timer = 0;
-      dirty      = true;
+    // View-specific input handling
+    if (pressed) {
+      if (s_view == VIEW_HOME)
+        handle_home_input(pressed, &dirty);
+      else
+        handle_list_input(pressed, &dirty);
     }
 
     if (ui_needs_header_redraw())
       dirty = true;
 
-    s_desc_scroll_timer++;
-    if (s_desc_scroll_timer >= 10) {
-      s_desc_scroll_timer = 0;
-      if (s_selected < s_app_count && s_apps[s_selected].description[0]) {
-        int tw = display_text_width(s_apps[s_selected].description);
-        int max_w = FB_WIDTH - LIST_X * 2 - 4;
-        int desc_len = strlen(s_apps[s_selected].description);
-        int max_scroll = desc_len - (max_w / 6);
-        if (tw > max_w) {
-          if (s_desc_scroll < max_scroll) {
-            s_desc_scroll++;
-            dirty = true;
-          } else {
-            // Reached end — reset and pause before cycling
-            s_desc_scroll = 0;
-            s_desc_scroll_timer = -DESC_SCROLL_RESET_PAUSE;
-            dirty = true;
-          }
-        }
-      }
-    }
+    // Description scrolling (list views only)
+    update_desc_scroll(&dirty);
 
     if (dirty)
-      draw_launcher();
+      draw_current_view();
 
     sleep_ms(16); // ~60 Hz polling
   }
