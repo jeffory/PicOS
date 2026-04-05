@@ -12,6 +12,7 @@
 typedef struct {
     uint16_t framebuffer[GB_WIDTH * GB_HEIGHT];
     uint16_t palette[3][4];       // DMG palettes (BG, OBJ0, OBJ1)
+    uint16_t cgb_lut[64];         // cached RGB565 lookup for CGB palette indices
     int selected_palette;
     int frame_count;
     bool cgb_mode;                // true when ROM is a GBC game
@@ -19,6 +20,7 @@ typedef struct {
 } GBCDisplay;
 
 void gbc_display_init(GBCDisplay *ctx);
+void gbc_display_update_cgb_lut(GBCDisplay *ctx);
 void gbc_display_set_palette(GBCDisplay *ctx, int palette_idx);
 void gbc_display_next_palette(GBCDisplay *ctx);
 void gbc_display_prev_palette(GBCDisplay *ctx);
