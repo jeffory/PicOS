@@ -582,6 +582,14 @@ typedef struct {
     void     (*setLoop)(pcmodplayer_t mp, bool loop);
 } picocalc_modplayer_t;
 
+// --- ZIP Archive Extraction ------------------------------------------------
+
+typedef struct {
+    bool (*extract)(const char *zip_path, const char *dest_dir);
+    // Returns number of files in archive, -1 on error.
+    int  (*list)(const char *zip_path);
+} picocalc_zip_t;
+
 // --- The complete OS API struct ---------------------------------------------
 // This is what gets passed to every Lua environment and future C app loaders.
 
@@ -606,6 +614,7 @@ typedef struct PicoCalcAPI {
     const picocalc_graphics_t    *graphics;    // image loading/drawing
     const picocalc_video_t       *video;       // MJPEG video playback
     const picocalc_modplayer_t   *modplayer;   // MOD tracker music
+    const picocalc_zip_t         *zip;         // ZIP extraction
     uint32_t                      version;     // 1=Phase1, 2=Phase2
 } PicoCalcAPI;
 

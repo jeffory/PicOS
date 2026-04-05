@@ -245,7 +245,12 @@ set(PICOS_CORE_SOURCES
     ${PICOS_ROOT}/src/os/lua_bridge_terminal.c
     ${PICOS_ROOT}/src/os/lua_bridge_crypto.c
     ${PICOS_ROOT}/src/os/lua_bridge_mod.c
+    ${PICOS_ROOT}/src/os/lua_bridge_zip.c
     ${PICOS_ROOT}/src/drivers/mod_player.c
+    ${PICOS_ROOT}/third_party/miniz/miniz.c
+    ${PICOS_ROOT}/third_party/miniz/miniz_tinfl.c
+    ${PICOS_ROOT}/third_party/miniz/miniz_tdef.c
+    ${PICOS_ROOT}/third_party/miniz/miniz_zip.c
     ${PICOS_ROOT}/src/os/text_input.c
     ${PICOS_ROOT}/src/os/file_browser.c
     ${PICOS_ROOT}/src/os/config.c
@@ -287,6 +292,7 @@ target_include_directories(picos_simulator PRIVATE
     ${PICOS_ROOT}/src/drivers
     ${PICOS_ROOT}/src/usb
     ${PICOS_ROOT}/third_party/umm_malloc/src
+    ${PICOS_ROOT}/third_party/miniz
     ${PICOS_ROOT}/third_party/stb
     ${PICOS_ROOT}/third_party/pocketmod
     ${unicorn_SOURCE_DIR}/include
@@ -318,6 +324,16 @@ target_compile_options(picos_simulator PRIVATE
     -Wno-unused-parameter
     -O2
     -g
+)
+
+# miniz: decompression only, no stdio, use standard malloc on simulator (no umm_malloc)
+set_source_files_properties(
+    ${PICOS_ROOT}/third_party/miniz/miniz.c
+    ${PICOS_ROOT}/third_party/miniz/miniz_tinfl.c
+    ${PICOS_ROOT}/third_party/miniz/miniz_tdef.c
+    ${PICOS_ROOT}/third_party/miniz/miniz_zip.c
+    PROPERTIES COMPILE_DEFINITIONS
+    "MINIZ_NO_STDIO;MINIZ_NO_ARCHIVE_WRITING_APIS;MINIZ_NO_ZLIB_COMPATIBLE_NAMES"
 )
 
 # Unicorn Engine's crc32c.c and PNGdec's crc32.c both define crc32 —
