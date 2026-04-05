@@ -37,3 +37,6 @@
 [submodule "apps/cdogs"]
 	path = apps/cdogs
 	url = https://github.com/jeffory/cdogs-picos.git
+[submodule "third_party/miniz"]
+	path = third_party/miniz
+	url = https://github.com/richgel999/miniz.git
