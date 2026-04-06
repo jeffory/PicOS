@@ -528,7 +528,7 @@ void usb_msc_enter_mode(void) {
 }
 
 // SD card stubs
-void sdcard_remount(void) {}
+bool sdcard_remount(void) { return true; }
 void sdcard_apply_clock(void) {}
 
 bool sdcard_fexists(const char* path) {
