@@ -144,11 +144,22 @@ void DG_DrawFrame() {
 }
 
 void DG_SleepMs(uint32_t ms) {
-    // No-op for now
+    // Feed the watchdog during any spin-wait (e.g. TryRunTics).
+    s_api->sys->poll();
 }
 
 uint32_t DG_GetTicksMs() {
-    return s_api->sys->getTimeMs();
+    uint32_t now = s_api->sys->getTimeMs();
+    // Feed the watchdog during the long init phase (WAD loading, hash tables,
+    // subsystem init) which runs entirely inside doomgeneric_Create() before
+    // the main loop gets a chance to call poll(). Throttled to once per 500ms
+    // to avoid hammering kbd_poll() on every timing query.
+    static uint32_t s_last_poll_ms = 0;
+    if (now - s_last_poll_ms >= 500) {
+        s_last_poll_ms = now;
+        s_api->sys->poll();
+    }
+    return now;
 }
 
 int DG_GetKey(int* pressed, unsigned char* key) {

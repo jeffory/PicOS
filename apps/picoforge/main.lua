@@ -102,7 +102,7 @@ term:setLineNumberCols(4)
 term:setScrollbar(true)
 term:setCursorVisible(true)
 term:setCursorBlink(true)
-term:setFont(1)  -- scientifica 6x11
+term:setFont("scientifica")  -- scientifica 6x11
 
 local editor = EditorMod.new(term, Buffer, Tokenizer)
 local sprite_editor = SpriteEditor.new(SpriteCanvas, Palette, DrawTools, Spritesheet)

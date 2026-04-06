@@ -100,6 +100,7 @@ void fileplayer_init(void) {
     printf("[FILEPLAYER] Allocating WAV buffer (%d bytes)...\n", WAV_BUFFER_SIZE);
     s_wav_buffer = umm_malloc(WAV_BUFFER_SIZE);
     printf("[FILEPLAYER] WAV buffer allocated: %s\n", s_wav_buffer ? "OK" : "FAILED");
+    if (!s_wav_buffer) return;
 
     memset(s_players, 0, sizeof(s_players));
 

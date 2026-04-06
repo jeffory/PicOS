@@ -3,6 +3,7 @@
 #include <stdint.h>
 #include <stdbool.h>
 #include <stddef.h>
+#include "hardware/sync.h"
 
 // =============================================================================
 // TCP client over Mongoose/lwIP for PicOS
@@ -39,8 +40,14 @@ typedef struct {
     uint32_t rx_head;
     uint32_t rx_tail;
     uint32_t rx_count;
-    
+
     void *pcb;  // mongoose mg_connection
+
+    spin_lock_t *spinlock;
+    int          spin_num;
+
+    uint32_t connect_timeout_ms;  // default 15000
+    uint32_t deadline_connect;    // ms since boot, 0 = not set
 } tcp_conn_t;
 
 void tcp_init(void);
@@ -54,6 +61,9 @@ void tcp_close(tcp_conn_t *c);
 uint32_t tcp_bytes_available(tcp_conn_t *c);
 const char *tcp_get_error(tcp_conn_t *c);
 uint32_t tcp_take_pending(tcp_conn_t *c);
+
+// Check and enforce TCP connect timeouts. Called from wifi_poll() on Core 1.
+void tcp_check_timeouts(void);
 
 // Mongoose event handler for TCP connections
 struct mg_connection;

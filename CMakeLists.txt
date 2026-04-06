@@ -234,6 +234,7 @@ add_executable(picocalc_os
     src/os/lua_bridge_3d.c
     src/os/lua_bridge_ui.c
     src/os/ui_widgets.c
+    src/os/toast.c
     src/os/text_wrap.c
     src/os/lua_bridge_audio.c
     src/os/lua_bridge_sound.c
@@ -244,6 +245,7 @@ add_executable(picocalc_os
     src/os/lua_bridge_game_scene.c
     src/os/lua_bridge_game_save.c
     src/os/lua_psram_alloc.c
+    src/os/core1_alloc.c
     src/os/system_menu.c
     src/os/screenshot.c
     src/os/terminal.c
@@ -253,6 +255,7 @@ add_executable(picocalc_os
     src/os/crypto.c
     src/os/lua_bridge_crypto.c
     src/os/lua_bridge_mod.c
+    src/os/lua_bridge_zip.c
     src/os/ota_update.c
     src/fonts/font_6x11.c
     src/fonts/font_scientifica.c
@@ -283,6 +286,10 @@ add_executable(picocalc_os
     src/drivers/pio_psram_bulk.c
     third_party/mongoose/mongoose.c
     third_party/umm_malloc/src/umm_malloc.c
+    third_party/miniz/miniz.c
+    third_party/miniz/miniz_tinfl.c
+    third_party/miniz/miniz_tdef.c
+    third_party/miniz/miniz_zip.c
 )
 
 target_include_directories(picocalc_os PRIVATE
@@ -293,6 +300,7 @@ target_include_directories(picocalc_os PRIVATE
     src/drivers/
     third_party/mongoose/
     third_party/umm_malloc/src/
+    third_party/miniz/
     third_party/libmad/
     third_party/pocketmod/
     data/
@@ -319,6 +327,20 @@ target_link_libraries(picocalc_os
     jpegdec_lib
     image_decoders
     pio_psram_lib
+)
+
+# ── miniz compile options (decompression only, no stdio, PSRAM allocator) ────
+# Redirect miniz heap allocations to umm_malloc (8MB PSRAM) instead of
+# standard malloc (~28KB SRAM) so ZIP extraction can handle real app sizes.
+# Force-include miniz_picos.h which defines MZ_MALLOC/MZ_FREE/MZ_REALLOC
+# before miniz_common.h's #ifndef guards.
+set_source_files_properties(
+    third_party/miniz/miniz.c
+    third_party/miniz/miniz_tinfl.c
+    third_party/miniz/miniz_tdef.c
+    third_party/miniz/miniz_zip.c
+    PROPERTIES COMPILE_FLAGS
+    "-DMINIZ_NO_STDIO -DMINIZ_NO_ARCHIVE_WRITING_APIS -DMINIZ_NO_ZLIB_COMPATIBLE_NAMES -include ${CMAKE_SOURCE_DIR}/third_party/miniz_picos.h"
 )
 
 # ── PIO PSRAM Bulk Transfer (improved driver with 16-bit counters) ─────────────

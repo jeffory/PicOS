@@ -558,7 +558,8 @@ static void video_boost_clock(video_priv_t *priv) {
     priv->wifi_was_connected = false;
     if (wifi_is_available()) {
         wifi_status_t wst = wifi_get_status();
-        if (wst == WIFI_STATUS_CONNECTED || wst == WIFI_STATUS_CONNECTING) {
+        if (wst == WIFI_STATUS_CONNECTED || wst == WIFI_STATUS_CONNECTING ||
+            wst == WIFI_STATUS_ONLINE) {
             priv->wifi_was_connected = true;
             wifi_disconnect();
             sleep_ms(50); // Let Core 1 process the disconnect

@@ -12,6 +12,7 @@
 #include "hardware/watchdog.h"
 #include "hardware/xip_cache.h"
 
+#include <stdatomic.h>
 #include <stdint.h>
 #include <stdlib.h>
 #include <string.h>
@@ -31,8 +32,9 @@
 
 // Maximum virtual address range accepted for a native app image.
 // Rejects malformed or malicious ELFs before attempting a heap allocation.
-// 5 MB is generous — real apps are well under 512 KB, but DOOM needs ~4MB.
-#define NATIVE_MAX_IMAGE_SIZE (5u * 1024u * 1024u)
+// 7 MB covers apps like TIC-80 (~5.4 MB with 4 MB sbrk heap in BSS).
+// The real limit is available PSRAM (6 MB on Pimoroni Pico Plus 2 W).
+#define NATIVE_MAX_IMAGE_SIZE (7u * 1024u * 1024u)
 
 // =============================================================================
 // Minimal ELF32 type definitions
@@ -140,17 +142,21 @@ static void show_error(const char *line1, const char *line2) {
 // stacks are completely independent: app stack pressure and interrupt stacking
 // do not interfere with each other.
 //
-// 8 KB gives comfortable headroom for the GBC emulator's call depth and any
-// local arrays allocated on the stack.  The buffer lives in SRAM (fast) and
-// is a module-level static so it is zero-initialised.
-#define NATIVE_STACK_SIZE (8 * 1024)
-uint8_t s_native_stack[NATIVE_STACK_SIZE] __attribute__((aligned(8)));
+// 64 KB is allocated from PSRAM (via umm_malloc) at launch time, giving
+// plenty of headroom for deep recursion (e.g. Doom's BSP tree traversal).
+// Stack accesses go through the cached XIP alias for performance.
+#define NATIVE_STACK_SIZE (64 * 1024)
+
+// Pointer to the dynamically-allocated stack buffer.  Read by the HardFault
+// handler (main.c) to detect PSP stack overflow.  NULL when no native app
+// is running.
+uint8_t *g_native_stack_base = NULL;
 
 // Stack canary: the bottom NATIVE_STACK_GUARD_WORDS words are filled with a
 // sentinel before launch and checked afterwards.  If the stack overflows into
 // this guard zone the corruption is detected and reported.  The stack grows
-// downward from s_native_stack+NATIVE_STACK_SIZE, so the bottom of the buffer
-// is the last area to be reached by overflow.
+// downward from the top of the buffer, so the bottom is the last area to be
+// reached by overflow.
 #define NATIVE_STACK_CANARY      0xDEADBEEFu
 #define NATIVE_STACK_GUARD_WORDS 8   // 32 bytes
 
@@ -222,8 +228,8 @@ static void launch_on_psp(uint32_t psp_top, picos_app_entry_t fn,
 // =============================================================================
 
 // Declared in main.c — pauses Core 1's Mongoose/WiFi polling loop.
-extern volatile bool g_core1_pause;
-extern volatile bool g_core1_paused;
+extern _Atomic bool g_core1_pause;
+extern _Atomic bool g_core1_paused;
 
 #ifdef PICOS_SIMULATOR
 // Simulator: use Unicorn Engine to emulate the ARM ELF binary
@@ -247,8 +253,10 @@ static bool native_run(const app_entry_t *app) {
   // Wait for Core 1 to acknowledge the pause (explicit handshake).
   // The old sleep_ms(10) was a race: Core 1 could be mid-umm_malloc()
   // during DNS resolution when the flag is set.
-  while (!g_core1_paused)
+  for (int i = 0; i < 200 && !g_core1_paused; i++)
     sleep_ms(1);
+  if (!g_core1_paused)
+    printf("[NATIVE] Core 1 pause timeout (200ms) — proceeding anyway\n");
 
   // ── 1. Open ELF from SD card ──────────────────────────────────────────────
   char elf_path[160];
@@ -257,6 +265,7 @@ static bool native_run(const app_entry_t *app) {
   bool ok = false;
   uint8_t *load_base = NULL;
   uint8_t *code_buf = NULL;
+  uint8_t *stack_buf = NULL;
   sdfile_t f = NULL;
   Elf32_Phdr *phdr_table = NULL;
 
@@ -357,7 +366,7 @@ static bool native_run(const app_entry_t *app) {
          (unsigned long)mem_min, (unsigned long)mem_max);
 
   if (image_size > NATIVE_MAX_IMAGE_SIZE) {
-    show_error("ELF: image too large (>5MB)", NULL);
+    show_error("ELF: image too large (>7MB)", NULL);
     goto out;
   }
 
@@ -464,6 +473,16 @@ static bool native_run(const app_entry_t *app) {
 
   // ── 6. Apply relocations (dual-bias for split mode) ───────────────────────
   {
+    // Guard against underflow from malformed ELF segment layout
+    if (!split_mode && mem_min > (uint32_t)(uintptr_t)load_base) {
+      show_error("ELF: invalid segment layout", NULL);
+      goto out;
+    }
+    if (split_mode && data_vaddr_start > (uint32_t)(uintptr_t)load_base) {
+      show_error("ELF: invalid segment layout", NULL);
+      goto out;
+    }
+
     uint32_t code_bias = split_mode ? (uint32_t)code_buf - code_vaddr : 0;
     uint32_t data_bias = split_mode ? (uint32_t)load_base - data_vaddr_start
                                     : (uint32_t)load_base - mem_min;
@@ -611,39 +630,54 @@ static bool native_run(const app_entry_t *app) {
 
   picos_app_entry_t entry_fn = (picos_app_entry_t)entry_addr;
 
-  uint32_t *guard = (uint32_t *)s_native_stack;
+  stack_buf = (uint8_t *)umm_malloc(NATIVE_STACK_SIZE);
+  if (!stack_buf) {
+    show_error("Out of memory for app stack", NULL);
+    goto out;
+  }
+  g_native_stack_base = stack_buf;
+
+  uint32_t *guard = (uint32_t *)stack_buf;
   for (int i = 0; i < NATIVE_STACK_GUARD_WORDS; i++)
     guard[i] = NATIVE_STACK_CANARY;
 
-  uint32_t stack_top = (uint32_t)(s_native_stack + NATIVE_STACK_SIZE);
+  uint32_t stack_top = (uint32_t)(stack_buf + NATIVE_STACK_SIZE);
 
   g_core1_pause = false;
 
   launch_on_psp(stack_top, entry_fn,
                 (const PicoCalcAPI *)&g_api, app->path, app->id, app->name);
 
+  ok = true;
   for (int i = 0; i < NATIVE_STACK_GUARD_WORDS; i++) {
     if (guard[i] != NATIVE_STACK_CANARY) {
-      printf("[NATIVE] WARNING: stack overflow detected in '%s' "
+      printf("[NATIVE] ERROR: stack overflow detected in '%s' "
              "(canary[%d] = 0x%08lx)\n",
              app->name, i, (unsigned long)guard[i]);
+      ok = false;
       break;
     }
   }
 
-  printf("[NATIVE] App '%s' returned\n", app->name);
-  ok = true;
+  printf("[NATIVE] App '%s' returned%s\n", app->name,
+         ok ? "" : " (with stack overflow)");
 
 out:
   // ── 9. Cleanup ─────────────────────────────────────────────────────────────
-  g_native_audio_callback = NULL;
+  __dmb(); // ensure all app writes visible before clearing callback
+  atomic_store(&g_native_audio_callback, NULL);
+  g_native_stack_base = NULL;
   g_core1_pause = true;
-  while (!g_core1_paused)
+  for (int i = 0; i < 200 && !g_core1_paused; i++)
     sleep_ms(1);
+  if (!g_core1_paused)
+    printf("[NATIVE] Core 1 pause timeout (200ms) at cleanup\n");
   audio_stop_stream();
   audio_stop_tone();
   if (code_buf)
     free(code_buf);
+  if (stack_buf)
+    umm_free(stack_buf);
   if (load_base)
     umm_free(load_base);
   if (phdr_table)

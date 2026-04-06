@@ -28,9 +28,21 @@ local tests = {
     fs_mkdir = {name = "FS Mkdir", status = "WAIT", value = ""},
     wifi_avail = {name = "WiFi Avail", status = "WAIT", value = ""},
     wifi_status = {name = "WiFi Status", status = "WAIT", value = ""},
+    internet = {name = "Internet", status = "WAIT", value = ""},
+    qmi_psram = {name = "QMI PSRAM", status = "WAIT", value = ""},
+    pio_psram = {name = "PIO PSRAM", status = "WAIT", value = ""},
+    xip_cache = {name = "XIP Cache", status = "WAIT", value = ""},
 }
 
-local test_order = {"battery", "usb", "time", "log", "fs_read", "fs_mkdir", "fs_write", "fs_list", "wifi_avail", "wifi_status"}
+local test_order = {
+    "battery", "usb", "time", "log",
+    "fs_read", "fs_mkdir", "fs_write", "fs_list",
+    "wifi_avail", "wifi_status", "internet",
+    "qmi_psram", "pio_psram", "xip_cache",
+}
+
+-- Scroll state for Tests tab
+local tests_scroll = 0
 
 local mode = "tabs"  -- Always use tabbed interface now
 local start_time = 0
@@ -40,8 +52,22 @@ local button_state = 0
 
 -- Tab demo state
 local active_tab = 1
-local tab_labels = {"Tests", "Input", "Display", "Network", "System"}
+local tab_labels = {"Tests", "Functions", "Input", "Display", "Network", "SD Card"}
 local nav_keys = {prev = input.BTN_LEFT, next = input.BTN_RIGHT}
+
+-- Functions tab state
+local func_sel = 1
+local func_items = {
+    { label = "Hello World Demo",    desc = "Bouncing box, blink text, FPS counter" },
+    { label = "Lua error()",         desc = "Calls error() -> /system/error.log" },
+    { label = "Nil index",           desc = "nil.foo access -> /system/error.log" },
+    { label = "Stack overflow",      desc = "Infinite recursion -> /system/error.log" },
+    { label = "HardFault (reboot)",  desc = "CPU fault -> reboot -> /system/crashlog.txt" },
+}
+
+-- Hello demo sub-mode state
+local hello_active = false
+local hello_frame = 0
 
 -- Input test state (from keytest)
 local MAX_HISTORY = 16
@@ -203,6 +229,72 @@ local function run_wifi_status_test()
     end
 end
 
+local function run_internet_test()
+    if not wifi.isAvailable() then
+        tests.internet.status = "INFO"
+        tests.internet.value = "No WiFi"
+        return
+    end
+    local status = wifi.getStatus()
+    if status ~= wifi.STATUS_CONNECTED then
+        tests.internet.status = "INFO"
+        tests.internet.value = "Not connected"
+        return
+    end
+    if wifi.hasInternet and wifi.hasInternet() then
+        tests.internet.status = "PASS"
+        tests.internet.value = "Reachable"
+    else
+        tests.internet.status = "FAIL"
+        tests.internet.value = "No internet"
+    end
+end
+
+local function run_qmi_psram_test()
+    local mem = sys.getMemInfo()
+    if mem.psram_total > 0 then
+        local free_kb = math.floor(mem.psram_free / 1024)
+        local total_kb = math.floor(mem.psram_total / 1024)
+        tests.qmi_psram.status = "PASS"
+        tests.qmi_psram.value = string.format("%dKB free / %dKB", free_kb, total_kb)
+    else
+        tests.qmi_psram.status = "FAIL"
+        tests.qmi_psram.value = "Not detected"
+    end
+end
+
+local function run_pio_psram_test()
+    local mem = sys.getMemInfo()
+    if mem.pio_psram_available then
+        local size_mb = math.floor(mem.pio_psram_size / (1024 * 1024))
+        tests.pio_psram.status = "PASS"
+        tests.pio_psram.value = size_mb .. "MB"
+    else
+        tests.pio_psram.status = "FAIL"
+        tests.pio_psram.value = "Not detected"
+    end
+end
+
+local function run_xip_cache_test()
+    local mem = sys.getMemInfo()
+    local rate = mem.xip_cache_hit_rate
+    if rate >= 0 then
+        tests.xip_cache.status = "PASS"
+        tests.xip_cache.value = rate .. "% hit rate"
+    else
+        tests.xip_cache.status = "INFO"
+        tests.xip_cache.value = "No accesses"
+    end
+end
+
+local function format_kb(kb)
+    if kb >= 1024 then
+        return string.format("%.1f MB", kb / 1024)
+    else
+        return kb .. " KB"
+    end
+end
+
 local function run_all_tests()
     run_battery_test()
     run_usb_test()
@@ -214,6 +306,271 @@ local function run_all_tests()
     run_fs_list_test()
     run_wifi_avail_test()
     run_wifi_status_test()
+    run_internet_test()
+    run_qmi_psram_test()
+    run_pio_psram_test()
+    run_xip_cache_test()
+end
+
+-- ── SD Card Test (f3write/f3read) ────────────────────────────────────────────
+
+local sd_state = "idle"  -- idle, writing, reading, cleanup, done, error, aborted
+local sd_sizes = {4, 16, 64, 256}  -- MB options
+local sd_size_idx = 2  -- default 16MB
+local sd_total_bytes = 0
+local sd_bytes_done = 0
+local sd_file_count = 0
+local sd_file_cur = 0
+local sd_block_cur = 0
+local sd_phase_start = 0
+local sd_write_speed = 0
+local sd_read_speed = 0
+local sd_mismatches = 0
+local sd_first_mismatch = nil
+local sd_error_msg = ""
+local sd_free_kb = 0
+local sd_total_kb = 0
+local sd_test_files = {}
+local sd_tick_fh = nil
+
+local SD_BLOCK_SIZE = 4096
+local SD_FILE_SIZE = 1024 * 1024  -- 1MB per file
+local SD_BLOCKS_PER_FILE = SD_FILE_SIZE / SD_BLOCK_SIZE  -- 256
+
+local function sd_make_block(file_num, block_num)
+    -- 16-byte unique signature per block, repeated to fill 4KB.
+    -- Fast: 1 string.char + 1 string.rep instead of 4096 iterations.
+    -- Each block across all files has a distinct signature, detecting
+    -- fake flash aliasing and single-bit errors equally well.
+    local a = file_num * 65537 + block_num * 251
+    local b = file_num * 131 + block_num * 65537 + 0xDEADBEEF
+    local c = a ~ b  -- XOR for extra entropy
+    local d = a + b
+    local sig = string.char(
+         a        & 0xFF, (a >> 8)  & 0xFF, (a >> 16) & 0xFF, (a >> 24) & 0xFF,
+         b        & 0xFF, (b >> 8)  & 0xFF, (b >> 16) & 0xFF, (b >> 24) & 0xFF,
+         c        & 0xFF, (c >> 8)  & 0xFF, (c >> 16) & 0xFF, (c >> 24) & 0xFF,
+         d        & 0xFF, (d >> 8)  & 0xFF, (d >> 16) & 0xFF, (d >> 24) & 0xFF)
+    return string.rep(sig, SD_BLOCK_SIZE // 16)
+end
+
+local function sd_cleanup_files()
+    for _, name in ipairs(sd_test_files) do
+        fs.delete(data_dir .. "/" .. name)
+    end
+    sd_test_files = {}
+end
+
+local function sd_test_file_name(n)
+    return string.format("sdtest_%03d.dat", n)
+end
+
+local function sd_refresh_disk_info()
+    local info = fs.diskInfo()
+    if info then
+        sd_free_kb = info.free
+        sd_total_kb = info.total
+    end
+end
+
+local function sd_start_test()
+    -- Pre-check: ensure card is ready
+    if not fs.ensureReady() then
+        sd_state = "error"
+        sd_error_msg = "SD card not ready"
+        return
+    end
+
+    sd_refresh_disk_info()
+
+    local test_mb = sd_sizes[sd_size_idx]
+    local test_kb = test_mb * 1024
+    local safe_free = sd_free_kb - 2048  -- 2MB safety margin
+    if safe_free < 1024 then
+        sd_state = "error"
+        sd_error_msg = "Not enough free space"
+        return
+    end
+
+    if test_kb > safe_free then
+        test_mb = math.floor(safe_free / 1024)
+        if test_mb < 1 then
+            sd_state = "error"
+            sd_error_msg = "Not enough free space"
+            return
+        end
+    end
+
+    sd_file_count = test_mb  -- 1MB per file
+    sd_total_bytes = sd_file_count * SD_FILE_SIZE
+    sd_bytes_done = 0
+    sd_file_cur = 0
+    sd_block_cur = 0
+    sd_mismatches = 0
+    sd_first_mismatch = nil
+    sd_write_speed = 0
+    sd_read_speed = 0
+    sd_error_msg = ""
+    sd_test_files = {}
+    sd_tick_fh = nil
+
+    -- Ensure data dir exists
+    fs.mkdir(data_dir)
+
+    sd_state = "writing"
+    sd_phase_start = sys.getTimeMs()
+    sd_file_cur = 1
+    sd_block_cur = 0
+end
+
+-- Drive one block of work per main-loop iteration for responsiveness
+local function sd_tick()
+    if sd_state == "writing" then
+        -- Open file if starting a new one
+        if sd_block_cur == 0 then
+            local name = sd_test_file_name(sd_file_cur)
+            sd_test_files[#sd_test_files + 1] = name
+            sd_tick_fh = fs.open(data_dir .. "/" .. name, "w")
+            if not sd_tick_fh then
+                sd_state = "error"
+                sd_error_msg = "Failed to open " .. name .. " for write"
+                return
+            end
+        end
+
+        -- Write a batch of blocks per tick for throughput
+        local blocks_per_tick = 16  -- 64KB per tick
+        for _ = 1, blocks_per_tick do
+            local block = sd_make_block(sd_file_cur, sd_block_cur)
+            local written = fs.write(sd_tick_fh, block)
+            if written ~= SD_BLOCK_SIZE then
+                fs.close(sd_tick_fh)
+                sd_tick_fh = nil
+                sd_state = "error"
+                sd_error_msg = string.format("Write error file %d block %d", sd_file_cur, sd_block_cur)
+                return
+            end
+            sd_bytes_done = sd_bytes_done + SD_BLOCK_SIZE
+            sd_block_cur = sd_block_cur + 1
+
+            if sd_block_cur >= SD_BLOCKS_PER_FILE then
+                break
+            end
+        end
+
+        -- File complete?
+        if sd_block_cur >= SD_BLOCKS_PER_FILE then
+            fs.close(sd_tick_fh)
+            sd_tick_fh = nil
+            sd_block_cur = 0
+
+            if sd_file_cur >= sd_file_count then
+                -- Write phase done, start read phase
+                local elapsed = sys.getTimeMs() - sd_phase_start
+                if elapsed > 0 then
+                    sd_write_speed = math.floor(sd_total_bytes / elapsed)  -- KB/s (bytes/ms = KB/s)
+                end
+                sd_state = "reading"
+                sd_phase_start = sys.getTimeMs()
+                sd_bytes_done = 0
+                sd_file_cur = 1
+                sd_block_cur = 0
+            else
+                sd_file_cur = sd_file_cur + 1
+            end
+        end
+
+    elseif sd_state == "reading" then
+        -- Open file if starting a new one
+        if sd_block_cur == 0 then
+            local name = sd_test_file_name(sd_file_cur)
+            sd_tick_fh = fs.open(data_dir .. "/" .. name, "r")
+            if not sd_tick_fh then
+                sd_state = "error"
+                sd_error_msg = "Failed to open " .. name .. " for read"
+                return
+            end
+        end
+
+        -- Read a batch of blocks per tick
+        local blocks_per_tick = 16
+        for _ = 1, blocks_per_tick do
+            local data = fs.read(sd_tick_fh, SD_BLOCK_SIZE)
+            if not data or #data ~= SD_BLOCK_SIZE then
+                fs.close(sd_tick_fh)
+                sd_tick_fh = nil
+                sd_state = "error"
+                sd_error_msg = string.format("Read error file %d block %d", sd_file_cur, sd_block_cur)
+                return
+            end
+
+            local expected = sd_make_block(sd_file_cur, sd_block_cur)
+            if data ~= expected then
+                sd_mismatches = sd_mismatches + 1
+                if not sd_first_mismatch then
+                    -- Find first differing byte
+                    for i = 1, #data do
+                        if data:byte(i) ~= expected:byte(i) then
+                            local abs_offset = (sd_file_cur - 1) * SD_FILE_SIZE + sd_block_cur * SD_BLOCK_SIZE + (i - 1)
+                            sd_first_mismatch = string.format(
+                                "file %d blk %d byte %d (offset %d): got 0x%02X expect 0x%02X",
+                                sd_file_cur, sd_block_cur, i - 1, abs_offset,
+                                data:byte(i), expected:byte(i))
+                            break
+                        end
+                    end
+                end
+            end
+
+            sd_bytes_done = sd_bytes_done + SD_BLOCK_SIZE
+            sd_block_cur = sd_block_cur + 1
+
+            if sd_block_cur >= SD_BLOCKS_PER_FILE then
+                break
+            end
+        end
+
+        -- File complete?
+        if sd_block_cur >= SD_BLOCKS_PER_FILE then
+            fs.close(sd_tick_fh)
+            sd_tick_fh = nil
+            sd_block_cur = 0
+
+            if sd_file_cur >= sd_file_count then
+                -- Read phase done
+                local elapsed = sys.getTimeMs() - sd_phase_start
+                if elapsed > 0 then
+                    sd_read_speed = math.floor(sd_total_bytes / elapsed)
+                end
+                sd_state = "cleanup"
+            else
+                sd_file_cur = sd_file_cur + 1
+            end
+        end
+
+    elseif sd_state == "cleanup" then
+        sd_cleanup_files()
+        sd_state = "done"
+    end
+end
+
+local function sd_abort()
+    if sd_tick_fh then
+        fs.close(sd_tick_fh)
+        sd_tick_fh = nil
+    end
+    sd_cleanup_files()
+    sd_state = "aborted"
+end
+
+local function sd_format_bytes(b)
+    if b >= 1024 * 1024 then
+        return string.format("%.1f MB", b / (1024 * 1024))
+    elseif b >= 1024 then
+        return string.format("%.1f KB", b / 1024)
+    else
+        return b .. " B"
+    end
 end
 
 -- ── Drawing Functions ─────────────────────────────────────────────────────────
@@ -242,40 +599,128 @@ local function draw_tabs_demo()
     
     -- Draw content based on active tab
     if active_tab == 1 then
-        -- Tests tab - show test results
-        local y = content_y
+        -- Tests tab - scrollable test results + system info
         local line_height = 11
-        
+        local footer_y = 300
+        local max_visible_y = footer_y - 12
+
+        -- Build all rows as {text, color, value, value_color}
+        local rows = {}
         for _, key in ipairs(test_order) do
             local test = tests[key]
             local color = draw_status_color(test.status)
-            
-            disp.drawText(4, y, test.name, FG, BG)
-            local status_x = 70
-            disp.drawText(status_x, y, test.status, color, BG)
-            
-            if test.value ~= "" then
-                local value_x = 110
-                local max_len = 28
-                local display_val = test.value
-                if #display_val > max_len then
-                    display_val = display_val:sub(1, max_len - 3) .. "..."
-                end
-                disp.drawText(value_x, y, display_val, DIM, BG)
-            end
-            
-            y = y + line_height
+            local val = test.value
+            if #val > 28 then val = val:sub(1, 25) .. "..." end
+            rows[#rows + 1] = {name = test.name, status = test.status, status_color = color, value = val}
         end
-        
-        -- Runtime info
-        y = y + 10
+
+        -- Separator
+        rows[#rows + 1] = {separator = true}
+
+        -- System info section
         local runtime = sys.getTimeMs() - start_time
-        disp.drawText(4, y, "Runtime: " .. runtime .. " ms", DIM, BG)
-        
+        rows[#rows + 1] = {info = "Uptime", value = runtime .. " ms"}
+
+        local mem = sys.getMemInfo()
+        rows[#rows + 1] = {info = "SRAM Heap", value = string.format("%d B free / %d B used", mem.sram_free, mem.sram_used)}
+        rows[#rows + 1] = {info = "QMI PSRAM", value = string.format("%s free / %s",
+            format_kb(math.floor(mem.psram_free / 1024)),
+            format_kb(math.floor(mem.psram_total / 1024)))}
+        if mem.pio_psram_available then
+            rows[#rows + 1] = {info = "PIO PSRAM", value = string.format("%s", format_kb(math.floor(mem.pio_psram_size / 1024)))}
+        end
+        if mem.xip_cache_hit_rate >= 0 then
+            rows[#rows + 1] = {info = "XIP Cache", value = mem.xip_cache_hit_rate .. "% hit rate"}
+        end
+
+        local disk = fs.diskInfo()
+        if disk then
+            rows[#rows + 1] = {info = "SD Card", value = string.format("%s free / %s",
+                format_kb(disk.free), format_kb(disk.total))}
+        end
+
+        -- Calculate scroll bounds
+        local visible_lines = math.floor((max_visible_y - content_y) / line_height)
+        local max_scroll = math.max(0, #rows - visible_lines)
+        if tests_scroll > max_scroll then tests_scroll = max_scroll end
+
+        -- Draw visible rows
+        local y = content_y
+        for i = tests_scroll + 1, #rows do
+            if y > max_visible_y then break end
+
+            local row = rows[i]
+            if row.separator then
+                y = y + 2
+                disp.drawLine(4, y, 310, y, DIM)
+                y = y + 4
+            elseif row.name then
+                -- Test result row
+                disp.drawText(4, y, row.name, FG, BG)
+                disp.drawText(80, y, row.status, row.status_color, BG)
+                if row.value ~= "" then
+                    disp.drawText(120, y, row.value, DIM, BG)
+                end
+                y = y + line_height
+            elseif row.info then
+                -- Info row
+                disp.drawText(4, y, row.info .. ":", DIM, BG)
+                disp.drawText(80, y, row.value, FG, BG)
+                y = y + line_height
+            end
+        end
+
+        -- Scroll indicators
+        if tests_scroll > 0 then
+            disp.drawText(308, content_y, "^", TITLE, BG)
+        end
+        if tests_scroll < max_scroll then
+            disp.drawText(308, max_visible_y - 8, "v", TITLE, BG)
+        end
+
         -- Footer instructions
-        pc.ui.drawFooter("←/→:Tab  ENTER/R:Rerun  ESC:Exit", nil)
-        
+        pc.ui.drawFooter("UP/DN:Scroll  R:Rerun  ESC:Exit", nil)
+
     elseif active_tab == 2 then
+        -- Functions tab
+        if hello_active then
+            -- Hello World demo sub-mode
+            local perf = pc.perf
+            perf.drawFPS()
+
+            local blink = (hello_frame % 60) < 30
+            if blink then
+                disp.drawText(100, 140, "* Hello World *", FG, BG)
+            end
+
+            local bx = 8 + math.floor(math.abs(math.sin(hello_frame / 60 * math.pi)) * 260)
+            local by = 100
+            disp.fillRect(bx, by, 20, 20, TITLE)
+
+            local bat = sys.getBattery()
+            local bat_str = (bat >= 0) and ("Bat: " .. bat .. "%  ") or ""
+            local ms = sys.getTimeMs()
+            local secs = math.floor(ms / 1000)
+            pc.ui.drawFooter("ESC:Back", bat_str .. "Uptime: " .. secs .. "s")
+        else
+            -- Function list
+            local y = content_y
+            for i, item in ipairs(func_items) do
+                local prefix = (i == func_sel) and "> " or "  "
+                local fg = (i == func_sel) and FG or DIM
+                disp.drawText(4, y, prefix .. item.label, fg, BG)
+                if i == func_sel then
+                    disp.drawText(20, y + 10, item.desc, DIM, BG)
+                    y = y + 22
+                else
+                    y = y + 12
+                end
+            end
+
+            pc.ui.drawFooter("UP/DN:Select  ENTER:Run  ESC:Exit", nil)
+        end
+
+    elseif active_tab == 3 then
         -- Input tab with keytest functionality
         disp.drawText(20, content_y, "Input Tab", TITLE, BG)
         content_y = content_y + 16
@@ -312,7 +757,7 @@ local function draw_tabs_demo()
             end
         end
         
-    elseif active_tab == 3 then
+    elseif active_tab == 4 then
         disp.drawText(20, content_y, "Display Tab", TITLE, BG)
         content_y = content_y + 20
         disp.drawText(20, content_y, "Resolution: 320x320", FG, BG)
@@ -324,26 +769,141 @@ local function draw_tabs_demo()
             local c = disp.rgb(i * 5, 100, 255 - i * 5)
             disp.fillRect(20 + i * 2, content_y + 10, 2, 20, c)
         end
-        
-    elseif active_tab == 4 then
+
+    elseif active_tab == 5 then
         disp.drawText(20, content_y, "Network Tab", TITLE, BG)
         content_y = content_y + 20
         disp.drawText(20, content_y, "WiFi: " .. tests.wifi_status.value, FG, BG)
         content_y = content_y + 12
         disp.drawText(20, content_y, "Status: " .. tests.wifi_avail.value, FG, BG)
-        
-    elseif active_tab == 5 then
-        disp.drawText(20, content_y, "System Tab", TITLE, BG)
-        content_y = content_y + 20
-        disp.drawText(20, content_y, "Uptime: " .. (sys.getTimeMs() - start_time) .. " ms", FG, BG)
-        content_y = content_y + 12
-        disp.drawText(20, content_y, "Battery: " .. tests.battery.value, FG, BG)
-        content_y = content_y + 12
-        disp.drawText(20, content_y, "USB: " .. tests.usb.value, FG, BG)
+
+    elseif active_tab == 6 then
+        -- SD Card test tab
+        local y = content_y
+
+        if sd_state == "idle" then
+            disp.drawText(20, y, "SD Card Test (f3write/f3read)", TITLE, BG)
+            y = y + 16
+
+            sd_refresh_disk_info()
+            disp.drawText(20, y, string.format("Free: %d MB / %d MB",
+                math.floor(sd_free_kb / 1024), math.floor(sd_total_kb / 1024)), FG, BG)
+            y = y + 14
+
+            disp.drawText(20, y, "Test size:", DIM, BG)
+            local size_str = ""
+            for i, sz in ipairs(sd_sizes) do
+                if i == sd_size_idx then
+                    size_str = size_str .. " [" .. sz .. "MB]"
+                else
+                    size_str = size_str .. "  " .. sz .. "MB "
+                end
+            end
+            disp.drawText(80, y, size_str, FG, BG)
+            y = y + 16
+
+            disp.drawText(20, y, "Writes unique patterns to 1MB files,", DIM, BG)
+            y = y + 10
+            disp.drawText(20, y, "reads back & verifies every byte.", DIM, BG)
+            y = y + 10
+            disp.drawText(20, y, "Detects fake flash & measures speed.", DIM, BG)
+            y = y + 20
+
+            disp.drawText(20, y, "UP/DOWN: size  ENTER: start", GOOD, BG)
+
+            pc.ui.drawFooter("UP/DN:Size  ENTER:Start  ESC:Exit", nil)
+
+        elseif sd_state == "writing" or sd_state == "reading" then
+            local phase = sd_state == "writing" and "Writing" or "Verifying"
+            disp.drawText(20, y, phase .. "...", TITLE, BG)
+            y = y + 14
+
+            disp.drawText(20, y, string.format("File %d / %d", sd_file_cur, sd_file_count), FG, BG)
+            y = y + 12
+
+            disp.drawText(20, y, sd_format_bytes(sd_bytes_done) .. " / " .. sd_format_bytes(sd_total_bytes), FG, BG)
+            y = y + 16
+
+            -- Progress bar
+            local bar_x, bar_w, bar_h = 20, 280, 14
+            disp.drawRect(bar_x, y, bar_w, bar_h, DIM)
+            local pct = sd_total_bytes > 0 and sd_bytes_done / sd_total_bytes or 0
+            local fill = math.floor(pct * (bar_w - 2))
+            if fill > 0 then
+                disp.fillRect(bar_x + 1, y + 1, fill, bar_h - 2, GOOD)
+            end
+            disp.drawText(bar_x + bar_w / 2 - 12, y + 3, string.format("%d%%", math.floor(pct * 100)), BG, GOOD)
+            y = y + bar_h + 10
+
+            -- Live throughput
+            local elapsed = sys.getTimeMs() - sd_phase_start
+            if elapsed > 0 and sd_bytes_done > 0 then
+                local speed = math.floor(sd_bytes_done / elapsed)  -- KB/s
+                disp.drawText(20, y, string.format("Speed: %d KB/s", speed), DIM, BG)
+            end
+
+            if sd_state == "reading" and sd_mismatches > 0 then
+                y = y + 12
+                disp.drawText(20, y, string.format("Mismatches: %d blocks", sd_mismatches), WARN, BG)
+            end
+
+            pc.ui.drawFooter("ESC:Abort", nil)
+
+        elseif sd_state == "cleanup" then
+            disp.drawText(20, y, "Cleaning up test files...", TITLE, BG)
+
+        elseif sd_state == "done" then
+            local passed = sd_mismatches == 0
+            disp.drawText(20, y, passed and "PASS" or "FAIL", passed and GOOD or WARN, BG)
+            y = y + 16
+
+            disp.drawText(20, y, "Tested: " .. sd_format_bytes(sd_total_bytes), FG, BG)
+            y = y + 12
+            disp.drawText(20, y, string.format("Files: %d x 1MB", sd_file_count), FG, BG)
+            y = y + 12
+            disp.drawText(20, y, string.format("Write: %d KB/s", sd_write_speed), FG, BG)
+            y = y + 12
+            disp.drawText(20, y, string.format("Read:  %d KB/s", sd_read_speed), FG, BG)
+            y = y + 12
+
+            if sd_mismatches > 0 then
+                disp.drawText(20, y, string.format("Mismatches: %d blocks", sd_mismatches), WARN, BG)
+                y = y + 12
+                if sd_first_mismatch then
+                    disp.drawText(8, y, sd_first_mismatch, WARN, BG)
+                    y = y + 10
+                end
+            else
+                disp.drawText(20, y, "All data verified OK", GOOD, BG)
+                y = y + 12
+            end
+
+            y = y + 8
+            disp.drawText(20, y, "ENTER: run again  ESC: exit", DIM, BG)
+            pc.ui.drawFooter("ENTER:Again  ESC:Exit", nil)
+
+        elseif sd_state == "aborted" then
+            disp.drawText(20, y, "Test aborted", WARN, BG)
+            y = y + 16
+            disp.drawText(20, y, "Test files cleaned up.", DIM, BG)
+            y = y + 16
+            disp.drawText(20, y, "ENTER: run again  ESC: exit", DIM, BG)
+            pc.ui.drawFooter("ENTER:Again  ESC:Exit", nil)
+
+        elseif sd_state == "error" then
+            disp.drawText(20, y, "ERROR", WARN, BG)
+            y = y + 16
+            disp.drawText(20, y, sd_error_msg, WARN, BG)
+            y = y + 16
+            disp.drawText(20, y, "ENTER: retry  ESC: exit", DIM, BG)
+            pc.ui.drawFooter("ENTER:Retry  ESC:Exit", nil)
+        end
     end
-    
-    -- Footer with instructions
-    pc.ui.drawFooter("F1:Exit  T:ToggleKeys  ESC:Back", nil)
+
+    -- Footer with instructions for tabs that don't draw their own
+    if active_tab >= 3 and active_tab <= 5 then
+        pc.ui.drawFooter("F1:Exit  T:ToggleKeys  ESC:Back", nil)
+    end
 end
 
 -- ── Main Loop ─────────────────────────────────────────────────────────────────
@@ -381,31 +941,120 @@ while true do
         push_history(string.format("0x%02X  %s", raw, label))
     end
     
-    -- ESC: exit
-    if pressed & input.BTN_ESC ~= 0 then
-        return
-    end
-    
-    -- ENTER or R: rerun tests
-    if pressed & input.BTN_ENTER ~= 0 or (last_char and last_char:upper() == "R") then
-        run_all_tests()
-        last_raw = 0
-        last_char = nil
-    end
-    
-    -- T: Toggle navigation keys between Left/Right and Up/Down
-    if last_char and last_char:upper() == "T" then
-        if nav_keys.prev == input.BTN_LEFT then
-            nav_keys.prev = input.BTN_UP
-            nav_keys.next = input.BTN_DOWN
+    -- Drive SD card test forward regardless of active tab
+    if sd_state == "writing" or sd_state == "reading" or sd_state == "cleanup" then
+        -- ESC aborts the test (from any tab)
+        if pressed & input.BTN_ESC ~= 0 then
+            sd_abort()
         else
-            nav_keys.prev = input.BTN_LEFT
-            nav_keys.next = input.BTN_RIGHT
+            sd_tick()
+        end
+    elseif active_tab == 2 and not hello_active then
+        -- Functions tab list input
+        if pressed & input.BTN_ESC ~= 0 then
+            return
+        end
+        if pressed & input.BTN_UP ~= 0 then
+            func_sel = func_sel > 1 and func_sel - 1 or #func_items
+        end
+        if pressed & input.BTN_DOWN ~= 0 then
+            func_sel = func_sel < #func_items and func_sel + 1 or 1
+        end
+        if pressed & input.BTN_ENTER ~= 0 then
+            if func_sel == 1 then
+                -- Hello World Demo
+                hello_active = true
+                hello_frame = 0
+            elseif func_sel == 2 then
+                error("Test crash message from systest app")
+            elseif func_sel == 3 then
+                local x = nil
+                local _ = x.foo
+            elseif func_sel == 4 then
+                local function recurse() recurse() end
+                recurse()
+            elseif func_sel == 5 then
+                disp.clear(BG)
+                disp.drawText(4, 4, "Triggering HardFault...", WARN, BG)
+                disp.drawText(4, 20, "Device will reboot.", FG, BG)
+                disp.flush()
+                sys.sleep(500)
+                if sys.triggerFault then
+                    sys.triggerFault()
+                else
+                    error("triggerFault not available (rebuild firmware)")
+                end
+            end
+        end
+    elseif active_tab == 2 and hello_active then
+        -- Hello demo sub-mode: ESC exits back to list
+        if pressed & input.BTN_ESC ~= 0 then
+            hello_active = false
+        end
+        hello_frame = hello_frame + 1
+    elseif active_tab == 6 then
+        -- SD Card tab-specific input when not actively testing
+        if sd_state == "idle" then
+            if pressed & input.BTN_ESC ~= 0 then
+                return
+            end
+            if pressed & input.BTN_UP ~= 0 then
+                sd_size_idx = sd_size_idx > 1 and sd_size_idx - 1 or #sd_sizes
+            end
+            if pressed & input.BTN_DOWN ~= 0 then
+                sd_size_idx = sd_size_idx < #sd_sizes and sd_size_idx + 1 or 1
+            end
+            if pressed & input.BTN_ENTER ~= 0 then
+                sd_start_test()
+            end
+        elseif sd_state == "done" or sd_state == "aborted" or sd_state == "error" then
+            if pressed & input.BTN_ESC ~= 0 then
+                return
+            end
+            if pressed & input.BTN_ENTER ~= 0 then
+                sd_state = "idle"
+            end
+        end
+    else
+        -- Normal tab input handling
+        if pressed & input.BTN_ESC ~= 0 then
+            return
+        end
+
+        -- Tests tab: UP/DOWN scroll, R/ENTER rerun
+        if active_tab == 1 then
+            if pressed & input.BTN_UP ~= 0 then
+                tests_scroll = math.max(0, tests_scroll - 1)
+            end
+            if pressed & input.BTN_DOWN ~= 0 then
+                tests_scroll = tests_scroll + 1  -- clamped in draw
+            end
+            if pressed & input.BTN_ENTER ~= 0 or (last_char and last_char:upper() == "R") then
+                run_all_tests()
+                last_raw = 0
+                last_char = nil
+            end
+        end
+
+        -- T: Toggle navigation keys between Left/Right and Up/Down
+        if last_char and last_char:upper() == "T" then
+            if nav_keys.prev == input.BTN_LEFT then
+                nav_keys.prev = input.BTN_UP
+                nav_keys.next = input.BTN_DOWN
+            else
+                nav_keys.prev = input.BTN_LEFT
+                nav_keys.next = input.BTN_RIGHT
+            end
         end
     end
-    
+
     draw_tabs_demo()
-    
+
     disp.flush()
-    sys.sleep(16)
+    -- During active SD test, minimal sleep for throughput
+    if sd_state == "writing" or sd_state == "reading" then
+        sys.sleep(1)
+    else
+        sys.sleep(16)
+    end
 end

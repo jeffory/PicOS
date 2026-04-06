@@ -17,6 +17,7 @@ import base64
 import json
 import os
 import platform
+import signal
 import shutil
 import socket
 import struct
@@ -323,6 +324,8 @@ class SimulatorManager:
             stdout=subprocess.PIPE, stderr=subprocess.PIPE, env=env,
             text=True,
         )
+        with _tracked_pids_lock:
+            _tracked_pids.add(self.process.pid)
 
         # Read stdout to find the assigned port
         actual_port = port if port > 0 else 0
@@ -379,6 +382,8 @@ class SimulatorManager:
                 except subprocess.TimeoutExpired:
                     self.process.kill()
                     self.process.wait()
+            with _tracked_pids_lock:
+                _tracked_pids.discard(self.process.pid)
             self.process = None
             self.port = 0
 
@@ -409,6 +414,8 @@ class SimulatorManager:
 
 
 _sim_manager: SimulatorManager | None = None
+_tracked_pids: set[int] = set()
+_tracked_pids_lock = threading.Lock()
 
 
 # ── Hardware connection helpers ─────────────────────────────────────────────────
@@ -969,6 +976,137 @@ async def start_simulator(
         return f"Error starting simulator: {e}"
 
 
+# ── Simulator Process Management ──────────────────────────────────────────────
+
+
+def _find_simulator_pids() -> set[int]:
+    """Find all picos_simulator processes on the system via pgrep."""
+    try:
+        result = subprocess.run(
+            ["pgrep", "-f", "picos_simulator"],
+            capture_output=True, text=True, timeout=5,
+        )
+        if result.returncode == 0:
+            return {int(line) for line in result.stdout.strip().split("\n") if line.strip()}
+    except (FileNotFoundError, subprocess.TimeoutExpired, ValueError):
+        pass
+    return set()
+
+
+def _is_pid_alive(pid: int) -> bool:
+    """Check if a process is still alive."""
+    try:
+        os.kill(pid, 0)
+        return True
+    except (ProcessLookupError, PermissionError):
+        return False
+
+
+@mcp.tool()
+async def list_simulators() -> str:
+    """List all tracked simulator PIDs and any picos_simulator processes on the system."""
+    with _tracked_pids_lock:
+        tracked = set(_tracked_pids)
+
+    system_pids = await asyncio.to_thread(_find_simulator_pids)
+
+    lines = []
+    if tracked:
+        lines.append("Tracked PIDs:")
+        for pid in sorted(tracked):
+            alive = _is_pid_alive(pid)
+            lines.append(f"  PID {pid}: {'alive' if alive else 'dead'}")
+    else:
+        lines.append("No tracked PIDs.")
+
+    orphans = system_pids - tracked
+    if orphans:
+        lines.append("System picos_simulator processes (not tracked):")
+        for pid in sorted(orphans):
+            lines.append(f"  PID {pid}")
+
+    if not tracked and not system_pids:
+        lines.append("No simulator processes found.")
+
+    return "\n".join(lines)
+
+
+@mcp.tool()
+async def kill_simulators(include_orphans: bool = True) -> str:
+    """Force-kill all tracked simulator processes.
+
+    Args:
+        include_orphans: Also kill any picos_simulator processes found on the
+                         system that weren't launched by this MCP session.
+    """
+    global _sim_manager, _conn
+
+    with _tracked_pids_lock:
+        tracked = set(_tracked_pids)
+
+    pids_to_kill = set(tracked)
+    if include_orphans:
+        system_pids = await asyncio.to_thread(_find_simulator_pids)
+        pids_to_kill |= system_pids
+
+    killed = []
+    failed = []
+    already_dead = []
+
+    for pid in sorted(pids_to_kill):
+        if not _is_pid_alive(pid):
+            already_dead.append(pid)
+            continue
+        try:
+            os.kill(pid, signal.SIGKILL)
+            killed.append(pid)
+        except ProcessLookupError:
+            already_dead.append(pid)
+        except PermissionError:
+            failed.append(pid)
+
+    # Reap child processes to avoid zombies in pgrep
+    for pid in killed:
+        try:
+            os.waitpid(pid, os.WNOHANG)
+        except ChildProcessError:
+            pass
+
+    # Clean up tracked set
+    with _tracked_pids_lock:
+        _tracked_pids.clear()
+
+    # Reset manager and connection state
+    if _sim_manager:
+        if _sim_manager.process:
+            try:
+                _sim_manager.process.wait(timeout=1)
+            except Exception:
+                pass
+        _sim_manager.process = None
+        _sim_manager.port = 0
+
+    with _conn_lock:
+        if _conn:
+            try:
+                _conn.close()
+            except Exception:
+                pass
+            _conn = None
+
+    lines = []
+    if killed:
+        lines.append(f"Killed: {', '.join(str(p) for p in killed)}")
+    if already_dead:
+        lines.append(f"Already dead: {', '.join(str(p) for p in already_dead)}")
+    if failed:
+        lines.append(f"Permission denied: {', '.join(str(p) for p in failed)}")
+    if not pids_to_kill:
+        lines.append("No simulator processes to kill.")
+
+    return "\n".join(lines)
+
+
 # ── Hardware-only Tools ────────────────────────────────────────────────────────
 
 
@@ -1036,6 +1174,138 @@ async def get_file(remote_path: str, local_path: str, device: str | None = None)
     if not HAS_SERIAL:
         return "pyserial not installed: pip install pyserial"
     return "Hardware get_file not yet implemented."
+
+
+# ── Display Diagnostics (simulator only) ─────────────────────────────────────
+
+
+@mcp.tool()
+async def display_stats(
+    x: int | None = None,
+    y: int | None = None,
+    device: str | None = None,
+) -> str:
+    """Get framebuffer statistics: non-zero pixel count, unique colors, first non-zero pixel.
+    Optionally inspect a specific pixel by providing x,y coordinates."""
+    if HARDWARE_MODE:
+        return "display_stats is only available in simulator mode."
+    try:
+        conn = get_connection()
+        params = {}
+        if x is not None:
+            params["x"] = x
+        if y is not None:
+            params["y"] = y
+        result = await asyncio.to_thread(conn.call, "display_stats", params, timeout=5)
+        total = result.get("total_pixels", 102400)
+        nz = result.get("nonzero_pixels", 0)
+        pct = (nz * 100.0 / total) if total else 0
+        unique = result.get("unique_colors", 0)
+        first = result.get("first_nonzero")
+
+        lines = [
+            f"Non-zero pixels: {nz}/{total} ({pct:.1f}%)",
+            f"Unique colors: {unique}",
+        ]
+        if first and isinstance(first, dict):
+            fx, fy = first.get("x", 0), first.get("y", 0)
+            fv = first.get("rgb565", 0)
+            r = ((fv >> 11) & 0x1F) << 3
+            g = ((fv >> 5) & 0x3F) << 2
+            b = (fv & 0x1F) << 3
+            lines.append(f"First non-zero: ({fx}, {fy}) = 0x{fv:04X} → RGB({r}, {g}, {b}) [#{r:02X}{g:02X}{b:02X}]")
+        else:
+            lines.append("First non-zero: none (all black)")
+
+        pixel_at = result.get("pixel_at")
+        if pixel_at and isinstance(pixel_at, dict):
+            px, py = pixel_at["x"], pixel_at["y"]
+            pv = pixel_at["rgb565"]
+            pr, pg, pb = pixel_at["r"], pixel_at["g"], pixel_at["b"]
+            lines.append(f"Pixel ({px}, {py}): 0x{pv:04X} → RGB({pr}, {pg}, {pb}) [#{pr:02X}{pg:02X}{pb:02X}]")
+
+        return "\n".join(lines)
+    except Exception as e:
+        return f"Error: {e}"
+
+
+@mcp.tool()
+async def display_diff(
+    action: str,
+    device: str | None = None,
+) -> str:
+    """Capture or compare framebuffer snapshots for pixel-level diff.
+    action='capture' saves the current framebuffer as reference.
+    action='compare' compares current framebuffer against the saved reference."""
+    if HARDWARE_MODE:
+        return "display_diff is only available in simulator mode."
+    try:
+        conn = get_connection()
+        result = await asyncio.to_thread(conn.call, "display_diff", {"action": action}, timeout=5)
+
+        if action == "capture":
+            return "Reference framebuffer captured. Use action='compare' after a change to see the diff."
+
+        if action == "compare":
+            changed = result.get("changed_pixels", 0)
+            total = result.get("total_pixels", 102400)
+            pct = result.get("change_pct", 0.0)
+            bbox = result.get("bbox")
+
+            lines = [f"Changed pixels: {changed}/{total} ({pct:.2f}%)"]
+            if bbox and isinstance(bbox, dict):
+                lines.append(f"Bounding box: x={bbox['x']} y={bbox['y']} w={bbox['w']} h={bbox['h']}")
+            else:
+                lines.append("No changes detected.")
+            return "\n".join(lines)
+
+        return f"Unknown action '{action}'. Use 'capture' or 'compare'."
+    except Exception as e:
+        return f"Error: {e}"
+
+
+@mcp.tool()
+async def get_pixel(
+    x: int,
+    y: int,
+    w: int = 1,
+    h: int = 1,
+    device: str | None = None,
+) -> str:
+    """Read pixel value(s) from the framebuffer. Returns RGB565 and decoded RGB.
+    Single pixel: provide x,y. Region: provide x,y,w,h (max 16x16)."""
+    if HARDWARE_MODE:
+        return "get_pixel is only available in simulator mode."
+    try:
+        conn = get_connection()
+        params: dict[str, Any] = {"x": x, "y": y}
+        if w > 1:
+            params["w"] = w
+        if h > 1:
+            params["h"] = h
+        result = await asyncio.to_thread(conn.call, "get_pixel", params, timeout=5)
+
+        if "pixels" in result:
+            # Region mode
+            pixels = result["pixels"]
+            rw, rh = result.get("w", w), result.get("h", h)
+            lines = [f"Region ({x},{y}) {rw}x{rh}:"]
+            idx = 0
+            for row in range(rh):
+                row_vals = []
+                for col in range(rw):
+                    if idx < len(pixels):
+                        row_vals.append(f"0x{pixels[idx]:04X}")
+                    idx += 1
+                lines.append(f"  y={y+row}: {' '.join(row_vals)}")
+            return "\n".join(lines)
+        else:
+            # Single pixel
+            px = result.get("rgb565", 0)
+            r, g, b = result.get("r", 0), result.get("g", 0), result.get("b", 0)
+            return f"Pixel ({x}, {y}): 0x{px:04X} → RGB({r}, {g}, {b}) [#{r:02X}{g:02X}{b:02X}]"
+    except Exception as e:
+        return f"Error: {e}"
 
 
 # ── Main Entry Point ──────────────────────────────────────────────────────────

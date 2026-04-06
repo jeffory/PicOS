@@ -19,10 +19,17 @@ static inline uint16_t rgb555_to_rgb565(uint16_t c) {
 void gbc_display_init(GBCDisplay *ctx) {
     for (int i = 0; i < 3; i++)
         memcpy(ctx->palette[i], default_dmg_palette, sizeof(default_dmg_palette));
+    memset(ctx->cgb_lut, 0, sizeof(ctx->cgb_lut));
     ctx->selected_palette = -1;
     ctx->frame_count = 0;
     ctx->cgb_mode = false;
     ctx->cgb_palette = NULL;
+}
+
+void gbc_display_update_cgb_lut(GBCDisplay *ctx) {
+    if (!ctx->cgb_palette) return;
+    for (int i = 0; i < 64; i++)
+        ctx->cgb_lut[i] = rgb555_to_rgb565(ctx->cgb_palette[i]);
 }
 
 void gbc_display_set_palette(GBCDisplay *ctx, int palette_idx) {
@@ -55,11 +62,9 @@ void gbc_display_draw_line(GBCDisplay *ctx, const uint8_t pixels[GB_WIDTH], uint
 
     if (ctx->cgb_mode && ctx->cgb_palette) {
         // CGB mode: pixel value is an index into fixPalette[0x40]
-        // BG: ((palette & 0x07) << 2) + shade  = 0x00-0x1F
-        // OBJ: ((palette & 0x07) << 2) + shade + 0x20 = 0x20-0x3F
+        // Use pre-computed LUT to avoid per-pixel RGB555->RGB565 conversion
         for (int x = 0; x < GB_WIDTH; x++) {
-            uint8_t idx = pixels[x] & 0x3F;
-            row[x] = rgb555_to_rgb565(ctx->cgb_palette[idx]);
+            row[x] = ctx->cgb_lut[pixels[x] & 0x3F];
         }
     } else {
         // DMG mode: shade in bits 0-1, palette layer in bits 4-5

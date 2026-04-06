@@ -235,10 +235,17 @@ static void draw_panel(const flat_item_t *items, int count, int sel, int px,
         fg = COLOR_GRAY;
       } else {
         switch (wifi_get_status()) {
-        case WIFI_STATUS_CONNECTED: {
+        case WIFI_STATUS_ONLINE: {
           const char *ip = wifi_get_ip();
           snprintf(label, sizeof(label), "WiFi: On (%s)", ip ? ip : "?");
           fg = COLOR_GREEN;
+          break;
+        }
+        case WIFI_STATUS_CONNECTED: {
+          const char *ip = wifi_get_ip();
+          snprintf(label, sizeof(label), "WiFi: On (%s) no inet",
+                   ip ? ip : "?");
+          fg = COLOR_YELLOW;
           break;
         }
         case WIFI_STATUS_CONNECTING:
@@ -265,9 +272,13 @@ static void draw_panel(const flat_item_t *items, int count, int sel, int px,
         fg = COLOR_GRAY;
       } else {
         switch (wifi_get_status()) {
-        case WIFI_STATUS_CONNECTED:
+        case WIFI_STATUS_ONLINE:
           snprintf(label, sizeof(label), "WiFi: Ok");
           fg = COLOR_GREEN;
+          break;
+        case WIFI_STATUS_CONNECTED:
+          snprintf(label, sizeof(label), "WiFi: No internet");
+          fg = COLOR_YELLOW;
           break;
         case WIFI_STATUS_CONNECTING:
           snprintf(label, sizeof(label), "WiFi: Connecting...");
@@ -448,7 +459,8 @@ static bool menu_loop(lua_State *L, int context) {
         break;
       case ITEM_WIFI_TOGGLE:
         if (wifi_is_available()) {
-          if (wifi_get_status() == WIFI_STATUS_CONNECTED) {
+          { wifi_status_t wst = wifi_get_status();
+          if (wst == WIFI_STATUS_CONNECTED || wst == WIFI_STATUS_ONLINE) {
             wifi_disconnect();
           } else {
             const char *ssid = config_get("wifi_ssid");
@@ -457,7 +469,7 @@ static bool menu_loop(lua_State *L, int context) {
               wifi_connect(ssid, pass ? pass : "");
             else
               run_wifi_config(); // no saved credentials, prompt
-          }
+          }}
           need_bg_restore = true;
           need_redraw = true;
         }

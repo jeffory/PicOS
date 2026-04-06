@@ -33,6 +33,9 @@ static bool parse_wav_header(sound_sample_t *sample, uint8_t *data, uint32_t siz
         uint32_t chunk_id = *(uint32_t *)(data + pos);
         uint32_t chunk_size = *(uint32_t *)(data + pos + 4);
 
+        if (chunk_size > size - pos - 8)
+            break; // malformed chunk — would read past buffer
+
         if (chunk_id == *(uint32_t *)"fmt ") {
             sample->channels = *(uint16_t *)(data + pos + 10);
             sample->sample_rate = *(uint32_t *)(data + pos + 12);

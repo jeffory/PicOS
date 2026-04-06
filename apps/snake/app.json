@@ -3,5 +3,8 @@
     "name": "Snake",
     "description": "Classic snake game",
     "version": "1.0",
-    "author": "PicOS"
+    "author": "PicOS",
+    "category": "games",
+    "repo": "jeffory/picos-apps",
+    "min_firmware": "1.0.0"
 }

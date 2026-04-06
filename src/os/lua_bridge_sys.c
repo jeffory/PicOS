@@ -4,8 +4,11 @@
 #include "version.h"
 #include "../dev_commands.h"
 #include "../hardware.h"
+#include "../drivers/pio_psram.h"
+#include "perf.h"
 #include "hardware/gpio.h"
 #include <malloc.h>
+#include <stdatomic.h>
 
 // ── picocalc.sys.* ───────────────────────────────────────────────────────────
 
@@ -75,6 +78,26 @@ static int l_sys_reboot(lua_State *L) {
   watchdog_enable(1, true);
   for (;;)
     tight_loop_contents();
+  return 0;
+}
+
+// Pause Core 1 (WiFi, audio, HTTP) for safe batch SD writes.
+// Matches the USB MSC pattern: caller must resumeBackground() when done.
+extern _Atomic bool g_core1_pause;
+extern _Atomic bool g_core1_paused;
+
+static int l_sys_pauseBackground(lua_State *L) {
+  (void)L;
+  g_core1_pause = true;
+  for (int i = 0; i < 500 && !g_core1_paused; i++)
+    sleep_ms(1);
+  lua_pushboolean(L, g_core1_paused);
+  return 1;
+}
+
+static int l_sys_resumeBackground(lua_State *L) {
+  (void)L;
+  g_core1_pause = false;
   return 0;
 }
 
@@ -153,7 +176,7 @@ static int l_sys_getMemInfo(lua_State *L) {
 
   struct mallinfo mi = mallinfo();
 
-  lua_createtable(L, 0, 5);
+  lua_createtable(L, 0, 10);
   lua_pushinteger(L, (lua_Integer)psram_free);
   lua_setfield(L, -2, "psram_free");
   lua_pushinteger(L, (lua_Integer)psram_used);
@@ -164,6 +187,17 @@ static int l_sys_getMemInfo(lua_State *L) {
   lua_setfield(L, -2, "sram_free");
   lua_pushinteger(L, (lua_Integer)mi.uordblks);
   lua_setfield(L, -2, "sram_used");
+
+  // PIO PSRAM (mainboard 8MB via PIO1)
+  lua_pushboolean(L, pio_psram_available());
+  lua_setfield(L, -2, "pio_psram_available");
+  lua_pushinteger(L, (lua_Integer)pio_psram_size());
+  lua_setfield(L, -2, "pio_psram_size");
+
+  // XIP cache hit rate (0-100%, or -1 if no accesses)
+  lua_pushinteger(L, (lua_Integer)perf_xip_cache_hit_rate());
+  lua_setfield(L, -2, "xip_cache_hit_rate");
+
   return 1;
 }
 
@@ -279,6 +313,8 @@ static const luaL_Reg l_sys_lib[] = {{"getMemInfo", l_sys_getMemInfo},
                                      {"applyUpdate", l_sys_applyUpdate},
                                      {"addMenuItem", l_sys_addMenuItem},
                                      {"clearMenuItems", l_sys_clearMenuItems},
+                                     {"pauseBackground", l_sys_pauseBackground},
+                                     {"resumeBackground", l_sys_resumeBackground},
                                      {"triggerFault", l_sys_trigger_fault},
                                      {"loadlib", l_sys_loadlib},
                                      {NULL, NULL}};

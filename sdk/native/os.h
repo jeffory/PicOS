@@ -1,5 +1,6 @@
 #pragma once
 
+#include <stdatomic.h>
 #include <stdint.h>
 #include <stdbool.h>
 
@@ -97,6 +98,13 @@ typedef struct {
     void (*effectDither)(uint8_t levels);      // quantization levels
     void (*effectScanline)(uint8_t intensity); // 0=none, 255=black lines
     void (*effectPosterize)(uint8_t levels);   // 2-32 levels per channel
+    // Raycasting primitives
+    void (*fillVLine)(int x, int y0, int y1, uint16_t color);
+    void (*drawTexturedColumn)(int x, int y0, int y1,
+                               const uint16_t *tex, int tex_w, int tex_h,
+                               int tex_x, int tex_y0, int tex_y1);
+    void (*fillVLineGradient)(int x, int y0, int y1,
+                              uint16_t color_top, uint16_t color_bottom);
 } picocalc_display_t;
 
 // --- Filesystem (SD card) ---------------------------------------------------
@@ -119,6 +127,14 @@ typedef struct {
                         void (*callback)(const char *name, bool is_dir,
                                          uint32_t size, void *user),
                         void *user);
+    // Create a directory. Returns true on success or if already exists.
+    bool     (*mkdir)(const char *path);
+    // Delete a file or empty directory. Returns true on success.
+    bool     (*deleteFile)(const char *path);
+    // Rename/move a file. Returns true on success.
+    bool     (*renameFile)(const char *src, const char *dst);
+    // Check if path is a directory. Returns true if it exists and is a directory.
+    bool     (*isDir)(const char *path);
 } picocalc_fs_t;
 
 // --- System -----------------------------------------------------------------
@@ -178,8 +194,9 @@ typedef struct {
 typedef enum {
     WIFI_STATUS_DISCONNECTED = 0,
     WIFI_STATUS_CONNECTING,
-    WIFI_STATUS_CONNECTED,
+    WIFI_STATUS_CONNECTED,      // IP assigned, internet NOT verified
     WIFI_STATUS_FAILED,
+    WIFI_STATUS_ONLINE,         // Internet connectivity confirmed
 } wifi_status_t;
 
 typedef struct {
@@ -294,7 +311,10 @@ typedef struct {
     void  (*setByteRange)(pchttp_t c, int from, int to);
     void  (*setConnectTimeout)(pchttp_t c, int seconds);
     void  (*setReadTimeout)(pchttp_t c, int seconds);
-    void  (*setReadBufferSize)(pchttp_t c, int bytes);
+    bool  (*setReadBufferSize)(pchttp_t c, int bytes);
+    // Returns true when the request has completed (success or failure).
+    // Use getStatus()/getError() to determine outcome.
+    bool  (*isComplete)(pchttp_t c);
 } picocalc_http_t;
 
 // --- Sound Player -----------------------------------------------------------
@@ -531,3 +551,8 @@ typedef struct PicoCalcAPI {
 
 // The global API instance, populated during os_init()
 extern PicoCalcAPI g_api;
+
+// Optional audio callback for native apps that need Core 1 mixing.
+// Set by the native app at startup, cleared on exit. Called every 5ms
+// from core1_entry() alongside mp3_player_update()/fileplayer_update().
+extern _Atomic(void (*)(void)) g_native_audio_callback;

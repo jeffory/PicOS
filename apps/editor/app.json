@@ -8,5 +8,8 @@
     "filesystem",
     "root-filesystem",
     "clipboard"
-  ]
+  ],
+  "category": "tools",
+  "repo": "jeffory/picos-apps",
+  "min_firmware": "1.0.0"
 }

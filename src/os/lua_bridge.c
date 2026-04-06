@@ -120,6 +120,7 @@ static void menu_lua_hook(lua_State *L, lua_Debug *ar) {
 void lua_bridge_game_init(lua_State *L);
 void lua_bridge_terminal_init(lua_State *L);
 void lua_bridge_register_3d(lua_State *L);
+void lua_bridge_zip_init(lua_State *L);
 
 void lua_bridge_register(lua_State *L) {
   printf("[LUA] lua_bridge_register start, PSRAM free=%lu\n",
@@ -190,6 +191,8 @@ void lua_bridge_register(lua_State *L) {
   lua_bridge_crypto_init(L);
   printf("[LUA] registering modplayer...\n");
   lua_bridge_mod_init(L);
+  printf("[LUA] registering zip...\n");
+  lua_bridge_zip_init(L);
   printf("[LUA] all modules done, PSRAM free=%lu\n",
          (unsigned long)umm_free_heap_size());
   // Set as global

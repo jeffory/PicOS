@@ -661,6 +661,111 @@ void display_fill_circle(int cx, int cy, int r, uint16_t color) {
   }
 }
 
+// Fast vertical line fill — stride-based pointer walk, no Bresenham overhead.
+void display_fill_vline(int x, int y0, int y1, uint16_t color) {
+  if (x < 0 || x >= FB_WIDTH)
+    return;
+  if (y0 > y1) {
+    int t = y0;
+    y0 = y1;
+    y1 = t;
+  }
+  if (y0 < 0)
+    y0 = 0;
+  if (y1 >= FB_HEIGHT)
+    y1 = FB_HEIGHT - 1;
+  if (y0 > y1)
+    return;
+  uint16_t be = (color >> 8) | (color << 8);
+  uint16_t *p = &s_framebuffer[y0 * FB_WIDTH + x];
+  for (int y = y0; y <= y1; y++, p += FB_WIDTH)
+    *p = be;
+}
+
+// Draw a textured vertical column using 16.16 fixed-point texture sampling.
+void display_draw_textured_column(int x, int y0, int y1,
+                                  const uint16_t *tex, int tex_w, int tex_h,
+                                  int tex_x, int tex_y0, int tex_y1) {
+  if (x < 0 || x >= FB_WIDTH || y0 > y1 || !tex)
+    return;
+  if (tex_x < 0 || tex_x >= tex_w)
+    return;
+
+  // Total screen height and texture height for this column
+  int screen_h = y1 - y0 + 1;
+  int tex_span = tex_y1 - tex_y0 + 1;
+  if (screen_h <= 0 || tex_span <= 0)
+    return;
+
+  // Fixed-point 16.16 step: how much texture to advance per screen pixel
+  uint32_t step = ((uint32_t)tex_span << 16) / (uint32_t)screen_h;
+
+  // Clip top
+  uint32_t tex_pos = (uint32_t)tex_y0 << 16; // starting texture position
+  if (y0 < 0) {
+    tex_pos += step * (uint32_t)(-y0);
+    y0 = 0;
+  }
+  if (y1 >= FB_HEIGHT)
+    y1 = FB_HEIGHT - 1;
+  if (y0 > y1)
+    return;
+
+  uint16_t *dst = &s_framebuffer[y0 * FB_WIDTH + x];
+  for (int y = y0; y <= y1; y++, dst += FB_WIDTH) {
+    int ty = (int)(tex_pos >> 16);
+    if (ty < 0)
+      ty = 0;
+    if (ty >= tex_h)
+      ty = tex_h - 1;
+    uint16_t c = tex[ty * tex_w + tex_x];
+    *dst = (c >> 8) | (c << 8); // byte-swap to big-endian
+    tex_pos += step;
+  }
+}
+
+// Gradient vertical line — interpolates RGB565 channels using fixed-point.
+void display_fill_vline_gradient(int x, int y0, int y1, uint16_t color_top,
+                                 uint16_t color_bottom) {
+  if (x < 0 || x >= FB_WIDTH)
+    return;
+  if (y0 > y1) {
+    int t = y0;
+    y0 = y1;
+    y1 = t;
+    uint16_t tc = color_top;
+    color_top = color_bottom;
+    color_bottom = tc;
+  }
+
+  // Clip
+  int orig_y0 = y0;
+  if (y0 < 0)
+    y0 = 0;
+  if (y1 >= FB_HEIGHT)
+    y1 = FB_HEIGHT - 1;
+  if (y0 > y1)
+    return;
+
+  int span = (y1 == orig_y0) ? 1 : (y1 - orig_y0); // avoid divide by zero
+
+  // Extract RGB565 channels
+  int r0 = (color_top >> 11) & 0x1F, g0 = (color_top >> 5) & 0x3F,
+      b0 = color_top & 0x1F;
+  int r1 = (color_bottom >> 11) & 0x1F, g1 = (color_bottom >> 5) & 0x3F,
+      b1 = color_bottom & 0x1F;
+
+  uint16_t *p = &s_framebuffer[y0 * FB_WIDTH + x];
+  for (int y = y0; y <= y1; y++, p += FB_WIDTH) {
+    int t = y - orig_y0;
+    int r = r0 + (r1 - r0) * t / span;
+    int g = g0 + (g1 - g0) * t / span;
+    int b = b0 + (b1 - b0) * t / span;
+    uint16_t c = ((r & 0x1F) << 11) | ((g & 0x3F) << 5) | (b & 0x1F);
+    *p = (c >> 8) | (c << 8);
+  }
+}
+
 // Fill a triangle using scanline algorithm
 void display_fill_triangle(int x0, int y0, int x1, int y1, int x2, int y2,
                            uint16_t color) {

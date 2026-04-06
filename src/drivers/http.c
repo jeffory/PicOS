@@ -5,10 +5,12 @@
 #include "mongoose.h"
 #include "pico/stdlib.h"
 
+#include <stdarg.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 
+#include "os/core1_alloc.h"
 #include "umm_malloc.h"
 
 // RP2350 XIP cache is per-core with no hardware coherency for PSRAM.
@@ -158,8 +160,41 @@ void http_ev_fn(struct mg_connection *nc, int ev, void *ev_data) {
   if (!c)
     return;
 
-  if (ev == MG_EV_CONNECT) {
+  // Drain pending nc->recv data into ring buffer on every poll cycle.
+  // MG_EV_READ only fires on NEW TCP data.  If the ring buffer was full
+  // when data arrived, that data stays in nc->recv.  After Lua drains
+  // the ring buffer (http_read on Core 0), this poll handler moves the
+  // buffered data forward — preventing a deadlock where the ring buffer
+  // is empty, nc->recv is full, and no new TCP triggers MG_EV_READ.
+  if (ev == MG_EV_POLL && c->headers_done &&
+      c->state == HTTP_STATE_BODY && nc->recv.len > 0) {
+    uint32_t space = (c->rx_count < c->rx_cap) ? c->rx_cap - c->rx_count : 0;
+    if (space > 0) {
+      uint32_t avail = (uint32_t)nc->recv.len;
+      uint32_t to_copy = (avail < space) ? avail : space;
+      if (to_copy > 0) {
+        uint32_t written = rx_write(c, nc->recv.buf, to_copy);
+        if (written > 0) {
+          mg_iobuf_del(&nc->recv, 0, written);
+          c->body_received += written;
+          c->deadline_read =
+              to_ms_since_boot(get_absolute_time()) + c->read_timeout_ms;
+          pending_set(c, HTTP_CB_REQUEST);
+
+          if (c->content_length >= 0 &&
+              c->body_received >= (uint32_t)c->content_length) {
+            c->state = HTTP_STATE_DONE;
+            pending_set(c, HTTP_CB_COMPLETE);
+            if (!c->keep_alive)
+              nc->is_closing = 1;
+          }
+        }
+      }
+    }
+  } else if (ev == MG_EV_CONNECT) {
     c->state = HTTP_STATE_SENDING;
+    c->deadline_connect = 0; // connected — cancel connect timeout
+    c->deadline_read = to_ms_since_boot(get_absolute_time()) + c->read_timeout_ms;
     printf("[HTTP] Connected, sending %s (%u bytes) %s\n", c->method,
            (unsigned)strlen(c->path), c->path);
     http_build_and_send_request(nc, c);
@@ -239,6 +274,7 @@ void http_ev_fn(struct mg_connection *nc, int ev, void *ev_data) {
 
     c->headers_done = true;
     c->state = HTTP_STATE_BODY;
+    c->deadline_read = to_ms_since_boot(get_absolute_time()) + c->read_timeout_ms;
     pending_set(c, HTTP_CB_HEADERS);
 
     // Trigger Mongoose streaming detach: clear the recv buffer so Mongoose
@@ -257,26 +293,50 @@ void http_ev_fn(struct mg_connection *nc, int ev, void *ev_data) {
   } else if (ev == MG_EV_READ && c->headers_done && c->state != HTTP_STATE_DONE) {
     // STREAMING: Copy body data incrementally to our rx_buf.
     // After MG_EV_HTTP_HDRS detach, all body data arrives here as raw reads.
-    uint32_t avail = (uint32_t)nc->recv.len;
-    if (avail > 0 && c->rx_count < c->rx_cap) {
-      uint32_t space = c->rx_cap - c->rx_count;
-      uint32_t to_copy = (avail < space) ? avail : space;
 
-      if (to_copy > 0) {
-        uint32_t written = rx_write(c, nc->recv.buf, to_copy);
-        if (written > 0) {
-          mg_iobuf_del(&nc->recv, 0, written);  // FREE only what was actually copied
-          c->body_received += written;
-          pending_set(c, HTTP_CB_REQUEST);  // Fire Lua callback with new data
+    // Guard: if ring buffer is full and nc->recv is growing dangerously large,
+    // close the connection cleanly before Mongoose hits OOM.  Without TCP
+    // backpressure (MG_ENABLE_TCPIP=1), nc->recv grows unbounded.
+    if (nc->recv.len > 524288) {  // 512KB threshold
+      printf("[HTTP] recv overflow: %lu bytes buffered, ring full — closing\n",
+             (unsigned long)nc->recv.len);
+      snprintf(c->err, sizeof(c->err), "recv overflow (%lu bytes)",
+               (unsigned long)nc->recv.len);
+      c->state = HTTP_STATE_DONE;
+      pending_set(c, HTTP_CB_REQUEST | HTTP_CB_COMPLETE);
+      nc->is_draining = 1;
+    } else {
+      uint32_t avail = (uint32_t)nc->recv.len;
+      if (avail > 0 && c->rx_count < c->rx_cap) {
+        uint32_t space = c->rx_cap - c->rx_count;
+        uint32_t to_copy = (avail < space) ? avail : space;
+
+        if (to_copy > 0) {
+          uint32_t written = rx_write(c, nc->recv.buf, to_copy);
+          if (written > 0) {
+            mg_iobuf_del(&nc->recv, 0, written);  // FREE only what was actually copied
+            c->body_received += written;
+            c->deadline_read = to_ms_since_boot(get_absolute_time()) + c->read_timeout_ms;
+            pending_set(c, HTTP_CB_REQUEST);  // Fire Lua callback with new data
+          }
         }
-      }
 
-      // Check for download completion (streaming mode)
-      if (c->content_length >= 0 &&
-          c->body_received >= (uint32_t)c->content_length) {
-        c->state = HTTP_STATE_DONE;
-        pending_set(c, HTTP_CB_COMPLETE);
-        if (!c->keep_alive) nc->is_closing = 1;
+        // Check for download completion (streaming mode)
+        if (c->content_length >= 0 &&
+            c->body_received >= (uint32_t)c->content_length) {
+          c->state = HTTP_STATE_DONE;
+          pending_set(c, HTTP_CB_COMPLETE);
+          if (!c->keep_alive) nc->is_closing = 1;
+        }
+      } else if (avail > 0 && c->rx_count >= c->rx_cap) {
+        // Ring buffer full — data stays in nc->recv until Lua drains via
+        // http_read().  Reset deadline so the read timeout doesn't fire
+        // while data is actively arriving (just can't be consumed yet).
+        c->deadline_read =
+            to_ms_since_boot(get_absolute_time()) + c->read_timeout_ms;
+        MG_DEBUG(("[HTTP] Ring buffer full (%u/%u), nc->recv=%lu pending",
+                  (unsigned)c->rx_count, (unsigned)c->rx_cap,
+                  (unsigned long)nc->recv.len));
       }
     }
     // If rx_buf is full, don't consume from nc->recv — TCP backpressure
@@ -366,6 +426,8 @@ void http_ev_fn(struct mg_connection *nc, int ev, void *ev_data) {
         }
       }
       // Fire both REQUEST (for data) and COMPLETE (for done)
+      // Set error so Lua can distinguish partial from clean completion
+      snprintf(c->err, sizeof(c->err), "partial: %s", (char *)ev_data);
       c->state = HTTP_STATE_DONE;
       pending_set(c, HTTP_CB_REQUEST | HTTP_CB_COMPLETE);
       nc->is_closing = 1;
@@ -498,6 +560,10 @@ void http_free(http_conn_t *c) {
          (to_ms_since_boot(get_absolute_time()) - start_ms) < 200) {
     sleep_ms(1);
   }
+  if (c->pcb != NULL || c->state == HTTP_STATE_QUEUED)
+    printf("[HTTP] http_free: timeout waiting for Core 1 (conn %d)\n",
+           (int)(c - s_conns));
+  __dmb(); // ensure Core 1 writes visible before we free buffers
 
   umm_free(c->path);
   c->path = NULL;
@@ -581,6 +647,8 @@ static bool start_request(http_conn_t *c, const char *method, const char *path,
 
   // Mark as queued so http_close_all() and http_free() know to wait
   c->state = HTTP_STATE_QUEUED;
+  c->deadline_connect = to_ms_since_boot(get_absolute_time()) + c->connect_timeout_ms;
+  c->deadline_read = 0;
 
   // Push to Core 1's request queue — it will call mg_http_connect() /
   // mg_printf() / etc. from within drain_requests().
@@ -677,7 +745,39 @@ void http_fire_c_pending(void) {
   // Future: iterate s_conns, check pending flags, call C callbacks.
 }
 
-// ── Custom Mongoose Allocator ────────────────────────────────────────────────
-void *mg_calloc(size_t count, size_t size) { return umm_calloc(count, size); }
+// ── Timeout enforcement (called from wifi_poll on Core 1) ───────────────────
 
-void mg_free(void *ptr) { umm_free(ptr); }
+void http_check_timeouts(void) {
+  uint32_t now = to_ms_since_boot(get_absolute_time());
+  for (int i = 0; i < HTTP_MAX_CONNECTIONS; i++) {
+    http_conn_t *c = &s_conns[i];
+    if (!c->in_use) continue;
+
+    // Connect timeout: covers QUEUED → CONNECTING → SENDING
+    if ((c->state == HTTP_STATE_QUEUED || c->state == HTTP_STATE_CONNECTING ||
+         c->state == HTTP_STATE_SENDING) &&
+        c->deadline_connect > 0 && now > c->deadline_connect) {
+      conn_fail(c, "connect timeout (%ums)", (unsigned)c->connect_timeout_ms);
+      if (c->pcb) {
+        ((struct mg_connection *)c->pcb)->is_closing = 1;
+        c->pcb = NULL;
+      }
+      c->deadline_connect = 0;
+    }
+    // Read timeout: covers HEADERS and BODY (idle — no data arriving)
+    else if ((c->state == HTTP_STATE_HEADERS || c->state == HTTP_STATE_BODY) &&
+             c->deadline_read > 0 && now > c->deadline_read) {
+      conn_fail(c, "read timeout (%ums)", (unsigned)c->read_timeout_ms);
+      if (c->pcb) {
+        ((struct mg_connection *)c->pcb)->is_closing = 1;
+        c->pcb = NULL;
+      }
+      c->deadline_read = 0;
+    }
+  }
+}
+
+// ── Custom Mongoose Allocator ────────────────────────────────────────────────
+void *mg_calloc(size_t count, size_t size) { return core1_calloc(count, size); }
+
+void mg_free(void *ptr) { core1_free(ptr); }

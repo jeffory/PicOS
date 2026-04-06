@@ -22,13 +22,13 @@
 // =============================================================================
 
 #define EMU_CODE_BASE       0x10000000u
-#define EMU_CODE_SIZE       (4u * 1024 * 1024)   // 4MB
+#define EMU_CODE_SIZE       (8u * 1024 * 1024)   // 8MB (matches PSRAM on hardware)
 
 #define EMU_DATA_BASE       0x20000000u
 #define EMU_DATA_SIZE       (4u * 1024 * 1024)   // 4MB
 
 #define EMU_STACK_BASE      0x30000000u
-#define EMU_STACK_SIZE      (64u * 1024)          // 64KB
+#define EMU_STACK_SIZE      (256u * 1024)         // 256KB
 
 #define EMU_HEAP_BASE       0x40000000u
 #define EMU_HEAP_SIZE       (4u * 1024 * 1024)    // 4MB
@@ -50,6 +50,10 @@
 
 // Maximum number of trampoline slots (API functions)
 #define MAX_TRAMP_SLOTS     256
+
+// Flag set when uc_emu_stop was called during nested emulation (SVC #254).
+// The outer emulation loop checks this to know it should restart.
+int g_emu_nested_stop = 0;
 
 // =============================================================================
 // Minimal ELF32 types (same as native_loader.c)
@@ -291,7 +295,7 @@ static void trampoline_hook(uc_engine *uc, uint32_t intno, void *user_data) {
         // PC=0 with insn=0 means the app returned (LR was set to 0).
         if ((insn & 0xFF00) != 0xDF00) {
             if (pc == 0) {
-                // Normal exit: app returned from picos_main()
+                printf("[UNICORN] Normal exit: app returned from picos_main()\n");
             } else {
                 fprintf(stderr, "[UNICORN] Unexpected interrupt on non-SVC insn 0x%04x at 0x%08x\n",
                         insn, pc);
@@ -301,6 +305,14 @@ static void trampoline_hook(uc_engine *uc, uint32_t intno, void *user_data) {
         }
 
         uint32_t slot = insn & 0xFF;
+
+        // SVC #254: nested callback return sentinel. Stop emulation.
+        // Set flag so outer loop knows to restart after the trampoline returns.
+        if (slot == 254) {
+            g_emu_nested_stop = 1;
+            uc_emu_stop(uc);
+            return;
+        }
 
         // Dispatch the API call
         unicorn_tramp_dispatch(uc, slot);
@@ -406,6 +418,14 @@ static bool load_elf(uc_engine *uc, const char *path, uint32_t *out_entry) {
     printf("[UNICORN] ELF image: %u bytes (vaddr 0x%08x..0x%08x)\n",
            image_size, mem_min, mem_max);
 
+    if (image_size > EMU_CODE_SIZE) {
+        fprintf(stderr, "[UNICORN] ELF image too large (%u bytes > %u byte code region)\n",
+                image_size, (uint32_t)EMU_CODE_SIZE);
+        free(phdrs);
+        fclose(f);
+        return false;
+    }
+
     // Load base: remap from original vaddr to our code region
     uint32_t load_bias = EMU_CODE_BASE - mem_min;
 
@@ -497,6 +517,26 @@ static bool load_elf(uc_engine *uc, const char *path, uint32_t *out_entry) {
         return false;
     }
 
+    // Map the ELF's original virtual address range (0x0..image_size) as a shadow
+    // region.  Newlib and other library code may hold unrelocated pointers (e.g.
+    // internal _reent function pointers, lock stubs) that reference the original
+    // VirtAddr space.  Without this mapping, every 4KB page fault triggers the
+    // mem_error_hook one at a time, adding hundreds of dynamic uc_mem_map calls.
+    // On real RP2350 hardware, low addresses land in boot ROM (reads succeed,
+    // writes are silently ignored), so this mirrors that behavior.
+    if (mem_min == 0 && image_size > 0) {
+        uint32_t shadow_size = (image_size + 0xFFF) & ~0xFFFu;
+        uc_err serr = uc_mem_map(uc, 0, shadow_size, UC_PROT_ALL);
+        if (serr == UC_ERR_OK) {
+            printf("[UNICORN] Mapped shadow region 0x00000000..0x%08x for unrelocated accesses\n",
+                   shadow_size);
+        } else {
+            fprintf(stderr, "[UNICORN] WARNING: shadow region map failed: %s (size=0x%08x)\n",
+                    uc_strerror(serr), shadow_size);
+        }
+        // Non-fatal if it fails (mem_error_hook will handle individual pages)
+    }
+
     // Compute entry point
     uint32_t entry_voff = (ehdr.e_entry & ~1u) - mem_min;
     *out_entry = EMU_CODE_BASE + entry_voff;
@@ -520,6 +560,34 @@ extern void unicorn_build_api_struct(uc_engine *uc, uint32_t api_base, uint32_t 
 
 // =============================================================================
 // Main entry point
+// Memory error hook — prints the faulting address and instruction context
+static bool mem_error_hook(uc_engine *uc, uc_mem_type type,
+                           uint64_t address, int size, int64_t value,
+                           void *user_data) {
+    (void)user_data; (void)value;
+    uint32_t pc, sp, lr;
+    uc_reg_read(uc, UC_ARM_REG_PC, &pc);
+    uc_reg_read(uc, UC_ARM_REG_SP, &sp);
+    uc_reg_read(uc, UC_ARM_REG_LR, &lr);
+    const char *op = (type == UC_MEM_READ_UNMAPPED) ? "READ" :
+                     (type == UC_MEM_WRITE_UNMAPPED) ? "WRITE" : "FETCH";
+    fprintf(stderr, "[UNICORN] MEM_ERROR: %s unmapped addr=0x%08llx size=%d at PC=0x%08x SP=0x%08x LR=0x%08x\n",
+            op, (unsigned long long)address, size, pc, sp, lr);
+    fflush(stderr);
+
+    // Dynamically map the faulting page so emulation can continue.
+    // This handles NULL pointer dereferences and hardware register accesses
+    // (e.g. RP2350 watchdog poke) that don't exist in the simulator.
+    uint64_t page_base = address & ~0xFFFULL;
+    uint32_t page_size = 0x1000;
+    uc_err err = uc_mem_map(uc, page_base, page_size, UC_PROT_ALL);
+    if (err == UC_ERR_OK) {
+        return true;  // retry the access
+    }
+    // If we can't map it, the access fails and emulation stops
+    return false;
+}
+
 // =============================================================================
 
 bool unicorn_run_app(const char *elf_path, const char *app_dir,
@@ -607,11 +675,24 @@ bool unicorn_run_app(const char *elf_path, const char *app_dir,
         goto fail;
     }
 
-    // Reverse-call stubs region
+    // Reverse-call stubs region — used as return address for nested uc_emu_start callbacks.
+    // Write a NOP at REVCALL_BASE so Unicorn's `until` address check fires before executing.
     err = uc_mem_map(uc, EMU_REVCALL_BASE, EMU_REVCALL_SIZE, UC_PROT_ALL);
     if (err != UC_ERR_OK) {
         fprintf(stderr, "[UNICORN] Failed to map reverse-call region: %s\n", uc_strerror(err));
         goto fail;
+    }
+    {
+        // Write SVC #254 + BX LR at REVCALL_BASE. When a nested callback
+        // returns (BX LR → REVCALL_BASE), it executes SVC #254 which the
+        // interrupt hook recognizes as "end of nested callback" and calls
+        // uc_emu_stop. The global stop flag is acceptable here because
+        // the trampoline code that invoked uc_emu_start expects it.
+        uint16_t revcall_code[2] = {
+            0xDFFE,  // SVC #254
+            0x4770,  // BX LR (safety, shouldn't reach here)
+        };
+        uc_mem_write(uc, EMU_REVCALL_BASE, revcall_code, sizeof(revcall_code));
     }
 
     // ── Fill trampoline region with SVC #N + BX LR instructions ────────
@@ -639,6 +720,18 @@ bool unicorn_run_app(const char *elf_path, const char *app_dir,
         if (err != UC_ERR_OK) {
             fprintf(stderr, "[UNICORN] Failed to add interrupt hook: %s\n", uc_strerror(err));
             goto fail;
+        }
+    }
+
+
+    // ── Memory error hook for debugging ────────────────────────────────
+    {
+        uc_hook mem_hook;
+        err = uc_hook_add(uc, &mem_hook,
+                          UC_HOOK_MEM_READ_UNMAPPED | UC_HOOK_MEM_WRITE_UNMAPPED | UC_HOOK_MEM_FETCH_UNMAPPED,
+                          (void *)mem_error_hook, NULL, 1, 0);
+        if (err != UC_ERR_OK) {
+            fprintf(stderr, "[UNICORN] Failed to add memory hook: %s\n", uc_strerror(err));
         }
     }
 
@@ -684,22 +777,42 @@ bool unicorn_run_app(const char *elf_path, const char *app_dir,
     fflush(stdout);  // ensure output visible before emulation starts
 
     // ── Run ─────────────────────────────────────────────────────────────
-    err = uc_emu_start(uc, entry_point, 0, 0, 0);
-    if (err != UC_ERR_OK) {
-        // UC_ERR_FETCH_UNMAPPED at address 0 means the app returned normally
-        // (LR was set to 0, so BX LR jumps to 0 which is unmapped)
-        uint32_t pc;
-        uc_reg_read(uc, UC_ARM_REG_PC, &pc);
-        if (err == UC_ERR_FETCH_UNMAPPED && pc == 0) {
-            printf("[UNICORN] App returned normally\n");
-        } else {
-            fprintf(stderr, "[UNICORN] Emulation error: %s (PC=0x%08x)\n",
-                    uc_strerror(err), pc);
-            // Print additional debug info
-            uint32_t sp_val, lr_val;
+    // The main emulation loop must restart when uc_emu_stop is called from
+    // within a nested callback (SVC #254). The trampoline handler sets
+    // g_emu_nest_depth > 0 during nested calls; if the outer emu_start exits
+    // while nested, we resume from the current PC.
+    {
+        uint32_t start_addr = entry_point;
+        for (;;) {
+            err = uc_emu_start(uc, start_addr, 0, 0, 0);
+            uint32_t pc, sp_val, lr_val;
+            uc_reg_read(uc, UC_ARM_REG_PC, &pc);
             uc_reg_read(uc, UC_ARM_REG_SP, &sp_val);
             uc_reg_read(uc, UC_ARM_REG_LR, &lr_val);
-            fprintf(stderr, "[UNICORN] SP=0x%08x LR=0x%08x\n", sp_val, lr_val);
+
+            if (err == UC_ERR_OK && g_emu_nested_stop) {
+                // Outer emulation was killed by nested uc_emu_stop (SVC #254).
+                // Resume from current PC (the SVC dispatch already set PC
+                // to LR, so we continue after the trampoline call).
+                g_emu_nested_stop = 0;
+                start_addr = pc | 1u;  // Thumb bit
+                continue;
+            }
+
+            printf("[UNICORN] emu_start returned: err=%d pc=0x%08x sp=0x%08x lr=0x%08x nested=%d\n",
+                   err, pc, sp_val, lr_val, g_emu_nested_stop);
+            fflush(stdout);
+            if (err == UC_ERR_OK) {
+                printf("[UNICORN] Emulation stopped (uc_emu_stop called). PC=0x%08x SP=0x%08x LR=0x%08x\n",
+                       pc, sp_val, lr_val);
+            } else if (err == UC_ERR_FETCH_UNMAPPED && pc == 0) {
+                printf("[UNICORN] App returned normally\n");
+            } else {
+                fprintf(stderr, "[UNICORN] Emulation error: %s (PC=0x%08x SP=0x%08x LR=0x%08x)\n",
+                        uc_strerror(err), pc, sp_val, lr_val);
+            }
+            fflush(stdout); fflush(stderr);
+            break;
         }
     }
 

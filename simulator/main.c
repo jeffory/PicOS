@@ -343,7 +343,7 @@ static void http_setKeepAlive_w(pchttp_t c, bool ka) { ((http_conn_t *)c)->keep_
 static void http_setByteRange_w(pchttp_t c, int from, int to) { ((http_conn_t *)c)->range_from = from; ((http_conn_t *)c)->range_to = to; }
 static void http_setConnectTimeout_w(pchttp_t c, int s) { ((http_conn_t *)c)->connect_timeout_ms = (uint32_t)(s * 1000); }
 static void http_setReadTimeout_w(pchttp_t c, int s) { ((http_conn_t *)c)->read_timeout_ms = (uint32_t)(s * 1000); }
-static void http_setReadBufferSize_w(pchttp_t c, int bytes) { http_set_recv_buf((http_conn_t *)c, (uint32_t)bytes); }
+static bool http_setReadBufferSize_w(pchttp_t c, int bytes) { return http_set_recv_buf((http_conn_t *)c, (uint32_t)bytes); }
 
 static const picocalc_http_t s_http_impl = {
     .newConn = http_newConn_w, .get = http_get_w, .post = http_post_w,
@@ -438,10 +438,12 @@ int main(int argc, char** argv) {
     
     hal_timing_init();
 
-    // Initialize networking (before Core 1 starts)
+    // Initialize toast system and networking (before Core 1 starts)
+    extern void toast_init(void);
     extern void http_init(void);
     extern void tcp_init(void);
     extern void wifi_init(void);
+    toast_init();
     http_init();
     tcp_init();
     wifi_init();

@@ -11,6 +11,8 @@
 #include "../os/os.h"
 #include "../os/ui.h"
 
+#include <stdatomic.h>
+
 // Define BYTE/LBA_t and other FatFs types manually before diskio.h
 // just in case they are missing from diskio.h inclusion order
 #include <stdint.h>
@@ -39,8 +41,8 @@ bool usb_msc_is_active(void) { return s_msc_active; }
 // --------------------------------------------------------------------
 
 // Declared in main.c - pauses Core 1's background tasks (WiFi, HTTP, audio)
-extern volatile bool g_core1_pause;
-extern volatile bool g_core1_paused;
+extern _Atomic bool g_core1_pause;
+extern _Atomic bool g_core1_paused;
 
 void usb_msc_enter_mode(void) {
   printf("[USB MSC] Entering USB Mass Storage mode\n");
@@ -48,7 +50,8 @@ void usb_msc_enter_mode(void) {
   // 1. Disconnect WiFi and pause Core 1 to prevent SPI/I2C contention
   //    Core 1 runs WiFi/HTTP/audio tasks every 5ms which can interfere
   //    with USB MSC operations and cause keyboard I2C timeouts.
-  bool was_connected = (wifi_get_status() == WIFI_STATUS_CONNECTED);
+  wifi_status_t wst = wifi_get_status();
+  bool was_connected = (wst == WIFI_STATUS_CONNECTED || wst == WIFI_STATUS_ONLINE);
   if (was_connected) {
     printf("[USB MSC] Disconnecting WiFi...\n");
     wifi_disconnect();
@@ -56,9 +59,10 @@ void usb_msc_enter_mode(void) {
   
   // Pause Core 1 completely - wait for acknowledgment to ensure it's stopped
   g_core1_pause = true;
-  while (!g_core1_paused) {
+  for (int i = 0; i < 500 && !g_core1_paused; i++)
     sleep_ms(1);
-  }
+  if (!g_core1_paused)
+    printf("[USB_MSC] Core 1 pause timeout (500ms)\n");
   printf("[USB MSC] Core 1 paused (WiFi/HTTP/audio halted)\n");
 
   // 2. Ensure FS Info has valid free cluster count, then unmount FatFS.
@@ -264,8 +268,11 @@ int32_t tud_msc_read10_cb(uint8_t lun, uint32_t lba, uint32_t offset,
   if (!s_msc_active)
     return -1;
 
-  // No mutex — Core 1 is paused during MSC mode, nothing else uses SPI0
+  // Defense-in-depth: Core 1 is paused during MSC mode so the mutex is
+  // uncontended, but acquire it anyway to guard against future changes.
+  recursive_mutex_enter_blocking(&g_sdcard_mutex);
   DRESULT res = disk_read(0, (BYTE *)buffer, lba, bufsize / msc_block_size);
+  recursive_mutex_exit(&g_sdcard_mutex);
   if (res != RES_OK)
     return -1;
 
@@ -285,8 +292,11 @@ int32_t tud_msc_write10_cb(uint8_t lun, uint32_t lba, uint32_t offset,
   if (!s_msc_active)
     return -1;
 
-  // No mutex — Core 1 is paused during MSC mode, nothing else uses SPI0
+  // Defense-in-depth: Core 1 is paused during MSC mode so the mutex is
+  // uncontended, but acquire it anyway to guard against future changes.
+  recursive_mutex_enter_blocking(&g_sdcard_mutex);
   DRESULT res = disk_write(0, (const BYTE *)buffer, lba, bufsize / msc_block_size);
+  recursive_mutex_exit(&g_sdcard_mutex);
   if (res != RES_OK)
     return -1;
 

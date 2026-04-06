@@ -167,6 +167,9 @@ uint8_t http_take_pending(http_conn_t *c);
 // Poll Mongoose for network events.
 void http_poll(void);
 
+// Check and enforce connect/read timeouts. Called from wifi_poll() on Core 1.
+void http_check_timeouts(void);
+
 // Fire any pending C-language (non-Lua) HTTP callbacks.
 // Called from Core 1 after wifi_poll() so native apps get network events
 // without needing a Lua-style opcode hook.

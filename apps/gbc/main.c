@@ -66,8 +66,9 @@ static void lcd_draw_line(struct gb_s *gb, const uint8_t pixels[160], const uint
 static char g_rom_list[16][32];
 static int g_rom_count = 0;
 
-static void rom_list_callback(const char *name, bool is_dir, void *user) {
+static void rom_list_callback(const char *name, bool is_dir, uint32_t size, void *user) {
     (void)user;
+    (void)size;
     s_api->sys->log("[GBC] rom_list_cb: '%s' dir=%d\n", name, is_dir);
     if (is_dir) return;
     
@@ -147,9 +148,6 @@ void picos_main(const PicoCalcAPI *api,
     gbc_fs_set_api(api);
     sys->log("[GBC] fs_set_api done\n");
 
-    for (volatile int i = 0; i < 100000; i++);
-    sys->log("[GBC] spin delay done\n");
-
     sys->log("[GBC] calling find_first_rom()...\n");
     char *rom_path = find_first_rom();
     sys->log("[GBC] find_first_rom() returned: %s\n", rom_path ? rom_path : "(null)");
@@ -173,8 +171,6 @@ void picos_main(const PicoCalcAPI *api,
     d->flush();
     sys->log("[GBC] Loading ROM screen drawn\n");
 
-    for (volatile int i = 0; i < 100000; i++);
-
     sys->log("[GBC] loading ROM: %s\n", rom_path);
     s_rom_size = gbc_fs_load_rom(&s_fs, rom_path, s_rom, ROM_MAX_SIZE);
     sys->log("[GBC] ROM load complete: path=%s size=%d\n", rom_path, s_rom_size);
@@ -195,8 +191,6 @@ void picos_main(const PicoCalcAPI *api,
     d->drawText(80, 150, "Init GB...", 0x07E0, 0x0000);
     d->flush();
     sys->log("[GBC] Init GB screen drawn\n");
-
-    for (volatile int i = 0; i < 100000; i++);
 
     sys->log("[GBC] calling gb_init...\n");
     enum gb_init_error_e ret = gb_init(&s_gb, &gb_rom_read, &gb_cart_ram_read,
@@ -226,6 +220,7 @@ void picos_main(const PicoCalcAPI *api,
     s_gb.direct.frame_skip = 1;
     s_display.cgb_mode = s_gb.cgb.cgbMode;
     s_display.cgb_palette = s_gb.cgb.fixPalette;
+    gbc_display_update_cgb_lut(&s_display);
     sys->log("[GBC] lcd callback set (cgb=%d)\n", s_display.cgb_mode);
 
     audio_init();
@@ -258,22 +253,21 @@ void picos_main(const PicoCalcAPI *api,
     while (running) {
         sys->poll();
 
-        gbc_input_update(&s_input, in->getButtons);
-        s_gb.direct.joypad_bits.a      = (s_input.buttons & BTN_F4)    ? 0 : 1;
-        s_gb.direct.joypad_bits.b      = (s_input.buttons & BTN_F5)    ? 0 : 1;
-        s_gb.direct.joypad_bits.select = (s_input.buttons & BTN_F1)    ? 0 : 1;
-        s_gb.direct.joypad_bits.start  = (s_input.buttons & BTN_F2)    ? 0 : 1;
-        s_gb.direct.joypad_bits.right  = (s_input.buttons & BTN_RIGHT) ? 0 : 1;
-        s_gb.direct.joypad_bits.left   = (s_input.buttons & BTN_LEFT)  ? 0 : 1;
-        s_gb.direct.joypad_bits.up     = (s_input.buttons & BTN_UP)    ? 0 : 1;
-        s_gb.direct.joypad_bits.down   = (s_input.buttons & BTN_DOWN)  ? 0 : 1;
-
-        if (in->getButtonsPressed() & BTN_ESC) {
-            running = false;
-            break;
-        }
-
         for (int f = 0; f < 4 && running; f++) {
+            gbc_input_update(&s_input, in->getButtons);
+            s_gb.direct.joypad_bits.a      = (s_input.buttons & BTN_F4)    ? 0 : 1;
+            s_gb.direct.joypad_bits.b      = (s_input.buttons & BTN_F5)    ? 0 : 1;
+            s_gb.direct.joypad_bits.select = (s_input.buttons & BTN_F1)    ? 0 : 1;
+            s_gb.direct.joypad_bits.start  = (s_input.buttons & BTN_F2)    ? 0 : 1;
+            s_gb.direct.joypad_bits.right  = (s_input.buttons & BTN_RIGHT) ? 0 : 1;
+            s_gb.direct.joypad_bits.left   = (s_input.buttons & BTN_LEFT)  ? 0 : 1;
+            s_gb.direct.joypad_bits.up     = (s_input.buttons & BTN_UP)    ? 0 : 1;
+            s_gb.direct.joypad_bits.down   = (s_input.buttons & BTN_DOWN)  ? 0 : 1;
+
+            if (in->getButtonsPressed() & BTN_ESC) {
+                running = false;
+                break;
+            }
             if (sys->shouldExit()) {
                 running = false;
                 break;
@@ -321,6 +315,10 @@ void picos_main(const PicoCalcAPI *api,
             }
             // Draw in the 16px black bar above the GBC image
             d->drawText(2, 4, fps_str, 0x07E0, 0x0000);
+
+            // Refresh CGB palette LUT (palettes can change mid-game)
+            if (s_display.cgb_mode)
+                gbc_display_update_cgb_lut(&s_display);
 
             gbc_display_render(&s_display,
                 d->drawImageNN,

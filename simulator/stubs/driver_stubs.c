@@ -1,4 +1,6 @@
 // driver_stubs.c - Stubs for PicOS driver functions
+#define _XOPEN_SOURCE 500  // for nftw()
+#include <ftw.h>
 #include <stdint.h>
 #include <stdbool.h>
 #include <stdio.h>
@@ -359,14 +361,34 @@ int display_get_font_height(void) {
     return FONT_H;
 }
 
+static int s_display_flush_count = 0;
+
 void display_flush(void) {
     // Socket polling is handled by the dedicated socket thread.
     // Swap buffers and copy to HAL framebuffer
     uint16_t* back = display_get_back_buffer();
     uint16_t* hal_fb = hal_display_get_framebuffer();
+    s_display_flush_count++;
     if (hal_fb) {
+        if (s_display_flush_count <= 5 || (s_display_flush_count % 500) == 0) {
+            // Debug: sample a few pixels to verify data is flowing
+            int nonzero = 0;
+            for (int i = 0; i < 320*320; i++) { if (back[i] != 0) nonzero++; }
+            fprintf(stderr, "[DISPLAY] flush #%d: back=%p hal_fb=%p nonzero_pixels=%d first=[%04x %04x %04x %04x]\n",
+                    s_display_flush_count, (void*)back, (void*)hal_fb, nonzero,
+                    back[0], back[1], back[160*320+160], back[319*320+319]);
+        }
         memcpy(hal_fb, back, 320 * 320 * sizeof(uint16_t));
+        if (s_display_flush_count <= 5 || (s_display_flush_count % 500) == 0) {
+            // Verify HAL buffer was written
+            int nz = 0;
+            for (int i = 0; i < 320*320; i++) { if (hal_fb[i] != 0) nz++; }
+            fprintf(stderr, "[DISPLAY] hal_fb after memcpy: nonzero=%d first=[%04x %04x] ptr=%p\n",
+                    nz, hal_fb[0], hal_fb[160*320+160], (void*)hal_fb);
+        }
         hal_display_present();
+    } else {
+        fprintf(stderr, "[DISPLAY] flush: hal_fb is NULL!\n");
     }
     // Swap buffer index
     g_current_buffer = 1 - g_current_buffer;
@@ -439,10 +461,64 @@ void display_fill_circle(int x, int y, int r, uint16_t color) {
 }
 
 void display_fill_triangle(int x0, int y0, int x1, int y1, int x2, int y2, uint16_t color) {
-    // Simple triangle fill - stub
-    (void)x0; (void)y0; (void)x1; (void)y1; (void)x2; (void)y2; (void)color;
+    // Sort vertices by Y coordinate
+    if (y0 > y1) { int t; t=y0; y0=y1; y1=t; t=x0; x0=x1; x1=t; }
+    if (y0 > y2) { int t; t=y0; y0=y2; y2=t; t=x0; x0=x2; x2=t; }
+    if (y1 > y2) { int t; t=y1; y1=y2; y2=t; t=x1; x1=x2; x2=t; }
+    if (y0 == y2) return;
+    float inv_dy02 = 1.0f / (float)(y2 - y0);
+    if (y0 == y1) {
+        for (int y = y0; y <= y2; y++) {
+            float t = (float)(y - y0) * inv_dy02;
+            int xa = x0 + (int)((x2 - x0) * t);
+            int xb = x1 + (int)((x2 - x1) * t);
+            if (xa > xb) { int tmp = xa; xa = xb; xb = tmp; }
+            display_draw_line(xa, y, xb, y, color);
+        }
+    } else if (y1 == y2) {
+        float inv_dy01 = 1.0f / (float)(y1 - y0);
+        for (int y = y0; y <= y1; y++) {
+            float t = (float)(y - y0) * inv_dy01;
+            int xa = x0 + (int)((x1 - x0) * t);
+            int xb = x0 + (int)((x2 - x0) * t);
+            if (xa > xb) { int tmp = xa; xa = xb; xb = tmp; }
+            display_draw_line(xa, y, xb, y, color);
+        }
+    } else {
+        float inv_dy01 = 1.0f / (float)(y1 - y0);
+        float inv_dy12 = 1.0f / (float)(y2 - y1);
+        for (int y = y0; y <= y1; y++) {
+            float t_short = (float)(y - y0) * inv_dy01;
+            float t_long  = (float)(y - y0) * inv_dy02;
+            int xa = x0 + (int)((x1 - x0) * t_short);
+            int xb = x0 + (int)((x2 - x0) * t_long);
+            if (xa > xb) { int tmp = xa; xa = xb; xb = tmp; }
+            display_draw_line(xa, y, xb, y, color);
+        }
+        for (int y = y1; y <= y2; y++) {
+            float t_short = (float)(y - y1) * inv_dy12;
+            float t_long  = (float)(y - y0) * inv_dy02;
+            int xa = x1 + (int)((x2 - x1) * t_short);
+            int xb = x0 + (int)((x2 - x0) * t_long);
+            if (xa > xb) { int tmp = xa; xa = xb; xb = tmp; }
+            display_draw_line(xa, y, xb, y, color);
+        }
+    }
 }
 
+void display_draw_textured_column(int x, int y0, int y1,
+                                  const uint16_t *tex, int tex_w, int tex_h,
+                                  int tex_x, int tex_y0, int tex_y1) {
+    (void)tex; (void)tex_w; (void)tex_h; (void)tex_x; (void)tex_y0; (void)tex_y1;
+    display_draw_line(x, y0, x, y1, 0x7BEF); // gray stub
+}
+void display_fill_vline(int x, int y0, int y1, uint16_t color) {
+    display_draw_line(x, y0, x, y1, color);
+}
+void display_fill_vline_gradient(int x, int y0, int y1, uint16_t color_top, uint16_t color_bottom) {
+    (void)color_bottom;
+    display_draw_line(x, y0, x, y1, color_top);
+}
 void display_set_scroll_area(int y, int h) { (void)y; (void)h; }
 void display_set_scroll_offset(int offset) { (void)offset; }
 void display_set_transparent_color(uint16_t color) { (void)color; }
@@ -530,6 +606,8 @@ void usb_msc_enter_mode(void) {
 // SD card stubs
 bool sdcard_remount(void) { return true; }
 void sdcard_apply_clock(void) {}
+bool sdcard_ensure_ready(void) { return true; }
+void sd_set_slow_mode(bool slow) { (void)slow; }
 
 bool sdcard_fexists(const char* path) {
     extern char g_base_path[512];
@@ -678,11 +756,15 @@ int sdcard_fseek(void* f, long offset, int whence) {
     return hal_sdcard_seek(f, offset); 
 }
 long sdcard_ftell(void* f) { return hal_sdcard_tell(f); }
-size_t sdcard_fsize_handle(void* f) { 
-    long pos = hal_sdcard_tell(f);
-    hal_sdcard_seek(f, 0);
-    hal_sdcard_seek(f, 0); // go to end would need SEEK_END support
-    return (size_t)pos; 
+size_t sdcard_fsize_handle(void* f) {
+    if (!f) return 0;
+    /* hal_sdcard_seek only supports SEEK_SET, so use fseek/ftell directly */
+    FILE *fp = (FILE *)f;
+    long pos = ftell(fp);
+    fseek(fp, 0, SEEK_END);
+    long size = ftell(fp);
+    fseek(fp, pos, SEEK_SET);
+    return (size_t)(size > 0 ? size : 0);
 }
 int sdcard_fwrite(void* f, const void* buf, int len) { return (int)hal_sdcard_write(f, buf, (size_t)len); }
 size_t sdcard_fsize(const char* path) { return (size_t)hal_sdcard_size(path); }
@@ -693,6 +775,19 @@ bool sdcard_delete(const char* path) {
     if (path[0] == '/') snprintf(full, sizeof(full), "%s%s", g_base_path, path);
     else snprintf(full, sizeof(full), "%s/%s", g_base_path, path);
     return remove(full) == 0;
+}
+// Recursive delete helper using nftw
+static int nftw_remove_cb(const char *fpath, const struct stat *sb,
+                          int typeflag, struct FTW *ftwbuf) {
+    (void)sb; (void)typeflag; (void)ftwbuf;
+    return remove(fpath);
+}
+bool sdcard_delete_recursive(const char* path) {
+    extern char g_base_path[512];
+    char full[1024];
+    if (path[0] == '/') snprintf(full, sizeof(full), "%s%s", g_base_path, path);
+    else snprintf(full, sizeof(full), "%s/%s", g_base_path, path);
+    return nftw(full, nftw_remove_cb, 64, FTW_DEPTH | FTW_PHYS) == 0;
 }
 bool sdcard_rename(const char* oldpath, const char* newpath) {
     extern char g_base_path[512];
@@ -708,7 +803,25 @@ bool sdcard_copy(const char* src, const char* dst,
                  void* user) {
     (void)src; (void)dst; (void)progress_cb; (void)user; return false;
 }
-bool sdcard_stat(const char* path, void* st) { (void)path; (void)st; return false; }
+bool sdcard_stat(const char* path, void* st_out) {
+    extern char g_base_path[512];
+    char full_path[1024];
+    if (path[0] == '/') {
+        snprintf(full_path, sizeof(full_path), "%s%s", g_base_path, path);
+    } else {
+        snprintf(full_path, sizeof(full_path), "%s/%s", g_base_path, path);
+    }
+    struct stat host_st;
+    if (stat(full_path, &host_st) != 0) return false;
+    // sdcard_stat_t layout: uint32_t size, bool is_dir, uint16_t fdate, uint16_t ftime
+    typedef struct { uint32_t size; bool is_dir; uint16_t fdate; uint16_t ftime; } sim_stat_t;
+    sim_stat_t *out = (sim_stat_t *)st_out;
+    out->size = (uint32_t)host_st.st_size;
+    out->is_dir = S_ISDIR(host_st.st_mode);
+    out->fdate = 0;
+    out->ftime = 0;
+    return true;
+}
 bool sdcard_disk_info(uint32_t* out_free_kb, uint32_t* out_total_kb) {
     extern char g_base_path[512];
     struct statvfs st;
@@ -743,7 +856,7 @@ void display_effect_posterize(uint8_t levels) { (void)levels; }
 // Audio/sound/fileplayer/mp3 are implemented in simulator/sim_audio.c
 
 // Native audio callback
-void (*g_native_audio_callback)(void) = NULL;
+_Atomic(void (*)(void)) g_native_audio_callback = NULL;
 
 // Audio ring buffer stubs
 uint32_t audio_ring_free(void) { return 4096; }
@@ -830,3 +943,10 @@ void image_draw_region(const pc_image_t *img,
 void image_draw_scaled(const pc_image_t *img, int x, int y, int dst_w, int dst_h) {
     (void)img; (void)x; (void)y; (void)dst_w; (void)dst_h;
 }
+
+// --- Basic runner stub ---
+#include "../../src/os/app_runner.h"
+#include "../../src/os/launcher_types.h"
+static bool basic_stub_can_handle(const app_entry_t *app) { (void)app; return false; }
+static bool basic_stub_run(const app_entry_t *app) { (void)app; return false; }
+const AppRunner g_basic_runner = {"basic", basic_stub_can_handle, basic_stub_run};
