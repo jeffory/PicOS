@@ -489,8 +489,8 @@ static bool psram_pio_available(void) { return pio_psram_available(); }
 static bool psram_pio_bulk_available(void) { return pio_psram_bulk_available(); }
 static void psram_pio_read(uint32_t addr, uint8_t *dst, uint32_t len) { pio_psram_read(addr, dst, len); }
 static void psram_pio_write(uint32_t addr, const uint8_t *src, uint32_t len) { pio_psram_write(addr, src, len); }
-static void psram_pio_bulk_read(uint32_t addr, uint8_t *dst, uint32_t len) { pio_psram_bulk_read_large(addr, dst, len); }
-static void psram_pio_bulk_write(uint32_t addr, const uint8_t *src, uint32_t len) { pio_psram_bulk_write_large(addr, src, len); }
+static void psram_pio_bulk_read(uint32_t addr, uint8_t *dst, uint32_t len) { pio_psram_bulk_read(addr, dst, len); }
+static void psram_pio_bulk_write(uint32_t addr, const uint8_t *src, uint32_t len) { pio_psram_bulk_write(addr, src, len); }
 static void *psram_qmi_alloc(uint32_t size) { return umm_malloc(size); }
 static void psram_qmi_free(void *ptr) { umm_free(ptr); }
 

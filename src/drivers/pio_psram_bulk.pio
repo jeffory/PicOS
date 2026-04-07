@@ -1,93 +1,74 @@
 ; PIO PSRAM Bulk Transfer Program
-; Uses 16-bit counters for larger transfers (up to 8191 bytes)
-; Maintains 8-bit autopull for compatibility with PSRAM bit ordering
 ;
-; Copyright (c) 2026 PicOS Project
-; Based on polpo/rp2040-psram design
+; Based on polpo/rp2040-psram, extended with streaming writes.
+; CS stays asserted across write chunks (PSRAM sequential mode).
+; Reads use per-transaction protocol (CS toggles) with rising-edge sampling.
+;
+; Read timing adapted from Picoware spi_psram_1wire for RP2350 compatibility.
+; The original polpo "fudge" (extra NOP + falling-edge reads) causes a 1-bit
+; shift on RP2350 — removed in favour of rising-edge reads without fudge.
+;
+; Two entry modes via the 'y' counter at begin:
+;
+; 1. Read transaction (y > 0): [write_bits, read_bits, cmd, addr, data...]
+;    Shifts write_bits on MOSI, reads read_bits from MISO, CS deasserts.
+;    Used for: reset commands, read transactions.
+;
+; 2. Streaming write (y = 0): [write_bits, 0, cmd, addr] [chunk_bits, data...] ... [0]
+;    After header, reads chunk counters and streams data while CS stays low.
+;    Terminated by chunk_bits = 0. Used for: bulk writes.
+
+.pio_version 0
 
 .program psram_bulk_fudge
-.side_set 2  ; bit 1 = SCK, bit 0 = CS
+.side_set 2                        ; bit 1 = SCK, bit 0 = CS
 
 begin:
-    out x, 8           side 0b01  ; x = write bits low byte
-    out x, 8           side 0b01  ; x |= write bits high byte << 8
-    out y, 8           side 0b01  ; y = read bits low byte
-    out y, 8           side 0b01  ; y |= read bits high byte << 8
-    
-    ; Combine the two 8-bit values into 16-bit counters
-    ; PIO doesn't have a way to shift, so we use a trick:
-    ; First out gives low byte, second out gives high byte
-    ; We need to combine them manually
-    
-    ; Actually, we need to rethink this...
-    ; out x, 8 overwrites x each time, not accumulates
-    ; So we need a different approach
-
+    out x, 8            side 0b01  ; x = write bits. CS deasserted.
+    out y, 8            side 0b01  ; y = read bits (0 for streaming write)
     jmp x--, writeloop  side 0b01  ; Pre-decrement for correct count
 
 writeloop:
-    out pins, 1         side 0b00  ; Write bit, lower clock, CS asserted
+    out pins, 1         side 0b00  ; Write bit, CS asserted, SCK LOW
     jmp x--, writeloop  side 0b10  ; Raise clock, loop if more
 
-    jmp !y, begin       side 0b00  ; If read-only, done
-    nop                 side 0b10  ; Fudge: extra clock for PSRAM output
-    jmp readloop_mid    side 0b00
+    ; Write phase done. Branch on y:
+    ; y > 0 → read mode (single transaction)
+    ; y = 0 → streaming write mode (check for more chunks)
+    jmp !y, stream_chk  side 0b00  ; y=0 → streaming write
+
+    ; --- Read path (no extra clock between write and read phases) ---
+    ; Enter at readloop (not readloop_mid) so the first in+HIGH captures D7
+    ; without an extra SCK HIGH→LOW that PSRAM would count as a clock.
+    ; C driver sends read_bits - 1 as the y counter to compensate.
+    jmp readloop         side 0b00  ; Stay LOW, first in+HIGH reads D7
 
 readloop:
-    in pins, 1          side 0b00  ; Read on falling edge (>83MHz)
+    in pins, 1          side 0b10  ; Read on rising edge
 readloop_mid:
-    jmp y--, readloop   side 0b10  ; Raise clock, loop if more
+    jmp y--, readloop   side 0b00  ; SCK LOW, loop if more
+    jmp begin           side 0b01  ; Done. CS deasserts.
 
-
-; Simpler approach: use two 8-bit counters but allow larger values
-; by treating them as a 16-bit value stored in two bytes
-.program psram_bulk
-.side_set 2
-
-; Read 16-bit write counter (stored as two bytes in FIFO)
-; We need to manually combine them since PIO out overwrites, not accumulates
-begin:
-    out x, 8           side 0b01  ; x = write_bits_low
-    out y, 8           side 0b01  ; y = write_bits_high (temp)
-    ; Now we need x = x + (y << 8)
-    ; But PIO can't do this directly...
-    
-    ; Alternative: use ISR (Input Shift Register) to accumulate
-    ; Or: just accept 8-bit counters and chunk in software
-    
-    ; For now, let's just use 8-bit counters like the original
-    ; but allow software to send multiple chunks
-    jmp x--, writeloop  side 0b01
-
-writeloop:
-    out pins, 1         side 0b00
-    jmp x--, writeloop  side 0b10
-    jmp !y, begin       side 0b00
-    jmp readloop_mid    side 0b10
-
-readloop:
-    in pins, 1          side 0b10
-readloop_mid:
-    jmp y--, readloop   side 0b00
+    ; --- Streaming write path (CS stays low) ---
+stream_chk:
+    out x, 8            side 0b00  ; Next write chunk counter (CS stays low!)
+    jmp !x, stream_end  side 0b00  ; 0 = done, CS stays low until stream_end
+    jmp x--, writeloop  side 0b00  ; More data, continue writing (CS stays low)
+stream_end:
+    jmp begin           side 0b01  ; Deassert CS, back to idle
 
 
 % c-sdk {
 #include "hardware/gpio.h"
 
-static inline void psram_bulk_cs_init(PIO pio, uint sm, uint prog_offs, 
-                                       float clkdiv, bool fudge,
+static inline void psram_bulk_cs_init(PIO pio, uint sm, uint prog_offs,
+                                       float clkdiv,
                                        uint pin_cs, uint pin_mosi, uint pin_miso) {
-    pio_sm_config c;
-    if (fudge) {
-        c = psram_bulk_fudge_program_get_default_config(prog_offs);
-    } else {
-        c = psram_bulk_program_get_default_config(prog_offs);
-    }
-    
+    pio_sm_config c = psram_bulk_fudge_program_get_default_config(prog_offs);
+
     sm_config_set_out_pins(&c, pin_mosi, 1);
     sm_config_set_in_pins(&c, pin_miso);
     sm_config_set_sideset_pins(&c, pin_cs);
-    // Use 8-bit autopull/push like the original polpo library
     sm_config_set_out_shift(&c, false, true, 8);
     sm_config_set_in_shift(&c, false, true, 8);
     sm_config_set_clkdiv(&c, clkdiv);

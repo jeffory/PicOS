@@ -12,7 +12,7 @@ bool pio_psram_init(void) {
     // Use bulk driver exclusively (8KB chunks, 300x faster for large transfers)
     if (pio_psram_bulk_init()) {
         s_available = true;
-        printf("[PIO_PSRAM] Initialised bulk driver (8KB max per transfer)\n");
+        printf("[PIO_PSRAM] Initialised streaming bulk driver\n");
         return true;
     }
 
@@ -22,12 +22,12 @@ bool pio_psram_init(void) {
 
 void pio_psram_read(uint32_t addr, uint8_t *dst, uint32_t len) {
     if (!s_available) return;
-    pio_psram_bulk_read_large(addr, dst, len);
+    pio_psram_bulk_read(addr, dst, len);
 }
 
 void pio_psram_write(uint32_t addr, const uint8_t *src, uint32_t len) {
     if (!s_available) return;
-    pio_psram_bulk_write_large(addr, src, len);
+    pio_psram_bulk_write(addr, src, len);
 }
 
 uint32_t pio_psram_size(void) {

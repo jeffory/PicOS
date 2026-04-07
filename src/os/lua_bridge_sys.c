@@ -299,6 +299,79 @@ static int l_sys_loadlib(lua_State *L) {
   return 1;  // return the module's result
 }
 
+// picocalc.sys.pioPsramRead(addr, len) -> string or nil
+static int l_sys_pio_psram_read(lua_State *L) {
+  if (!pio_psram_available()) { lua_pushnil(L); return 1; }
+  lua_Integer addr = luaL_checkinteger(L, 1);
+  lua_Integer len  = luaL_checkinteger(L, 2);
+  if (len <= 0 || addr < 0) { lua_pushnil(L); return 1; }
+  luaL_Buffer buf;
+  char *p = luaL_buffinitsize(L, &buf, (size_t)len);
+  pio_psram_read((uint32_t)addr, (uint8_t *)p, (uint32_t)len);
+  luaL_pushresultsize(&buf, (size_t)len);
+  return 1;
+}
+
+// picocalc.sys.pioPsramWrite(addr, data) -> bytes_written
+static int l_sys_pio_psram_write(lua_State *L) {
+  if (!pio_psram_available()) { lua_pushinteger(L, 0); return 1; }
+  lua_Integer addr = luaL_checkinteger(L, 1);
+  size_t len;
+  const char *data = luaL_checklstring(L, 2, &len);
+  if (len == 0 || addr < 0) { lua_pushinteger(L, 0); return 1; }
+  pio_psram_write((uint32_t)addr, (const uint8_t *)data, (uint32_t)len);
+  lua_pushinteger(L, (lua_Integer)len);
+  return 1;
+}
+
+// picocalc.sys.pioPsramSize() -> size in bytes (0 if not available)
+static int l_sys_pio_psram_size(lua_State *L) {
+  lua_pushinteger(L, (lua_Integer)pio_psram_size());
+  return 1;
+}
+
+// QMI PSRAM test functions — allocate/write/read/free a test buffer in QMI PSRAM
+extern void *umm_malloc(size_t size);
+extern void  umm_free(void *ptr);
+
+// sys.qmiPsramAlloc(size) -> handle (light userdata) or nil
+static int l_sys_qmi_psram_alloc(lua_State *L) {
+  size_t size = (size_t)luaL_checkinteger(L, 1);
+  void *p = umm_malloc(size);
+  if (!p) { lua_pushnil(L); return 1; }
+  lua_pushlightuserdata(L, p);
+  return 1;
+}
+
+// sys.qmiPsramFree(handle)
+static int l_sys_qmi_psram_free(lua_State *L) {
+  void *p = lua_touserdata(L, 1);
+  if (p) umm_free(p);
+  return 0;
+}
+
+// sys.qmiPsramWrite(handle, offset, data) -> bytes written
+static int l_sys_qmi_psram_write(lua_State *L) {
+  uint8_t *p = (uint8_t *)lua_touserdata(L, 1);
+  if (!p) { lua_pushinteger(L, 0); return 1; }
+  lua_Integer offset = luaL_checkinteger(L, 2);
+  size_t len;
+  const char *data = luaL_checklstring(L, 3, &len);
+  memcpy(p + offset, data, len);
+  lua_pushinteger(L, (lua_Integer)len);
+  return 1;
+}
+
+// sys.qmiPsramRead(handle, offset, len) -> string
+static int l_sys_qmi_psram_read(lua_State *L) {
+  uint8_t *p = (uint8_t *)lua_touserdata(L, 1);
+  if (!p) { lua_pushnil(L); return 1; }
+  lua_Integer offset = luaL_checkinteger(L, 2);
+  lua_Integer len = luaL_checkinteger(L, 3);
+  lua_pushlstring(L, (const char *)(p + offset), (size_t)len);
+  return 1;
+}
+
 static const luaL_Reg l_sys_lib[] = {{"getMemInfo", l_sys_getMemInfo},
                                      {"getTimeMs", l_sys_getTimeMs},
                                      {"getBattery", l_sys_getBattery},
@@ -317,6 +390,13 @@ static const luaL_Reg l_sys_lib[] = {{"getMemInfo", l_sys_getMemInfo},
                                      {"resumeBackground", l_sys_resumeBackground},
                                      {"triggerFault", l_sys_trigger_fault},
                                      {"loadlib", l_sys_loadlib},
+                                     {"pioPsramRead", l_sys_pio_psram_read},
+                                     {"pioPsramWrite", l_sys_pio_psram_write},
+                                     {"pioPsramSize", l_sys_pio_psram_size},
+                                     {"qmiPsramAlloc", l_sys_qmi_psram_alloc},
+                                     {"qmiPsramFree", l_sys_qmi_psram_free},
+                                     {"qmiPsramWrite", l_sys_qmi_psram_write},
+                                     {"qmiPsramRead", l_sys_qmi_psram_read},
                                      {NULL, NULL}};
 
 

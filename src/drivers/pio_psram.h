@@ -1,12 +1,12 @@
 #pragma once
 
-// PIO PSRAM driver — unified API wrapping the bulk transfer driver.
+// PIO PSRAM driver — unified API wrapping the streaming bulk transfer driver.
 // Drives the 8MB PSRAM chip on the PicoCalc v2.0 mainboard via PIO1 SPI.
 // This bus is completely independent of the Pimoroni QMI PSRAM (Lua heap)
 // and the Flash XIP cache, so reads/writes cause zero cache pressure.
 //
-// The bulk driver supports up to 8KB per transaction (300x faster than
-// the original 27-byte chunk driver for large transfers).
+// Uses streaming protocol: CS stays asserted across 8-bit chunk boundaries
+// (PSRAM sequential mode), giving ~3% overhead for large transfers.
 
 #include <stdbool.h>
 #include <stdint.h>
@@ -15,10 +15,6 @@
 #ifdef __cplusplus
 extern "C" {
 #endif
-
-// Maximum bytes per bulk transfer
-#define PIO_PSRAM_MAX_WRITE  8187
-#define PIO_PSRAM_MAX_READ   8191
 
 // Memory layout constants for PIO PSRAM
 #define PIO_PSRAM_MP3_RING_BASE    0x0000

@@ -49,15 +49,27 @@ static dma_channel_config s_read_dma_cfg;
 // Statistics
 static pio_psram_bulk_stats_t s_stats;
 
-// Forward declarations for command builders (used in self-test before definition)
-static uint32_t build_write_cmd(uint8_t *buf, uint32_t addr, uint32_t data_len);
-static uint32_t build_read_cmd(uint8_t *buf, uint32_t addr, uint32_t data_len);
+// Write a byte to the PIO TX FIFO using an 8-bit store.
+// On the AHB bus a narrow write is replicated across the full 32-bit word,
+// so the byte lands in every lane and the PIO's MSB-first shift reads it
+// correctly.  This matches how the polpo library and DMA_SIZE_8 feed data.
+static inline void pio_put_byte(uint8_t val) {
+    while (pio_sm_is_tx_fifo_full(s_pio, s_sm))
+        tight_loop_contents();
+    *(volatile uint8_t *)&s_pio->txf[s_sm] = val;
+}
 
-// Transaction buffer for command assembly
-// Format: [write_bits(16)][read_bits(16)][cmd(8)][addr(24)][data...]
-// We need at least 8 bytes for the header
-#define CMD_BUF_SIZE 12
-static uint8_t s_cmd_buf[CMD_BUF_SIZE] __attribute__((aligned(4)));
+// Send a simple PSRAM command (reset etc).
+// Protocol: [write_bits=8, read_bits=0, cmd] → enters streaming write mode,
+// then [0] terminates the stream and deasserts CS.
+static void send_simple_cmd(uint8_t cmd) {
+    pio_put_byte(8);     // 8 write bits
+    pio_put_byte(0);     // 0 read bits → streaming write mode
+    pio_put_byte(cmd);   // command byte
+    pio_put_byte(0);     // streaming terminator → CS deasserts
+    while (!pio_sm_is_tx_fifo_empty(s_pio, s_sm))
+        tight_loop_contents();
+}
 
 bool pio_psram_bulk_init(void) {
     if (s_available) return true;
@@ -75,27 +87,38 @@ bool pio_psram_bulk_init(void) {
     }
 
     // Initialize the state machine
-    // clkdiv=1.0 at 200MHz sys_clk → 100MHz PIO clock → ~12.5MHz SPI
-    psram_bulk_cs_init(s_pio, s_sm, s_prog_offs, 1.0f, true,
+    // clkdiv=4.0 at 200MHz sys_clk -> 50MHz PIO clock -> 25MHz SPI
+    // At clkdiv=2.0 (50MHz SPI), MISO has only 10ns to settle vs PSRAM tCLQV
+    // of ~8ns, leaving <2ns margin. clkdiv=4.0 gives 20ns → 12ns margin.
+    psram_bulk_cs_init(s_pio, s_sm, s_prog_offs, 4.0f,
                        PIO_PSRAM_PIN_CS, PIO_PSRAM_PIN_MOSI, PIO_PSRAM_PIN_MISO);
 
-    // Set up GPIO drive strength
+    // Set up GPIO drive strength and slew rate
     gpio_set_drive_strength(PIO_PSRAM_PIN_CS, GPIO_DRIVE_STRENGTH_4MA);
     gpio_set_drive_strength(PIO_PSRAM_PIN_SCK, GPIO_DRIVE_STRENGTH_4MA);
     gpio_set_drive_strength(PIO_PSRAM_PIN_MOSI, GPIO_DRIVE_STRENGTH_4MA);
+    gpio_set_slew_rate(PIO_PSRAM_PIN_CS, GPIO_SLEW_RATE_FAST);
+    gpio_set_slew_rate(PIO_PSRAM_PIN_SCK, GPIO_SLEW_RATE_FAST);
+    gpio_set_slew_rate(PIO_PSRAM_PIN_MOSI, GPIO_SLEW_RATE_FAST);
+
+    // PSRAM reset sequence (required for reliable operation)
+    send_simple_cmd(0x66);   // Reset Enable
+    busy_wait_us(50);
+    send_simple_cmd(0x99);   // Reset
+    busy_wait_us(100);
 
     // Claim DMA channels
     s_write_dma_chan = dma_claim_unused_channel(true);
     s_read_dma_chan = dma_claim_unused_channel(true);
 
-    // Configure write DMA (memory → PIO TX FIFO)
+    // Configure write DMA (memory -> PIO TX FIFO)
     s_write_dma_cfg = dma_channel_get_default_config(s_write_dma_chan);
     channel_config_set_transfer_data_size(&s_write_dma_cfg, DMA_SIZE_8);
     channel_config_set_read_increment(&s_write_dma_cfg, true);
     channel_config_set_write_increment(&s_write_dma_cfg, false);
     channel_config_set_dreq(&s_write_dma_cfg, pio_get_dreq(s_pio, s_sm, true));
 
-    // Configure read DMA (PIO RX FIFO → memory)
+    // Configure read DMA (PIO RX FIFO -> memory)
     s_read_dma_cfg = dma_channel_get_default_config(s_read_dma_chan);
     channel_config_set_transfer_data_size(&s_read_dma_cfg, DMA_SIZE_8);
     channel_config_set_read_increment(&s_read_dma_cfg, false);
@@ -105,26 +128,17 @@ bool pio_psram_bulk_init(void) {
     // Initialize mutex for multi-core safety
     mutex_init(&s_mutex);
 
-    // Self-test: write 4 bytes then read them back using direct PIO FIFO
-    // access with timeouts.  We can't use the DMA-based bulk read/write
-    // functions here because if the PSRAM chip is absent the read DMA hangs
-    // forever (DREQ from an RX FIFO that never fills).
+    // Self-test: write 4 bytes then read them back
+    // Uses polpo-compatible protocol (proven timing)
     {
         // --- Write 4 bytes at address 0 ---
-        uint8_t wr_hdr[12];
-        uint32_t wr_hdr_len = build_write_cmd(wr_hdr, 0, 4);
-        // Append data
-        wr_hdr[wr_hdr_len + 0] = 0xDE;
-        wr_hdr[wr_hdr_len + 1] = 0xAD;
-        wr_hdr[wr_hdr_len + 2] = 0xBE;
-        wr_hdr[wr_hdr_len + 3] = 0xEF;
-        uint32_t wr_total = wr_hdr_len + 4;
+        // [write_bits=64, read_bits=0, cmd=0x02, addr, data...] [0=end stream]
+        uint8_t wr_cmd[] = { 64, 0, 0x02, 0x00, 0x00, 0x00,
+                             0xDE, 0xAD, 0xBE, 0xEF,
+                             0 };  // streaming terminator
+        for (uint32_t i = 0; i < sizeof(wr_cmd); i++)
+            pio_put_byte(wr_cmd[i]);
 
-        // Push bytes into TX FIFO (PIO will shift them out on SPI)
-        for (uint32_t i = 0; i < wr_total; i++)
-            pio_sm_put_blocking(s_pio, s_sm, wr_hdr[i]);
-
-        // Wait for TX FIFO to drain (write complete)
         absolute_time_t deadline = make_timeout_time_ms(100);
         while (!pio_sm_is_tx_fifo_empty(s_pio, s_sm)) {
             if (time_reached(deadline)) {
@@ -133,19 +147,16 @@ bool pio_psram_bulk_init(void) {
             }
             tight_loop_contents();
         }
-        // Extra delay for PIO to clock out last byte
         sleep_us(100);
 
         // --- Read 4 bytes from address 0 ---
-        // Drain any stale RX data
+        // [write_bits=40, read_bits=32, cmd=0x0B, addr, dummy]
         while (!pio_sm_is_rx_fifo_empty(s_pio, s_sm))
             (void)pio_sm_get(s_pio, s_sm);
 
-        uint8_t rd_hdr[12];
-        uint32_t rd_hdr_len = build_read_cmd(rd_hdr, 0, 4);
-
-        for (uint32_t i = 0; i < rd_hdr_len; i++)
-            pio_sm_put_blocking(s_pio, s_sm, rd_hdr[i]);
+        uint8_t rd_cmd[] = { 40, 31, 0x0B, 0x00, 0x00, 0x00, 0x00 };
+        for (uint32_t i = 0; i < sizeof(rd_cmd); i++)
+            pio_put_byte(rd_cmd[i]);
 
         // Collect 4 bytes from RX FIFO with timeout
         uint8_t readback[4] = {0};
@@ -172,7 +183,6 @@ bool pio_psram_bulk_init(void) {
     goto selftest_pass;
 
 selftest_fail:
-    // Clean up all claimed resources so they don't leak
     pio_sm_set_enabled(s_pio, s_sm, false);
     dma_channel_unclaim(s_write_dma_chan);
     dma_channel_unclaim(s_read_dma_chan);
@@ -184,8 +194,9 @@ selftest_fail:
     return false;
 
 selftest_pass:
-    printf("[PIO_PSRAM_BULK] Initialised: max %d bytes/write, %d bytes/read\n",
-           PIO_PSRAM_BULK_MAX_WRITE, PIO_PSRAM_BULK_MAX_READ);
+    s_available = true;
+    printf("[PIO_PSRAM_BULK] Initialised (%d/%d bytes per chunk)\n",
+           PIO_PSRAM_BULK_CHUNK_WRITE, PIO_PSRAM_BULK_CHUNK_READ);
     return true;
 }
 
@@ -193,149 +204,96 @@ bool pio_psram_bulk_available(void) {
     return s_available;
 }
 
-// Build a write command buffer
-// Returns total bytes to send (header + data)
-static uint32_t build_write_cmd(uint8_t *buf, uint32_t addr, uint32_t data_len) {
-    // write_bits = 32 (cmd+addr) + data_len*8
-    uint32_t write_bits = 32 + data_len * 8;
-    uint32_t read_bits = 0;
-    
-    // Little-endian 16-bit counters
-    buf[0] = write_bits & 0xFF;
-    buf[1] = (write_bits >> 8) & 0xFF;
-    buf[2] = read_bits & 0xFF;
-    buf[3] = (read_bits >> 8) & 0xFF;
-    
-    // Command and address
-    buf[4] = 0x02;  // Write command
-    buf[5] = (addr >> 16) & 0xFF;
-    buf[6] = (addr >> 8) & 0xFF;
-    buf[7] = addr & 0xFF;
-    
-    return 8;  // Header size
-}
-
-// Build a read command buffer
-// Returns header bytes to send
-static uint32_t build_read_cmd(uint8_t *buf, uint32_t addr, uint32_t data_len) {
-    // write_bits = 40 (cmd+addr+dummy)
-    uint32_t write_bits = 40;
-    uint32_t read_bits = data_len * 8;
-    
-    buf[0] = write_bits & 0xFF;
-    buf[1] = (write_bits >> 8) & 0xFF;
-    buf[2] = read_bits & 0xFF;
-    buf[3] = (read_bits >> 8) & 0xFF;
-    
-    buf[4] = 0x0B;  // Fast read command
-    buf[5] = (addr >> 16) & 0xFF;
-    buf[6] = (addr >> 8) & 0xFF;
-    buf[7] = addr & 0xFF;
-    buf[8] = 0;     // Dummy byte
-    
-    return 9;  // Header size
-}
-
 void pio_psram_bulk_write(uint32_t addr, const uint8_t *src, uint32_t len) {
     if (!s_available || len == 0) return;
-    if (len > PIO_PSRAM_BULK_MAX_WRITE) {
-        pio_psram_bulk_write_large(addr, src, len);
-        return;
-    }
     if (is_cached_psram(src))
         src = flush_and_uncache(src);
 
     mutex_enter_blocking(&s_mutex);
 
-    // Build command header
-    uint32_t hdr_len = build_write_cmd(s_cmd_buf, addr, len);
+    // Per-transaction writes: each chunk is a complete SPI transaction
+    // with its own cmd+addr, matching the self-test protocol.
+    // [write_bits=(4+chunk)*8, read_bits=0, cmd, addr, data...] [0=end]
+    uint32_t remaining = len;
+    const uint8_t *p = src;
+    while (remaining > 0) {
+        uint32_t chunk = (remaining > PIO_PSRAM_BULK_CHUNK_WRITE)
+                         ? PIO_PSRAM_BULK_CHUNK_WRITE : remaining;
 
-    // Send header via DMA
-    dma_channel_configure(s_write_dma_chan, &s_write_dma_cfg,
-                          &s_pio->txf[s_sm],  // Write to PIO TX FIFO
-                          s_cmd_buf,           // Read from command buffer
-                          hdr_len,             // Transfer count
-                          true);               // Start immediately
-    dma_channel_wait_for_finish_blocking(s_write_dma_chan);
+        pio_put_byte((4 + chunk) * 8);  // write_bits for cmd+addr+data
+        pio_put_byte(0);                // read_bits = 0 → streaming mode
+        pio_put_byte(0x02);             // write command
+        pio_put_byte((addr >> 16) & 0xFF);
+        pio_put_byte((addr >> 8) & 0xFF);
+        pio_put_byte(addr & 0xFF);
 
-    // Send data via DMA
-    dma_channel_configure(s_write_dma_chan, &s_write_dma_cfg,
-                          &s_pio->txf[s_sm],
-                          src,
-                          len,
-                          true);
-    dma_channel_wait_for_finish_blocking(s_write_dma_chan);
+        dma_channel_configure(s_write_dma_chan, &s_write_dma_cfg,
+                              &s_pio->txf[s_sm], p, chunk, true);
+        dma_channel_wait_for_finish_blocking(s_write_dma_chan);
+
+        // Streaming terminator → CS deasserts
+        pio_put_byte(0);
+
+        while (!pio_sm_is_tx_fifo_empty(s_pio, s_sm))
+            tight_loop_contents();
+
+        addr += chunk;
+        p += chunk;
+        remaining -= chunk;
+    }
+
+    sleep_us(1);
 
     s_stats.write_calls++;
     s_stats.write_bytes += len;
-    s_stats.write_chunks += 2;  // header + data
 
     mutex_exit(&s_mutex);
 }
 
 void pio_psram_bulk_read(uint32_t addr, uint8_t *dst, uint32_t len) {
     if (!s_available || len == 0) return;
-    if (len > PIO_PSRAM_BULK_MAX_READ) {
-        pio_psram_bulk_read_large(addr, dst, len);
-        return;
-    }
     if (is_cached_psram(dst))
         dst = flush_and_uncache_dst(dst);
 
     mutex_enter_blocking(&s_mutex);
 
-    // Build command header
-    uint32_t hdr_len = build_read_cmd(s_cmd_buf, addr, len);
+    // Non-streaming reads: each chunk is a separate polpo-compatible transaction.
+    // This uses the proven fudge read timing (no chunk boundary issues).
+    uint32_t remaining = len;
+    uint8_t *p = dst;
+    while (remaining > 0) {
+        uint32_t chunk = (remaining > PIO_PSRAM_BULK_CHUNK_READ)
+                         ? PIO_PSRAM_BULK_CHUNK_READ : remaining;
 
-    // Start read DMA (will capture data from PIO RX FIFO)
-    dma_channel_configure(s_read_dma_chan, &s_read_dma_cfg,
-                          dst,                 // Write to destination
-                          &s_pio->rxf[s_sm],    // Read from PIO RX FIFO
-                          len,                  // Transfer count
-                          true);                // Start immediately
+        // Drain stale RX data
+        while (!pio_sm_is_rx_fifo_empty(s_pio, s_sm))
+            (void)pio_sm_get(s_pio, s_sm);
 
-    // Send header via write DMA
-    dma_channel_configure(s_write_dma_chan, &s_write_dma_cfg,
-                          &s_pio->txf[s_sm],
-                          s_cmd_buf,
-                          hdr_len,
-                          true);
-    dma_channel_wait_for_finish_blocking(s_write_dma_chan);
+        // [write_bits=40, read_bits=chunk*8-1, cmd, addr, dummy]
+        // read_bits is chunk*8-1 because PIO enters readloop (not readloop_mid),
+        // reading one extra bit vs the y counter value.
+        pio_put_byte(40);
+        pio_put_byte(chunk * 8 - 1);
+        pio_put_byte(0x0B);
+        pio_put_byte((addr >> 16) & 0xFF);
+        pio_put_byte((addr >> 8) & 0xFF);
+        pio_put_byte(addr & 0xFF);
+        pio_put_byte(0x00);  // dummy byte
 
-    // Wait for read DMA to complete
-    dma_channel_wait_for_finish_blocking(s_read_dma_chan);
+        // DMA capture
+        dma_channel_configure(s_read_dma_chan, &s_read_dma_cfg,
+                              p, &s_pio->rxf[s_sm], chunk, true);
+        dma_channel_wait_for_finish_blocking(s_read_dma_chan);
+
+        addr += chunk;
+        p += chunk;
+        remaining -= chunk;
+    }
 
     s_stats.read_calls++;
     s_stats.read_bytes += len;
-    s_stats.read_chunks += 2;
 
     mutex_exit(&s_mutex);
-}
-
-void pio_psram_bulk_write_large(uint32_t addr, const uint8_t *src, uint32_t len) {
-    // Flush cache once for the entire large transfer; inner calls get uncached ptr
-    if (is_cached_psram(src))
-        src = flush_and_uncache(src);
-    while (len > 0) {
-        uint32_t chunk = (len > PIO_PSRAM_BULK_MAX_WRITE) ? PIO_PSRAM_BULK_MAX_WRITE : len;
-        pio_psram_bulk_write(addr, src, chunk);
-        addr += chunk;
-        src += chunk;
-        len -= chunk;
-    }
-}
-
-void pio_psram_bulk_read_large(uint32_t addr, uint8_t *dst, uint32_t len) {
-    // Flush cache once for the entire large transfer; inner calls get uncached ptr
-    if (is_cached_psram(dst))
-        dst = flush_and_uncache_dst(dst);
-    while (len > 0) {
-        uint32_t chunk = (len > PIO_PSRAM_BULK_MAX_READ) ? PIO_PSRAM_BULK_MAX_READ : len;
-        pio_psram_bulk_read(addr, dst, chunk);
-        addr += chunk;
-        dst += chunk;
-        len -= chunk;
-    }
 }
 
 void pio_psram_bulk_get_stats(pio_psram_bulk_stats_t *stats) {

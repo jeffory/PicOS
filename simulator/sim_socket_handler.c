@@ -480,19 +480,6 @@ static char *h_screenshot(const char *params) {
     char format[16] = "png";
     json_get_str(params, "format", format, sizeof(format));
 
-    // Debug: dump framebuffer state
-    {
-        uint16_t *fb = hal_display_get_framebuffer();
-        if (fb) {
-            int nz = 0;
-            for (int i = 0; i < 320*320; i++) { if (fb[i] != 0) nz++; }
-            fprintf(stderr, "[SCREENSHOT] fb=%p nonzero=%d first=[%04x %04x %04x]\n",
-                    (void*)fb, nz, fb[0], fb[160*320+160], fb[319*320+319]);
-        } else {
-            fprintf(stderr, "[SCREENSHOT] fb is NULL!\n");
-        }
-    }
-
     char *data;
     int len;
     if (strcmp(format, "raw") == 0) {
