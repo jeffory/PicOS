@@ -48,6 +48,9 @@ typedef struct {
 
     uint32_t connect_timeout_ms;  // default 15000
     uint32_t deadline_connect;    // ms since boot, 0 = not set
+
+    uint32_t read_timeout_ms;    // 0 = disabled (default, backward compatible)
+    uint32_t deadline_read;      // ms since boot, 0 = not set
 } tcp_conn_t;
 
 void tcp_init(void);

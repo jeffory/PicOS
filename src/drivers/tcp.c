@@ -39,6 +39,7 @@ tcp_conn_t *tcp_alloc(void) {
             s_conns[i].spin_num = spin_lock_claim_unused(true);
             s_conns[i].spinlock = spin_lock_instance(s_conns[i].spin_num);
             s_conns[i].connect_timeout_ms = 15000;
+            s_conns[i].read_timeout_ms = 0;  // disabled by default
             s_conns[i].in_use = true;
             return &s_conns[i];
         }
@@ -155,6 +156,8 @@ void tcp_ev_fn(struct mg_connection *nc, int ev, void *ev_data) {
 
     if (ev == MG_EV_CONNECT) {
         c->deadline_connect = 0;
+        if (c->read_timeout_ms > 0)
+            c->deadline_read = to_ms_since_boot(get_absolute_time()) + c->read_timeout_ms;
         uint32_t save = spin_lock_blocking(c->spinlock);
         c->state = TCP_STATE_CONNECTED;
         c->pending |= TCP_CB_CONNECT;
@@ -185,7 +188,12 @@ void tcp_ev_fn(struct mg_connection *nc, int ev, void *ev_data) {
         }
         spin_unlock(c->spinlock, save);
 
-        if (len > 0) mg_iobuf_del(io, 0, len);
+        if (len > 0) {
+            mg_iobuf_del(io, 0, len);
+            // Reset read deadline — data is actively arriving
+            if (c->read_timeout_ms > 0)
+                c->deadline_read = to_ms_since_boot(get_absolute_time()) + c->read_timeout_ms;
+        }
     } else if (ev == MG_EV_ERROR) {
         snprintf(c->err, sizeof(c->err), "Mongoose error: %s", (char *)ev_data);
         uint32_t save = spin_lock_blocking(c->spinlock);
@@ -220,6 +228,22 @@ void tcp_check_timeouts(void) {
                 c->pcb = NULL;
             }
             c->deadline_connect = 0;
+        }
+        // Read timeout: connected but no data arriving
+        else if (c->state == TCP_STATE_CONNECTED &&
+            c->deadline_read > 0 && now > c->deadline_read) {
+            snprintf(c->err, sizeof(c->err), "read timeout (%ums)",
+                     (unsigned)c->read_timeout_ms);
+            printf("[TCP] %s\n", c->err);
+            uint32_t save = spin_lock_blocking(c->spinlock);
+            c->state = TCP_STATE_FAILED;
+            c->pending |= TCP_CB_FAILED;
+            spin_unlock(c->spinlock, save);
+            if (c->pcb) {
+                ((struct mg_connection *)c->pcb)->is_closing = 1;
+                c->pcb = NULL;
+            }
+            c->deadline_read = 0;
         }
     }
 }

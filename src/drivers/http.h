@@ -109,6 +109,8 @@ typedef struct {
     // Deadline timestamps (ms since boot)
     uint32_t deadline_connect;
     uint32_t deadline_read;
+    uint32_t max_transfer_ms;    // 0 = disabled (default)
+    uint32_t deadline_transfer;  // hard ceiling for total transfer time
 
     // Opaque pointer back to Lua userdata (set by lua_bridge.c)
     void *lua_ud;

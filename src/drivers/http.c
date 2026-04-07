@@ -617,6 +617,8 @@ static bool start_request(http_conn_t *c, const char *method, const char *path,
   c->content_length = -1;
   c->body_received = 0;
   c->headers_done = false;
+  c->hdr_count = 0;
+  c->hdr_len = 0;
   c->err[0] = '\0';
   {
     uint32_t irq = spin_lock_blocking(c->rx_spinlock);
@@ -647,8 +649,10 @@ static bool start_request(http_conn_t *c, const char *method, const char *path,
 
   // Mark as queued so http_close_all() and http_free() know to wait
   c->state = HTTP_STATE_QUEUED;
-  c->deadline_connect = to_ms_since_boot(get_absolute_time()) + c->connect_timeout_ms;
+  uint32_t now_ms = to_ms_since_boot(get_absolute_time());
+  c->deadline_connect = now_ms + c->connect_timeout_ms;
   c->deadline_read = 0;
+  c->deadline_transfer = (c->max_transfer_ms > 0) ? now_ms + c->max_transfer_ms : 0;
 
   // Push to Core 1's request queue — it will call mg_http_connect() /
   // mg_printf() / etc. from within drain_requests().
@@ -773,6 +777,16 @@ void http_check_timeouts(void) {
         c->pcb = NULL;
       }
       c->deadline_read = 0;
+    }
+    // Transfer deadline: hard ceiling regardless of data trickle (slowloris)
+    else if ((c->state == HTTP_STATE_HEADERS || c->state == HTTP_STATE_BODY) &&
+             c->deadline_transfer > 0 && now > c->deadline_transfer) {
+      conn_fail(c, "transfer timeout (%ums)", (unsigned)c->max_transfer_ms);
+      if (c->pcb) {
+        ((struct mg_connection *)c->pcb)->is_closing = 1;
+        c->pcb = NULL;
+      }
+      c->deadline_transfer = 0;
     }
   }
 }

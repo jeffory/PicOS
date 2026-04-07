@@ -40,7 +40,7 @@ static int      s_connect_retries  = 0;
 static uint8_t  s_sntp_retries = 0;
 static uint32_t s_sntp_next_retry_ms = 0;
 #define SNTP_MAX_RETRIES    3
-#define SNTP_RETRY_DELAY_MS 5000
+#define SNTP_RETRY_DELAY_MS 2000
 
 static struct mg_mgr s_mgr;
 static struct mg_tcpip_if s_ifp;
@@ -91,6 +91,9 @@ static struct mg_connection *s_check_conn = NULL;
 
 #define CONNECTIVITY_CHECK_INTERVAL_MS  60000   // recheck every 60s
 #define CONNECTIVITY_CHECK_RETRY_MS     10000   // retry faster on failure
+#define CONNECTIVITY_CHECK_TIMEOUT_MS   10000   // give up if check hangs
+
+static uint32_t s_connectivity_deadline = 0;
 
 static void connectivity_cb(struct mg_connection *c, int ev, void *ev_data) {
   (void)ev_data;
@@ -98,6 +101,7 @@ static void connectivity_cb(struct mg_connection *c, int ev, void *ev_data) {
     printf("WiFi: connectivity check OK\n");
     s_internet_ok = true;
     s_check_conn = NULL;
+    s_connectivity_deadline = 0;
     c->is_closing = 1;
     s_connectivity_check_ms =
         to_ms_since_boot(get_absolute_time()) + CONNECTIVITY_CHECK_INTERVAL_MS;
@@ -105,6 +109,7 @@ static void connectivity_cb(struct mg_connection *c, int ev, void *ev_data) {
     printf("WiFi: connectivity check failed: %s\n", (char *)ev_data);
     s_internet_ok = false;
     s_check_conn = NULL;
+    s_connectivity_deadline = 0;
     c->is_closing = 1;
     toast_push("No internet connection", TOAST_STYLE_WARNING);
     s_connectivity_check_ms =
@@ -121,6 +126,9 @@ static void start_connectivity_check(void) {
     s_internet_ok = false;
     s_connectivity_check_ms =
         to_ms_since_boot(get_absolute_time()) + CONNECTIVITY_CHECK_RETRY_MS;
+  } else {
+    s_connectivity_deadline =
+        to_ms_since_boot(get_absolute_time()) + CONNECTIVITY_CHECK_TIMEOUT_MS;
   }
 }
 
@@ -175,8 +183,8 @@ static void tcpip_cb(struct mg_tcpip_if *ifp, int ev, void *ev_data) {
       s_connect_start_ms = 0;
       s_connect_retries = 0;
       s_internet_ok = false;
-      // Schedule connectivity check 2s after IP assignment
-      s_connectivity_check_ms = to_ms_since_boot(get_absolute_time()) + 2000;
+      // Schedule connectivity check shortly after IP assignment
+      s_connectivity_check_ms = to_ms_since_boot(get_absolute_time()) + 500;
       { uint32_t save = spin_lock_blocking(s_state_lock);
         mg_snprintf(s_ip, sizeof(s_ip), "%M", mg_print_ip, &ifp->ip);
         spin_unlock(s_state_lock, save);
@@ -368,7 +376,7 @@ void wifi_init(void) {
   s_ifp.driver = &mg_tcpip_driver_pico_w;
   s_ifp.driver_data = &s_driver_data;
   s_ifp.pfn = tcpip_cb;
-  s_ifp.recv_queue.size = 8192;
+  s_ifp.recv_queue.size = 16384;
 
   mg_tcpip_init(&s_mgr, &s_ifp);
   s_ifp.pfn = tcpip_cb; // Ensure our callback is set
@@ -536,6 +544,21 @@ void wifi_poll(void) {
     if (now_ms >= s_connectivity_check_ms) {
       s_connectivity_check_ms = 0;
       start_connectivity_check();
+    }
+  }
+
+  // Connectivity check timeout — force-close if hanging
+  if (s_connectivity_deadline > 0) {
+    uint32_t now_ms = to_ms_since_boot(get_absolute_time());
+    if (now_ms >= s_connectivity_deadline) {
+      printf("WiFi: connectivity check timeout\n");
+      if (s_check_conn) {
+        s_check_conn->is_closing = 1;
+        s_check_conn = NULL;
+      }
+      s_internet_ok = false;
+      s_connectivity_deadline = 0;
+      s_connectivity_check_ms = now_ms + CONNECTIVITY_CHECK_RETRY_MS;
     }
   }
 

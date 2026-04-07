@@ -52,7 +52,7 @@ local button_state = 0
 
 -- Tab demo state
 local active_tab = 1
-local tab_labels = {"Tests", "Functions", "Input", "Display", "Network", "SD Card"}
+local tab_labels = {"Tests", "Functions", "Input", "Network", "SD Card", "RAM"}
 local nav_keys = {prev = input.BTN_LEFT, next = input.BTN_RIGHT}
 
 -- Functions tab state
@@ -210,7 +210,7 @@ local function run_wifi_status_test()
         tests.wifi_status.value = "N/A"
         return
     end
-    
+
     local status = wifi.getStatus()
     if status == wifi.STATUS_CONNECTED then
         local ip = wifi.getIP()
@@ -573,6 +573,183 @@ local function sd_format_bytes(b)
     end
 end
 
+-- ── RAM Test (PIO PSRAM and QMI PSRAM write/verify/speed) ────────────────────
+
+local ram_state = "idle"  -- idle, writing, reading, done, error, aborted
+local ram_sizes = {64, 256, 1024, 4096}  -- KB options
+local ram_size_idx = 2  -- default 256KB
+local ram_target = 1  -- 1 = PIO, 2 = QMI
+local ram_target_names = {"PIO", "QMI"}
+local ram_total_bytes = 0
+local ram_bytes_done = 0
+local ram_phase_start = 0
+local ram_write_speed = 0
+local ram_read_speed = 0
+local ram_mismatches = 0
+local ram_first_mismatch = nil
+local ram_error_msg = ""
+local ram_qmi_handle = nil  -- QMI PSRAM alloc handle
+
+-- PIO PSRAM: test after reserved regions (MP3=32KB, Video=256KB, App=288KB+)
+local RAM_TEST_BASE = 288 * 1024
+local RAM_BLOCK_SIZE = 256  -- bytes per block
+
+local function ram_make_block(block_num)
+    local a = block_num * 65537 + 0xCAFEBABE
+    local b = block_num * 131 + 0xDEADC0DE
+    local c = a ~ b
+    local d = a + b
+    local sig = string.char(
+         a        & 0xFF, (a >> 8)  & 0xFF, (a >> 16) & 0xFF, (a >> 24) & 0xFF,
+         b        & 0xFF, (b >> 8)  & 0xFF, (b >> 16) & 0xFF, (b >> 24) & 0xFF,
+         c        & 0xFF, (c >> 8)  & 0xFF, (c >> 16) & 0xFF, (c >> 24) & 0xFF,
+         d        & 0xFF, (d >> 8)  & 0xFF, (d >> 16) & 0xFF, (d >> 24) & 0xFF)
+    return string.rep(sig, RAM_BLOCK_SIZE // 16)
+end
+
+local function ram_cleanup()
+    if ram_qmi_handle then
+        sys.qmiPsramFree(ram_qmi_handle)
+        ram_qmi_handle = nil
+    end
+end
+
+local function ram_start_test()
+    if ram_target == 1 then
+        -- PIO PSRAM
+        local psram_size = sys.pioPsramSize()
+        if psram_size == 0 then
+            ram_state = "error"
+            ram_error_msg = "PIO PSRAM not available"
+            return
+        end
+        local test_bytes = ram_sizes[ram_size_idx] * 1024
+        local max_test = psram_size - RAM_TEST_BASE
+        if test_bytes > max_test then test_bytes = max_test end
+        if test_bytes < RAM_BLOCK_SIZE then
+            ram_state = "error"
+            ram_error_msg = "Not enough PIO PSRAM space"
+            return
+        end
+        ram_total_bytes = test_bytes
+    else
+        -- QMI PSRAM
+        local mem = sys.getMemInfo()
+        if mem.psram_total == 0 then
+            ram_state = "error"
+            ram_error_msg = "QMI PSRAM not available"
+            return
+        end
+        local test_bytes = ram_sizes[ram_size_idx] * 1024
+        -- Leave headroom for Lua VM (at least 512KB)
+        local max_test = mem.psram_free - 512 * 1024
+        if max_test < RAM_BLOCK_SIZE then
+            ram_state = "error"
+            ram_error_msg = "Not enough free QMI PSRAM"
+            return
+        end
+        if test_bytes > max_test then test_bytes = max_test end
+        ram_qmi_handle = sys.qmiPsramAlloc(test_bytes)
+        if not ram_qmi_handle then
+            ram_state = "error"
+            ram_error_msg = "QMI PSRAM alloc failed"
+            return
+        end
+        ram_total_bytes = test_bytes
+    end
+
+    ram_bytes_done = 0
+    ram_mismatches = 0
+    ram_first_mismatch = nil
+    ram_write_speed = 0
+    ram_read_speed = 0
+    ram_error_msg = ""
+
+    ram_state = "writing"
+    ram_phase_start = sys.getTimeMs()
+end
+
+local function ram_tick()
+    if ram_state == "writing" then
+        local blocks_per_tick = 64  -- 16KB per tick
+        for _ = 1, blocks_per_tick do
+            if ram_bytes_done >= ram_total_bytes then break end
+            local block_num = ram_bytes_done // RAM_BLOCK_SIZE
+            local block = ram_make_block(block_num)
+            if ram_target == 1 then
+                sys.pioPsramWrite(RAM_TEST_BASE + ram_bytes_done, block)
+            else
+                sys.qmiPsramWrite(ram_qmi_handle, ram_bytes_done, block)
+            end
+            ram_bytes_done = ram_bytes_done + RAM_BLOCK_SIZE
+        end
+
+        if ram_bytes_done >= ram_total_bytes then
+            local elapsed = sys.getTimeMs() - ram_phase_start
+            if elapsed > 0 then
+                ram_write_speed = math.floor(ram_total_bytes / elapsed)
+            end
+            ram_state = "reading"
+            ram_phase_start = sys.getTimeMs()
+            ram_bytes_done = 0
+        end
+
+    elseif ram_state == "reading" then
+        local blocks_per_tick = 64
+        for _ = 1, blocks_per_tick do
+            if ram_bytes_done >= ram_total_bytes then break end
+            local block_num = ram_bytes_done // RAM_BLOCK_SIZE
+            local data
+            if ram_target == 1 then
+                data = sys.pioPsramRead(RAM_TEST_BASE + ram_bytes_done, RAM_BLOCK_SIZE)
+            else
+                data = sys.qmiPsramRead(ram_qmi_handle, ram_bytes_done, RAM_BLOCK_SIZE)
+            end
+
+            if not data or #data ~= RAM_BLOCK_SIZE then
+                ram_state = "error"
+                ram_error_msg = string.format("Read failed at offset %d", ram_bytes_done)
+                ram_cleanup()
+                return
+            end
+
+            local expected = ram_make_block(block_num)
+            if data ~= expected then
+                ram_mismatches = ram_mismatches + 1
+                if not ram_first_mismatch then
+                    for i = 1, #data do
+                        if data:byte(i) ~= expected:byte(i) then
+                            local abs_addr = ram_bytes_done + i - 1
+                            if ram_target == 1 then abs_addr = RAM_TEST_BASE + abs_addr end
+                            ram_first_mismatch = string.format(
+                                "blk %d byte %d (0x%06X): got 0x%02X expect 0x%02X",
+                                block_num, i - 1, abs_addr,
+                                data:byte(i), expected:byte(i))
+                            break
+                        end
+                    end
+                end
+            end
+
+            ram_bytes_done = ram_bytes_done + RAM_BLOCK_SIZE
+        end
+
+        if ram_bytes_done >= ram_total_bytes then
+            local elapsed = sys.getTimeMs() - ram_phase_start
+            if elapsed > 0 then
+                ram_read_speed = math.floor(ram_total_bytes / elapsed)
+            end
+            ram_cleanup()
+            ram_state = "done"
+        end
+    end
+end
+
+local function ram_abort()
+    ram_cleanup()
+    ram_state = "aborted"
+end
+
 -- ── Drawing Functions ─────────────────────────────────────────────────────────
 
 local function draw_status_color(status)
@@ -586,17 +763,17 @@ end
 
 local function draw_tabs_demo()
     disp.clear(BG)
-    
+
     pc.ui.drawHeader("System Test Suite")
-    
+
     -- Draw tabs with customizable navigation keys
-    local new_tab, height = pc.ui.drawTabs(29, tab_labels, active_tab, 
+    local new_tab, height = pc.ui.drawTabs(29, tab_labels, active_tab,
                                            nav_keys.prev, nav_keys.next)
     active_tab = new_tab
-    
+
     -- Content area starts below tabs
     local content_y = 29 + height + 10
-    
+
     -- Draw content based on active tab
     if active_tab == 1 then
         -- Tests tab - scrollable test results + system info
@@ -629,15 +806,14 @@ local function draw_tabs_demo()
         if mem.pio_psram_available then
             rows[#rows + 1] = {info = "PIO PSRAM", value = string.format("%s", format_kb(math.floor(mem.pio_psram_size / 1024)))}
         end
-        if mem.xip_cache_hit_rate >= 0 then
-            rows[#rows + 1] = {info = "XIP Cache", value = mem.xip_cache_hit_rate .. "% hit rate"}
-        end
-
         local disk = fs.diskInfo()
         if disk then
             rows[#rows + 1] = {info = "SD Card", value = string.format("%s free / %s",
                 format_kb(disk.free), format_kb(disk.total))}
         end
+
+        -- Display info (moved from Display tab)
+        rows[#rows + 1] = {info = "Display", value = "320x320 RGB565"}
 
         -- Calculate scroll bounds
         local visible_lines = math.floor((max_visible_y - content_y) / line_height)
@@ -724,13 +900,13 @@ local function draw_tabs_demo()
         -- Input tab with keytest functionality
         disp.drawText(20, content_y, "Input Tab", TITLE, BG)
         content_y = content_y + 16
-        
+
         -- Last raw keycode
         disp.drawText(20, content_y, "Last raw:", DIM, BG)
         content_y = content_y + 10
         disp.drawText(80, content_y, string.format("0x%02X  (%d)", last_raw, last_raw), FG, BG)
         content_y = content_y + 12
-        
+
         -- Last character
         disp.drawText(20, content_y, "Char:", DIM, BG)
         if last_char then
@@ -741,12 +917,12 @@ local function draw_tabs_demo()
             disp.drawText(80, content_y, "(none)", DIM, BG)
         end
         content_y = content_y + 12
-        
+
         -- Currently held
         disp.drawText(20, content_y, "Held:", DIM, BG)
         disp.drawText(80, content_y, btn_names(button_state) or "(none)", FG, BG)
         content_y = content_y + 16
-        
+
         -- Event log
         disp.drawText(20, content_y, "Event log:", DIM, BG)
         content_y = content_y + 10
@@ -756,28 +932,15 @@ local function draw_tabs_demo()
                 disp.drawText(20, y, entry, i == 1 and FG or DIM, BG)
             end
         end
-        
-    elseif active_tab == 4 then
-        disp.drawText(20, content_y, "Display Tab", TITLE, BG)
-        content_y = content_y + 20
-        disp.drawText(20, content_y, "Resolution: 320x320", FG, BG)
-        content_y = content_y + 12
-        disp.drawText(20, content_y, "Color depth: RGB565", FG, BG)
-        content_y = content_y + 12
-        -- Draw a gradient demo
-        for i = 0, 50 do
-            local c = disp.rgb(i * 5, 100, 255 - i * 5)
-            disp.fillRect(20 + i * 2, content_y + 10, 2, 20, c)
-        end
 
-    elseif active_tab == 5 then
+    elseif active_tab == 4 then
         disp.drawText(20, content_y, "Network Tab", TITLE, BG)
         content_y = content_y + 20
         disp.drawText(20, content_y, "WiFi: " .. tests.wifi_status.value, FG, BG)
         content_y = content_y + 12
         disp.drawText(20, content_y, "Status: " .. tests.wifi_avail.value, FG, BG)
 
-    elseif active_tab == 6 then
+    elseif active_tab == 5 then
         -- SD Card test tab
         local y = content_y
 
@@ -898,10 +1061,157 @@ local function draw_tabs_demo()
             disp.drawText(20, y, "ENTER: retry  ESC: exit", DIM, BG)
             pc.ui.drawFooter("ENTER:Retry  ESC:Exit", nil)
         end
+
+    elseif active_tab == 6 then
+        -- RAM test tab (PIO PSRAM)
+        local y = content_y
+
+        if ram_state == "idle" then
+            disp.drawText(20, y, "PSRAM Test", TITLE, BG)
+            y = y + 16
+
+            -- Target toggle
+            disp.drawText(20, y, "Target:", DIM, BG)
+            for i, name in ipairs(ram_target_names) do
+                local lbl = (i == ram_target) and ("[" .. name .. "]") or (" " .. name .. " ")
+                local col = (i == ram_target) and FG or DIM
+                disp.drawText(68 + (i - 1) * 50, y, lbl, col, BG)
+            end
+            y = y + 14
+
+            -- Show available space for selected target
+            if ram_target == 1 then
+                local psram_size = sys.pioPsramSize()
+                if psram_size > 0 then
+                    local avail_kb = math.floor((psram_size - RAM_TEST_BASE) / 1024)
+                    disp.drawText(20, y, string.format("Available: %d KB (of %d MB)",
+                        avail_kb, math.floor(psram_size / (1024 * 1024))), FG, BG)
+                else
+                    disp.drawText(20, y, "PIO PSRAM not detected!", WARN, BG)
+                end
+            else
+                local mem = sys.getMemInfo()
+                if mem.psram_total > 0 then
+                    local free_kb = math.floor(mem.psram_free / 1024)
+                    local total_kb = math.floor(mem.psram_total / 1024)
+                    disp.drawText(20, y, string.format("Available: %d KB (of %d KB)",
+                        free_kb, total_kb), FG, BG)
+                else
+                    disp.drawText(20, y, "QMI PSRAM not detected!", WARN, BG)
+                end
+            end
+            y = y + 14
+
+            disp.drawText(20, y, "Test size:", DIM, BG)
+            local size_str = ""
+            for i, sz in ipairs(ram_sizes) do
+                if i == ram_size_idx then
+                    size_str = size_str .. " [" .. sz .. "KB]"
+                else
+                    size_str = size_str .. "  " .. sz .. "KB "
+                end
+            end
+            disp.drawText(80, y, size_str, FG, BG)
+            y = y + 16
+
+            if ram_target == 1 then
+                disp.drawText(20, y, "Writes unique patterns via PIO SPI,", DIM, BG)
+                y = y + 10
+                disp.drawText(20, y, "reads back & verifies every byte.", DIM, BG)
+                y = y + 10
+                disp.drawText(20, y, "Tests mainboard PSRAM chip.", DIM, BG)
+            else
+                disp.drawText(20, y, "Writes unique patterns to QMI PSRAM,", DIM, BG)
+                y = y + 10
+                disp.drawText(20, y, "reads back & verifies every byte.", DIM, BG)
+                y = y + 10
+                disp.drawText(20, y, "Tests Pimoroni onboard PSRAM.", DIM, BG)
+            end
+            y = y + 20
+
+            disp.drawText(20, y, "T: target  UP/DN: size  ENTER: start", GOOD, BG)
+
+            pc.ui.drawFooter("T:Target  UP/DN:Size  ENTER:Start", nil)
+
+        elseif ram_state == "writing" or ram_state == "reading" then
+            local phase = ram_state == "writing" and "Writing" or "Verifying"
+            disp.drawText(20, y, phase .. " " .. ram_target_names[ram_target] .. " PSRAM...", TITLE, BG)
+            y = y + 14
+
+            disp.drawText(20, y, sd_format_bytes(ram_bytes_done) .. " / " .. sd_format_bytes(ram_total_bytes), FG, BG)
+            y = y + 16
+
+            -- Progress bar
+            local bar_x, bar_w, bar_h = 20, 280, 14
+            disp.drawRect(bar_x, y, bar_w, bar_h, DIM)
+            local pct = ram_total_bytes > 0 and ram_bytes_done / ram_total_bytes or 0
+            local fill = math.floor(pct * (bar_w - 2))
+            if fill > 0 then
+                disp.fillRect(bar_x + 1, y + 1, fill, bar_h - 2, GOOD)
+            end
+            disp.drawText(bar_x + bar_w / 2 - 12, y + 3, string.format("%d%%", math.floor(pct * 100)), BG, GOOD)
+            y = y + bar_h + 10
+
+            -- Live throughput
+            local elapsed = sys.getTimeMs() - ram_phase_start
+            if elapsed > 0 and ram_bytes_done > 0 then
+                local speed = math.floor(ram_bytes_done / elapsed)
+                disp.drawText(20, y, string.format("Speed: %d KB/s", speed), DIM, BG)
+            end
+
+            if ram_state == "reading" and ram_mismatches > 0 then
+                y = y + 12
+                disp.drawText(20, y, string.format("Mismatches: %d blocks", ram_mismatches), WARN, BG)
+            end
+
+            pc.ui.drawFooter("ESC:Abort", nil)
+
+        elseif ram_state == "done" then
+            local passed = ram_mismatches == 0
+            disp.drawText(20, y, passed and "PASS" or "FAIL", passed and GOOD or WARN, BG)
+            y = y + 16
+
+            disp.drawText(20, y, "Tested: " .. sd_format_bytes(ram_total_bytes), FG, BG)
+            y = y + 12
+            disp.drawText(20, y, string.format("Write: %d KB/s", ram_write_speed), FG, BG)
+            y = y + 12
+            disp.drawText(20, y, string.format("Read:  %d KB/s", ram_read_speed), FG, BG)
+            y = y + 12
+
+            if ram_mismatches > 0 then
+                disp.drawText(20, y, string.format("Mismatches: %d blocks", ram_mismatches), WARN, BG)
+                y = y + 12
+                if ram_first_mismatch then
+                    disp.drawText(8, y, ram_first_mismatch, WARN, BG)
+                    y = y + 10
+                end
+            else
+                disp.drawText(20, y, "All data verified OK", GOOD, BG)
+                y = y + 12
+            end
+
+            y = y + 8
+            disp.drawText(20, y, "ENTER: run again  ESC: exit", DIM, BG)
+            pc.ui.drawFooter("ENTER:Again  ESC:Exit", nil)
+
+        elseif ram_state == "aborted" then
+            disp.drawText(20, y, "Test aborted", WARN, BG)
+            y = y + 16
+            disp.drawText(20, y, "ENTER: run again  ESC: exit", DIM, BG)
+            pc.ui.drawFooter("ENTER:Again  ESC:Exit", nil)
+
+        elseif ram_state == "error" then
+            disp.drawText(20, y, "ERROR", WARN, BG)
+            y = y + 16
+            disp.drawText(20, y, ram_error_msg, WARN, BG)
+            y = y + 16
+            disp.drawText(20, y, "ENTER: retry  ESC: exit", DIM, BG)
+            pc.ui.drawFooter("ENTER:Retry  ESC:Exit", nil)
+        end
     end
 
     -- Footer with instructions for tabs that don't draw their own
-    if active_tab >= 3 and active_tab <= 5 then
+    if active_tab >= 3 and active_tab <= 4 then
         pc.ui.drawFooter("F1:Exit  T:ToggleKeys  ESC:Back", nil)
     end
 end
@@ -918,7 +1228,7 @@ while true do
     local pressed = input.getButtonsPressed()
     local released = input.getButtonsReleased()
     button_state = input.getButtons()
-    
+
     -- Track raw key and character for Input tab
     -- Get char first so it's available when we check raw key
     last_char = input.getChar()
@@ -940,7 +1250,7 @@ while true do
         end
         push_history(string.format("0x%02X  %s", raw, label))
     end
-    
+
     -- Drive SD card test forward regardless of active tab
     if sd_state == "writing" or sd_state == "reading" or sd_state == "cleanup" then
         -- ESC aborts the test (from any tab)
@@ -948,6 +1258,13 @@ while true do
             sd_abort()
         else
             sd_tick()
+        end
+    -- Drive RAM test forward regardless of active tab
+    elseif ram_state == "writing" or ram_state == "reading" then
+        if pressed & input.BTN_ESC ~= 0 then
+            ram_abort()
+        else
+            ram_tick()
         end
     elseif active_tab == 2 and not hello_active then
         -- Functions tab list input
@@ -992,7 +1309,7 @@ while true do
             hello_active = false
         end
         hello_frame = hello_frame + 1
-    elseif active_tab == 6 then
+    elseif active_tab == 5 then
         -- SD Card tab-specific input when not actively testing
         if sd_state == "idle" then
             if pressed & input.BTN_ESC ~= 0 then
@@ -1013,6 +1330,32 @@ while true do
             end
             if pressed & input.BTN_ENTER ~= 0 then
                 sd_state = "idle"
+            end
+        end
+    elseif active_tab == 6 then
+        -- RAM tab-specific input when not actively testing
+        if ram_state == "idle" then
+            if pressed & input.BTN_ESC ~= 0 then
+                return
+            end
+            if last_char and last_char:upper() == "T" then
+                ram_target = ram_target == 1 and 2 or 1
+            end
+            if pressed & input.BTN_UP ~= 0 then
+                ram_size_idx = ram_size_idx > 1 and ram_size_idx - 1 or #ram_sizes
+            end
+            if pressed & input.BTN_DOWN ~= 0 then
+                ram_size_idx = ram_size_idx < #ram_sizes and ram_size_idx + 1 or 1
+            end
+            if pressed & input.BTN_ENTER ~= 0 then
+                ram_start_test()
+            end
+        elseif ram_state == "done" or ram_state == "aborted" or ram_state == "error" then
+            if pressed & input.BTN_ESC ~= 0 then
+                return
+            end
+            if pressed & input.BTN_ENTER ~= 0 then
+                ram_state = "idle"
             end
         end
     else
@@ -1051,8 +1394,9 @@ while true do
     draw_tabs_demo()
 
     disp.flush()
-    -- During active SD test, minimal sleep for throughput
-    if sd_state == "writing" or sd_state == "reading" then
+    -- During active tests, minimal sleep for throughput
+    if sd_state == "writing" or sd_state == "reading"
+       or ram_state == "writing" or ram_state == "reading" then
         sys.sleep(1)
     else
         sys.sleep(16)

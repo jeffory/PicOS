@@ -329,6 +329,17 @@ target_link_libraries(picocalc_os
     pio_psram_lib
 )
 
+# ── Generate miniz_export.h stub (miniz's own CMake does this, but we
+#    compile sources directly so we need to create it ourselves) ─────────────
+if(NOT EXISTS "${CMAKE_SOURCE_DIR}/third_party/miniz/miniz_export.h")
+    file(WRITE "${CMAKE_SOURCE_DIR}/third_party/miniz/miniz_export.h"
+        "#ifndef MINIZ_EXPORT_H\n"
+        "#define MINIZ_EXPORT_H\n"
+        "#define MINIZ_EXPORT\n"
+        "#endif\n"
+    )
+endif()
+
 # ── miniz compile options (decompression only, no stdio, PSRAM allocator) ────
 # Redirect miniz heap allocations to umm_malloc (8MB PSRAM) instead of
 # standard malloc (~28KB SRAM) so ZIP extraction can handle real app sizes.

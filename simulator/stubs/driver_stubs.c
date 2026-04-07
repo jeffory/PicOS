@@ -361,34 +361,13 @@ int display_get_font_height(void) {
     return FONT_H;
 }
 
-static int s_display_flush_count = 0;
-
 void display_flush(void) {
-    // Socket polling is handled by the dedicated socket thread.
-    // Swap buffers and copy to HAL framebuffer
+    // Copy back buffer to HAL framebuffer and present
     uint16_t* back = display_get_back_buffer();
     uint16_t* hal_fb = hal_display_get_framebuffer();
-    s_display_flush_count++;
     if (hal_fb) {
-        if (s_display_flush_count <= 5 || (s_display_flush_count % 500) == 0) {
-            // Debug: sample a few pixels to verify data is flowing
-            int nonzero = 0;
-            for (int i = 0; i < 320*320; i++) { if (back[i] != 0) nonzero++; }
-            fprintf(stderr, "[DISPLAY] flush #%d: back=%p hal_fb=%p nonzero_pixels=%d first=[%04x %04x %04x %04x]\n",
-                    s_display_flush_count, (void*)back, (void*)hal_fb, nonzero,
-                    back[0], back[1], back[160*320+160], back[319*320+319]);
-        }
         memcpy(hal_fb, back, 320 * 320 * sizeof(uint16_t));
-        if (s_display_flush_count <= 5 || (s_display_flush_count % 500) == 0) {
-            // Verify HAL buffer was written
-            int nz = 0;
-            for (int i = 0; i < 320*320; i++) { if (hal_fb[i] != 0) nz++; }
-            fprintf(stderr, "[DISPLAY] hal_fb after memcpy: nonzero=%d first=[%04x %04x] ptr=%p\n",
-                    nz, hal_fb[0], hal_fb[160*320+160], (void*)hal_fb);
-        }
         hal_display_present();
-    } else {
-        fprintf(stderr, "[DISPLAY] flush: hal_fb is NULL!\n");
     }
     // Swap buffer index
     g_current_buffer = 1 - g_current_buffer;
@@ -524,7 +503,10 @@ void display_set_scroll_offset(int offset) { (void)offset; }
 void display_set_transparent_color(uint16_t color) { (void)color; }
 uint16_t display_get_transparent_color(void) { return 0; }
 uint16_t* display_get_framebuffer(void) { return display_get_back_buffer(); }
-uint16_t* display_get_screen_buffer(void) { return display_get_back_buffer(); }
+uint16_t* display_get_screen_buffer(void) {
+    // Return the front buffer (what's currently on screen), not the back buffer
+    return g_current_buffer == 0 ? g_front_buffer : g_back_buffer;
+}
 
 void display_draw_image(int x, int y, const uint16_t* data, int w, int h) {
     uint16_t* fb = display_get_back_buffer();
@@ -950,3 +932,10 @@ void image_draw_scaled(const pc_image_t *img, int x, int y, int dst_w, int dst_h
 static bool basic_stub_can_handle(const app_entry_t *app) { (void)app; return false; }
 static bool basic_stub_run(const app_entry_t *app) { (void)app; return false; }
 const AppRunner g_basic_runner = {"basic", basic_stub_can_handle, basic_stub_run};
+
+// --- PIO PSRAM stubs ---
+bool pio_psram_init(void) { return false; }
+bool pio_psram_available(void) { return false; }
+uint32_t pio_psram_size(void) { return 0; }
+void pio_psram_read(uint32_t addr, uint8_t *dst, uint32_t len) { (void)addr; (void)dst; (void)len; }
+void pio_psram_write(uint32_t addr, const uint8_t *src, uint32_t len) { (void)addr; (void)src; (void)len; }
