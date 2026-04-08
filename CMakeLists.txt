@@ -271,6 +271,7 @@ add_executable(picocalc_os
     src/os/image_decoders.cpp
     src/drivers/display.c
     src/drivers/image_api.c
+    src/drivers/image_preload.c
     src/drivers/audio.c
     src/drivers/sound.c
     src/drivers/fileplayer.c

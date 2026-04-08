@@ -60,6 +60,15 @@ local img_files = {}       -- list of image files in current directory
 local img_index = 1        -- current index in img_files
 local img_dir = ""         -- directory being browsed
 local img_panel = 1        -- which panel (1 or 2) was active when opening image
+local cache_prev = nil     -- {img=<image_obj>, index=<int>} or nil
+local cache_next = nil     -- {img=<image_obj>, index=<int>} or nil
+
+-- Slideshow auto-play
+local img_slideshow     = false
+local slideshow_paused  = false
+local slideshow_timer   = 0
+local SLIDESHOW_STEPS   = {1, 2, 3, 5, 10, 15, 30}
+local slideshow_interval = tonumber(pc.config.get("slideshow_interval")) or 3
 
 -- MP3 player
 local mp3_player      = nil
@@ -243,43 +252,54 @@ end
 local function draw_img_view()
   disp.fillRect(0, 0, SW, SH, BG)
 
-  -- Header
-  disp.fillRect(0, 0, SW, HDR_H, HDR_ACT)
-  local nav_info = (#img_files > 1) and string.format(" [%d/%d]", img_index, #img_files) or ""
   local iw, ih = 0, 0
-  if img_obj then
-    iw, ih = img_obj:getSize()
+  if img_obj then iw, ih = img_obj:getSize() end
+
+  if not img_slideshow then
+    -- Header
+    disp.fillRect(0, 0, SW, HDR_H, HDR_ACT)
+    local nav_info = (#img_files > 1) and string.format(" [%d/%d]", img_index, #img_files) or ""
+    local title = string.format("%s  %dx%d%s", img_name, iw, ih, nav_info)
+    disp.drawText(1, 2, pad(title, 53), WHITE, HDR_ACT)
   end
-  local title = string.format("%s  %dx%d%s", img_name, iw, ih, nav_info)
-  disp.drawText(1, 2, pad(title, 53), WHITE, HDR_ACT)
 
   if not img_obj then
     disp.drawText(80, 150, "Failed to load image", disp.RED, BG)
     disp.drawText(80, 165, img_name, GRAY, BG)
   else
-    -- Image area: y=12..309 (298 px high), footer hint at y=310
+    local top_y   = img_slideshow and 0 or HDR_H
+    local bot_pad = img_slideshow and 0 or 10
     local avail_w = SW
-    local avail_h = SH - HDR_H - 10
+    local avail_h = SH - top_y - bot_pad
     local scale = math.min(avail_w / iw, avail_h / ih)
 
     if scale < 1.0 then
       local dw = math.floor(iw * scale)
       local dh = math.floor(ih * scale)
       local ox = (SW - dw) // 2
-      local oy = HDR_H + (avail_h - dh) // 2
+      local oy = top_y + (avail_h - dh) // 2
       img_obj:drawScaled(ox, oy, scale)
     else
       local ox = (SW - iw) // 2
-      local oy = HDR_H + (avail_h - ih) // 2
+      local oy = top_y + (avail_h - ih) // 2
       img_obj:draw(ox, oy)
     end
   end
 
-  disp.fillRect(0, SH - 10, SW, 10, FOOT_BG)
-  if #img_files > 1 then
-    disp.drawText(1, SH - 9, "< >: Prev/Next  Esc: close", GRAY, FOOT_BG)
+  if img_slideshow then
+    if slideshow_paused then
+      local label = "PAUSED"
+      local lw = #label * CHAR_W
+      disp.fillRect((SW - lw) // 2 - 2, SH - 12, lw + 4, 12, FOOT_BG)
+      disp.drawText((SW - lw) // 2, SH - 10, label, YELLOW, FOOT_BG)
+    end
   else
-    disp.drawText(1, SH - 9, "Esc or Enter: close", GRAY, FOOT_BG)
+    disp.fillRect(0, SH - 10, SW, 10, FOOT_BG)
+    if #img_files > 1 then
+      disp.drawText(1, SH - 9, "< >:Prev/Next F5:Slideshow Esc:close", GRAY, FOOT_BG)
+    else
+      disp.drawText(1, SH - 9, "Esc or Enter: close", GRAY, FOOT_BG)
+    end
   end
 end
 
@@ -614,12 +634,28 @@ local function cmd_delete()
   load_dir(p)
 end
 
-local function open_img_view(path, fname)
-  -- Free previous image if exists
-  if img_obj then
-    img_obj = nil
-    collectgarbage()
+local function preload_adjacent()
+  if #img_files <= 1 then return end
+  local next_idx = img_index % #img_files + 1
+  if cache_next and cache_next.index == next_idx then return end  -- already cached or loading
+  cache_next = nil
+  local fname = img_files[next_idx]
+  local path = path_join(img_dir, fname)
+  sys.log("preload: async start index " .. next_idx .. " (" .. fname .. ")")
+  if gfx.image.preload(path) then
+    cache_next = {img = nil, index = next_idx, loading = true}
+  else
+    sys.log("preload: busy, will retry")
   end
+end
+
+local function open_img_view(path, fname)
+  -- Free previous image and caches
+  gfx.image.cancelPreload()
+  img_obj = nil
+  cache_prev = nil
+  cache_next = nil
+  collectgarbage()
 
   -- Scan current directory for images to allow navigation
   local dir = path:match("^(.*)/")
@@ -653,6 +689,7 @@ local function open_img_view(path, fname)
   img_obj  = img
   img_name = fname
   state = ST.IMG_VIEW
+  needs_preload = true
 end
 
 local function open_txt_view(path, fname)
@@ -824,64 +861,119 @@ local function handle_browse(pressed)
   return true
 end
 
+local function slideshow_reset_timer()
+  slideshow_timer = math.floor(slideshow_interval * 1000 / 16)  -- frames at 16ms
+end
+
+local function slideshow_enter()
+  img_slideshow = true
+  slideshow_paused = false
+  slideshow_reset_timer()
+end
+
+local function slideshow_exit()
+  img_slideshow = false
+  slideshow_paused = false
+  slideshow_timer = 0
+end
+
 local function handle_img_view(pressed)
-  input.getChar()   -- drain char buffer
+  local ch = input.getChar()   -- drain char buffer
+
+  -- F5: toggle slideshow mode
+  if pressed & input.BTN_F5 ~= 0 and #img_files > 1 then
+    if img_slideshow then slideshow_exit() else slideshow_enter() end
+    return
+  end
+
+  -- Space: pause/resume slideshow
+  if img_slideshow and ch == " " then
+    slideshow_paused = not slideshow_paused
+    return
+  end
+
+  -- Esc in slideshow: exit slideshow (not image viewer)
+  if img_slideshow and pressed & input.BTN_ESC ~= 0 then
+    slideshow_exit()
+    return
+  end
 
   -- Navigate between images in directory
   if #img_files > 1 then
-    if pressed & input.BTN_LEFT ~= 0 then
-      img_index = img_index - 1
-      if img_index < 1 then img_index = #img_files end
-      local new_path = path_join(img_dir, img_files[img_index])
-      local new_name = img_files[img_index]
-      -- Free current and load next
-      img_obj = nil
-      collectgarbage()
-      local ok, img = pcall(function() return gfx.image.load(new_path) end)
-      if ok and img then
-        img_obj = img
-        img_name = new_name
-      else
-        collectgarbage()
-        img_obj = nil
-        img_name = "Error: " .. new_name
+    local nav_dir = nil
+    if pressed & input.BTN_RIGHT ~= 0 then nav_dir = "next"
+    elseif pressed & input.BTN_LEFT ~= 0 then nav_dir = "prev" end
+
+    if nav_dir then
+      local target_idx
+      sys.log("nav: " .. nav_dir .. " from index " .. img_index)
+      if nav_dir == "next" then
+        target_idx = img_index % #img_files + 1
+        cache_prev = {img = img_obj, index = img_index}
+        if cache_next and cache_next.index == target_idx and not cache_next.loading then
+          sys.log("nav: cache HIT for index " .. target_idx)
+          img_obj = cache_next.img
+          cache_next = nil
+        elseif cache_next and cache_next.index == target_idx and cache_next.loading then
+          -- Async preload in progress for this exact image — wait for it
+          sys.log("nav: waiting for async preload of index " .. target_idx)
+          img_obj = nil
+          img_index = target_idx
+          img_name = img_files[target_idx]
+          -- Will resolve in main loop poll; show loading state for now
+          -- Sync panel cursor
+          local p = panels[img_panel]
+          for i, e in ipairs(p.entries) do
+            if e.name == img_files[target_idx] then
+              p.cursor = i; clamp_scroll(p); break
+            end
+          end
+          return
+        else
+          sys.log("nav: cache MISS for index " .. target_idx)
+          gfx.image.cancelPreload()
+          cache_next = nil
+          img_obj = nil
+          collectgarbage()
+          local path = path_join(img_dir, img_files[target_idx])
+          local ok, img = pcall(function() return gfx.image.load(path) end)
+          img_obj = (ok and img) and img or nil
+        end
+      else -- prev
+        target_idx = img_index - 1
+        if target_idx < 1 then target_idx = #img_files end
+        gfx.image.cancelPreload()
+        cache_next = {img = img_obj, index = img_index}
+        if cache_prev and cache_prev.index == target_idx then
+          sys.log("nav: cache HIT for index " .. target_idx)
+          img_obj = cache_prev.img
+          cache_prev = nil
+        else
+          sys.log("nav: cache MISS for index " .. target_idx)
+          cache_prev = nil
+          img_obj = nil
+          collectgarbage()
+          local path = path_join(img_dir, img_files[target_idx])
+          local ok, img = pcall(function() return gfx.image.load(path) end)
+          img_obj = (ok and img) and img or nil
+        end
       end
+
+      img_index = target_idx
+      img_name = img_obj and img_files[target_idx] or ("Error: " .. img_files[target_idx])
+
       -- Sync panel cursor
       local p = panels[img_panel]
       for i, e in ipairs(p.entries) do
-        if e.name == new_name then
+        if e.name == img_files[target_idx] then
           p.cursor = i
           clamp_scroll(p)
           break
         end
       end
-      return
-    elseif pressed & input.BTN_RIGHT ~= 0 then
-      img_index = img_index + 1
-      if img_index > #img_files then img_index = 1 end
-      local new_path = path_join(img_dir, img_files[img_index])
-      local new_name = img_files[img_index]
-      -- Free current and load next
-      img_obj = nil
-      collectgarbage()
-      local ok, img = pcall(function() return gfx.image.load(new_path) end)
-      if ok and img then
-        img_obj = img
-        img_name = new_name
-      else
-        collectgarbage()
-        img_obj = nil
-        img_name = "Error: " .. new_name
-      end
-      -- Sync panel cursor
-      local p = panels[img_panel]
-      for i, e in ipairs(p.entries) do
-        if e.name == new_name then
-          p.cursor = i
-          clamp_scroll(p)
-          break
-        end
-      end
+
+      if img_slideshow then slideshow_reset_timer() end
+      preload_adjacent()
       return
     end
   end
@@ -889,7 +981,11 @@ local function handle_img_view(pressed)
   if pressed & input.BTN_ESC   ~= 0 or
      pressed & input.BTN_ENTER ~= 0 or
      pressed & input.BTN_F3    ~= 0 then
+    slideshow_exit()
+    gfx.image.cancelPreload()
     img_obj = nil
+    cache_prev = nil
+    cache_next = nil
     img_files = {}
     img_index = 1
     img_dir = ""
@@ -944,6 +1040,20 @@ if di then
   set_status(fmt_diskspace(di.free) .. " free / " .. fmt_diskspace(di.total) .. " total")
 end
 
+-- System menu: slideshow interval (cycles through options on each select)
+sys.addMenuItem("Slideshow interval", function()
+  local cur_i = 1
+  for i, v in ipairs(SLIDESHOW_STEPS) do
+    if v == slideshow_interval then cur_i = i; break end
+  end
+  cur_i = (cur_i % #SLIDESHOW_STEPS) + 1
+  slideshow_interval = SLIDESHOW_STEPS[cur_i]
+  pc.config.set("slideshow_interval", tostring(slideshow_interval))
+  pc.config.save()
+  if img_slideshow then slideshow_reset_timer() end
+  set_status("Slideshow interval: " .. slideshow_interval .. "s")
+end)
+
 local running = true
 while running do
   input.update()
@@ -956,6 +1066,16 @@ while running do
   elseif state == ST.HELP     then handle_help(pressed)
   elseif state == ST.MP3_VIEW then handle_mp3_view(pressed)
   elseif state == ST.VIDEO_VIEW then handle_vid_view(pressed)
+  end
+
+  -- Slideshow auto-advance
+  if state == ST.IMG_VIEW and img_slideshow and not slideshow_paused and img_obj then
+    slideshow_timer = slideshow_timer - 1
+    if slideshow_timer <= 0 then
+      -- Auto-advance to next image
+      handle_img_view(input.BTN_RIGHT)
+      slideshow_reset_timer()
+    end
   end
 
   -- Video update
@@ -1000,6 +1120,34 @@ while running do
     sys.sleep(1)
   else
     disp.flush()
+    -- Poll for async preload completion (non-blocking)
+    if state == ST.IMG_VIEW and cache_next and cache_next.loading then
+      local img, ready = gfx.image.pollPreload()
+      if ready then
+        if img then
+          sys.log("preload: async complete for index " .. cache_next.index)
+          -- If we're waiting for this image (img_obj is nil), use it directly
+          if not img_obj and cache_next.index == img_index then
+            sys.log("preload: applying waited image for index " .. img_index)
+            img_obj = img
+            img_name = img_files[img_index]
+            cache_next = nil
+            preload_adjacent()
+            draw_img_view()
+            disp.flush()
+          else
+            cache_next = {img = img, index = cache_next.index}
+          end
+        else
+          sys.log("preload: async FAILED for index " .. cache_next.index)
+          -- If we were waiting for this, show error
+          if not img_obj and cache_next.index == img_index then
+            img_name = "Error: " .. img_files[img_index]
+          end
+          cache_next = nil
+        end
+      end
+    end
     sys.sleep(16)
   end
 end

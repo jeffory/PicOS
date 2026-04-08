@@ -260,29 +260,27 @@ static void build_category_indices(void) {
 
 #define ITEM_H 28
 #define LIST_X 8
-#define LIST_Y 32
+#define LIST_Y 48          // below header (28) + tab bar (18) + border (1) + 1
 #define LIST_VISIBLE 9
 #define DESC_SCROLL_RESET_PAUSE 40
+#define ICON_SIZE   20     // app icon size in list view
 
-#define GRID_X      8
-#define GRID_Y      34
-#define TILE_W      96
-#define TILE_H      88
-#define TILE_GAP    8
-#define GRID_COLS   3
-#define GRID_ROWS   2
-#define ALL_APPS_Y  220
-#define ICON_SIZE   20  // app icon size in list view
+#define TAB_COUNT   (CAT_COUNT + 1)  // "All" + 6 categories
 
-typedef enum {
-  VIEW_HOME,      // category grid
-  VIEW_CATEGORY,  // filtered app list
-  VIEW_ALL,       // all apps list
-} launcher_view_t;
+static const char *s_tab_names[TAB_COUNT] = {
+    "All", "Games", "Tools", "System", "Demos", "Emulators", "Network"};
 
-static launcher_view_t s_view = VIEW_HOME;
-static category_t s_current_cat = CAT_GAMES;
-static int s_home_sel = 0;  // 0..5 = tiles, 6 = "All Apps"
+static const uint16_t s_tab_colors[TAB_COUNT] = {
+    RGB565(140, 160, 255),  // All: light blue
+    RGB565(255, 100, 50),   // Games: orange
+    RGB565(100, 180, 255),  // Tools: blue
+    RGB565(160, 160, 160),  // System: gray
+    RGB565(255, 200, 50),   // Demos: yellow
+    RGB565(150, 100, 255),  // Emulators: purple
+    RGB565(50, 200, 150),   // Network: teal
+};
+
+static int s_active_tab = 0;  // 0 = All, 1..6 = categories
 
 static int s_selected = 0;
 static int s_scroll = 0;
@@ -304,81 +302,48 @@ void launcher_refresh_apps(void) {
 #define C_BATTERY_OK COLOR_GREEN
 #define C_BATTERY_LO COLOR_RED
 #define C_BORDER RGB565(60, 60, 100)
-#define C_TILE_BG RGB565(25, 25, 40)
-#define C_TILE_SEL RGB565(40, 60, 120)
 
-// ── Procedural category icons (32x32, drawn with display primitives) ────────
+// ── Tab bar (horizontal category tabs) ──────────────────────────────────────
 
-static void draw_cat_icon_games(int cx, int cy, uint16_t color) {
-  // Gamepad: body rect + two circle buttons + dpad
-  display_fill_rect(cx - 14, cy - 6, 28, 12, color);
-  display_fill_circle(cx - 7, cy, 3, COLOR_WHITE);
-  display_fill_circle(cx + 7, cy, 3, COLOR_WHITE);
-  // Dpad
-  display_fill_rect(cx - 2, cy - 5, 4, 10, COLOR_WHITE);
-  display_fill_rect(cx - 5, cy - 2, 10, 4, COLOR_WHITE);
-}
+#define TAB_BAR_Y    29    // below header border
+#define TAB_BAR_H    18
+#define TAB_DOT_W    14    // width of an unselected tab (colored dot)
+#define TAB_DOT_R    3     // dot radius
+#define TAB_GAP      2
+#define TAB_OUTER_PAD 6
+#define TAB_LABEL_PAD 6    // horizontal padding around selected label text
+#define TAB_SEL_BG   RGB565(40, 60, 120)
 
-static void draw_cat_icon_tools(int cx, int cy, uint16_t color) {
-  // Wrench shape
-  display_fill_circle(cx - 6, cy - 6, 5, color);
-  display_fill_circle(cx - 6, cy - 6, 2, C_TILE_BG);
-  display_draw_line(cx - 3, cy - 3, cx + 8, cy + 8, color);
-  display_draw_line(cx - 2, cy - 3, cx + 9, cy + 8, color);
-  display_fill_rect(cx + 5, cy + 5, 6, 6, color);
-}
+static void draw_tab_bar(void) {
+  display_fill_rect(0, TAB_BAR_Y, FB_WIDTH, TAB_BAR_H, C_HEADER_BG);
+  display_fill_rect(0, TAB_BAR_Y + TAB_BAR_H, FB_WIDTH, 1, C_BORDER);
 
-static void draw_cat_icon_system(int cx, int cy, uint16_t color) {
-  // Gear: circle with notches
-  display_fill_circle(cx, cy, 8, color);
-  display_fill_circle(cx, cy, 4, C_TILE_BG);
-  // Notches (small rects at cardinal + diagonal points)
-  for (int a = 0; a < 8; a++) {
-    int dx = (a == 0 || a == 4) ? 0 : ((a < 4) ? 1 : -1);
-    int dy = (a == 2 || a == 6) ? 0 : ((a < 2 || a > 6) ? -1 : 1);
-    display_fill_rect(cx + dx * 9 - 2, cy + dy * 9 - 2, 4, 4, color);
-  }
-}
+  // Calculate selected tab width
+  const char *sel_label = s_tab_names[s_active_tab];
+  int sel_label_w = display_text_width(sel_label);
+  int sel_w = sel_label_w + TAB_LABEL_PAD * 2;
 
-static void draw_cat_icon_demos(int cx, int cy, uint16_t color) {
-  // Star / diamond shape
-  display_draw_line(cx, cy - 10, cx + 7, cy, color);
-  display_draw_line(cx + 7, cy, cx, cy + 10, color);
-  display_draw_line(cx, cy + 10, cx - 7, cy, color);
-  display_draw_line(cx - 7, cy, cx, cy - 10, color);
-  display_fill_circle(cx, cy, 4, color);
-}
+  // Calculate total width to center the tab bar
+  int total_w = sel_w + (TAB_COUNT - 1) * TAB_DOT_W + (TAB_COUNT - 1) * TAB_GAP;
+  int x = (FB_WIDTH - total_w) / 2;
 
-static void draw_cat_icon_emulators(int cx, int cy, uint16_t color) {
-  // Retro screen with antenna
-  display_fill_rect(cx - 10, cy - 6, 20, 14, color);
-  display_fill_rect(cx - 8, cy - 4, 16, 10, C_TILE_BG);
-  // Antenna
-  display_draw_line(cx - 4, cy - 6, cx - 8, cy - 12, color);
-  display_draw_line(cx + 4, cy - 6, cx + 8, cy - 12, color);
-}
-
-static void draw_cat_icon_network(int cx, int cy, uint16_t color) {
-  // Globe: circle with cross lines
-  display_draw_circle(cx, cy, 9, color);
-  display_draw_circle(cx, cy, 10, color);
-  display_draw_line(cx - 10, cy, cx + 10, cy, color);
-  display_draw_line(cx, cy - 10, cx, cy + 10, color);
-  // Latitude arcs (simplified as ellipse-ish lines)
-  display_draw_line(cx - 5, cy - 8, cx + 5, cy - 8, color);
-  display_draw_line(cx - 5, cy + 8, cx + 5, cy + 8, color);
-}
-
-static void draw_category_icon(int cx, int cy, category_t cat) {
-  uint16_t color = (cat < CAT_COUNT) ? s_cat_colors[cat] : COLOR_GRAY;
-  switch (cat) {
-    case CAT_GAMES:    draw_cat_icon_games(cx, cy, color); break;
-    case CAT_TOOLS:    draw_cat_icon_tools(cx, cy, color); break;
-    case CAT_SYSTEM:   draw_cat_icon_system(cx, cy, color); break;
-    case CAT_DEMOS:    draw_cat_icon_demos(cx, cy, color); break;
-    case CAT_EMULATORS:draw_cat_icon_emulators(cx, cy, color); break;
-    case CAT_NETWORK:  draw_cat_icon_network(cx, cy, color); break;
-    default: break;
+  for (int i = 0; i < TAB_COUNT; i++) {
+    if (i == s_active_tab) {
+      // Selected: highlight bg + text label + bottom accent line
+      uint16_t accent = s_tab_colors[i];
+      display_fill_rect(x, TAB_BAR_Y + 1, sel_w, TAB_BAR_H - 2, TAB_SEL_BG);
+      display_fill_rect(x, TAB_BAR_Y + TAB_BAR_H - 3, sel_w, 3, accent);
+      int tx = x + (sel_w - sel_label_w) / 2;
+      display_draw_text(tx, TAB_BAR_Y + (TAB_BAR_H - 8) / 2, sel_label,
+                        C_TEXT, TAB_SEL_BG);
+      x += sel_w + TAB_GAP;
+    } else {
+      // Unselected: colored dot
+      int cx = x + TAB_DOT_W / 2;
+      int cy = TAB_BAR_Y + TAB_BAR_H / 2;
+      display_fill_circle(cx, cy, TAB_DOT_R, s_tab_colors[i]);
+      x += TAB_DOT_W + TAB_GAP;
+    }
   }
 }
 
@@ -407,109 +372,34 @@ static void draw_app_icon(int x, int y, int size, const app_entry_t *app) {
   }
 }
 
-// ── Home view (category grid) ───────────────────────────────────────────────
-
-static void draw_home_view(void) {
-  display_clear(C_BG);
-  ui_draw_header("PicOS");
-
-  if (s_app_count == 0) {
-    display_draw_text(8, GRID_Y + 30, "No apps found.", C_TEXT_DIM, C_BG);
-    display_draw_text(8, GRID_Y + 44, "Copy apps to /apps/ on SD.",
-                      C_TEXT_DIM, C_BG);
-    ui_draw_footer("", NULL);
-    display_flush();
-    return;
-  }
-
-  // Draw 3x2 grid of category tiles
-  for (int r = 0; r < GRID_ROWS; r++) {
-    for (int c = 0; c < GRID_COLS; c++) {
-      int cat = r * GRID_COLS + c;
-      int tx = GRID_X + c * (TILE_W + TILE_GAP);
-      int ty = GRID_Y + r * (TILE_H + TILE_GAP);
-      bool sel = (s_home_sel == cat);
-      int count = s_cat_counts[cat];
-
-      // Tile background
-      uint16_t bg = sel ? C_TILE_SEL : C_TILE_BG;
-      display_fill_rect(tx, ty, TILE_W, TILE_H, bg);
-
-      // Selection border
-      if (sel) {
-        display_draw_rect(tx, ty, TILE_W, TILE_H, s_cat_colors[cat]);
-        display_draw_rect(tx + 1, ty + 1, TILE_W - 2, TILE_H - 2,
-                          s_cat_colors[cat]);
-      }
-
-      // Category icon (centered in top portion)
-      int icon_cx = tx + TILE_W / 2;
-      int icon_cy = ty + 28;
-      draw_category_icon(icon_cx, icon_cy, (category_t)cat);
-
-      // Category name (centered)
-      const char *name = s_cat_names[cat];
-      int name_w = display_text_width(name);
-      display_draw_text(tx + (TILE_W - name_w) / 2, ty + 52, name, C_TEXT, bg);
-
-      // App count
-      char count_str[16];
-      snprintf(count_str, sizeof(count_str), "(%d)", count);
-      int count_w = display_text_width(count_str);
-      uint16_t count_color = count > 0 ? C_TEXT_DIM : RGB565(80, 80, 80);
-      display_draw_text(tx + (TILE_W - count_w) / 2, ty + 66, count_str,
-                        count_color, bg);
-    }
-  }
-
-  // "All Apps" bar
-  bool all_sel = (s_home_sel == CAT_COUNT);
-  uint16_t all_bg = all_sel ? C_SEL_BG : C_TILE_BG;
-  display_fill_rect(GRID_X, ALL_APPS_Y, FB_WIDTH - GRID_X * 2, ITEM_H, all_bg);
-  if (all_sel) {
-    display_draw_rect(GRID_X, ALL_APPS_Y, FB_WIDTH - GRID_X * 2, ITEM_H,
-                      RGB565(100, 140, 255));
-  }
-  char all_label[32];
-  snprintf(all_label, sizeof(all_label), "All Apps (%d)", s_app_count);
-  int all_w = display_text_width(all_label);
-  display_draw_text((FB_WIDTH - all_w) / 2, ALL_APPS_Y + 10, all_label, C_TEXT,
-                    all_bg);
-
-  ui_draw_footer("Arrows:Select  Enter:Open  F10:Menu", NULL);
-  display_flush();
-}
-
-// ── App list view (filtered or all) ─────────────────────────────────────────
+// ── App list helpers ────────────────────────────────────────────────────────
 
 static int list_count(void) {
-  if (s_view == VIEW_ALL) return s_app_count;
-  if (s_current_cat < CAT_COUNT) return s_cat_counts[s_current_cat];
+  if (s_active_tab == 0) return s_app_count;  // "All"
+  int cat = s_active_tab - 1;
+  if (cat < CAT_COUNT) return s_cat_counts[cat];
   return 0;
 }
 
 static int list_app_idx(int list_idx) {
-  if (s_view == VIEW_ALL) return list_idx;
-  if (s_current_cat < CAT_COUNT && list_idx < s_cat_counts[s_current_cat])
-    return s_cat_indices[s_current_cat][list_idx];
+  if (s_active_tab == 0) return list_idx;  // "All"
+  int cat = s_active_tab - 1;
+  if (cat < CAT_COUNT && list_idx < s_cat_counts[cat])
+    return s_cat_indices[cat][list_idx];
   return 0;
 }
 
 static void draw_app_list(void) {
   display_clear(C_BG);
-
-  // Header with category name
-  if (s_view == VIEW_CATEGORY && s_current_cat < CAT_COUNT)
-    ui_draw_header(s_cat_names[s_current_cat]);
-  else
-    ui_draw_header("All Apps");
+  ui_draw_header("PicOS");
+  draw_tab_bar();
 
   int count = list_count();
 
   if (count == 0) {
     display_draw_text(8, LIST_Y + 20, "No apps in this category.",
                       C_TEXT_DIM, C_BG);
-    ui_draw_footer("ESC:Back", NULL);
+    ui_draw_footer("L/R:Category  F10:Menu", NULL);
     display_flush();
     return;
   }
@@ -568,18 +458,14 @@ static void draw_app_list(void) {
     display_fill_rect(FB_WIDTH - 6, bar_y, 4, bar_h, C_TEXT);
   }
 
-  ui_draw_footer("ESC:Back  Enter:Launch  F10:Menu", NULL);
+  ui_draw_footer("L/R:Category  Enter:Launch  F10:Menu", NULL);
   display_flush();
 }
 
 // ── Unified draw dispatch ───────────────────────────────────────────────────
 
 static void draw_current_view(void) {
-  switch (s_view) {
-    case VIEW_HOME:     draw_home_view(); break;
-    case VIEW_CATEGORY: draw_app_list();  break;
-    case VIEW_ALL:      draw_app_list();  break;
-  }
+  draw_app_list();
 }
 
 // ── Runner dispatch table ─────────────────────────────────────────────────────
@@ -761,80 +647,32 @@ static bool run_app(int idx) {
 // ── Public interface
 // ──────────────────────────────────────────────────────────
 
-// ── Input: Home view grid navigation ────────────────────────────────────────
+// ── Input: unified navigation ───────────────────────────────────────────────
 
-static bool handle_home_input(uint32_t pressed, bool *dirty) {
-  if (pressed & BTN_UP) {
-    if (s_home_sel == CAT_COUNT) {
-      // "All Apps" → bottom row
-      s_home_sel = GRID_COLS + (s_home_sel % GRID_COLS);
-      if (s_home_sel >= CAT_COUNT) s_home_sel = CAT_COUNT - 1;
-    } else if (s_home_sel >= GRID_COLS) {
-      s_home_sel -= GRID_COLS;  // move up one row
-    } else {
-      s_home_sel = CAT_COUNT;   // wrap: top row → "All Apps"
-    }
-    *dirty = true;
-  }
-  if (pressed & BTN_DOWN) {
-    if (s_home_sel == CAT_COUNT) {
-      s_home_sel = 0;   // wrap: "All Apps" → top row
-    } else if (s_home_sel < GRID_COLS) {
-      s_home_sel += GRID_COLS;  // move to bottom row
-      if (s_home_sel >= CAT_COUNT) s_home_sel = CAT_COUNT - 1;
-    } else {
-      s_home_sel = CAT_COUNT;   // bottom row → "All Apps"
-    }
-    *dirty = true;
-  }
-  if (pressed & BTN_LEFT) {
-    if (s_home_sel < CAT_COUNT && (s_home_sel % GRID_COLS) > 0) {
-      s_home_sel--;
-      *dirty = true;
-    }
-  }
-  if (pressed & BTN_RIGHT) {
-    if (s_home_sel < CAT_COUNT && (s_home_sel % GRID_COLS) < GRID_COLS - 1
-        && s_home_sel + 1 < CAT_COUNT) {
-      s_home_sel++;
-      *dirty = true;
-    }
-  }
-  if (pressed & BTN_ENTER) {
-    if (s_home_sel == CAT_COUNT) {
-      // "All Apps"
-      s_view = VIEW_ALL;
-      s_selected = 0;
-      s_scroll = 0;
-      s_desc_scroll = 0;
-      s_desc_scroll_timer = 0;
-    } else if (s_home_sel < CAT_COUNT) {
-      // Enter a category (skip if empty)
-      if (s_cat_counts[s_home_sel] > 0) {
-        s_view = VIEW_CATEGORY;
-        s_current_cat = (category_t)s_home_sel;
-        s_selected = 0;
-        s_scroll = 0;
-        s_desc_scroll = 0;
-        s_desc_scroll_timer = 0;
-      }
-    }
-    *dirty = true;
-  }
-  return false;
-}
-
-// ── Input: App list navigation ──────────────────────────────────────────────
-
-static bool handle_list_input(uint32_t pressed, bool *dirty) {
+static void handle_input(uint32_t pressed, bool *dirty) {
   int count = list_count();
 
-  if (pressed & BTN_ESC) {
-    s_view = VIEW_HOME;
+  // LEFT/RIGHT: switch tabs
+  if (pressed & BTN_LEFT) {
+    if (s_active_tab > 0) s_active_tab--;
+    else s_active_tab = TAB_COUNT - 1;
+    s_selected = 0;
+    s_scroll = 0;
+    s_desc_scroll = 0;
+    s_desc_scroll_timer = 0;
     *dirty = true;
-    return false;
+  }
+  if (pressed & BTN_RIGHT) {
+    if (s_active_tab < TAB_COUNT - 1) s_active_tab++;
+    else s_active_tab = 0;
+    s_selected = 0;
+    s_scroll = 0;
+    s_desc_scroll = 0;
+    s_desc_scroll_timer = 0;
+    *dirty = true;
   }
 
+  // UP/DOWN: navigate app list
   if (pressed & BTN_UP) {
     if (count > 0) {
       if (s_selected > 0) s_selected--;
@@ -859,51 +697,22 @@ static bool handle_list_input(uint32_t pressed, bool *dirty) {
       *dirty = true;
     }
   }
-  if (pressed & BTN_LEFT) {
-    if (count > 0) {
-      int new_sel = s_selected - LIST_VISIBLE;
-      if (new_sel < 0) new_sel = 0;
-      if (new_sel != s_selected) {
-        s_selected = new_sel;
-        if (s_selected < s_scroll) s_scroll = s_selected;
-        s_desc_scroll = 0;
-        s_desc_scroll_timer = 0;
-        *dirty = true;
-      }
-    }
-  }
-  if (pressed & BTN_RIGHT) {
-    if (count > 0) {
-      int new_sel = s_selected + LIST_VISIBLE;
-      if (new_sel >= count) new_sel = count - 1;
-      if (new_sel != s_selected) {
-        s_selected = new_sel;
-        if (s_selected >= s_scroll + LIST_VISIBLE)
-          s_scroll = s_selected - LIST_VISIBLE + 1;
-        s_desc_scroll = 0;
-        s_desc_scroll_timer = 0;
-        *dirty = true;
-      }
-    }
-  }
+
+  // ENTER: launch app
   if (pressed & BTN_ENTER) {
     if (count > 0 && s_selected < count) {
       int app_idx = list_app_idx(s_selected);
       size_t free_mem = lua_psram_alloc_free_size();
       printf("[LAUNCHER] PSRAM free before launch: %zu bytes\n", free_mem);
 
-      // Preserve view state across app launch
-      launcher_view_t saved_view = s_view;
-      category_t saved_cat = s_current_cat;
+      int saved_tab = s_active_tab;
 
       run_app(app_idx);
       kbd_clear_state();
       scan_apps();
       build_category_indices();
 
-      // Restore view state
-      s_view = saved_view;
-      s_current_cat = saved_cat;
+      s_active_tab = saved_tab;
       s_desc_scroll = 0;
       s_desc_scroll_timer = 0;
 
@@ -915,14 +724,11 @@ static bool handle_list_input(uint32_t pressed, bool *dirty) {
       *dirty = true;
     }
   }
-  return false;
 }
 
 // ── Description scroll update (for list views) ─────────────────────────────
 
 static void update_desc_scroll(bool *dirty) {
-  if (s_view == VIEW_HOME) return;
-
   int count = list_count();
   s_desc_scroll_timer++;
   if (s_desc_scroll_timer >= 10) {
@@ -1052,13 +858,8 @@ void launcher_run(void) {
 
     uint32_t pressed = kbd_get_buttons_pressed();
 
-    // View-specific input handling
-    if (pressed) {
-      if (s_view == VIEW_HOME)
-        handle_home_input(pressed, &dirty);
-      else
-        handle_list_input(pressed, &dirty);
-    }
+    if (pressed)
+      handle_input(pressed, &dirty);
 
     if (ui_needs_header_redraw())
       dirty = true;

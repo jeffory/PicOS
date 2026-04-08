@@ -1,5 +1,6 @@
 #include "lua_bridge_internal.h"
 #include "../drivers/image_api.h"
+#include "../drivers/image_preload.h"
 #include "pico/time.h"
 #include <math.h>
 
@@ -356,6 +357,41 @@ static int l_graphics_image_getSupportedFormats(lua_State *L) {
   return 1;
 }
 
+// ── Async preloading (Core 1) ────────────────────────────────────────────────
+
+static int l_graphics_image_preload(lua_State *L) {
+  const char *path = luaL_checkstring(L, 1);
+  if (!fs_sandbox_check(L, path, false))
+    return luaL_error(L, "access denied");
+  lua_pushboolean(L, image_preload_start(path));
+  return 1;
+}
+
+static int l_graphics_image_poll_preload(lua_State *L) {
+  bool ready = false;
+  pc_image_t *loaded = image_preload_poll(&ready);
+  if (loaded) {
+    lua_image_t *img = (lua_image_t *)lua_newuserdata(L, sizeof(lua_image_t));
+    img->w = loaded->w;
+    img->h = loaded->h;
+    img->data = loaded->data;
+    img->transparent_color = 0;
+    loaded->data = NULL;
+    umm_free(loaded);
+    luaL_setmetatable(L, GRAPHICS_IMAGE_MT);
+  } else {
+    lua_pushnil(L);
+  }
+  lua_pushboolean(L, ready);
+  return 2;
+}
+
+static int l_graphics_image_cancel_preload(lua_State *L) {
+  (void)L;
+  image_preload_cancel();
+  return 0;
+}
+
 static const luaL_Reg l_graphics_image_lib[] = {
     {"new", l_graphics_image_new},
     {"load", l_graphics_image_load},
@@ -367,6 +403,9 @@ static const luaL_Reg l_graphics_image_lib[] = {
     {"newStream", l_graphics_image_newStream},
     {"setPlaceholder", l_graphics_image_setPlaceholder},
     {"getSupportedFormats", l_graphics_image_getSupportedFormats},
+    {"preload", l_graphics_image_preload},
+    {"pollPreload", l_graphics_image_poll_preload},
+    {"cancelPreload", l_graphics_image_cancel_preload},
     {NULL, NULL}};
 
 #define GRAPHICS_IMAGESTREAM_MT "picocalc.graphics.imagestream"

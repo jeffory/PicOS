@@ -223,6 +223,7 @@ void __attribute__((naked)) isr_hardfault(void) {
 #include "drivers/mod_player.h"
 #include "drivers/display.h"
 #include "drivers/image_api.h"
+#include "drivers/image_preload.h"
 #include "drivers/video_player.h"
 #include "drivers/http.h"
 #include "drivers/tcp.h"
@@ -1281,6 +1282,8 @@ static void core1_entry(void) {
       void (*audio_cb)(void) = atomic_load(&g_native_audio_callback);
       if (audio_cb)
         audio_cb();
+
+      image_preload_update();
     }
 
     __wfi();
@@ -1625,6 +1628,8 @@ int main(void) {
   extern size_t lua_psram_alloc_free_size(void);
   printf("[PSRAM] Free after WiFi/HTTP init: %zu bytes (%zuK)\n",
          lua_psram_alloc_free_size(), lua_psram_alloc_free_size() / 1024);
+
+  image_preload_init();
 
   // Launch Core 1 background tasks
   multicore_launch_core1(core1_entry);

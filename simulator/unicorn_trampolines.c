@@ -599,9 +599,16 @@ static volatile bool s_emu_exit = false;
 // Display trampoline handlers
 // =============================================================================
 
+// When drawing trampolines (clear, drawText, etc.) write to the host back
+// buffer, this flag tells tramp_display_flush() NOT to overwrite it with the
+// emulated framebuffer (EMU_FB_BASE), which apps using getBackBuffer() write
+// to directly. Reset to 0 after each flush.
+static int s_back_buffer_dirty = 0;
+
 static void tramp_display_clear(uc_engine *uc) {
     uint16_t color = (uint16_t)read_reg(uc, UC_ARM_REG_R0);
     display_clear(color);
+    s_back_buffer_dirty = 1;
 }
 
 static void tramp_display_set_pixel(uc_engine *uc) {
@@ -609,6 +616,7 @@ static void tramp_display_set_pixel(uc_engine *uc) {
     int y = (int)read_reg(uc, UC_ARM_REG_R1);
     uint16_t color = (uint16_t)read_reg(uc, UC_ARM_REG_R2);
     display_set_pixel(x, y, color);
+    s_back_buffer_dirty = 1;
 }
 
 static void tramp_display_fill_rect(uc_engine *uc) {
@@ -618,6 +626,7 @@ static void tramp_display_fill_rect(uc_engine *uc) {
     int h = (int)read_reg(uc, UC_ARM_REG_R3);
     uint16_t color = (uint16_t)read_stack_arg(uc, 0);
     display_fill_rect(x, y, w, h, color);
+    s_back_buffer_dirty = 1;
 }
 
 static void tramp_display_draw_rect(uc_engine *uc) {
@@ -627,6 +636,7 @@ static void tramp_display_draw_rect(uc_engine *uc) {
     int h = (int)read_reg(uc, UC_ARM_REG_R3);
     uint16_t color = (uint16_t)read_stack_arg(uc, 0);
     display_draw_rect(x, y, w, h, color);
+    s_back_buffer_dirty = 1;
 }
 
 static void tramp_display_draw_line(uc_engine *uc) {
@@ -636,6 +646,7 @@ static void tramp_display_draw_line(uc_engine *uc) {
     int y1 = (int)read_reg(uc, UC_ARM_REG_R3);
     uint16_t color = (uint16_t)read_stack_arg(uc, 0);
     display_draw_line(x0, y0, x1, y1, color);
+    s_back_buffer_dirty = 1;
 }
 
 static void tramp_display_draw_circle(uc_engine *uc) {
@@ -644,6 +655,7 @@ static void tramp_display_draw_circle(uc_engine *uc) {
     int r  = (int)read_reg(uc, UC_ARM_REG_R2);
     uint16_t color = (uint16_t)read_reg(uc, UC_ARM_REG_R3);
     display_draw_circle(cx, cy, r, color);
+    s_back_buffer_dirty = 1;
 }
 
 static void tramp_display_fill_circle(uc_engine *uc) {
@@ -652,6 +664,7 @@ static void tramp_display_fill_circle(uc_engine *uc) {
     int r  = (int)read_reg(uc, UC_ARM_REG_R2);
     uint16_t color = (uint16_t)read_reg(uc, UC_ARM_REG_R3);
     display_fill_circle(cx, cy, r, color);
+    s_back_buffer_dirty = 1;
 }
 
 static void tramp_display_draw_text(uc_engine *uc) {
@@ -663,6 +676,7 @@ static void tramp_display_draw_text(uc_engine *uc) {
     char *text = uc_read_string(uc, text_addr);
     int result = display_draw_text(x, y, text ? text : "", fg, bg);
     write_reg(uc, UC_ARM_REG_R0, (uint32_t)result);
+    s_back_buffer_dirty = 1;
 }
 
 // Native ARM apps write big-endian RGB565 (matching the ST7365P display).
@@ -674,10 +688,6 @@ static void byteswap_rgb565(uint16_t *buf, int count) {
         buf[i] = (p >> 8) | (p << 8);
     }
 }
-
-// When drawImageNN writes directly to the back buffer, flush should NOT
-// overwrite from EMU_FB_BASE (which the app never wrote to).
-static int s_back_buffer_dirty = 0;
 
 static int s_flush_count = 0;
 

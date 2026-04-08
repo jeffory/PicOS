@@ -410,6 +410,9 @@ static char *h_exit_app(const char *params) {
     (void)params;
     extern void dev_commands_set_exit(void);
     dev_commands_set_exit();
+    // Also inject ESC key so native apps with input-based exit loops
+    // (checking getButtonsPressed/getChar instead of shouldExit) will exit.
+    kbd_inject_buttons(BTN_ESC);
     return strdup("{\"jsonrpc\":\"2.0\",\"result\":{\"ok\":true}}");
 }
 
