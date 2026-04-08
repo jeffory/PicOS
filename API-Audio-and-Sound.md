@@ -218,6 +218,54 @@ local clip = sample:getSubsample(0, 22050)  -- first second at 44100 Hz
 
 ---
 
+#### `sample:play([repeatCount [, rate]])`
+Creates a temporary SamplePlayer, starts playback, and returns the player. Convenience method.
+
+- **Parameters:**
+  - `repeatCount` (number, optional): Number of times to play (default `1`)
+  - `rate` (number, optional): Playback rate multiplier (default `1.0`)
+- **Returns:** (userdata) SamplePlayer object
+
+```lua
+local s = picocalc.sound.sample("/apps/myapp/beep.wav")
+s:play()           -- play once at normal speed
+s:play(3, 1.5)     -- play 3 times at 150% speed
+```
+
+---
+
+#### `sample:playAt(when [, vol [, rightvol [, rate]]])`
+Creates a temporary SamplePlayer and starts playback. The `when` parameter is accepted for API compatibility but ignored on this hardware (playback starts immediately).
+
+- **Parameters:**
+  - `when` (number): Ignored (accepted for API compatibility)
+  - `vol` (number, optional): Volume 0–255 (default `100`)
+  - `rightvol` (number, optional): Ignored (mono PWM output)
+  - `rate` (number, optional): Playback rate multiplier (default `1.0`)
+- **Returns:** (userdata) SamplePlayer object
+
+```lua
+local s = picocalc.sound.sample("/apps/myapp/beep.wav")
+local player = s:playAt(0, 200)       -- play at volume 200
+local player = s:playAt(0, 128, 0, 2.0)  -- play at double speed
+```
+
+---
+
+#### `sample:save(filename)`
+Writes the sample data to a WAV file on the SD card.
+
+- **Parameters:**
+  - `filename` (string): Path to write
+- **Returns:** `true` on success, or `false, errstr` on failure
+
+```lua
+local clip = sample:getSubsample(0, 22050)
+clip:save("/data/com.myapp/clip.wav")
+```
+
+---
+
 ### SamplePlayer
 
 Plays a `Sample` from memory. Supports looping and volume control.
@@ -315,6 +363,34 @@ player:setRate(1.5)  -- play at 150% speed
 
 ---
 
+#### `player:setFinishCallback(fn)`
+Sets a callback fired when playback finishes (all repeats completed). Maximum 4 callbacks across all SamplePlayer instances. The callback fires on Core 0 via the Lua instruction hook (slight delay of up to ~256 opcodes).
+
+- **Parameters:**
+  - `fn` (function): Callback function (called with no arguments)
+
+```lua
+player:setFinishCallback(function()
+    picocalc.sys.log("Sample playback finished")
+end)
+```
+
+---
+
+#### `player:setLoopCallback(fn)`
+Sets a callback fired each time the player loops back to the start. Same cross-core delivery mechanism as `setFinishCallback`.
+
+- **Parameters:**
+  - `fn` (function): Callback function (called with no arguments)
+
+```lua
+player:setLoopCallback(function()
+    picocalc.sys.log("Sample looped")
+end)
+```
+
+---
+
 ### FilePlayer
 
 Streams a WAV file from the SD card without loading it fully into memory.
@@ -380,6 +456,34 @@ Sets a callback function to be called when playback finishes. Maximum 2 finish c
 player:setFinishCallback(function()
     picocalc.sys.log("Playback finished")
 end)
+```
+
+---
+
+#### `player:setLoopCallback(fn)`
+Sets a callback fired each time the file loops back to the start. Maximum 2 loop callbacks across all FilePlayer instances.
+
+- **Parameters:**
+  - `fn` (function): Callback function (called with no arguments)
+
+```lua
+player:setLoopCallback(function()
+    picocalc.sys.log("File looped")
+end)
+```
+
+---
+
+#### `player:setRate(rate)` / `player:getRate()`
+Sets or gets the playback rate. Rate is clamped to 0.1–4.0. Uses nearest-neighbor resampling.
+
+- **Parameters:**
+  - `rate` (number): Playback rate multiplier (`1.0` = normal, `2.0` = double speed, `0.5` = half speed)
+- **Returns:** (number) Current rate (for `getRate`)
+
+```lua
+player:setRate(2.0)                -- double speed
+local r = player:getRate()         -- returns 2.0
 ```
 
 ---

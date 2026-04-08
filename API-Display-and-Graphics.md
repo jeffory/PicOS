@@ -714,6 +714,117 @@ end
 
 ---
 
+### Text Rendering
+
+#### `picocalc.graphics.drawText(text, x, y [, font])`
+Draws text using the current graphics color and background color. Optionally specify a font object.
+
+- **Parameters:**
+  - `text` (string): Text to draw
+  - `x` (number): X coordinate
+  - `y` (number): Y coordinate
+  - `font` (userdata, optional): Font object from `graphics.font.new()`
+- **Returns:** (number) Pixel width of rendered text
+
+```lua
+local width = picocalc.graphics.drawText("Hello!", 10, 10)
+```
+
+---
+
+#### `picocalc.graphics.drawTextAligned(text, x, y, alignment [, font])`
+Draws text with alignment. For center/right, text is positioned relative to `x`.
+
+- **Parameters:**
+  - `text` (string): Text to draw
+  - `x` (number): X coordinate
+  - `y` (number): Y coordinate
+  - `alignment` (number): 0 = left, 1 = center, 2 = right
+  - `font` (userdata, optional): Font object from `graphics.font.new()`
+- **Returns:** None
+
+```lua
+-- Draw centered text
+picocalc.graphics.drawTextAligned("Centered", 160, 10, 1)
+```
+
+---
+
+#### `picocalc.graphics.drawTextInRect(text, x, y, w, h [, alignment [, font]])`
+Draws word-wrapped text within a bounding rectangle. Line breaks at word boundaries for monospace fonts.
+
+- **Parameters:**
+  - `text` (string): Text to draw
+  - `x` (number): Left edge of bounding rectangle
+  - `y` (number): Top edge of bounding rectangle
+  - `w` (number): Width of bounding rectangle
+  - `h` (number): Height of bounding rectangle
+  - `alignment` (number, optional): 0 = left (default), 1 = center, 2 = right
+  - `font` (userdata, optional): Font object from `graphics.font.new()`
+- **Returns:** None
+
+```lua
+-- Draw a paragraph of word-wrapped text in a box
+picocalc.graphics.setColor(picocalc.display.WHITE)
+picocalc.graphics.setBackgroundColor(picocalc.display.BLACK)
+picocalc.graphics.drawTextInRect(
+    "This is a long string that will be word-wrapped to fit within the rectangle.",
+    10, 10, 200, 100
+)
+```
+
+---
+
+#### `picocalc.graphics.getTextSize(text [, font])`
+Returns pixel dimensions for a single line of text.
+
+- **Parameters:**
+  - `text` (string): Text to measure
+  - `font` (userdata, optional): Font object from `graphics.font.new()`
+- **Returns:** (number, number) `width, height`
+
+```lua
+local w, h = picocalc.graphics.getTextSize("Hello!")
+```
+
+---
+
+#### `picocalc.graphics.getTextSizeForMaxWidth(text, maxWidth [, font])`
+Returns pixel dimensions of word-wrapped text within `maxWidth`.
+
+- **Parameters:**
+  - `text` (string): Text to measure
+  - `maxWidth` (number): Maximum width in pixels for word wrapping
+  - `font` (userdata, optional): Font object from `graphics.font.new()`
+- **Returns:** (number, number) `width, height`
+
+```lua
+local w, h = picocalc.graphics.getTextSizeForMaxWidth("A long string to measure.", 200)
+```
+
+---
+
+#### `picocalc.graphics.imageWithText(text, maxWidth, maxHeight [, bgColor [, font]])`
+Renders word-wrapped text into a new image in PSRAM. Uses the current graphics color for the text foreground.
+
+- **Parameters:**
+  - `text` (string): Text to render
+  - `maxWidth` (number): Maximum image width in pixels
+  - `maxHeight` (number): Maximum image height in pixels
+  - `bgColor` (number, optional): Background RGB565 color
+  - `font` (userdata, optional): Font object from `graphics.font.new()`
+- **Returns:** (userdata) Image object, or `nil, errstr` on failure
+
+```lua
+picocalc.graphics.setColor(picocalc.display.WHITE)
+local img = picocalc.graphics.imageWithText("Hello World", 200, 100, picocalc.display.BLACK)
+if img then
+    img:draw(10, 10)
+end
+```
+
+---
+
 ### Image Constructor Functions
 
 #### `picocalc.graphics.image.new(width, height)`
@@ -1589,6 +1700,62 @@ Checks if a point collides with the sprite's collision rect.
 
 ---
 
+#### `sprite:setTilemap(tilemap)`
+Assigns a tilemap to this sprite. When set, the sprite renders the tilemap instead of a single image. The sprite's position acts as the tilemap scroll offset. Pass `nil` to clear.
+
+- **Parameters:**
+  - `tilemap` (userdata or nil): Tilemap object, or `nil` to clear
+- **Returns:** None
+
+```lua
+local tm = picocalc.graphics.tilemap.new(tilesetImage, 16, 16)
+tm:setSize(20, 20)
+local bgSprite = picocalc.graphics.sprite.new()
+bgSprite:setTilemap(tm)
+bgSprite:moveTo(0, 0)
+bgSprite:add()
+```
+
+---
+
+#### `picocalc.graphics.sprite.addWallSprites(tilemap, wallIDs [, xOffset [, yOffset]])`
+Creates invisible collision sprites for each tile whose index appears in the `wallIDs` table. Useful for tile-based collision detection with the sprite system.
+
+- **Parameters:**
+  - `tilemap` (userdata): Tilemap object
+  - `wallIDs` (table): Array of tile indices that are solid/collidable
+  - `xOffset` (number, optional): X offset applied to all wall sprite positions
+  - `yOffset` (number, optional): Y offset applied to all wall sprite positions
+- **Returns:** (number) Count of wall sprites created
+
+```lua
+-- Create wall collision sprites for tile indices 1, 2, and 5
+local wallCount = picocalc.graphics.sprite.addWallSprites(tilemap, {1, 2, 5})
+print("Created " .. wallCount .. " wall sprites")
+```
+
+---
+
+#### `picocalc.graphics.sprite.spriteWithText(text, maxWidth, maxHeight [, bgColor [, font]])`
+Creates a sprite with text rendered into it. Uses the current graphics color for the text foreground.
+
+- **Parameters:**
+  - `text` (string): Text to render
+  - `maxWidth` (number): Maximum image width in pixels
+  - `maxHeight` (number): Maximum image height in pixels
+  - `bgColor` (number, optional): Background RGB565 color
+  - `font` (userdata, optional): Font object from `graphics.font.new()`
+- **Returns:** (userdata) Sprite object with text image
+
+```lua
+picocalc.graphics.setColor(picocalc.display.WHITE)
+local label = picocalc.graphics.sprite.spriteWithText("Score: 0", 120, 16, picocalc.display.BLACK)
+label:moveTo(10, 10)
+label:add()
+```
+
+---
+
 ### Sprite Properties
 
 Sprites support direct property access via Lua:
@@ -1730,6 +1897,268 @@ while true do
     end
     
     ss:drawFrame(frame, 144, 144)
+    picocalc.display.flush()
+end
+```
+
+---
+
+## picocalc.graphics.font
+
+Custom font loading and text rendering. Font objects can be passed to text rendering functions throughout the graphics API.
+
+### Constructor Functions
+
+#### `picocalc.graphics.font.new(fontId)`
+Creates a new font object from a built-in font ID.
+
+- **Parameters:**
+  - `fontId` (number): One of the `FONT_*` constants (e.g., `picocalc.display.FONT_6X8`)
+- **Returns:** (userdata) Font object
+
+```lua
+local font = picocalc.graphics.font.new(picocalc.display.FONT_8X12)
+```
+
+---
+
+### Font Methods
+
+#### `font:drawText(x, y, text, fg [, bg])`
+Draws text at the specified position using this font.
+
+- **Parameters:**
+  - `x` (number): X coordinate
+  - `y` (number): Y coordinate
+  - `text` (string): Text to draw
+  - `fg` (number): Foreground RGB565 color
+  - `bg` (number, optional): Background RGB565 color
+- **Returns:** None
+
+```lua
+font:drawText(10, 10, "Hello!", picocalc.display.WHITE)
+```
+
+---
+
+#### `font:drawTextAligned(x, y, text, alignment, fg [, bg])`
+Draws text with alignment using this font.
+
+- **Parameters:**
+  - `x` (number): X coordinate
+  - `y` (number): Y coordinate
+  - `text` (string): Text to draw
+  - `alignment` (number): 0 = left, 1 = center, 2 = right
+  - `fg` (number): Foreground RGB565 color
+  - `bg` (number, optional): Background RGB565 color
+- **Returns:** None
+
+```lua
+font:drawTextAligned(160, 10, "Centered", 1, picocalc.display.WHITE)
+```
+
+---
+
+#### `font:drawTextInRect(x, y, w, h, text [, alignment [, fg [, bg]]])`
+Draws word-wrapped text within a bounding rectangle using this font.
+
+- **Parameters:**
+  - `x` (number): Left edge of bounding rectangle
+  - `y` (number): Top edge of bounding rectangle
+  - `w` (number): Width of bounding rectangle
+  - `h` (number): Height of bounding rectangle
+  - `text` (string): Text to draw
+  - `alignment` (number, optional): 0 = left (default), 1 = center, 2 = right
+  - `fg` (number, optional): Foreground RGB565 color
+  - `bg` (number, optional): Background RGB565 color
+- **Returns:** None
+
+```lua
+local font = picocalc.graphics.font.new(picocalc.display.FONT_SCIENTIFICA)
+font:drawTextInRect(10, 10, 200, 100, "This text will wrap within the rectangle.", 0,
+    picocalc.display.WHITE, picocalc.display.BLACK)
+```
+
+---
+
+#### `font:getHeight()`
+Returns the font's character height in pixels.
+
+- **Returns:** (number) Height in pixels
+
+---
+
+#### `font:getWidth()`
+Returns the font's character width in pixels.
+
+- **Returns:** (number) Width in pixels
+
+---
+
+#### `font:getTextWidth(text)`
+Returns the pixel width of text rendered in this font.
+
+- **Parameters:**
+  - `text` (string): Text to measure
+- **Returns:** (number) Width in pixels
+
+```lua
+local w = font:getTextWidth("Hello")
+```
+
+---
+
+#### `font:getName()`
+Returns the name of the font.
+
+- **Returns:** (string) Font name
+
+---
+
+## picocalc.graphics.tilemap
+
+Tilemap system for tile-based game worlds. Tilemaps use an image atlas as a tileset and render visible tiles to the screen with scroll offset support.
+
+### Constructor Functions
+
+#### `picocalc.graphics.tilemap.new(image, tileWidth, tileHeight)`
+Creates a new tilemap using an image atlas as the tileset. Tiles are indexed 1-based (0 = empty/transparent). Tiles are extracted from the tileset image left-to-right, top-to-bottom.
+
+- **Parameters:**
+  - `image` (userdata): Tileset image (image atlas containing all tile graphics)
+  - `tileWidth` (number): Width of each tile in pixels
+  - `tileHeight` (number): Height of each tile in pixels
+- **Returns:** (userdata) Tilemap object
+
+```lua
+local tileset = picocalc.graphics.image.load(APP_DIR .. "/tileset.png")
+local tilemap = picocalc.graphics.tilemap.new(tileset, 16, 16)
+```
+
+---
+
+### Tilemap Methods
+
+#### `tilemap:setSize(width, height)`
+Allocates the tile grid. Maximum 128x128 tiles. Tile data is stored in PSRAM.
+
+- **Parameters:**
+  - `width` (number): Grid width in tiles
+  - `height` (number): Grid height in tiles
+- **Returns:** None
+
+```lua
+tilemap:setSize(40, 30)
+```
+
+---
+
+#### `tilemap:setTileAtPosition(x, y, tileIndex)`
+Sets the tile at a grid position. Tile index is 1-based; 0 = empty/transparent.
+
+- **Parameters:**
+  - `x` (number): Grid X position
+  - `y` (number): Grid Y position
+  - `tileIndex` (number): Tile index (1-based, 0 = empty)
+- **Returns:** None
+
+```lua
+tilemap:setTileAtPosition(5, 3, 1)  -- Place tile 1 at grid (5,3)
+tilemap:setTileAtPosition(5, 4, 0)  -- Clear tile at grid (5,4)
+```
+
+---
+
+#### `tilemap:getTileAtPosition(x, y)`
+Returns the tile index at a grid position. Returns 0 for empty or out-of-bounds positions.
+
+- **Parameters:**
+  - `x` (number): Grid X position
+  - `y` (number): Grid Y position
+- **Returns:** (number) Tile index (0 = empty)
+
+```lua
+local tile = tilemap:getTileAtPosition(5, 3)
+```
+
+---
+
+#### `tilemap:getSize()`
+Returns the tilemap dimensions in tiles.
+
+- **Returns:** (number, number) `width, height`
+
+```lua
+local w, h = tilemap:getSize()
+```
+
+---
+
+#### `tilemap:getTileSize()`
+Returns the tile dimensions in pixels.
+
+- **Returns:** (number, number) `tileWidth, tileHeight`
+
+```lua
+local tw, th = tilemap:getTileSize()
+```
+
+---
+
+#### `tilemap:getPixelSize()`
+Returns the total tilemap dimensions in pixels.
+
+- **Returns:** (number, number) `pixelWidth, pixelHeight`
+
+```lua
+local pw, ph = tilemap:getPixelSize()
+```
+
+---
+
+#### `tilemap:draw(scrollX, scrollY)`
+Draws visible tiles to the framebuffer with scroll offset. Only draws tiles visible on the 320x320 screen.
+
+- **Parameters:**
+  - `scrollX` (number): Horizontal scroll offset in pixels
+  - `scrollY` (number): Vertical scroll offset in pixels
+- **Returns:** None
+
+```lua
+tilemap:draw(cameraX, cameraY)
+```
+
+---
+
+### Example: Tile-Based Game World
+
+```lua
+-- Load tileset and create tilemap
+local tileset = picocalc.graphics.image.load(APP_DIR .. "/tileset.png")
+local tilemap = picocalc.graphics.tilemap.new(tileset, 16, 16)
+tilemap:setSize(40, 30)
+
+-- Fill with grass (tile 1), add some walls (tile 2)
+for y = 0, 29 do
+    for x = 0, 39 do
+        tilemap:setTileAtPosition(x, y, 1)  -- grass
+    end
+end
+-- Add border walls
+for x = 0, 39 do
+    tilemap:setTileAtPosition(x, 0, 2)   -- top wall
+    tilemap:setTileAtPosition(x, 29, 2)  -- bottom wall
+end
+
+-- Create wall collision sprites for tile index 2
+local wallCount = picocalc.graphics.sprite.addWallSprites(tilemap, {2})
+
+-- Scroll camera
+local scrollX, scrollY = 0, 0
+while true do
+    picocalc.display.clear(picocalc.display.BLACK)
+    tilemap:draw(scrollX, scrollY)
+    picocalc.graphics.sprite.update()
     picocalc.display.flush()
 end
 ```
