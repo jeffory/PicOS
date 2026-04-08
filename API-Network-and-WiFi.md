@@ -74,6 +74,47 @@ Returns the SSID of the current connection.
 
 ---
 
+#### `picocalc.wifi.hasInternet()`
+Check if the device has working internet connectivity (beyond just WiFi connection).
+
+- **Parameters:** None
+- **Returns:** (boolean) `true` if internet is reachable
+
+```lua
+if picocalc.wifi.hasInternet() then
+    -- Safe to make external requests
+end
+```
+
+---
+
+#### `picocalc.wifi.isHwDisconnected()`
+Check if the WiFi hardware is physically disconnected or unavailable.
+
+- **Parameters:** None
+- **Returns:** (boolean) `true` if hardware is disconnected
+
+```lua
+if picocalc.wifi.isHwDisconnected() then
+    print("No WiFi hardware detected")
+end
+```
+
+---
+
+#### `picocalc.wifi.setEnabled(flag)`
+Enable or disable the WiFi hardware.
+
+- **Parameters:**
+  - `flag` (boolean): `true` to enable, `false` to disable
+- **Returns:** None
+
+```lua
+picocalc.wifi.setEnabled(true)   -- Turn on WiFi hardware
+```
+
+---
+
 ### WiFi Status Constants
 
 | Constant | Description |

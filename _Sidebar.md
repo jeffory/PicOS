@@ -1,7 +1,7 @@
 ### Documentation
 * [[Home]]
 * [[Creating your first app]]
-* [[Native App Development]]
+* [[Native Loading]]
 * [[Lua SDK Reference]]
 
 ### System
@@ -9,14 +9,18 @@
 
 ### API Reference
 * [[Global Variables and Permissions]]
-* [[API Display and Graphics]]
-* [[API Input]]
-* [[API System and Config]]
-* [[API Terminal]]
-* [[API Filesystem]]
-* [[API UI]]
-* [[API Network and WiFi]]
 * [[API Audio and Sound]]
-* [[API Video]]
+* [[API Crypto]]
+* [[API Display and Graphics]]
+* [[API Filesystem]]
+* [[API Input]]
+* [[API Mod Player]]
+* [[API Network and WiFi]]
 * [[API Performance]]
+* [[API REPL]]
+* [[API System and Config]]
+* [[API System Configuration]]
+* [[API Terminal]]
+* [[API UI]]
+* [[API Video]]
 * [[Standard Lua Libraries]]

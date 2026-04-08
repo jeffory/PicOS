@@ -172,6 +172,181 @@ picocalc.display.clear(purple)
 
 ---
 
+#### `picocalc.display.drawCircle(cx, cy, radius, color)`
+Draw a circle outline.
+
+- **Parameters:**
+  - `cx` (number): Center X coordinate
+  - `cy` (number): Center Y coordinate
+  - `radius` (number): Circle radius in pixels
+  - `color` (number): RGB565 color value
+- **Returns:** None
+
+```lua
+picocalc.display.drawCircle(160, 160, 50, picocalc.display.WHITE)
+```
+
+---
+
+#### `picocalc.display.fillCircle(cx, cy, radius, color)`
+Draw a filled circle.
+
+- **Parameters:**
+  - `cx` (number): Center X coordinate
+  - `cy` (number): Center Y coordinate
+  - `radius` (number): Circle radius in pixels
+  - `color` (number): RGB565 color value
+- **Returns:** None
+
+```lua
+picocalc.display.fillCircle(160, 160, 50, picocalc.display.RED)
+```
+
+---
+
+#### `picocalc.display.fillVLine(x, y0, y1, color)`
+Draw an optimized vertical line.
+
+- **Parameters:**
+  - `x` (number): X coordinate
+  - `y0` (number): Top Y coordinate
+  - `y1` (number): Bottom Y coordinate
+  - `color` (number): RGB565 color value
+- **Returns:** None
+
+```lua
+picocalc.display.fillVLine(100, 10, 300, picocalc.display.GREEN)
+```
+
+---
+
+#### `picocalc.display.fillVLineGradient(x, y0, y1, colorTop, colorBottom)`
+Draw a vertical line with gradient between two colors.
+
+- **Parameters:**
+  - `x` (number): X coordinate
+  - `y0` (number): Top Y coordinate
+  - `y1` (number): Bottom Y coordinate
+  - `colorTop` (number): RGB565 color at the top
+  - `colorBottom` (number): RGB565 color at the bottom
+- **Returns:** None
+
+```lua
+picocalc.display.fillVLineGradient(160, 0, 319, picocalc.display.BLUE, picocalc.display.BLACK)
+```
+
+---
+
+#### `picocalc.display.drawTexturedColumn(x, y0, y1, image, texX, texY0, texY1)`
+Draw a vertical column of pixels sampled from a texture image. Useful for raycasting renderers.
+
+- **Parameters:**
+  - `x` (number): Screen X coordinate
+  - `y0` (number): Screen top Y coordinate
+  - `y1` (number): Screen bottom Y coordinate
+  - `image` (userdata): Image object from `picocalc.graphics.image.load()` or `.new()`
+  - `texX` (number): Texture X coordinate to sample from
+  - `texY0` (number): Texture top Y coordinate
+  - `texY1` (number): Texture bottom Y coordinate
+- **Returns:** None
+
+```lua
+-- Draw a column from a wall texture (raycasting)
+picocalc.display.drawTexturedColumn(x, wallTop, wallBottom, wallTexture, texCol, 0, 63)
+```
+
+---
+
+#### `picocalc.display.setFont(fontId)`
+Set the active bitmap font for `drawText` and `textWidth`.
+
+- **Parameters:**
+  - `fontId` (number): One of the `FONT_*` constants
+- **Returns:** None
+
+```lua
+picocalc.display.setFont(picocalc.display.FONT_8X12)
+picocalc.display.drawText(10, 10, "Larger text", picocalc.display.WHITE)
+```
+
+---
+
+#### `picocalc.display.getFont()`
+Get the current font ID.
+
+- **Parameters:** None
+- **Returns:** (number) Font ID constant
+
+```lua
+local currentFont = picocalc.display.getFont()
+```
+
+---
+
+#### `picocalc.display.getFontWidth()`
+Get the character width in pixels of the current font.
+
+- **Parameters:** None
+- **Returns:** (number) Width in pixels
+
+```lua
+local charWidth = picocalc.display.getFontWidth()
+```
+
+---
+
+#### `picocalc.display.getFontHeight()`
+Get the character height in pixels of the current font.
+
+- **Parameters:** None
+- **Returns:** (number) Height in pixels
+
+```lua
+local charHeight = picocalc.display.getFontHeight()
+```
+
+---
+
+#### `picocalc.display.setScrollArea(top, height, bottom)`
+Configure the hardware vertical scroll area on the LCD.
+
+- **Parameters:**
+  - `top` (number): Fixed top area in pixels
+  - `height` (number): Scrolling area height in pixels
+  - `bottom` (number): Fixed bottom area in pixels
+- **Returns:** None
+
+```lua
+-- Set up a scrolling area in the middle of the screen
+picocalc.display.setScrollArea(40, 240, 40)
+```
+
+---
+
+#### `picocalc.display.setScrollOffset(offset)`
+Set the hardware vertical scroll offset.
+
+- **Parameters:**
+  - `offset` (number): Scroll offset in pixels
+- **Returns:** None
+
+```lua
+picocalc.display.setScrollOffset(scrollPos)
+```
+
+---
+
+### Font Constants
+
+| Constant | Value | Description |
+|----------|-------|-------------|
+| `picocalc.display.FONT_6X8` | 0 | Built-in 6x8 pixel bitmap font (default) |
+| `picocalc.display.FONT_8X12` | 1 | Larger 8x12 pixel bitmap font |
+| `picocalc.display.FONT_SCIENTIFICA` | 2 | Scientifica proportional font |
+| `picocalc.display.FONT_SCIENTIFICA_BOLD` | 3 | Scientifica bold proportional font |
+
+---
+
 ### Color Constants
 
 Predefined RGB565 color values:

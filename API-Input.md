@@ -79,6 +79,19 @@ Returns the raw STM32 keycode from the keyboard controller.
 
 ---
 
+#### `picocalc.input.clearState()`
+Clear all button and key input state. Resets pressed, released, and held button buffers. Useful when returning from modal dialogs or menus to prevent stale input.
+
+- **Parameters:** None
+- **Returns:** None
+
+```lua
+-- After closing a dialog, clear stale input
+picocalc.input.clearState()
+```
+
+---
+
 ### Button Constants
 
 Bitmask values for button states:

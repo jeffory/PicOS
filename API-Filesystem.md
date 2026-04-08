@@ -197,3 +197,136 @@ if selected then
     print("Selected: " .. selected)
 end
 ```
+
+---
+
+#### `picocalc.fs.copy(src, dst)`
+Copy a file. Subject to filesystem sandbox.
+
+- **Parameters:**
+  - `src` (string): Source path
+  - `dst` (string): Destination path
+- **Returns:** (boolean) `true` on success; `(false, string)` on failure
+
+```lua
+local ok, err = picocalc.fs.copy("/data/myapp/save.json", "/data/myapp/save_backup.json")
+if not ok then print("Copy failed: " .. err) end
+```
+
+---
+
+#### `picocalc.fs.delete(path)`
+Delete a file. Subject to filesystem sandbox.
+
+- **Parameters:**
+  - `path` (string): File path to delete
+- **Returns:** (boolean) `true` on success; `(false, string)` on failure
+
+```lua
+local ok, err = picocalc.fs.delete("/data/myapp/old_save.json")
+if not ok then print("Delete failed: " .. err) end
+```
+
+---
+
+#### `picocalc.fs.deleteRecursive(path)`
+Delete a directory and all its contents. Subject to filesystem sandbox.
+
+- **Parameters:**
+  - `path` (string): Directory path to delete
+- **Returns:** (boolean) `true` on success; `(false, string)` on failure
+
+```lua
+local ok, err = picocalc.fs.deleteRecursive("/data/myapp/cache")
+if not ok then print("Delete failed: " .. err) end
+```
+
+---
+
+#### `picocalc.fs.rename(src, dst)`
+Rename or move a file. Both paths subject to sandbox.
+
+- **Parameters:**
+  - `src` (string): Current path
+  - `dst` (string): New path
+- **Returns:** (boolean) `true` on success; `(false, string)` on failure
+
+```lua
+local ok, err = picocalc.fs.rename("/data/myapp/temp.txt", "/data/myapp/final.txt")
+if not ok then print("Rename failed: " .. err) end
+```
+
+---
+
+#### `picocalc.fs.stat(path)`
+Get file or directory information. Subject to sandbox.
+
+- **Parameters:**
+  - `path` (string): File or directory path
+- **Returns:** (table) `{size = number, is_dir = boolean}`, or `(nil, string)` on failure
+
+```lua
+local info, err = picocalc.fs.stat("/data/myapp/save.json")
+if info then
+    print("Size: " .. info.size .. ", is_dir: " .. tostring(info.is_dir))
+end
+```
+
+---
+
+#### `picocalc.fs.diskInfo()`
+Get SD card disk space information.
+
+- **Parameters:** None
+- **Returns:** (table) `{free = number, total = number}` (values in KB), or `(nil, string)` on failure
+
+```lua
+local info, err = picocalc.fs.diskInfo()
+if info then
+    print("Free: " .. info.free .. " KB / Total: " .. info.total .. " KB")
+end
+```
+
+---
+
+#### `picocalc.fs.glob(path, pattern)`
+List files in a directory matching a glob pattern. Subject to sandbox.
+
+- **Parameters:**
+  - `path` (string): Directory to search
+  - `pattern` (string): Glob pattern (e.g. `"*.lua"`)
+- **Returns:** (table) Array of matching filenames
+
+```lua
+local lua_files = picocalc.fs.glob("/apps/myapp", "*.lua")
+for _, name in ipairs(lua_files) do
+    print(name)
+end
+```
+
+---
+
+#### `picocalc.fs.ensureReady()`
+Ensure the SD card is mounted and ready.
+
+- **Parameters:** None
+- **Returns:** (boolean) `true` if SD card is ready
+
+```lua
+if picocalc.fs.ensureReady() then
+    -- Safe to perform file operations
+end
+```
+
+---
+
+#### `picocalc.fs.setSlowMode(enabled)`
+Enable or disable slow SD card mode. Slow mode reduces SPI clock speed for compatibility with some SD cards.
+
+- **Parameters:**
+  - `enabled` (boolean): `true` to enable slow mode, `false` to disable
+- **Returns:** None
+
+```lua
+picocalc.fs.setSlowMode(true)  -- Use slower SPI clock for compatibility
+```

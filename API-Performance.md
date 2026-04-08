@@ -65,3 +65,17 @@ Convenience function to draw the FPS counter on screen. Color-coded: green ≥55
 ```lua
 picocalc.perf.drawFPS()  -- Draw at default position
 ```
+
+---
+
+#### `picocalc.perf.setTargetFPS(fps)`
+Set target frame rate for automatic frame pacing. When set, `endFrame()` will sleep to maintain the target rate. Pass `0` to disable frame limiting.
+
+- **Parameters:**
+  - `fps` (number): Target frames per second (`0` = unlimited)
+- **Returns:** None
+
+```lua
+picocalc.perf.setTargetFPS(30)  -- Cap at 30 FPS
+picocalc.perf.setTargetFPS(0)   -- Disable frame limiting
+```

@@ -21,8 +21,13 @@ Add `"video"` (no explicit requirement needed) or `"audio"` to your `app.json` i
 ### Creating a player
 
 ```lua
-local player = picocalc.video.new()
+local player = picocalc.video.player()
 ```
+
+#### `picocalc.video.player()`
+Creates a new video player instance.
+
+- **Returns:** (userdata) Video player object, or `nil, errstr` on failure
 
 ### Loading and playing
 
@@ -40,6 +45,55 @@ player:setLoop(true)         -- loop continuously (default: false)
 player:setSpeed(1.0)         -- playback speed multiplier (default: 1.0)
 player:seek(frame_number)    -- jump to a specific frame index
 ```
+
+#### `player:pause()`
+Pauses video playback. Audio is also paused.
+
+#### `player:resume()`
+Resumes video playback after a pause.
+
+---
+
+### Performance and stats
+
+#### `player:getFPS()`
+Returns the actual playback frame rate.
+
+- **Returns:** (number) Frames per second
+
+```lua
+local fps = player:getFPS()
+picocalc.sys.log("FPS: " .. string.format("%.1f", fps))
+```
+
+#### `player:getSize()`
+Returns the video frame dimensions.
+
+- **Returns:** (number, number) Width and height in pixels
+
+```lua
+local w, h = player:getSize()
+```
+
+#### `player:getDroppedFrames()`
+Returns the number of frames dropped during playback due to decode not keeping up with the frame rate.
+
+- **Returns:** (number) Number of dropped frames
+
+#### `player:resetStats()`
+Resets playback statistics (dropped frame counter).
+
+#### `player:setAutoFlush(enabled)`
+Controls whether the player automatically calls `display.flush()` after each decoded frame. When disabled, the app must call `display.flush()` manually, allowing HUD overlays to be drawn between decode and flush.
+
+- **Parameters:**
+  - `enabled` (boolean): `true` for automatic flush (default), `false` for manual flush
+
+```lua
+player:setAutoFlush(false)  -- manual flush for HUD overlay
+```
+
+---
 
 ### Audio control
 
@@ -69,7 +123,7 @@ local info = player:getInfo()
 Call `player:update()` each frame to advance playback:
 
 ```lua
-local player = picocalc.video.new()
+local player = picocalc.video.player()
 player:load("/apps/demo/video.avi")
 player:play()
 

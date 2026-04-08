@@ -172,6 +172,191 @@ picocalc.sys.triggerFault()
 
 ---
 
+#### `picocalc.sys.getVersion()`
+Get the PicOS firmware version string.
+
+- **Parameters:** None
+- **Returns:** (string) Version string (e.g. "1.2.0")
+
+```lua
+local version = picocalc.sys.getVersion()
+picocalc.sys.log("PicOS version: " .. version)
+```
+
+---
+
+#### `picocalc.sys.getPowerStatus()`
+Get detailed power status.
+
+- **Parameters:** None
+- **Returns:** (table) With fields:
+  - `charging` (boolean): Whether the device is currently charging
+  - `percent` (number): Battery percentage (0-100)
+
+```lua
+local power = picocalc.sys.getPowerStatus()
+if power.charging then
+    print("Charging: " .. power.percent .. "%")
+end
+```
+
+---
+
+#### `picocalc.sys.applyUpdate(path)`
+Trigger an OTA firmware update from a UF2 file on the SD card. The device will reboot to apply the update.
+
+- **Parameters:**
+  - `path` (string): Path to UF2 file on the SD card
+- **Returns:** (boolean) `true` on success; `false, string` on failure with error message
+
+```lua
+local ok, err = picocalc.sys.applyUpdate("/system/update.uf2")
+if not ok then
+    picocalc.sys.log("Update failed: " .. err)
+end
+```
+
+---
+
+#### `picocalc.sys.pauseBackground()`
+Pause Core 1 background tasks (WiFi polling, audio decode, HTTP). Useful before intensive SD card operations.
+
+- **Parameters:** None
+- **Returns:** (boolean) `true` if Core 1 successfully paused
+
+```lua
+picocalc.sys.pauseBackground()
+-- perform intensive SD card operations
+picocalc.sys.resumeBackground()
+```
+
+---
+
+#### `picocalc.sys.resumeBackground()`
+Resume Core 1 background tasks after `pauseBackground()`.
+
+- **Parameters:** None
+- **Returns:** None
+
+```lua
+picocalc.sys.resumeBackground()
+```
+
+---
+
+#### `picocalc.sys.loadlib(name)`
+Load a shared Lua library from `/system/lib/<name>.lua` and return its result. Libraries are standard Lua files that return a table of functions.
+
+- **Parameters:**
+  - `name` (string): Library name (without `.lua` extension)
+- **Returns:** Whatever the library script returns (typically a table)
+
+```lua
+local json = picocalc.sys.loadlib("json")
+local data = json.decode(raw)
+```
+
+---
+
+#### `picocalc.sys.pioPsramRead(addr, len)`
+Read bytes from PIO PSRAM (mainboard 8MB).
+
+- **Parameters:**
+  - `addr` (number): Byte address
+  - `len` (number): Number of bytes to read
+- **Returns:** (string) Data, or `nil` if PIO PSRAM not available
+
+```lua
+local data = picocalc.sys.pioPsramRead(0x0000, 256)
+```
+
+---
+
+#### `picocalc.sys.pioPsramWrite(addr, data)`
+Write bytes to PIO PSRAM.
+
+- **Parameters:**
+  - `addr` (number): Byte address
+  - `data` (string): Bytes to write
+- **Returns:** (number) Bytes written (0 if unavailable)
+
+```lua
+local written = picocalc.sys.pioPsramWrite(0x8000, myData)
+```
+
+---
+
+#### `picocalc.sys.pioPsramSize()`
+Get PIO PSRAM size.
+
+- **Parameters:** None
+- **Returns:** (number) Size in bytes (0 if not available)
+
+```lua
+local size = picocalc.sys.pioPsramSize()
+if size > 0 then
+    picocalc.sys.log("PIO PSRAM: " .. (size // 1024) .. " KB")
+end
+```
+
+---
+
+#### `picocalc.sys.qmiPsramAlloc(size)`
+Allocate a buffer in QMI PSRAM (Lua heap). Low-level; prefer standard Lua tables for most uses.
+
+- **Parameters:**
+  - `size` (number): Bytes to allocate
+- **Returns:** (lightuserdata) Handle, or `nil` on failure
+
+```lua
+local buf = picocalc.sys.qmiPsramAlloc(4096)
+```
+
+---
+
+#### `picocalc.sys.qmiPsramFree(handle)`
+Free a QMI PSRAM allocation.
+
+- **Parameters:**
+  - `handle` (lightuserdata): Handle from `qmiPsramAlloc`
+- **Returns:** None
+
+```lua
+picocalc.sys.qmiPsramFree(buf)
+```
+
+---
+
+#### `picocalc.sys.qmiPsramWrite(handle, offset, data)`
+Write to a QMI PSRAM buffer.
+
+- **Parameters:**
+  - `handle` (lightuserdata): Handle from `qmiPsramAlloc`
+  - `offset` (number): Byte offset within the buffer
+  - `data` (string): Bytes to write
+- **Returns:** (number) Bytes written
+
+```lua
+picocalc.sys.qmiPsramWrite(buf, 0, "Hello PSRAM")
+```
+
+---
+
+#### `picocalc.sys.qmiPsramRead(handle, offset, len)`
+Read from a QMI PSRAM buffer.
+
+- **Parameters:**
+  - `handle` (lightuserdata): Handle from `qmiPsramAlloc`
+  - `offset` (number): Byte offset within the buffer
+  - `len` (number): Number of bytes to read
+- **Returns:** (string) Data
+
+```lua
+local data = picocalc.sys.qmiPsramRead(buf, 0, 11)
+```
+
+---
+
 ## picocalc.config
 
 Persistent key-value configuration storage (stored in `/system/config.json`).
@@ -228,4 +413,31 @@ Loads configuration from `/system/config.json`.
 
 ```lua
 picocalc.config.load()
+```
+
+---
+
+#### `picocalc.config.clear()`
+Clears all keys from the current app's configuration in memory. Does not delete the config file on disk; call `save()` afterwards to persist the change.
+
+- **Parameters:** None
+- **Returns:** None
+
+```lua
+picocalc.config.clear()
+picocalc.config.save()  -- persist the empty config
+```
+
+---
+
+#### `picocalc.config.reset()`
+Resets the app configuration by deleting the config file from the SD card and clearing the in-memory state.
+
+- **Parameters:** None
+- **Returns:** (boolean) `true` if the file was deleted successfully, `false` on error
+
+```lua
+if picocalc.config.reset() then
+    picocalc.sys.log("App config reset to defaults")
+end
 ```

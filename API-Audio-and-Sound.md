@@ -48,6 +48,65 @@ picocalc.audio.setVolume(128)  -- 50% volume
 
 ---
 
+### PCM Streaming
+
+#### `picocalc.audio.startStream(sampleRate)`
+Initialize PCM audio streaming at the specified sample rate.
+
+- **Parameters:**
+  - `sampleRate` (number): Sample rate in Hz (e.g. `44100`)
+- **Returns:** None
+
+```lua
+picocalc.audio.startStream(44100)
+```
+
+---
+
+#### `picocalc.audio.stopStream()`
+Stop the active PCM audio stream.
+
+- **Parameters:** None
+- **Returns:** None
+
+```lua
+picocalc.audio.stopStream()
+```
+
+---
+
+#### `picocalc.audio.pushSamples(samples)`
+Push audio samples to the streaming buffer. Samples are interleaved stereo pairs (left, right, left, right...).
+
+- **Parameters:**
+  - `samples` (table): Array of int16 sample values (max 512 values = 256 stereo pairs)
+- **Returns:** None
+
+```lua
+local samples = {}
+for i = 1, 512 do
+    samples[i] = math.floor(math.sin(i * 0.1) * 16000)
+end
+picocalc.audio.pushSamples(samples)
+```
+
+---
+
+#### `picocalc.audio.ringFree()`
+Get the number of free slots available in the audio ring buffer. Use this to avoid pushing more samples than the buffer can hold.
+
+- **Parameters:** None
+- **Returns:** (number) Free buffer slots
+
+```lua
+local free = picocalc.audio.ringFree()
+if free >= 512 then
+    picocalc.audio.pushSamples(samples)
+end
+```
+
+---
+
 ## picocalc.sound
 
 Full audio playback system supporting WAV samples and MP3 files. Provides three player types:
@@ -68,6 +127,18 @@ Returns the current audio clock time in milliseconds since the last `resetTime()
 Resets the audio clock to zero.
 
 - **Returns:** None
+
+---
+
+#### `picocalc.sound.playingSources()`
+Returns the number of audio sources currently playing across all player types.
+
+- **Returns:** (number) Count of active audio sources
+
+```lua
+local n = picocalc.sound.playingSources()
+picocalc.sys.log("Active sources: " .. n)
+```
 
 ---
 
@@ -108,6 +179,42 @@ Returns the number of PCM samples (frames).
 Returns the sample rate in Hz (e.g., `44100`).
 
 - **Returns:** (number)
+
+---
+
+#### `sample:getFormat()`
+Returns the audio format of the sample as a table.
+
+- **Returns:** (table) With fields:
+  - `bits` (number): Bits per sample (e.g. 8, 16)
+  - `channels` (number): Number of channels (1=mono, 2=stereo)
+  - `sampleRate` (number): Sample rate in Hz
+
+```lua
+local fmt = sample:getFormat()
+picocalc.sys.log(fmt.bits .. "bit, " .. fmt.channels .. "ch, " .. fmt.sampleRate .. "Hz")
+```
+
+---
+
+#### `sample:decompress()`
+Returns the sample itself (no-op). Provided for API compatibility with engines that distinguish compressed and decompressed sample data. On PicOS, samples are always stored decompressed.
+
+- **Returns:** (userdata) The same Sample object
+
+---
+
+#### `sample:getSubsample(start, end)`
+Creates a new Sample containing a slice of the original sample's PCM data.
+
+- **Parameters:**
+  - `start` (number): Start offset in PCM frames
+  - `end` (number): End offset in PCM frames
+- **Returns:** (userdata) New Sample object, or `nil, errstr` on failure
+
+```lua
+local clip = sample:getSubsample(0, 22050)  -- first second at 44100 Hz
+```
 
 ---
 
@@ -162,6 +269,52 @@ Volume range 0–255.
 
 ---
 
+#### `player:getSample()`
+Returns the Sample object currently assigned to this player.
+
+- **Returns:** (lightuserdata) Sample handle, or `nil` if no sample is set
+
+---
+
+#### `player:setPaused(paused)`
+Pauses or unpauses playback without resetting the playback position.
+
+- **Parameters:**
+  - `paused` (boolean): `true` to pause, `false` to resume
+
+```lua
+player:setPaused(true)   -- pause
+player:setPaused(false)  -- resume
+```
+
+---
+
+#### `player:setPlayRange(start, end)`
+Sets the playback range in PCM frames. Playback will only play samples within this range.
+
+- **Parameters:**
+  - `start` (number): Start frame offset
+  - `end` (number): End frame offset
+
+```lua
+player:setPlayRange(0, 44100)  -- play only the first second
+```
+
+---
+
+#### `player:setRate(rate)` / `player:getRate()`
+Sets or gets the playback rate multiplier. `1.0` is normal speed, `2.0` is double speed, `0.5` is half speed.
+
+- **Parameters:**
+  - `rate` (number): Playback rate multiplier
+- **Returns:** (number) Current rate (for `getRate`)
+
+```lua
+player:setRate(1.5)  -- play at 150% speed
+```
+
+---
+
 ### FilePlayer
 
 Streams a WAV file from the SD card without loading it fully into memory.
@@ -201,6 +354,45 @@ Sets left/right channel volumes (0–255). Returns both channels.
 
 #### `player:setLoopRange([start [, end]])`
 Sets the loop region in seconds. Omit both to loop the whole file.
+
+---
+
+#### `player:didUnderrun()`
+Returns whether the streaming buffer underran since the last check. An underrun means the SD card could not supply audio data fast enough.
+
+- **Returns:** (boolean) `true` if an underrun occurred
+
+```lua
+if player:didUnderrun() then
+    picocalc.sys.log("Audio buffer underrun!")
+end
+```
+
+---
+
+#### `player:setFinishCallback(fn)`
+Sets a callback function to be called when playback finishes. Maximum 2 finish callbacks across all FilePlayer instances.
+
+- **Parameters:**
+  - `fn` (function): Callback function (called with no arguments)
+
+```lua
+player:setFinishCallback(function()
+    picocalc.sys.log("Playback finished")
+end)
+```
+
+---
+
+#### `player:setStopOnUnderrun(flag)`
+Controls whether the player automatically stops when a buffer underrun occurs.
+
+- **Parameters:**
+  - `flag` (boolean): `true` to stop on underrun, `false` to continue
+
+```lua
+player:setStopOnUnderrun(true)
+```
 
 ---
 

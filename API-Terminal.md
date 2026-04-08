@@ -172,6 +172,70 @@ term:setScrollInfo(#lines, scroll_offset)
 
 ---
 
+## Grid dimensions
+
+#### `term:getCols()` → `n`
+Return the total number of columns in the terminal grid.
+
+#### `term:getRows()` → `n`
+Return the total number of rows in the terminal grid.
+
+---
+
+## Render bounds
+
+#### `term:setRenderBounds(y_start, y_end)`
+Restrict rendering to rows between `y_start` and `y_end` (inclusive). Useful for embedding a terminal in a portion of the screen alongside other UI elements.
+
+- `y_start` (number): First row to render (0-based pixel row)
+- `y_end` (number): Last row to render
+
+```lua
+term:setRenderBounds(16, 300)  -- leave room for a header
+```
+
+---
+
+## Cell access
+
+Direct cell manipulation for syntax highlighting and custom rendering.
+
+#### `term:setCell(x, y, ch)`
+Set the character at column `x`, row `y` (0-based). Out-of-bounds coordinates are silently ignored.
+
+- `x` (number): Column
+- `y` (number): Row
+- `ch` (string): Single character to place in the cell
+
+#### `term:getCell(x, y)` → `ch`
+Return the character at column `x`, row `y` as a single-character string. Returns `" "` for out-of-bounds coordinates or empty cells.
+
+#### `term:setCellColors(x, y, fg, bg)`
+Set the foreground and background colours (RGB565) of a single cell. Marks the row dirty.
+
+- `x` (number): Column
+- `y` (number): Row
+- `fg` (number): Foreground colour (RGB565)
+- `bg` (number): Background colour (RGB565)
+
+#### `term:setRowColors(y, fgTable, bgTable [, startX [, count]])`
+Batch-set foreground and background colours for a range of cells in row `y`. Both `fgTable` and `bgTable` are arrays of RGB565 values. Marks the row dirty.
+
+- `y` (number): Row
+- `fgTable` (table): Array of foreground colours
+- `bgTable` (table): Array of background colours
+- `startX` (number, optional): Starting column (default 0)
+- `count` (number, optional): Number of cells to set (default: all columns)
+
+```lua
+-- Highlight columns 0-9 of row 3
+local fg = {}; local bg = {}
+for i = 1, 10 do fg[i] = 0xFFE0; bg[i] = 0x0000 end  -- yellow on black
+term:setRowColors(3, fg, bg, 0, 10)
+```
+
+---
+
 ## Word wrap
 
 #### `term:setWordWrap(enabled)`
