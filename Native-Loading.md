@@ -177,14 +177,6 @@ The application runs in the same privilege level as the OS but is expected to re
 - If the app crashes (HardFault), the fault handler displays register state, CFSR flags, and stack pointer info on the LCD. It detects whether the crash was in the app (PSP) or OS (MSP).
 - Stack overflow signature: OVFL with SP below `__StackBottom` (0x20081000) and BFAR at 0x35xxxxxx.
 
-## TinyGo Support
-
-TinyGo can also produce PIE binaries for ARM. Use the following flags:
-- `-target=pico`: Target the RP2040/RP2350.
-- `-gc=none`: Recommended for real-time performance.
-- `-panic=trap`: Minimize binary size.
-- Export `picos_main` using `//export picos_main`.
-
 ## See also
 
 - [[Lua SDK Reference]] — Lua API documentation (C API mirrors these modules)
