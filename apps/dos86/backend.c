@@ -5,6 +5,8 @@
 
 #include "backend.h"
 #include "os.h"
+#include "scancode.h"
+#include "fake86/i8259.h"
 #include <string.h>
 
 /* ---- Module state ---- */
@@ -98,8 +100,43 @@ bool backend_kb_available(void) {
     return s_kb_head != s_kb_tail;
 }
 
+static char s_last_char;
+
 void backend_pump_keyboard(void) {
-    /* Stub: keyboard scancode injection implemented in Task 6 */
+    uint32_t pressed  = s_api->input->getButtonsPressed();
+    uint32_t released = s_api->input->getButtonsReleased();
+
+    /* Button-mapped keys */
+    for (int i = 0; btn_scancode_table[i].btn_mask != 0; i++) {
+        uint32_t mask = btn_scancode_table[i].btn_mask;
+        uint8_t  sc   = btn_scancode_table[i].scancode;
+        if (pressed & mask) {
+            backend_kb_push(sc);          /* Make code */
+            i8259_irq(1);                 /* Keyboard IRQ1 */
+        }
+        if (released & mask) {
+            backend_kb_push(sc | 0x80);   /* Break code */
+            i8259_irq(1);
+        }
+    }
+
+    /* ASCII character keys */
+    char c = s_api->input->getChar();
+    if (c && c != s_last_char) {
+        uint8_t sc = ascii_to_scancode(c);
+        if (sc) {
+            backend_kb_push(sc);
+            i8259_irq(1);
+        }
+        s_last_char = c;
+    } else if (!c && s_last_char) {
+        uint8_t sc = ascii_to_scancode(s_last_char);
+        if (sc) {
+            backend_kb_push(sc | 0x80);
+            i8259_irq(1);
+        }
+        s_last_char = 0;
+    }
 }
 
 /* ---- Disk I/O ---- */
