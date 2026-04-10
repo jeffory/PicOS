@@ -102,6 +102,7 @@ void     intcall86(uint8_t intnum);
 extern union _bytewordregs_ regs;
 extern uint16_t segregs[4];
 extern uint16_t ip;
+extern uint16_t saveip;   /* IP of the current instruction (set before decode) */
 extern uint8_t  hltstate;
 extern uint8_t  running;
 extern uint8_t  didbootstrap;

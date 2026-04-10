@@ -26,6 +26,7 @@
 #include "cpu.h"
 #include "disk.h"
 #include "video.h"
+#include "bios.h"
 
 /* ---- modregrm decoder (no address mode cache) ---- */
 static uint8_t addrbyte;
@@ -684,6 +685,14 @@ void intcall86(uint8_t intnum) {
 		case 0x13:  /* BIOS disk services — handled in C */
 		case 0xFD:
 			diskhandler();
+			return;
+
+		case 0x16:  /* BIOS keyboard services — handled in C */
+			bios_int16h();
+			return;
+
+		case 0x1A:  /* BIOS time services — handled in C */
+			bios_int1ah();
 			return;
 
 		case 0x19:  /* Bootstrap loader */
