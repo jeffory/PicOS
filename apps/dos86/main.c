@@ -4,6 +4,9 @@
 #include <stdio.h>
 #include "fake86/config.h"
 #include "fake86/cpu.h"
+#include "fake86/i8259.h"
+#include "fake86/i8253.h"
+#include "speaker.h"
 
 /* Global memory pointers (referenced by fake86 via extern in config.h) */
 uint8_t *g_ram;       /* 1 MB conventional + UMA */
@@ -57,6 +60,12 @@ void picos_main(const PicoCalcAPI *api,
     /* Reset the CPU — sets CS:IP to F000:FFF0 (the x86 reset vector) */
     cpu_reset();
     api->sys->log("DOS86: CPU reset, CS:IP = F000:FFF0");
+
+    /* Initialize peripherals */
+    i8259_reset();
+    i8253_reset();
+    speaker_init();
+    api->sys->log("DOS86: PIC/PIT/Speaker initialized");
 
     /* Execute a small number of instructions to prove the CPU works.
        The reset vector points into our HLT-filled ROM, so exec86 will
