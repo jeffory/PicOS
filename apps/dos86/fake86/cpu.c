@@ -99,25 +99,6 @@ union _bytewordregs_ regs;
 uint8_t  running = 0, didbootstrap = 0;
 uint8_t  bootdrive = 0;
 
-/* ---- Port I/O stubs (return 0xFF for reads, ignore writes) ---- */
-uint8_t portin(uint16_t portnum) {
-	(void)portnum;
-	return g_portram[portnum & 0xFFFF];
-}
-
-uint16_t portin16(uint16_t portnum) {
-	return (uint16_t)portin(portnum) | ((uint16_t)portin(portnum + 1) << 8);
-}
-
-void portout(uint16_t portnum, uint8_t value) {
-	g_portram[portnum & 0xFFFF] = value;
-}
-
-void portout16(uint16_t portnum, uint16_t value) {
-	portout(portnum, (uint8_t)value);
-	portout(portnum + 1, (uint8_t)(value >> 8));
-}
-
 /* ---- Backend stubs (will be implemented in later tasks) ---- */
 void diskhandler(void) {
 	/* Stub: return error (AH=1, CF=1) for all disk calls */

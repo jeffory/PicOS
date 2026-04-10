@@ -89,7 +89,7 @@ void     write86(uint32_t addr32, uint8_t value);
 uint16_t readw86(uint32_t addr32);
 void     writew86(uint32_t addr32, uint16_t value);
 
-/* ---- Port I/O (stubs for now, will move to ports.c in Task 4) ---- */
+/* ---- Port I/O (implemented in ports.c) ---- */
 uint8_t  portin(uint16_t portnum);
 uint16_t portin16(uint16_t portnum);
 void     portout(uint16_t portnum, uint8_t value);

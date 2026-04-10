@@ -6,6 +6,8 @@
 #include "fake86/cpu.h"
 #include "fake86/i8259.h"
 #include "fake86/i8253.h"
+#include "fake86/ports.h"
+#include "backend.h"
 #include "speaker.h"
 
 /* Global memory pointers (referenced by fake86 via extern in config.h) */
@@ -52,6 +54,10 @@ void picos_main(const PicoCalcAPI *api,
     memset(g_portram, 0, PORT_SIZE);
 
     api->sys->log("DOS86: PSRAM allocated (1.3 MB)");
+
+    /* Initialize backend and port dispatcher */
+    backend_init(api, app_dir);
+    ports_reset();
 
     /* Fill ROM area (0xF0000-0xFFFFF) with HLT instructions so the CPU
        halts immediately after reset instead of executing random data. */
@@ -101,6 +107,7 @@ void picos_main(const PicoCalcAPI *api,
     }
 
     /* Cleanup */
+    backend_shutdown();
     api->psram->qmiFree(g_portram);
     api->psram->qmiFree(g_vram);
     api->psram->qmiFree(g_ram);
