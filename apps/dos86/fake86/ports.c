@@ -9,6 +9,7 @@
 #include "video.h"
 #include "../backend.h"
 #include "../speaker.h"
+#include "../opl.h"
 #include <stdint.h>
 
 /* Port 0x61: keyboard/speaker control register */
@@ -49,9 +50,9 @@ uint8_t portin8(uint16_t port) {
         return video_portin(port);
     }
 
-    /* OPL2 (AdLib): stubbed */
+    /* OPL2 (AdLib): FM synthesis */
     if (port == 0x388 || port == 0x389) {
-        return 0xFF;
+        return opl_read(port);
     }
 
     /* Default: return port shadow RAM value */
@@ -89,8 +90,9 @@ void portout8(uint16_t port, uint8_t val) {
         return;
     }
 
-    /* OPL2 (AdLib): stubbed no-op */
+    /* OPL2 (AdLib): FM synthesis */
     if (port == 0x388 || port == 0x389) {
+        opl_write(port, val);
         return;
     }
 

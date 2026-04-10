@@ -12,6 +12,7 @@
 #include "fake86/render.h"
 #include "backend.h"
 #include "speaker.h"
+#include "audio_mix.h"
 #include "roms/pcxtbios.h"
 #include "roms/videorom.h"
 
@@ -294,6 +295,7 @@ void picos_main(const PicoCalcAPI *api,
     i8259_reset();
     i8253_reset();
     speaker_init();
+    audio_mix_init(api);
     video_reset();
 
     /* Allocate 320x200 RGB565 render buffer from PSRAM (128 KB) */
@@ -334,6 +336,7 @@ void picos_main(const PicoCalcAPI *api,
     }
 
     /* Cleanup */
+    audio_mix_shutdown();
     disk_unmount(0x00);
     backend_shutdown();
     api->psram->qmiFree(render_buf);
