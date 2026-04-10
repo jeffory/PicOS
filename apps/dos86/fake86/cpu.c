@@ -27,6 +27,7 @@
 #include "disk.h"
 #include "video.h"
 #include "bios.h"
+#include "i8259.h"
 
 /* ---- modregrm decoder (no address mode cache) ---- */
 static uint8_t addrbyte;
@@ -732,7 +733,23 @@ void exec86(uint32_t execloops) {
 			trap_toggle = 0;
 		}
 
-		if (hltstate) goto skipexecution;
+		/* Check for pending hardware interrupts from the 8259 PIC.
+		   On a real 8086, this happens after every instruction when IF=1.
+		   Also wakes the CPU from HLT state. */
+		if (ifl) {
+			int irq_vec = i8259_poll();
+			if (irq_vec >= 0) {
+				hltstate = 0;  /* Wake from HLT */
+				intcall86((uint8_t)irq_vec);
+			}
+		}
+
+		if (hltstate) {
+			/* CPU is halted and no interrupt woke us — break early
+			   to avoid burning cycles.  The main loop will tick the
+			   PIT and pump keyboard, then call exec86 again. */
+			break;
+		}
 
 		reptype = 0;
 		segoverride = 0;
@@ -1547,7 +1564,6 @@ void exec86(uint32_t execloops) {
 				break;
 		}
 
-skipexecution:
 		if (!running) return;
 	}
 }
