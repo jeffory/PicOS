@@ -12,7 +12,7 @@ LDFLAGS = -T linker.ld \
           -Wl,--no-warn-rwx-segments \
           -nostartfiles -nodefaultlibs -lc -lgcc
 
-SRCS    = main.c
+SRCS    = main.c fake86/cpu.c stubs.c
 TARGET  = main.elf
 
 .PHONY: all clean
