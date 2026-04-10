@@ -24,6 +24,7 @@
 #include <stdint.h>
 #include <stdio.h>
 #include "cpu.h"
+#include "disk.h"
 
 /* ---- modregrm decoder (no address mode cache) ---- */
 static uint8_t addrbyte;
@@ -99,11 +100,7 @@ union _bytewordregs_ regs;
 uint8_t  running = 0, didbootstrap = 0;
 uint8_t  bootdrive = 0;
 
-/* ---- Backend stubs (will be implemented in later tasks) ---- */
-void diskhandler(void) {
-	/* Stub: return error (AH=1, CF=1) for all disk calls */
-}
-
+/* vidinterrupt stub (will be replaced in Task 7) */
 void vidinterrupt(void) {
 	/* Stub: video BIOS interrupt handler, no-op for now */
 }
@@ -675,11 +672,22 @@ static void op_grp5(void) {
 /* ---- Interrupt call ---- */
 
 void intcall86(uint8_t intnum) {
-	/*
-	 * Simplified for PicOS: no hardware intercepts (video, disk, network).
-	 * Just push flags/CS/IP and vector through the IVT.
-	 * Backend handlers (disk, video) will be added in later tasks.
-	 */
+	if (intnum == 0x19) didbootstrap = 1;
+
+	switch (intnum) {
+		case 0x13:  /* BIOS disk services — handled in C */
+		case 0xFD:
+			diskhandler();
+			return;
+
+		case 0x19:  /* Bootstrap loader */
+			disk_bootstrap();
+			return;
+
+		default:
+			break;
+	}
+
 	push(makeflagsword());
 	push(segregs[regcs]);
 	push(ip);

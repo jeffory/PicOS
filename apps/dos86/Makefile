@@ -12,7 +12,7 @@ LDFLAGS = -T linker.ld \
           -Wl,--no-warn-rwx-segments \
           -nostartfiles -nodefaultlibs -lc -lgcc
 
-SRCS    = main.c backend.c stubs.c fake86/cpu.c fake86/i8259.c fake86/i8253.c fake86/ports.c speaker.c
+SRCS    = main.c backend.c stubs.c fake86/cpu.c fake86/i8259.c fake86/i8253.c fake86/ports.c fake86/disk.c speaker.c
 TARGET  = main.elf
 
 .PHONY: all clean

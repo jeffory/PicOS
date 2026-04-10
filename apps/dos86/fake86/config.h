@@ -54,9 +54,6 @@ static inline bool is_readonly(uint32_t addr) {
 /* ---- Timing interval (instruction count between timing callbacks) ---- */
 #define TIMING_INTERVAL  15
 
-/* ---- Backend callback prototypes (stubs for now) ---- */
-/* Called by intcall86 for disk interrupt (INT 13h) */
-extern void diskhandler(void);
 /* Called by intcall86 for video interrupt (INT 10h) */
 extern void vidinterrupt(void);
 

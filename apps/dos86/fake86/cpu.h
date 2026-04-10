@@ -104,6 +104,8 @@ extern uint16_t segregs[4];
 extern uint16_t ip;
 extern uint8_t  hltstate;
 extern uint8_t  running;
+extern uint8_t  didbootstrap;
+extern uint8_t  bootdrive;
 extern uint64_t totalexec;
 extern uint8_t  byteregtable[8];
 

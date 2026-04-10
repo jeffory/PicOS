@@ -166,6 +166,12 @@ bool backend_disk_mounted(int drive) {
     return s_drives[idx].mounted;
 }
 
+uint32_t backend_disk_get_size(int drive) {
+    int idx = drive_idx(drive);
+    if (idx < 0 || !s_drives[idx].mounted) return 0;
+    return s_drives[idx].size_bytes;
+}
+
 /* ---- Display ---- */
 
 void backend_render_frame(const uint16_t *framebuf, int width, int height) {
