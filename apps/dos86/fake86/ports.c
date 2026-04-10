@@ -6,6 +6,7 @@
 #include "ports.h"
 #include "i8259.h"
 #include "i8253.h"
+#include "video.h"
 #include "../backend.h"
 #include "../speaker.h"
 #include <stdint.h>
@@ -43,6 +44,11 @@ uint8_t portin8(uint16_t port) {
         return backend_kb_available() ? 0x01 : 0x00;
     }
 
+    /* VGA/CGA video registers: 0x3B0-0x3DA */
+    if (port >= 0x3B0 && port <= 0x3DA) {
+        return video_portin(port);
+    }
+
     /* OPL2 (AdLib): stubbed */
     if (port == 0x388 || port == 0x389) {
         return 0xFF;
@@ -74,6 +80,12 @@ void portout8(uint16_t port, uint8_t val) {
         s_port61 = val;
         /* Both bit 0 (PIT ch2 gate) and bit 1 (speaker out) must be set for sound */
         speaker_set_gate((val & 0x03) == 0x03);
+        return;
+    }
+
+    /* VGA/CGA video registers: 0x3B0-0x3DA */
+    if (port >= 0x3B0 && port <= 0x3DA) {
+        video_portout(port, val);
         return;
     }
 

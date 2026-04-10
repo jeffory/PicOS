@@ -8,6 +8,8 @@
 #include "fake86/i8253.h"
 #include "fake86/ports.h"
 #include "fake86/disk.h"
+#include "fake86/video.h"
+#include "fake86/render.h"
 #include "backend.h"
 #include "speaker.h"
 #include "roms/pcxtbios.h"
@@ -292,6 +294,21 @@ void picos_main(const PicoCalcAPI *api,
     i8259_reset();
     i8253_reset();
     speaker_init();
+    video_reset();
+
+    /* Allocate 320x200 RGB565 render buffer from PSRAM (128 KB) */
+    uint16_t *render_buf = (uint16_t *)api->psram->qmiAlloc(320 * 200 * sizeof(uint16_t));
+    if (!render_buf) {
+        api->sys->log("DOS86: Failed to allocate render buffer");
+        disk_unmount(0x00);
+        backend_shutdown();
+        api->psram->qmiFree(g_portram);
+        api->psram->qmiFree(g_vram);
+        api->psram->qmiFree(g_ram);
+        return;
+    }
+    memset(render_buf, 0, 320 * 200 * sizeof(uint16_t));
+    api->sys->log("DOS86: Render buffer allocated");
 
     /* Clear display for emulation */
     api->display->clear(COL_BG);
@@ -307,11 +324,19 @@ void picos_main(const PicoCalcAPI *api,
 
         /* Tick the PIT: 1.19318 MHz / 60 Hz = ~19886 ticks per frame */
         i8253_tick(19886);
+
+        /* Render video output when dirty */
+        if (video_is_dirty()) {
+            render_frame(render_buf);
+            backend_render_frame(render_buf, 320, 200);
+            video_clear_dirty();
+        }
     }
 
     /* Cleanup */
     disk_unmount(0x00);
     backend_shutdown();
+    api->psram->qmiFree(render_buf);
     api->psram->qmiFree(g_portram);
     api->psram->qmiFree(g_vram);
     api->psram->qmiFree(g_ram);

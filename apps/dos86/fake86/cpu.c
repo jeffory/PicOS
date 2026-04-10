@@ -25,6 +25,7 @@
 #include <stdio.h>
 #include "cpu.h"
 #include "disk.h"
+#include "video.h"
 
 /* ---- modregrm decoder (no address mode cache) ---- */
 static uint8_t addrbyte;
@@ -100,9 +101,9 @@ union _bytewordregs_ regs;
 uint8_t  running = 0, didbootstrap = 0;
 uint8_t  bootdrive = 0;
 
-/* vidinterrupt stub (will be replaced in Task 7) */
+/* Video BIOS interrupt handler — delegates to video.c */
 void vidinterrupt(void) {
-	/* Stub: video BIOS interrupt handler, no-op for now */
+	video_int10h();
 }
 
 /* ---- Memory access ---- */
@@ -118,6 +119,7 @@ void write86(uint32_t addr32, uint8_t value) {
 	/* Video RAM: 0xA0000 - 0xBFFFF */
 	if ((tempaddr32 >= 0xA0000) && (tempaddr32 <= 0xBFFFF)) {
 		g_vram[tempaddr32 - 0xA0000] = value;
+		video_set_dirty();
 		return;
 	}
 
@@ -675,6 +677,10 @@ void intcall86(uint8_t intnum) {
 	if (intnum == 0x19) didbootstrap = 1;
 
 	switch (intnum) {
+		case 0x10:  /* BIOS video services — handled in C */
+			vidinterrupt();
+			return;
+
 		case 0x13:  /* BIOS disk services — handled in C */
 		case 0xFD:
 			diskhandler();

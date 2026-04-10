@@ -211,9 +211,20 @@ uint32_t backend_disk_get_size(int drive) {
 
 /* ---- Display ---- */
 
+#define RENDER_Y_OFFSET 60
+
 void backend_render_frame(const uint16_t *framebuf, int width, int height) {
-    /* Stub: display rendering implemented in Task 7 */
-    (void)framebuf;
-    (void)width;
-    (void)height;
+    uint16_t *fb = s_api->display->getBackBuffer();
+    if (!fb) return;
+
+    for (int y = 0; y < height && y < 200; y++) {
+        uint16_t *dst = &fb[(y + RENDER_Y_OFFSET) * 320];
+        const uint16_t *src = &framebuf[y * width];
+        for (int x = 0; x < width && x < 320; x++) {
+            uint16_t px = src[x];
+            dst[x] = (px >> 8) | (px << 8);  /* Byte-swap to big-endian */
+        }
+    }
+
+    s_api->display->flushRegion(RENDER_Y_OFFSET - 1, RENDER_Y_OFFSET + height);
 }
