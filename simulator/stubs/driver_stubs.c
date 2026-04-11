@@ -939,3 +939,11 @@ bool pio_psram_available(void) { return false; }
 uint32_t pio_psram_size(void) { return 0; }
 void pio_psram_read(uint32_t addr, uint8_t *dst, uint32_t len) { (void)addr; (void)dst; (void)len; }
 void pio_psram_write(uint32_t addr, const uint8_t *src, uint32_t len) { (void)addr; (void)src; (void)len; }
+
+// --- Image preload stubs ---
+#include "../../src/drivers/image_api.h"
+void image_preload_init(void) {}
+bool image_preload_start(const char *path) { (void)path; return false; }
+pc_image_t *image_preload_poll(bool *ready) { if (ready) *ready = false; return NULL; }
+void image_preload_cancel(void) {}
+void image_preload_update(void) {}
