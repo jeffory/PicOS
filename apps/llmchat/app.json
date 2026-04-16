@@ -1,0 +1,13 @@
+{
+    "id": "com.picos.llmchat",
+    "name": "LLM Chat",
+    "author": "PicOS",
+    "description": "Chat with LLMs (OpenAI, Claude, Ollama)",
+    "version": "1.0.0",
+    "requirements": [
+        "http"
+    ],
+    "category": "network",
+    "repo": "jeffory/picos-apps",
+    "min_firmware": "1.0.0"
+}
