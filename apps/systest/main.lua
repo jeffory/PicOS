@@ -250,6 +250,14 @@ local function run_internet_test()
     end
 end
 
+local function format_kb(kb)
+    if kb >= 1024 then
+        return string.format("%.1f MB", kb / 1024)
+    else
+        return kb .. " KB"
+    end
+end
+
 local function run_qmi_psram_test()
     local mem = sys.getMemInfo()
     if mem.psram_total > 0 then
@@ -284,14 +292,6 @@ local function run_xip_cache_test()
     else
         tests.xip_cache.status = "INFO"
         tests.xip_cache.value = "No accesses"
-    end
-end
-
-local function format_kb(kb)
-    if kb >= 1024 then
-        return string.format("%.1f MB", kb / 1024)
-    else
-        return kb .. " KB"
     end
 end
 
@@ -804,7 +804,10 @@ local function draw_tabs_demo()
             format_kb(math.floor(mem.psram_free / 1024)),
             format_kb(math.floor(mem.psram_total / 1024)))}
         if mem.pio_psram_available then
-            rows[#rows + 1] = {info = "PIO PSRAM", value = string.format("%s", format_kb(math.floor(mem.pio_psram_size / 1024)))}
+            local pio_kb = math.floor(mem.pio_psram_size / 1024)
+            local pio_reserved_kb = 288  -- MP3 ring (32KB) + video buffer (256KB)
+            local pio_free_kb = pio_kb - pio_reserved_kb
+            rows[#rows + 1] = {info = "PIO PSRAM", value = string.format("%s free / %s", format_kb(pio_free_kb), format_kb(pio_kb))}
         end
         local disk = fs.diskInfo()
         if disk then
