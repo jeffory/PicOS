@@ -1,0 +1,10 @@
+{
+  "id": "com.picos.calculator",
+  "name": "Calculator",
+  "description": "Scientific calculator with expression evaluation",
+  "version": "0.1.0",
+  "author": "PicOS",
+  "category": "tools",
+  "repo": "jeffory/picos-apps",
+  "min_firmware": "1.0.0"
+}
