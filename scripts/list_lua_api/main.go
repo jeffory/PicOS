@@ -48,8 +48,12 @@ var docFileMapping = map[string]string{
 	"sound":    "API-Audio-and-Sound.md",
 	"perf":     "API-Performance.md",
 	"graphics": "API-Display-and-Graphics.md",
-	"video":    "API-Audio-and-Sound.md",
-	"repl":     "",
+	"video":     "API-Video.md",
+	"repl":      "API-Repl.md",
+	"terminal":  "API-Terminal.md",
+	"crypto":    "API-Crypto.md",
+	"modplayer": "API-Modplayer.md",
+	"sysconfig": "API-Sysconfig.md",
 }
 
 func main() {
@@ -261,9 +265,11 @@ func checkDocumentation(module *Module, docContents map[string]string) {
 	}
 
 	for i := range module.Functions {
+		fname := module.Functions[i].Name
 		searchPatterns := []string{
-			fmt.Sprintf("picocalc.%s.%s(", module.Name, module.Functions[i].Name),
-			fmt.Sprintf("`picocalc.%s.%s(", module.Name, module.Functions[i].Name),
+			fmt.Sprintf("picocalc.%s.%s(", module.Name, fname),
+			fmt.Sprintf("`picocalc.%s.%s(", module.Name, fname),
+			fmt.Sprintf(":%s(", fname),  // method syntax e.g. player:load(
 		}
 		found := false
 		for _, pattern := range searchPatterns {
