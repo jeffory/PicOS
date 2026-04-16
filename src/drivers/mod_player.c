@@ -80,6 +80,7 @@ static bool mod_player_alloc(void) {
 
 void mod_player_deinit(void) {
     if (!s_initialized) return;
+    if (!s_player) { s_initialized = false; return; }
     mod_player_stop(s_player);
     if (s_player->mod_data) {
         umm_free(s_player->mod_data);
@@ -247,6 +248,7 @@ void mod_player_set_loop(mod_player_t *player, bool loop) {
 // Called from Core 1 every ~1ms
 void mod_player_update(void) {
     if (!s_initialized) return;
+    if (!s_player) return;  // alloc is deferred to mod_player_create()
 
     mod_player_t *p = s_player;
     if (!p->playing || p->paused || !p->mod_data) return;
