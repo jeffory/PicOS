@@ -172,7 +172,9 @@ void picos_main(const PicoCalcAPI *api,
     sys->log("[GBC] Loading ROM screen drawn\n");
 
     sys->log("[GBC] loading ROM: %s\n", rom_path);
+    sys->poll(); // feed watchdog before potentially long SD read
     s_rom_size = gbc_fs_load_rom(&s_fs, rom_path, s_rom, ROM_MAX_SIZE);
+    sys->poll(); // feed watchdog after ROM load
     sys->log("[GBC] ROM load complete: path=%s size=%d\n", rom_path, s_rom_size);
     if (s_rom_size <= 0) {
         d->clear(0x0000);
@@ -251,9 +253,8 @@ void picos_main(const PicoCalcAPI *api,
     // between every GB frame so button latency stays <20ms.
     bool running = true;
     while (running) {
-        sys->poll();
-
         for (int f = 0; f < 4 && running; f++) {
+            sys->poll();
             gbc_input_update(&s_input, in->getButtons);
             s_gb.direct.joypad_bits.a      = (s_input.buttons & BTN_F4)    ? 0 : 1;
             s_gb.direct.joypad_bits.b      = (s_input.buttons & BTN_F5)    ? 0 : 1;
@@ -284,7 +285,7 @@ void picos_main(const PicoCalcAPI *api,
         }
 
         if (running) {
-            api->audio->pushSamples(s_audio_buf, AUDIO_SAMPLES * 2 * 4);
+            api->audio->pushSamples(s_audio_buf, AUDIO_SAMPLES * 4);
         }
 
         if (running) {
