@@ -113,6 +113,7 @@ fileplayer_t *fileplayer_create(void) {
             memset(&s_players[i], 0, sizeof(fileplayer_t));
             s_players[i].volume = 100;
             s_players[i].channels = 2;
+            s_players[i].rate = 1.0f;
             return &s_players[i];
         }
     }
@@ -273,6 +274,12 @@ void fileplayer_set_finish_callback(fileplayer_t *player, int (*cb)(void *), voi
     player->finish_callback_arg = arg;
 }
 
+void fileplayer_set_loop_callback(fileplayer_t *player, int (*cb)(void *), void *arg) {
+    if (!player) return;
+    player->loop_callback = cb;
+    player->loop_callback_arg = arg;
+}
+
 void fileplayer_set_offset(fileplayer_t *player, uint32_t seconds) {
     if (!player || !s_current_file) return;
     uint32_t offset = seconds * s_sample_rate * 4;
@@ -288,6 +295,17 @@ uint32_t fileplayer_get_offset(const fileplayer_t *player) {
 void fileplayer_set_stop_on_underrun(fileplayer_t *player, bool flag) {
     if (!player) return;
     player->stop_on_underrun = flag;
+}
+
+void fileplayer_set_rate(fileplayer_t *player, float rate) {
+    if (!player) return;
+    if (rate < 0.1f) rate = 0.1f;
+    if (rate > 4.0f) rate = 4.0f;
+    player->rate = rate;
+}
+
+float fileplayer_get_rate(const fileplayer_t *player) {
+    return player ? player->rate : 1.0f;
 }
 
 // Called from Core 1 every 5ms. Reads WAV data from SD, converts to
@@ -317,19 +335,26 @@ void fileplayer_update(void) {
     if (res == FR_OK && br > 0) {
         // WAV data is 16-bit signed PCM. Convert to stereo int16_t pairs
         // and push into the PCM stream ring buffer.
+        // Rate resampling: nearest-neighbor. For rate=2.0 we produce half
+        // the output frames (pitch up); for rate=0.5 we produce double.
         int16_t *pcm = (int16_t *)s_wav_buffer;
         uint32_t num_samples = br / 2;  // 16-bit samples
+        float rate = s_active_player->rate;
+        if (rate < 0.1f) rate = 0.1f;
 
         if (s_active_player->channels == 1) {
-            // Mono: duplicate to both channels via a temp buffer
-            // Process in-place backwards to avoid overwrite
+            uint32_t in_frames = num_samples;
+            uint32_t out_frames = (uint32_t)(in_frames / rate);
+            if (out_frames == 0) out_frames = 1;
             int16_t stereo_buf[512];  // 256 stereo frames at a time
             uint32_t pos = 0;
-            while (pos < num_samples) {
-                uint32_t chunk = num_samples - pos;
+            while (pos < out_frames) {
+                uint32_t chunk = out_frames - pos;
                 if (chunk > 256) chunk = 256;
                 for (uint32_t i = 0; i < chunk; i++) {
-                    int32_t s = ((int32_t)pcm[pos + i] * s_volume_l) / 100;
+                    uint32_t src = (uint32_t)((pos + i) * rate);
+                    if (src >= in_frames) src = in_frames - 1;
+                    int32_t s = ((int32_t)pcm[src] * s_volume_l) / 100;
                     if (s > 32767) s = 32767;
                     if (s < -32768) s = -32768;
                     stereo_buf[i * 2] = (int16_t)s;
@@ -340,16 +365,19 @@ void fileplayer_update(void) {
             }
             s_active_player->position += br;
         } else {
-            // Stereo: apply volume and push directly
-            uint32_t num_frames = num_samples / 2;
+            uint32_t in_frames = num_samples / 2;
+            uint32_t out_frames = (uint32_t)(in_frames / rate);
+            if (out_frames == 0) out_frames = 1;
             int16_t stereo_buf[512];  // 256 stereo frames at a time
             uint32_t pos = 0;
-            while (pos < num_frames) {
-                uint32_t chunk = num_frames - pos;
+            while (pos < out_frames) {
+                uint32_t chunk = out_frames - pos;
                 if (chunk > 256) chunk = 256;
                 for (uint32_t i = 0; i < chunk; i++) {
-                    int32_t l = ((int32_t)pcm[(pos + i) * 2] * s_volume_l) / 100;
-                    int32_t r = ((int32_t)pcm[(pos + i) * 2 + 1] * s_volume_r) / 100;
+                    uint32_t src = (uint32_t)((pos + i) * rate);
+                    if (src >= in_frames) src = in_frames - 1;
+                    int32_t l = ((int32_t)pcm[src * 2] * s_volume_l) / 100;
+                    int32_t r = ((int32_t)pcm[src * 2 + 1] * s_volume_r) / 100;
                     if (l > 32767) l = 32767;
                     if (l < -32768) l = -32768;
                     if (r > 32767) r = 32767;
@@ -366,6 +394,8 @@ void fileplayer_update(void) {
         if (s_active_player->loop) {
             sdcard_fseek(s_current_file, 44);
             s_active_player->position = 0;
+            if (s_active_player->loop_callback)
+                s_active_player->loop_callback(s_active_player->loop_callback_arg);
         } else {
             s_active_player->state = FILEPLAYER_STATE_STOPPED;
             if (s_active_player->finish_callback)

@@ -947,3 +947,29 @@ bool image_preload_start(const char *path) { (void)path; return false; }
 pc_image_t *image_preload_poll(bool *ready) { if (ready) *ready = false; return NULL; }
 void image_preload_cancel(void) {}
 void image_preload_update(void) {}
+
+// --- display_draw_text_to_buffer stub ---
+int display_draw_text_to_buffer(uint16_t *buf, int buf_w, int buf_h,
+                                int x, int y, const char *text,
+                                uint16_t fg, uint16_t bg) {
+    (void)buf; (void)buf_w; (void)buf_h; (void)x; (void)y;
+    (void)text; (void)fg; (void)bg;
+    return 0;
+}
+
+// --- Fileplayer rate/callback stubs ---
+#include "../../src/drivers/fileplayer.h"
+void fileplayer_set_rate(fileplayer_t *player, float rate) { (void)player; (void)rate; }
+float fileplayer_get_rate(const fileplayer_t *player) { (void)player; return 1.0f; }
+void fileplayer_set_loop_callback(fileplayer_t *player, int (*cb)(void *), void *arg) {
+    (void)player; (void)cb; (void)arg;
+}
+
+// --- Sound player callback stubs ---
+#include "../../src/drivers/sound.h"
+void sound_player_set_finish_callback(sound_player_t *player, int (*cb)(void *), void *arg) {
+    (void)player; (void)cb; (void)arg;
+}
+void sound_player_set_loop_callback(sound_player_t *player, int (*cb)(void *), void *arg) {
+    (void)player; (void)cb; (void)arg;
+}

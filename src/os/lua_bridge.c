@@ -62,6 +62,7 @@ static void menu_lua_hook(lua_State *L, lua_Debug *ar) {
   watchdog_update(); // kick watchdog — fires every 256 Lua opcodes
   http_lua_fire_pending(L); // fire any queued HTTP Lua callbacks
   tcp_lua_fire_pending(L);  // fire any queued TCP Lua callbacks
+  lua_bridge_sound_poll(L); // fire any pending sound finish/loop callbacks
   dev_commands_poll();
   dev_commands_process();
 #ifdef PICOS_SIMULATOR

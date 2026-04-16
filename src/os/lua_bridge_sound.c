@@ -2,6 +2,7 @@
 #include "../drivers/sound.h"
 #include "../drivers/fileplayer.h"
 #include "../drivers/mp3_player.h"
+#include "../drivers/sdcard.h"
 // Note: sound.h, fileplayer.h, mp3_player.h are kept for functions not in
 // g_api.soundplayer (e.g. sound_sample_new_blank, sound_player_set_rate,
 // fileplayer_set_finish_callback, mp3_player_get_position, init/reset calls).
@@ -151,6 +152,110 @@ static int l_sound_sample_getSubsample(lua_State *L) {
     sound_sample_t **ud = lua_newuserdata(L, sizeof(sound_sample_t *));
     *ud = sub;
     luaL_setmetatable(L, SAMPLE_USERDATA);
+    return 1;
+}
+
+// sample:play([repeatCount], [rate]) — convenience: create temp player, play, return it
+static int l_sound_sample_play(lua_State *L) {
+    sound_sample_t *sample = check_sample(L, 1);
+    uint8_t repeat = (uint8_t)luaL_optinteger(L, 2, 1);
+    float rate = (float)luaL_optnumber(L, 3, 1.0);
+
+    sound_player_t *player = (sound_player_t *)g_api.soundplayer->playerNew();
+    if (!player) return luaL_error(L, "failed to create player");
+
+    g_api.soundplayer->playerSetSample(player, sample);
+    sound_player_set_rate(player, rate);
+    g_api.soundplayer->playerPlay(player, repeat);
+
+    sound_player_t **ud = lua_newuserdata(L, sizeof(sound_player_t *));
+    *ud = player;
+    luaL_setmetatable(L, PLAYER_USERDATA);
+    return 1;
+}
+
+// sample:playAt(when, [vol], [rightvol], [rate])
+static int l_sound_sample_playAt(lua_State *L) {
+    sound_sample_t *sample = check_sample(L, 1);
+    (void)luaL_checknumber(L, 2); // 'when' — ignored on this hardware (no scheduler)
+    uint8_t vol = (uint8_t)luaL_optinteger(L, 3, 100);
+    (void)luaL_optinteger(L, 4, vol); // rightvol — mono PWM, use left
+    float rate = (float)luaL_optnumber(L, 5, 1.0);
+
+    sound_player_t *player = (sound_player_t *)g_api.soundplayer->playerNew();
+    if (!player) return luaL_error(L, "failed to create player");
+
+    g_api.soundplayer->playerSetSample(player, sample);
+    g_api.soundplayer->playerSetVolume(player, vol);
+    sound_player_set_rate(player, rate);
+    g_api.soundplayer->playerPlay(player, 1);
+
+    sound_player_t **ud = lua_newuserdata(L, sizeof(sound_player_t *));
+    *ud = player;
+    luaL_setmetatable(L, PLAYER_USERDATA);
+    return 1;
+}
+
+// sample:save(filename) — write WAV file to SD card
+static int l_sound_sample_save(lua_State *L) {
+    sound_sample_t *sample = check_sample(L, 1);
+    const char *path = luaL_checkstring(L, 2);
+
+    if (!sample->loaded || !sample->data || sample->length == 0) {
+        lua_pushboolean(L, false);
+        lua_pushstring(L, "sample has no data");
+        return 2;
+    }
+
+    sdfile_t f = sdcard_fopen(path, "w");
+    if (!f) {
+        lua_pushboolean(L, false);
+        lua_pushstring(L, "failed to open file for writing");
+        return 2;
+    }
+
+    // Build 44-byte WAV header
+    uint32_t data_size = sample->length;
+    uint32_t file_size = 36 + data_size;
+    uint16_t channels = sample->channels;
+    uint32_t sr = sample->sample_rate;
+    uint16_t bps = sample->bits_per_sample;
+    uint16_t block_align = channels * (bps / 8);
+    uint32_t byte_rate = sr * block_align;
+
+    uint8_t hdr[44];
+    memcpy(hdr, "RIFF", 4);
+    memcpy(hdr + 4, &file_size, 4);
+    memcpy(hdr + 8, "WAVEfmt ", 8);
+    uint32_t fmt_size = 16;
+    memcpy(hdr + 16, &fmt_size, 4);
+    uint16_t audio_fmt = 1; // PCM
+    memcpy(hdr + 20, &audio_fmt, 2);
+    memcpy(hdr + 22, &channels, 2);
+    memcpy(hdr + 24, &sr, 4);
+    memcpy(hdr + 28, &byte_rate, 4);
+    memcpy(hdr + 32, &block_align, 2);
+    memcpy(hdr + 34, &bps, 2);
+    memcpy(hdr + 36, "data", 4);
+    memcpy(hdr + 40, &data_size, 4);
+
+    int wrote = sdcard_fwrite(f, hdr, 44);
+    if (wrote < 44) {
+        sdcard_fclose(f);
+        lua_pushboolean(L, false);
+        lua_pushstring(L, "failed to write WAV header");
+        return 2;
+    }
+    wrote = sdcard_fwrite(f, sample->data, data_size);
+    sdcard_fclose(f);
+
+    if (wrote < (int)data_size) {
+        lua_pushboolean(L, false);
+        lua_pushstring(L, "failed to write sample data");
+        return 2;
+    }
+
+    lua_pushboolean(L, true);
     return 1;
 }
 
@@ -417,57 +522,141 @@ static int l_sound_fileplayer_resume(lua_State *L) {
     return 0;
 }
 
-// Finish callback: stores a Lua function ref and fires it when playback ends.
-// The C callback is invoked from fileplayer_update() on Core 1, but we defer
-// to Core 0 by checking in the Lua hook. For simplicity, we fire immediately
-// since fileplayer_update sets state to IDLE which isPlaying() already reflects.
+// ── Cross-core callback system ──────────────────────────────────────────────
+// Audio callbacks fire on Core 1 (sound_update / fileplayer_update).  Lua runs
+// on Core 0.  The trampoline sets a volatile pending flag; Core 0 polls it in
+// lua_bridge_sound_poll() (called from the Lua instruction-count hook every 256
+// opcodes) and fires the Lua function reference.
+
 typedef struct {
     lua_State *L;
     int ref;
-} fileplayer_lua_cb_t;
+    volatile uint8_t pending;
+} sound_lua_cb_t;
 
+// Callback slots: fileplayer finish/loop, sampleplayer finish/loop
 #define MAX_FILEPLAYER_CBS 2
-static fileplayer_lua_cb_t s_fp_cbs[MAX_FILEPLAYER_CBS];
+static sound_lua_cb_t s_fp_finish_cbs[MAX_FILEPLAYER_CBS];
+static sound_lua_cb_t s_fp_loop_cbs[MAX_FILEPLAYER_CBS];
 
-static int fileplayer_lua_finish_trampoline(void *arg) {
-    // This runs on Core 1 — we can't call Lua here.
-    // The finish callback in the C driver just sets state to IDLE;
-    // apps should poll isPlaying() or we could add a pending flag.
-    // For now, just return 0 to indicate success.
-    (void)arg;
+#define MAX_SAMPLEPLAYER_CBS SOUND_MAX_SAMPLES
+static sound_lua_cb_t s_sp_finish_cbs[MAX_SAMPLEPLAYER_CBS];
+static sound_lua_cb_t s_sp_loop_cbs[MAX_SAMPLEPLAYER_CBS];
+
+// Trampolines — run on Core 1, just set pending flag
+static int trampoline_set_pending(void *arg) {
+    sound_lua_cb_t *cb = (sound_lua_cb_t *)arg;
+    cb->pending = 1;
     return 0;
 }
 
-static int l_sound_fileplayer_setFinishCallback(lua_State *L) {
-    fileplayer_t *player = check_fileplayer(L, 1);
+// Helper: find or allocate a callback slot for a given player
+static sound_lua_cb_t *find_or_alloc_cb(sound_lua_cb_t *arr, int count,
+                                         void *match_arg) {
+    // Try to reuse an existing slot for this player
+    for (int i = 0; i < count; i++) {
+        if (arr[i].ref != 0 && match_arg == &arr[i])
+            return &arr[i];
+    }
+    // Allocate a free slot
+    for (int i = 0; i < count; i++) {
+        if (arr[i].ref == 0)
+            return &arr[i];
+    }
+    return NULL;
+}
+
+// Helper: register a Lua callback into a slot array.
+// Returns the slot pointer (for wiring the C callback), or NULL on failure.
+static sound_lua_cb_t *register_lua_cb(lua_State *L, sound_lua_cb_t *arr,
+                                        int count, void *match_arg) {
     luaL_checktype(L, 2, LUA_TFUNCTION);
-
-    // Find or allocate a callback slot for this player
-    fileplayer_lua_cb_t *cb = NULL;
-    for (int i = 0; i < MAX_FILEPLAYER_CBS; i++) {
-        if (s_fp_cbs[i].ref != 0 && player->finish_callback_arg == &s_fp_cbs[i]) {
-            // Reuse existing slot for this player
-            luaL_unref(L, LUA_REGISTRYINDEX, s_fp_cbs[i].ref);
-            cb = &s_fp_cbs[i];
-            break;
-        }
-    }
-    if (!cb) {
-        for (int i = 0; i < MAX_FILEPLAYER_CBS; i++) {
-            if (s_fp_cbs[i].ref == 0) {
-                cb = &s_fp_cbs[i];
-                break;
-            }
-        }
-    }
+    sound_lua_cb_t *cb = find_or_alloc_cb(arr, count, match_arg);
     if (!cb)
-        return luaL_error(L, "too many fileplayer finish callbacks");
-
+        return NULL;
+    if (cb->ref != 0)
+        luaL_unref(L, LUA_REGISTRYINDEX, cb->ref);
     lua_pushvalue(L, 2);
     cb->ref = luaL_ref(L, LUA_REGISTRYINDEX);
     cb->L = L;
+    cb->pending = 0;
+    return cb;
+}
 
-    fileplayer_set_finish_callback(player, fileplayer_lua_finish_trampoline, cb);
+// Poll all callback slots and fire any pending Lua functions.
+// Called from Core 0 in menu_lua_hook every 256 opcodes.
+void lua_bridge_sound_poll(lua_State *L) {
+    // Fileplayer finish callbacks
+    for (int i = 0; i < MAX_FILEPLAYER_CBS; i++) {
+        if (s_fp_finish_cbs[i].pending && s_fp_finish_cbs[i].ref != 0) {
+            s_fp_finish_cbs[i].pending = 0;
+            lua_rawgeti(L, LUA_REGISTRYINDEX, s_fp_finish_cbs[i].ref);
+            lua_pcall(L, 0, 0, 0);
+        }
+    }
+    // Fileplayer loop callbacks
+    for (int i = 0; i < MAX_FILEPLAYER_CBS; i++) {
+        if (s_fp_loop_cbs[i].pending && s_fp_loop_cbs[i].ref != 0) {
+            s_fp_loop_cbs[i].pending = 0;
+            lua_rawgeti(L, LUA_REGISTRYINDEX, s_fp_loop_cbs[i].ref);
+            lua_pcall(L, 0, 0, 0);
+        }
+    }
+    // Sampleplayer finish callbacks
+    for (int i = 0; i < MAX_SAMPLEPLAYER_CBS; i++) {
+        if (s_sp_finish_cbs[i].pending && s_sp_finish_cbs[i].ref != 0) {
+            s_sp_finish_cbs[i].pending = 0;
+            lua_rawgeti(L, LUA_REGISTRYINDEX, s_sp_finish_cbs[i].ref);
+            lua_pcall(L, 0, 0, 0);
+        }
+    }
+    // Sampleplayer loop callbacks
+    for (int i = 0; i < MAX_SAMPLEPLAYER_CBS; i++) {
+        if (s_sp_loop_cbs[i].pending && s_sp_loop_cbs[i].ref != 0) {
+            s_sp_loop_cbs[i].pending = 0;
+            lua_rawgeti(L, LUA_REGISTRYINDEX, s_sp_loop_cbs[i].ref);
+            lua_pcall(L, 0, 0, 0);
+        }
+    }
+}
+
+// ── Fileplayer callbacks ────────────────────────────────────────────────────
+
+static int l_sound_fileplayer_setFinishCallback(lua_State *L) {
+    fileplayer_t *player = check_fileplayer(L, 1);
+    sound_lua_cb_t *cb = register_lua_cb(L, s_fp_finish_cbs, MAX_FILEPLAYER_CBS,
+                                          player->finish_callback_arg);
+    if (!cb) return luaL_error(L, "too many fileplayer finish callbacks");
+    fileplayer_set_finish_callback(player, trampoline_set_pending, cb);
+    return 0;
+}
+
+static int l_sound_fileplayer_setLoopCallback(lua_State *L) {
+    fileplayer_t *player = check_fileplayer(L, 1);
+    sound_lua_cb_t *cb = register_lua_cb(L, s_fp_loop_cbs, MAX_FILEPLAYER_CBS,
+                                          player->loop_callback_arg);
+    if (!cb) return luaL_error(L, "too many fileplayer loop callbacks");
+    fileplayer_set_loop_callback(player, trampoline_set_pending, cb);
+    return 0;
+}
+
+// ── Sampleplayer callbacks ──────────────────────────────────────────────────
+
+static int l_sound_sampleplayer_setFinishCallback(lua_State *L) {
+    sound_player_t *player = check_player(L, 1);
+    sound_lua_cb_t *cb = register_lua_cb(L, s_sp_finish_cbs, MAX_SAMPLEPLAYER_CBS,
+                                          player->finish_callback_arg);
+    if (!cb) return luaL_error(L, "too many sampleplayer finish callbacks");
+    sound_player_set_finish_callback(player, trampoline_set_pending, cb);
+    return 0;
+}
+
+static int l_sound_sampleplayer_setLoopCallback(lua_State *L) {
+    sound_player_t *player = check_player(L, 1);
+    sound_lua_cb_t *cb = register_lua_cb(L, s_sp_loop_cbs, MAX_SAMPLEPLAYER_CBS,
+                                          player->loop_callback_arg);
+    if (!cb) return luaL_error(L, "too many sampleplayer loop callbacks");
+    sound_player_set_loop_callback(player, trampoline_set_pending, cb);
     return 0;
 }
 
@@ -482,6 +671,19 @@ static int l_sound_fileplayer_setStopOnUnderrun(lua_State *L) {
     bool flag = lua_toboolean(L, 2);
     fileplayer_set_stop_on_underrun(player, flag);
     return 0;
+}
+
+static int l_sound_fileplayer_setRate(lua_State *L) {
+    fileplayer_t *player = check_fileplayer(L, 1);
+    float rate = (float)luaL_checknumber(L, 2);
+    fileplayer_set_rate(player, rate);
+    return 0;
+}
+
+static int l_sound_fileplayer_getRate(lua_State *L) {
+    fileplayer_t *player = check_fileplayer(L, 1);
+    lua_pushnumber(L, fileplayer_get_rate(player));
+    return 1;
 }
 
 static int l_sound_fileplayer_gc(lua_State *L) {
@@ -612,6 +814,9 @@ static const luaL_Reg sound_sample_methods[] = {
     {"getFormat", l_sound_sample_getFormat},
     {"decompress", l_sound_sample_decompress},
     {"getSubsample", l_sound_sample_getSubsample},
+    {"play", l_sound_sample_play},
+    {"playAt", l_sound_sample_playAt},
+    {"save", l_sound_sample_save},
     {"__gc", l_sound_sample_gc},
     {NULL, NULL}
 };
@@ -631,6 +836,8 @@ static const luaL_Reg sound_player_methods[] = {
     {"setPlayRange", l_sound_sampleplayer_setPlayRange},
     {"setRate", l_sound_sampleplayer_setRate},
     {"getRate", l_sound_sampleplayer_getRate},
+    {"setFinishCallback", l_sound_sampleplayer_setFinishCallback},
+    {"setLoopCallback", l_sound_sampleplayer_setLoopCallback},
     {"__gc", l_sound_sampleplayer_gc},
     {NULL, NULL}
 };
@@ -650,7 +857,10 @@ static const luaL_Reg sound_fileplayer_methods[] = {
     {"setLoopRange", l_sound_fileplayer_setLoopRange},
     {"didUnderrun", l_sound_fileplayer_didUnderrun},
     {"setFinishCallback", l_sound_fileplayer_setFinishCallback},
+    {"setLoopCallback", l_sound_fileplayer_setLoopCallback},
     {"setStopOnUnderrun", l_sound_fileplayer_setStopOnUnderrun},
+    {"setRate", l_sound_fileplayer_setRate},
+    {"getRate", l_sound_fileplayer_getRate},
     {"__gc", l_sound_fileplayer_gc},
     {NULL, NULL}
 };
@@ -714,7 +924,10 @@ void lua_bridge_sound_init(lua_State *L) {
     mp3_player_reset();
 
     // Clear Lua callback refs from previous app
-    memset(s_fp_cbs, 0, sizeof(s_fp_cbs));
+    memset(s_fp_finish_cbs, 0, sizeof(s_fp_finish_cbs));
+    memset(s_fp_loop_cbs, 0, sizeof(s_fp_loop_cbs));
+    memset(s_sp_finish_cbs, 0, sizeof(s_sp_finish_cbs));
+    memset(s_sp_loop_cbs, 0, sizeof(s_sp_loop_cbs));
 
     fileplayer_init();
     mp3_player_init();
