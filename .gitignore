@@ -64,3 +64,10 @@ saves/
 
 graphify-out/
 src/graphify-out/
+
+# Native app build artifacts
+apps/**/*.o
+apps/**/*.su
+
+# Design mockups (not tracked)
+*.aseprite
