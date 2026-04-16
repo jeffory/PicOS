@@ -1,0 +1,7 @@
+{
+    "id": "com.picos.term_test",
+    "name": "Term Test",
+    "description": "Terminal buffer test fixture",
+    "version": "1.0",
+    "author": "PicOS"
+}

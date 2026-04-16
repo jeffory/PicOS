@@ -1,0 +1,97 @@
+name: E2E Tests
+
+on:
+  push:
+    branches: [main, develop]
+  pull_request:
+    branches: [main]
+
+jobs:
+  e2e:
+    runs-on: ubuntu-latest
+    
+    steps:
+      - uses: actions/checkout@v3
+        with:
+          submodules: recursive
+      
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            cmake \
+            build-essential \
+            libsdl2-dev \
+            libpthread-stubs0-dev \
+            python3-pip \
+            python3-venv
+      
+      - name: Setup Python
+        run: |
+          python3 -m venv .venv
+          source .venv/bin/activate
+          pip install --upgrade pip
+          pip install -r tests/e2e/requirements.txt
+      
+      - name: Cache build
+        uses: actions/cache@v3
+        with:
+          path: build_sim
+          key: ${{ runner.os }}-simulator-${{ hashFiles('simulator/**/*.c', 'simulator/**/*.h', 'src/**/*.c', 'src/**/*.h') }}
+          restore-keys: |
+            ${{ runner.os }}-simulator-
+      
+      - name: Build simulator
+        run: |
+          source .venv/bin/activate
+          make simulator
+      
+      - name: Run E2E tests
+        run: |
+          source .venv/bin/activate
+          export SDL_VIDEODRIVER=dummy
+          pytest tests/e2e/ \
+            -v \
+            --tb=short \
+            --html=reports/e2e-report.html \
+            --self-contained-html \
+            --junitxml=reports/junit.xml \
+            -n auto 2>&1 | tee reports/test-output.txt
+        timeout-minutes: 10
+      
+      - name: Upload test results
+        uses: actions/upload-artifact@v3
+        if: always()
+        with:
+          name: e2e-results
+          path: |
+            reports/
+            tests/e2e/fixtures/
+      
+      - name: Update baseline screenshots
+        if: failure()
+        uses: actions/upload-artifact@v3
+        with:
+          name: new-baselines
+          path: tests/e2e/fixtures/
+
+  summary:
+    needs: e2e
+    runs-on: ubuntu-latest
+    if: always()
+    
+    steps:
+      - name: Test Summary
+        run: |
+          echo "## E2E Test Results" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          
+          if [ "${{ needs.e2e.result }}" == "success" ]; then
+            echo "✅ All E2E tests passed" >> $GITHUB_STEP_SUMMARY
+          elif [ "${{ needs.e2e.result }}" == "failure" ]; then
+            echo "❌ E2E tests failed" >> $GITHUB_STEP_SUMMARY
+            echo "" >> $GITHUB_STEP_SUMMARY
+            echo "Download the 'e2e-results' artifact for details." >> $GITHUB_STEP_SUMMARY
+          else
+            echo "⚠️ E2E tests were skipped or cancelled" >> $GITHUB_STEP_SUMMARY
+          fi

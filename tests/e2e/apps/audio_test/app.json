@@ -1,0 +1,8 @@
+{
+    "id": "com.picos.audio_test",
+    "name": "Audio Test",
+    "description": "Audio API verification for E2E testing",
+    "version": "1.0",
+    "author": "PicOS E2E",
+    "requirements": ["audio"]
+}

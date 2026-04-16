@@ -1,0 +1,6 @@
+# E2E test requirements
+pytest>=7.0.0
+pytest-html>=3.2.0
+pytest-xdist>=2.5.0
+Pillow>=9.0.0
+numpy>=1.21.0
