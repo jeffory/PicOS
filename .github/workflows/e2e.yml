@@ -11,7 +11,7 @@ jobs:
     runs-on: ubuntu-latest
     
     steps:
-      - uses: actions/checkout@v3
+      - uses: actions/checkout@v4
         with:
           submodules: recursive
       
@@ -34,7 +34,7 @@ jobs:
           pip install -r tests/e2e/requirements.txt
       
       - name: Cache build
-        uses: actions/cache@v3
+        uses: actions/cache@v4
         with:
           path: build_sim
           key: ${{ runner.os }}-simulator-${{ hashFiles('simulator/**/*.c', 'simulator/**/*.h', 'src/**/*.c', 'src/**/*.h') }}
@@ -60,7 +60,7 @@ jobs:
         timeout-minutes: 10
       
       - name: Upload test results
-        uses: actions/upload-artifact@v3
+        uses: actions/upload-artifact@v4
         if: always()
         with:
           name: e2e-results
@@ -70,7 +70,7 @@ jobs:
       
       - name: Update baseline screenshots
         if: failure()
-        uses: actions/upload-artifact@v3
+        uses: actions/upload-artifact@v4
         with:
           name: new-baselines
           path: tests/e2e/fixtures/
