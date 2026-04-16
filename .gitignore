@@ -61,3 +61,6 @@ tests/e2e/__pycache__/
 *.patch
 
 saves/
+
+graphify-out/
+src/graphify-out/
