@@ -72,6 +72,9 @@ void display_fill_vline_gradient(int x, int y0, int y1,
 // Text rendering using the active bitmap font (default: 6x8)
 // Returns pixel width of the rendered text
 int display_draw_text(int x, int y, const char *text, uint16_t fg, uint16_t bg);
+int display_draw_text_to_buffer(uint16_t *buf, int buf_w, int buf_h,
+                                int x, int y, const char *text,
+                                uint16_t fg, uint16_t bg);
 int display_text_width(const char *text);
 
 // Font selection: 0 = 6x8 (default), 1 = 8x12, 2 = scientifica 6x12, 3 = scientifica-bold 6x12

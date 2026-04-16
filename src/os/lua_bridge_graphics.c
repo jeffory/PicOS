@@ -675,6 +675,78 @@ static int l_graphics_draw3DWireframe(lua_State *L) {
   return 0;
 }
 
+// ── Tilemap type (used by sprites and tilemap API) ─────────────────────────
+#define GRAPHICS_TILEMAP_MT "picocalc.graphics.tilemap"
+#define TILEMAP_MAX_WIDTH 128
+#define TILEMAP_MAX_HEIGHT 128
+
+typedef struct {
+  lua_image_t *tileset;  // tileset image (spritesheet atlas)
+  uint16_t *tiles;       // 2D tile index array (umm_malloc'd)
+  int map_w, map_h;      // map dimensions in tiles
+  int tile_w, tile_h;    // tile size in pixels
+  int tiles_per_row;     // tiles per row in the tileset image
+} lua_tilemap_t;
+
+static lua_tilemap_t *check_tilemap(lua_State *L, int idx) {
+  return (lua_tilemap_t *)luaL_checkudata(L, idx, GRAPHICS_TILEMAP_MT);
+}
+
+// Draw visible tiles from a tilemap at the given scroll offset
+static void tilemap_draw(lua_tilemap_t *tm, int scroll_x, int scroll_y) {
+  if (!tm || !tm->tileset || !tm->tiles || !tm->tileset->data) return;
+
+  int tw = tm->tile_w;
+  int th = tm->tile_h;
+  int tpr = tm->tiles_per_row;
+  if (tpr <= 0) return;
+
+  int start_col = scroll_x / tw;
+  int start_row = scroll_y / th;
+  int end_col = (scroll_x + 320 + tw - 1) / tw;
+  int end_row = (scroll_y + 320 + th - 1) / th;
+
+  if (start_col < 0) start_col = 0;
+  if (start_row < 0) start_row = 0;
+  if (end_col > tm->map_w) end_col = tm->map_w;
+  if (end_row > tm->map_h) end_row = tm->map_h;
+
+  for (int row = start_row; row < end_row; row++) {
+    for (int col = start_col; col < end_col; col++) {
+      uint16_t tile_idx = tm->tiles[row * tm->map_w + col];
+      if (tile_idx == 0) continue; // 0 = empty/transparent
+
+      int idx = tile_idx - 1;
+      int src_col = idx % tpr;
+      int src_row = idx / tpr;
+      int src_x = src_col * tw;
+      int src_y = src_row * th;
+
+      int dst_x = col * tw - scroll_x;
+      int dst_y = row * th - scroll_y;
+
+      display_draw_image_partial(dst_x, dst_y, tw, th,
+                                  tm->tileset->data, src_x, src_y,
+                                  tm->tileset->w, tm->tileset->h,
+                                  false, false, 0);
+    }
+  }
+}
+
+// ── Font type (used by sprites, graphics text, and font API) ────────────────
+#define GRAPHICS_FONT_MT "picocalc.graphics.font"
+
+typedef struct {
+  int font_id;
+  int cell_width;
+  int cell_height;
+  const char *name;
+} lua_font_t;
+
+static lua_font_t *check_font(lua_State *L, int idx) {
+  return (lua_font_t *)luaL_checkudata(L, idx, GRAPHICS_FONT_MT);
+}
+
 // ── Sprite System ───────────────────────────────────────────────────────────────
 
 #define GRAPHICS_SPRITE_MT "picocalc.graphics.sprite"
@@ -712,6 +784,7 @@ typedef struct {
   lua_image_t *stencil;        // stencil image (deferred masking)
   uint8_t stencil_pattern[8];  // 8x8 dither stencil pattern
   bool has_stencil_pattern;    // true if stencil_pattern is active
+  void *tilemap;               // lua_tilemap_t* if set (renders tilemap instead of image)
 } lua_sprite_t;
 
 static lua_sprite_t *s_sprites[MAX_SPRITES];
@@ -878,6 +951,7 @@ static int l_sprite_new(lua_State *L) {
   s->stencil = NULL;
   memset(s->stencil_pattern, 0, sizeof(s->stencil_pattern));
   s->has_stencil_pattern = false;
+  s->tilemap = NULL;
 
   if (lua_isuserdata(L, 1)) {
     s->image = (lua_image_t *)lua_touserdata(L, 1);
@@ -915,6 +989,12 @@ static int l_sprite_remove(lua_State *L) {
 static int l_sprite_update(lua_State *L) {
   for (int i = 0; i < s_sprite_count; i++) {
     lua_sprite_t *s = s_sprites[i];
+    // Tilemap sprites: draw tilemap at sprite position as scroll offset
+    if (s->updates_enabled && s->visible && s->tilemap) {
+      lua_tilemap_t *tm = (lua_tilemap_t *)s->tilemap;
+      tilemap_draw(tm, -s->x, -s->y);
+      continue;
+    }
     if (s->updates_enabled && s->visible && s->image) {
       int draw_x = s->x;
       int draw_y = s->y;
@@ -1402,6 +1482,11 @@ static int l_sprite_newindex(lua_State *L) {
   return 0;
 }
 
+// Forward declarations for tilemap/text sprite functions (defined after spritesheet)
+static int l_sprite_setTilemap(lua_State *L);
+static int l_sprite_addWallSprites(lua_State *L);
+static int l_sprite_spriteWithText(lua_State *L);
+
 static const luaL_Reg l_sprite_methods[] = {
     {"setImage", l_sprite_setImage},
     {"getImage", l_sprite_getImage},
@@ -1474,6 +1559,7 @@ static const luaL_Reg l_sprite_methods[] = {
     {"clearStencil", l_sprite_clearStencil},
     {"setStencilPattern", l_sprite_setStencilPattern},
     {"alphaCollision", l_sprite_alphaCollision},
+    {"setTilemap", l_sprite_setTilemap},
     {NULL, NULL}};
 
 static int l_sprite_addSprite(lua_State *L) {
@@ -2497,6 +2583,8 @@ static const luaL_Reg l_sprite_lib[] = {
     {"setClipRectsInRange", l_sprite_setClipRectsInRange},
     {"clearClipRectsInRange", l_sprite_clearClipRectsInRange},
     {"addEmptyCollisionSprite", l_sprite_addEmptyCollisionSprite},
+    {"addWallSprites", l_sprite_addWallSprites},
+    {"spriteWithText", l_sprite_spriteWithText},
     {NULL, NULL}};
 
 // ── Spritesheet System ─────────────────────────────────────────────────────────
@@ -2645,6 +2733,292 @@ static const luaL_Reg l_spritesheet_lib[] = {
     {"newGrid", l_spritesheet_newGrid},
     {NULL, NULL}};
 
+// ── Tilemap Lua API ───────────────────────────────────────────────────────────
+
+// tilemap.new(image, tileWidth, tileHeight)
+static int l_tilemap_new(lua_State *L) {
+  lua_image_t *img = (lua_image_t *)luaL_checkudata(L, 1, GRAPHICS_IMAGE_MT);
+  int tw = luaL_checkinteger(L, 2);
+  int th = luaL_checkinteger(L, 3);
+
+  if (tw <= 0 || th <= 0) return luaL_error(L, "tile size must be positive");
+
+  lua_tilemap_t *tm = (lua_tilemap_t *)lua_newuserdata(L, sizeof(lua_tilemap_t));
+  tm->tileset = img;
+  tm->tile_w = tw;
+  tm->tile_h = th;
+  tm->tiles_per_row = img->w / tw;
+  tm->map_w = 0;
+  tm->map_h = 0;
+  tm->tiles = NULL;
+
+  luaL_setmetatable(L, GRAPHICS_TILEMAP_MT);
+  return 1;
+}
+
+// tilemap:setSize(width, height) — allocate the tile grid
+static int l_tilemap_setSize(lua_State *L) {
+  lua_tilemap_t *tm = check_tilemap(L, 1);
+  int w = luaL_checkinteger(L, 2);
+  int h = luaL_checkinteger(L, 3);
+  if (w <= 0 || h <= 0 || w > TILEMAP_MAX_WIDTH || h > TILEMAP_MAX_HEIGHT)
+    return luaL_error(L, "tilemap size out of range (max %dx%d)", TILEMAP_MAX_WIDTH, TILEMAP_MAX_HEIGHT);
+
+  if (tm->tiles) umm_free(tm->tiles);
+  size_t sz = (size_t)w * h * sizeof(uint16_t);
+  tm->tiles = (uint16_t *)umm_malloc(sz);
+  if (!tm->tiles) return luaL_error(L, "out of memory for tilemap");
+  memset(tm->tiles, 0, sz);
+  tm->map_w = w;
+  tm->map_h = h;
+  return 0;
+}
+
+// tilemap:setTileAtPosition(x, y, tileIndex) — 1-based tile index, 0=empty
+static int l_tilemap_setTile(lua_State *L) {
+  lua_tilemap_t *tm = check_tilemap(L, 1);
+  int x = luaL_checkinteger(L, 2);
+  int y = luaL_checkinteger(L, 3);
+  int tile = luaL_checkinteger(L, 4);
+
+  if (!tm->tiles || x < 0 || x >= tm->map_w || y < 0 || y >= tm->map_h)
+    return 0;
+  tm->tiles[y * tm->map_w + x] = (uint16_t)tile;
+  return 0;
+}
+
+// tilemap:getTileAtPosition(x, y) → tileIndex
+static int l_tilemap_getTile(lua_State *L) {
+  lua_tilemap_t *tm = check_tilemap(L, 1);
+  int x = luaL_checkinteger(L, 2);
+  int y = luaL_checkinteger(L, 3);
+
+  if (!tm->tiles || x < 0 || x >= tm->map_w || y < 0 || y >= tm->map_h) {
+    lua_pushinteger(L, 0);
+    return 1;
+  }
+  lua_pushinteger(L, tm->tiles[y * tm->map_w + x]);
+  return 1;
+}
+
+// tilemap:getSize() → width, height (in tiles)
+static int l_tilemap_getSize(lua_State *L) {
+  lua_tilemap_t *tm = check_tilemap(L, 1);
+  lua_pushinteger(L, tm->map_w);
+  lua_pushinteger(L, tm->map_h);
+  return 2;
+}
+
+// tilemap:getTileSize() → tileWidth, tileHeight
+static int l_tilemap_getTileSize(lua_State *L) {
+  lua_tilemap_t *tm = check_tilemap(L, 1);
+  lua_pushinteger(L, tm->tile_w);
+  lua_pushinteger(L, tm->tile_h);
+  return 2;
+}
+
+// tilemap:getPixelSize() → pixelWidth, pixelHeight
+static int l_tilemap_getPixelSize(lua_State *L) {
+  lua_tilemap_t *tm = check_tilemap(L, 1);
+  lua_pushinteger(L, tm->map_w * tm->tile_w);
+  lua_pushinteger(L, tm->map_h * tm->tile_h);
+  return 2;
+}
+
+// tilemap:draw(scrollX, scrollY)
+static int l_tilemap_draw(lua_State *L) {
+  lua_tilemap_t *tm = check_tilemap(L, 1);
+  int sx = luaL_optinteger(L, 2, 0);
+  int sy = luaL_optinteger(L, 3, 0);
+  tilemap_draw(tm, sx, sy);
+  return 0;
+}
+
+static int l_tilemap_gc(lua_State *L) {
+  lua_tilemap_t *tm = check_tilemap(L, 1);
+  if (tm->tiles) {
+    umm_free(tm->tiles);
+    tm->tiles = NULL;
+  }
+  return 0;
+}
+
+static const luaL_Reg l_tilemap_methods[] = {
+    {"setSize", l_tilemap_setSize},
+    {"setTileAtPosition", l_tilemap_setTile},
+    {"getTileAtPosition", l_tilemap_getTile},
+    {"getSize", l_tilemap_getSize},
+    {"getTileSize", l_tilemap_getTileSize},
+    {"getPixelSize", l_tilemap_getPixelSize},
+    {"draw", l_tilemap_draw},
+    {"__gc", l_tilemap_gc},
+    {NULL, NULL}};
+
+static const luaL_Reg l_tilemap_lib[] = {
+    {"new", l_tilemap_new},
+    {NULL, NULL}};
+
+// ── sprite:setTilemap(tilemap) ──────────────────────────────────────────────
+static int l_sprite_setTilemap(lua_State *L) {
+  lua_sprite_t *s = check_sprite(L, 1);
+  if (lua_isnil(L, 2)) {
+    s->tilemap = NULL;
+    return 0;
+  }
+  lua_tilemap_t *tm = check_tilemap(L, 2);
+  s->tilemap = tm;
+  s->width = tm->map_w * tm->tile_w;
+  s->height = tm->map_h * tm->tile_h;
+  return 0;
+}
+
+// sprite.addWallSprites(tilemap, wallIDs, [xOffset], [yOffset])
+// wallIDs is a table of tile indices that should have collision
+static int l_sprite_addWallSprites(lua_State *L) {
+  lua_tilemap_t *tm = check_tilemap(L, 1);
+  luaL_checktype(L, 2, LUA_TTABLE);
+  int x_off = (int)luaL_optinteger(L, 3, 0);
+  int y_off = (int)luaL_optinteger(L, 4, 0);
+
+  if (!tm->tiles) return 0;
+
+  int count = 0;
+  for (int row = 0; row < tm->map_h; row++) {
+    for (int col = 0; col < tm->map_w; col++) {
+      uint16_t tile = tm->tiles[row * tm->map_w + col];
+      if (tile == 0) continue;
+
+      // Check if this tile is in the wallIDs table
+      bool is_wall = false;
+      int tlen = (int)lua_rawlen(L, 2);
+      for (int i = 1; i <= tlen; i++) {
+        lua_rawgeti(L, 2, i);
+        if (lua_tointeger(L, -1) == tile) is_wall = true;
+        lua_pop(L, 1);
+        if (is_wall) break;
+      }
+
+      if (is_wall && s_sprite_count < MAX_SPRITES) {
+        // Create an invisible collision sprite at this tile position
+        lua_sprite_t *ws = (lua_sprite_t *)lua_newuserdata(L, sizeof(lua_sprite_t));
+        memset(ws, 0, sizeof(lua_sprite_t));
+        ws->x = col * tm->tile_w + x_off;
+        ws->y = row * tm->tile_h + y_off;
+        ws->width = tm->tile_w;
+        ws->height = tm->tile_h;
+        ws->scale = 1.0f;
+        ws->scale_y = 1.0f;
+        ws->visible = false;
+        ws->updates_enabled = false;
+        ws->collisions_enabled = true;
+        ws->collide_w = tm->tile_w;
+        ws->collide_h = tm->tile_h;
+        ws->group_mask = 1;
+        ws->collides_with_mask = 0xFFFF;
+        luaL_setmetatable(L, GRAPHICS_SPRITE_MT);
+
+        s_sprites[s_sprite_count++] = ws;
+        count++;
+      }
+    }
+  }
+
+  lua_pushinteger(L, count);
+  return 1;
+}
+
+// sprite.spriteWithText(text, maxWidth, maxHeight, [bgColor], [font])
+static int l_sprite_spriteWithText(lua_State *L) {
+  const char *text = luaL_checkstring(L, 1);
+  int max_w = luaL_checkinteger(L, 2);
+  int max_h = luaL_checkinteger(L, 3);
+  uint16_t bg = (lua_gettop(L) >= 4 && !lua_isnil(L, 4))
+                    ? l_checkcolor(L, 4)
+                    : s_graphics_bg_color;
+
+  int prev_font = display_get_font();
+  int fw = display_get_font_width();
+  int fh = display_get_font_height();
+  if (lua_gettop(L) >= 5 && lua_isuserdata(L, 5)) {
+    lua_font_t *f = check_font(L, 5);
+    display_set_font(f->font_id);
+    fw = f->cell_width;
+    fh = f->cell_height;
+  }
+
+  int chars_per_line = (fw > 0) ? max_w / fw : 1;
+  if (chars_per_line < 1) chars_per_line = 1;
+
+  // Allocate image
+  size_t buf_size = (size_t)max_w * max_h * sizeof(uint16_t);
+  uint16_t *pixels = (uint16_t *)umm_malloc(buf_size);
+  if (!pixels) {
+    display_set_font(prev_font);
+    lua_pushnil(L);
+    return 1;
+  }
+  for (int i = 0; i < max_w * max_h; i++) pixels[i] = bg;
+
+  // Word-wrap render
+  int y = 0;
+  const char *p = text;
+  while (*p && (y + fh <= max_h)) {
+    int line_len = 0, last_space = -1;
+    const char *scan = p;
+    while (*scan && *scan != '\n' && line_len < chars_per_line) {
+      if (*scan == ' ') last_space = line_len;
+      scan++;
+      line_len++;
+    }
+    int use_len = line_len;
+    if (*scan && *scan != '\n' && last_space > 0) use_len = last_space;
+
+    char line[128];
+    if (use_len > 127) use_len = 127;
+    memcpy(line, p, use_len);
+    line[use_len] = '\0';
+
+    display_draw_text_to_buffer(pixels, max_w, max_h, 0, y, line,
+                                s_graphics_color, bg);
+    y += fh;
+    p += use_len;
+    if (*p == ' ') p++;
+    if (*p == '\n') p++;
+  }
+  display_set_font(prev_font);
+
+  // Create image userdata
+  lua_image_t *img = (lua_image_t *)lua_newuserdata(L, sizeof(lua_image_t));
+  img->w = max_w;
+  img->h = max_h;
+  img->data = pixels;
+  img->transparent_color = 0;
+  luaL_setmetatable(L, GRAPHICS_IMAGE_MT);
+
+  // Create sprite with this image
+  lua_sprite_t *s = (lua_sprite_t *)lua_newuserdata(L, sizeof(lua_sprite_t));
+  memset(s, 0, sizeof(lua_sprite_t));
+  s->image = img;
+  s->width = max_w;
+  s->height = max_h;
+  s->scale = 1.0f;
+  s->scale_y = 1.0f;
+  s->visible = true;
+  s->updates_enabled = true;
+  s->opaque = true;
+  s->redraws_on_image_change = true;
+  luaL_setmetatable(L, GRAPHICS_SPRITE_MT);
+  return 1;  // return the sprite (image is on stack but sprite is on top)
+}
+
+// Forward declarations for text rendering functions (defined in font section)
+static int l_graphics_drawText(lua_State *L);
+static int l_graphics_drawTextAligned(lua_State *L);
+static int l_graphics_drawTextInRect(lua_State *L);
+static int l_graphics_getTextSize(lua_State *L);
+static int l_graphics_getTextSizeForMaxWidth(lua_State *L);
+static int l_graphics_imageWithText(lua_State *L);
+
 static const luaL_Reg l_graphics_lib[] = {
     {"setColor", l_graphics_setColor},
     {"setBackgroundColor", l_graphics_setBackgroundColor},
@@ -2657,6 +3031,12 @@ static const luaL_Reg l_graphics_lib[] = {
     {"updateDrawParticles", l_graphics_updateDrawParticles},
     {"draw3DWireframe", l_graphics_draw3DWireframe},
     {"setStencilPattern", l_graphics_setStencilPattern},
+    {"drawText", l_graphics_drawText},
+    {"drawTextAligned", l_graphics_drawTextAligned},
+    {"drawTextInRect", l_graphics_drawTextInRect},
+    {"getTextSize", l_graphics_getTextSize},
+    {"getTextSizeForMaxWidth", l_graphics_getTextSizeForMaxWidth},
+    {"imageWithText", l_graphics_imageWithText},
     {NULL, NULL}};
 
 // ── Animation System ─────────────────────────────────────────────────────────
@@ -3295,19 +3675,7 @@ static const luaL_Reg l_animation_blinker_lib[] = {
     {NULL, NULL}};
 
 // ── picocalc.graphics.font.* ─────────────────────────────────────────────────
-
-#define GRAPHICS_FONT_MT "picocalc.graphics.font"
-
-typedef struct {
-  int font_id;
-  int cell_width;
-  int cell_height;
-  const char *name;
-} lua_font_t;
-
-static lua_font_t *check_font(lua_State *L, int idx) {
-  return (lua_font_t *)luaL_checkudata(L, idx, GRAPHICS_FONT_MT);
-}
+// lua_font_t, check_font, and GRAPHICS_FONT_MT are defined near the top of this file
 
 static int l_font_new(lua_State *L) {
   const char *name = luaL_checkstring(L, 1);
@@ -3373,8 +3741,339 @@ static int l_font_getName(lua_State *L) {
   return 1;
 }
 
+// font:drawTextAligned(x, y, text, alignment, fg, [bg])
+// alignment: 0=left, 1=center, 2=right
+static int l_font_drawTextAligned(lua_State *L) {
+  lua_font_t *f = check_font(L, 1);
+  int x = luaL_checkinteger(L, 2);
+  int y = luaL_checkinteger(L, 3);
+  const char *text = luaL_checkstring(L, 4);
+  int alignment = luaL_checkinteger(L, 5);
+  uint16_t fg = l_checkcolor(L, 6);
+  uint16_t bg = (lua_gettop(L) >= 7) ? l_checkcolor(L, 7) : COLOR_BLACK;
+
+  int len = (int)strlen(text);
+  int tw = len * f->cell_width;
+  if (alignment == 1) x -= tw / 2;       // center
+  else if (alignment == 2) x -= tw;      // right
+
+  int prev_font = display_get_font();
+  display_set_font(f->font_id);
+  display_draw_text(x, y, text, fg, bg);
+  display_set_font(prev_font);
+  return 0;
+}
+
+// font:drawTextInRect(x, y, w, h, text, [alignment], [fg], [bg])
+// Word-wraps text within a bounding rect. Monospace fonts only.
+static int l_font_drawTextInRect(lua_State *L) {
+  lua_font_t *f = check_font(L, 1);
+  int rx = luaL_checkinteger(L, 2);
+  int ry = luaL_checkinteger(L, 3);
+  int rw = luaL_checkinteger(L, 4);
+  int rh = luaL_checkinteger(L, 5);
+  const char *text = luaL_checkstring(L, 6);
+  int alignment = (int)luaL_optinteger(L, 7, 0);
+  uint16_t fg = (lua_gettop(L) >= 8) ? l_checkcolor(L, 8) : s_graphics_color;
+  uint16_t bg = (lua_gettop(L) >= 9) ? l_checkcolor(L, 9) : s_graphics_bg_color;
+
+  int fw = f->cell_width;
+  int fh = f->cell_height;
+  int chars_per_line = (fw > 0) ? rw / fw : 1;
+  if (chars_per_line < 1) chars_per_line = 1;
+
+  int prev_font = display_get_font();
+  display_set_font(f->font_id);
+
+  int y = ry;
+  const char *p = text;
+  while (*p && (y + fh <= ry + rh)) {
+    // Find line break: word-wrap at chars_per_line
+    int line_len = 0;
+    int last_space = -1;
+    const char *scan = p;
+    while (*scan && *scan != '\n' && line_len < chars_per_line) {
+      if (*scan == ' ') last_space = line_len;
+      scan++;
+      line_len++;
+    }
+    // If we hit the limit and there's more text, break at last space
+    int use_len = line_len;
+    if (*scan && *scan != '\n' && last_space > 0)
+      use_len = last_space;
+
+    // Build line buffer
+    char line[128];
+    if (use_len > 127) use_len = 127;
+    memcpy(line, p, use_len);
+    line[use_len] = '\0';
+
+    // Alignment offset
+    int tw = use_len * fw;
+    int x = rx;
+    if (alignment == 1) x = rx + (rw - tw) / 2;
+    else if (alignment == 2) x = rx + rw - tw;
+
+    display_draw_text(x, y, line, fg, bg);
+    y += fh;
+
+    // Advance past consumed text
+    p += use_len;
+    if (*p == ' ') p++;     // skip break space
+    if (*p == '\n') p++;    // skip newline
+  }
+
+  display_set_font(prev_font);
+  return 0;
+}
+
+// ── Top-level graphics.drawText* functions ─────────────────────────────────
+
+// graphics.drawText(text, x, y, [font])
+static int l_graphics_drawText(lua_State *L) {
+  const char *text = luaL_checkstring(L, 1);
+  int x = luaL_checkinteger(L, 2);
+  int y = luaL_checkinteger(L, 3);
+
+  int prev_font = display_get_font();
+  if (lua_gettop(L) >= 4 && lua_isuserdata(L, 4)) {
+    lua_font_t *f = check_font(L, 4);
+    display_set_font(f->font_id);
+  }
+
+  int width = display_draw_text(x, y, text, s_graphics_color, s_graphics_bg_color);
+  display_set_font(prev_font);
+
+  lua_pushinteger(L, width);
+  return 1;
+}
+
+// graphics.drawTextAligned(text, x, y, alignment, [font])
+static int l_graphics_drawTextAligned(lua_State *L) {
+  const char *text = luaL_checkstring(L, 1);
+  int x = luaL_checkinteger(L, 2);
+  int y = luaL_checkinteger(L, 3);
+  int alignment = luaL_checkinteger(L, 4);
+
+  int prev_font = display_get_font();
+  int fw = display_get_font_width();
+  if (lua_gettop(L) >= 5 && lua_isuserdata(L, 5)) {
+    lua_font_t *f = check_font(L, 5);
+    display_set_font(f->font_id);
+    fw = f->cell_width;
+  }
+
+  int tw = (int)strlen(text) * fw;
+  if (alignment == 1) x -= tw / 2;
+  else if (alignment == 2) x -= tw;
+
+  display_draw_text(x, y, text, s_graphics_color, s_graphics_bg_color);
+  display_set_font(prev_font);
+  return 0;
+}
+
+// graphics.drawTextInRect(text, x, y, w, h, [alignment], [font])
+static int l_graphics_drawTextInRect(lua_State *L) {
+  const char *text = luaL_checkstring(L, 1);
+  int rx = luaL_checkinteger(L, 2);
+  int ry = luaL_checkinteger(L, 3);
+  int rw = luaL_checkinteger(L, 4);
+  int rh = luaL_checkinteger(L, 5);
+  int alignment = (int)luaL_optinteger(L, 6, 0);
+
+  int prev_font = display_get_font();
+  int fw = display_get_font_width();
+  int fh = display_get_font_height();
+  if (lua_gettop(L) >= 7 && lua_isuserdata(L, 7)) {
+    lua_font_t *f = check_font(L, 7);
+    display_set_font(f->font_id);
+    fw = f->cell_width;
+    fh = f->cell_height;
+  }
+
+  int chars_per_line = (fw > 0) ? rw / fw : 1;
+  if (chars_per_line < 1) chars_per_line = 1;
+
+  int y = ry;
+  const char *p = text;
+  while (*p && (y + fh <= ry + rh)) {
+    int line_len = 0;
+    int last_space = -1;
+    const char *scan = p;
+    while (*scan && *scan != '\n' && line_len < chars_per_line) {
+      if (*scan == ' ') last_space = line_len;
+      scan++;
+      line_len++;
+    }
+    int use_len = line_len;
+    if (*scan && *scan != '\n' && last_space > 0)
+      use_len = last_space;
+
+    char line[128];
+    if (use_len > 127) use_len = 127;
+    memcpy(line, p, use_len);
+    line[use_len] = '\0';
+
+    int tw = use_len * fw;
+    int x = rx;
+    if (alignment == 1) x = rx + (rw - tw) / 2;
+    else if (alignment == 2) x = rx + rw - tw;
+
+    display_draw_text(x, y, line, s_graphics_color, s_graphics_bg_color);
+    y += fh;
+
+    p += use_len;
+    if (*p == ' ') p++;
+    if (*p == '\n') p++;
+  }
+
+  display_set_font(prev_font);
+  return 0;
+}
+
+// graphics.getTextSize(text, [font]) → width, height
+static int l_graphics_getTextSize(lua_State *L) {
+  const char *text = luaL_checkstring(L, 1);
+  int fw = display_get_font_width();
+  int fh = display_get_font_height();
+  if (lua_gettop(L) >= 2 && lua_isuserdata(L, 2)) {
+    lua_font_t *f = check_font(L, 2);
+    fw = f->cell_width;
+    fh = f->cell_height;
+  }
+  lua_pushinteger(L, (int)strlen(text) * fw);
+  lua_pushinteger(L, fh);
+  return 2;
+}
+
+// graphics.getTextSizeForMaxWidth(text, maxWidth, [font]) → width, height
+static int l_graphics_getTextSizeForMaxWidth(lua_State *L) {
+  const char *text = luaL_checkstring(L, 1);
+  int max_width = luaL_checkinteger(L, 2);
+  int fw = display_get_font_width();
+  int fh = display_get_font_height();
+  if (lua_gettop(L) >= 3 && lua_isuserdata(L, 3)) {
+    lua_font_t *f = check_font(L, 3);
+    fw = f->cell_width;
+    fh = f->cell_height;
+  }
+
+  int chars_per_line = (fw > 0) ? max_width / fw : 1;
+  if (chars_per_line < 1) chars_per_line = 1;
+
+  int lines = 0;
+  int max_line_w = 0;
+  const char *p = text;
+  while (*p) {
+    int line_len = 0;
+    int last_space = -1;
+    const char *scan = p;
+    while (*scan && *scan != '\n' && line_len < chars_per_line) {
+      if (*scan == ' ') last_space = line_len;
+      scan++;
+      line_len++;
+    }
+    int use_len = line_len;
+    if (*scan && *scan != '\n' && last_space > 0)
+      use_len = last_space;
+
+    if (use_len * fw > max_line_w) max_line_w = use_len * fw;
+    lines++;
+    p += use_len;
+    if (*p == ' ') p++;
+    if (*p == '\n') p++;
+  }
+
+  lua_pushinteger(L, max_line_w);
+  lua_pushinteger(L, lines * fh);
+  return 2;
+}
+
+// graphics.imageWithText(text, maxWidth, maxHeight, [bgColor], [font])
+// Returns a graphics.image with the text rendered into it
+static int l_graphics_imageWithText(lua_State *L) {
+  const char *text = luaL_checkstring(L, 1);
+  int max_w = luaL_checkinteger(L, 2);
+  int max_h = luaL_checkinteger(L, 3);
+  uint16_t bg = (lua_gettop(L) >= 4 && !lua_isnil(L, 4))
+                    ? l_checkcolor(L, 4)
+                    : s_graphics_bg_color;
+
+  int prev_font = display_get_font();
+  int fw = display_get_font_width();
+  int fh = display_get_font_height();
+  if (lua_gettop(L) >= 5 && lua_isuserdata(L, 5)) {
+    lua_font_t *f = check_font(L, 5);
+    display_set_font(f->font_id);
+    fw = f->cell_width;
+    fh = f->cell_height;
+  }
+
+  // Calculate dimensions
+  int chars_per_line = (fw > 0) ? max_w / fw : 1;
+  if (chars_per_line < 1) chars_per_line = 1;
+  int img_w = max_w;
+  int img_h = max_h;
+
+  // Allocate image buffer in PSRAM
+  size_t buf_size = (size_t)img_w * img_h * sizeof(uint16_t);
+  uint16_t *pixels = (uint16_t *)umm_malloc(buf_size);
+  if (!pixels) {
+    display_set_font(prev_font);
+    lua_pushnil(L);
+    lua_pushstring(L, "out of memory");
+    return 2;
+  }
+
+  // Fill with background color
+  for (int i = 0; i < img_w * img_h; i++)
+    pixels[i] = bg;
+
+  // Word-wrap and render text into the buffer
+  int y = 0;
+  const char *p = text;
+  while (*p && (y + fh <= img_h)) {
+    int line_len = 0;
+    int last_space = -1;
+    const char *scan = p;
+    while (*scan && *scan != '\n' && line_len < chars_per_line) {
+      if (*scan == ' ') last_space = line_len;
+      scan++;
+      line_len++;
+    }
+    int use_len = line_len;
+    if (*scan && *scan != '\n' && last_space > 0)
+      use_len = last_space;
+
+    char line[128];
+    if (use_len > 127) use_len = 127;
+    memcpy(line, p, use_len);
+    line[use_len] = '\0';
+
+    display_draw_text_to_buffer(pixels, img_w, img_h, 0, y, line,
+                                s_graphics_color, bg);
+    y += fh;
+    p += use_len;
+    if (*p == ' ') p++;
+    if (*p == '\n') p++;
+  }
+
+  display_set_font(prev_font);
+
+  // Create lua_image_t userdata
+  lua_image_t *img = (lua_image_t *)lua_newuserdata(L, sizeof(lua_image_t));
+  img->w = img_w;
+  img->h = img_h;
+  img->data = pixels;
+  img->transparent_color = 0;
+  luaL_setmetatable(L, GRAPHICS_IMAGE_MT);
+  return 1;
+}
+
 static const luaL_Reg l_font_methods[] = {
     {"drawText", l_font_drawText},
+    {"drawTextAligned", l_font_drawTextAligned},
+    {"drawTextInRect", l_font_drawTextInRect},
     {"getHeight", l_font_getHeight},
     {"getWidth", l_font_getWidth},
     {"getTextWidth", l_font_getTextWidth},
@@ -3480,6 +4179,17 @@ void lua_bridge_graphics_init(lua_State *L) {
   lua_newtable(L);
   luaL_setfuncs(L, l_spritesheet_lib, 0);
   lua_setfield(L, -2, "spritesheet");
+
+  // Tilemap metatable + lib
+  luaL_newmetatable(L, GRAPHICS_TILEMAP_MT);
+  lua_pushvalue(L, -1);
+  lua_setfield(L, -2, "__index");
+  luaL_setfuncs(L, l_tilemap_methods, 0);
+  lua_pop(L, 1);
+
+  lua_newtable(L);
+  luaL_setfuncs(L, l_tilemap_lib, 0);
+  lua_setfield(L, -2, "tilemap");
 
   lua_newtable(L);
   luaL_setfuncs(L, l_graphics_cache_lib, 0);

@@ -916,6 +916,68 @@ int display_draw_text(int x, int y, const char *text, uint16_t fg,
   return x - start_x;
 }
 
+int display_draw_text_to_buffer(uint16_t *buf, int buf_w, int buf_h,
+                                int x, int y, const char *text,
+                                uint16_t fg, uint16_t bg) {
+  int start_x = x;
+  // Note: buffer stores host-byte-order (no byte-swap)
+
+  if (s_active_font == 1) {
+    while (*text) {
+      char c = *text++;
+      if (c < 0x20 || c > 0x7E) c = '?';
+      const uint8_t *glyph = s_font8x12[c - 0x20];
+      for (int row = 0; row < FONT8X12_H; row++) {
+        uint8_t rowdata = glyph[row];
+        int py = y + row;
+        if (py < 0 || py >= buf_h) continue;
+        for (int col = 0; col < FONT8X12_W; col++) {
+          int px = x + col;
+          if (px >= 0 && px < buf_w)
+            buf[py * buf_w + px] = (rowdata & (0x80 >> col)) ? fg : bg;
+        }
+      }
+      x += FONT8X12_W;
+    }
+  } else if (s_active_font == 2 || s_active_font == 3) {
+    while (*text) {
+      char c = *text++;
+      if (c < 0x20 || c > 0x7E) c = '?';
+      const uint8_t *glyph = (s_active_font == 3)
+          ? font_scientifica_bold_glyph(c)
+          : font_scientifica_glyph(c);
+      for (int row = 0; row < FONT_SCI_HEIGHT; row++) {
+        uint8_t rowdata = glyph[row];
+        int py = y + row;
+        if (py < 0 || py >= buf_h) continue;
+        for (int col = 0; col < FONT_SCI_WIDTH; col++) {
+          int px = x + col;
+          if (px >= 0 && px < buf_w)
+            buf[py * buf_w + px] = (rowdata & (0x80 >> col)) ? fg : bg;
+        }
+      }
+      x += FONT_SCI_WIDTH;
+    }
+  } else {
+    while (*text) {
+      char c = *text++;
+      if (c < 0x20 || c > 0x7E) c = '?';
+      const uint8_t *glyph = s_font6x8[c - 0x20];
+      for (int col = 0; col < FONT_W; col++) {
+        uint8_t coldata = glyph[col];
+        for (int row = 0; row < FONT_H; row++) {
+          int px = x + col;
+          int py = y + row;
+          if (px >= 0 && px < buf_w && py >= 0 && py < buf_h)
+            buf[py * buf_w + px] = (coldata & (1 << row)) ? fg : bg;
+        }
+      }
+      x += FONT_W;
+    }
+  }
+  return x - start_x;
+}
+
 int display_text_width(const char *text) {
   int len = 0;
   while (*text++)
