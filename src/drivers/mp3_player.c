@@ -65,12 +65,23 @@ static _Atomic size_t s_ring_wr = 0;
 static bool s_use_pio_psram = false;
 static uint32_t s_pio_psram_base = 0;
 
-#define STAGING_BUF_SIZE  (DMA_BUF_SAMPLES * 4 * 4)
+#define STAGING_BUF_SIZE  (DMA_BUF_SAMPLES * 4 * 8)
 static uint8_t  s_staging_buf[STAGING_BUF_SIZE] __attribute__((aligned(4)));
 static size_t   s_staging_avail = 0;
 static size_t   s_staging_pos   = 0;
 
-static uint8_t s_pio_read_buf[STAGING_BUF_SIZE] __attribute__((aligned(4)));
+// Diagnostics (declared early: used by the ring/refill/decode paths below).
+static volatile uint32_t s_staging_underruns = 0;
+static volatile uint32_t s_diag_updates = 0;       // mp3_player_update entered
+static volatile uint32_t s_diag_skip_mutex = 0;    // update skipped: mutex held (Core 0 API call)
+static volatile uint32_t s_diag_refill_calls = 0;  // refill attempted (staging below half)
+static volatile uint32_t s_diag_refill_empty = 0;  // refill found PCM ring empty
+static volatile uint32_t s_diag_decode_runs = 0;   // decode_fill_ring past 50% trigger
+static volatile uint32_t s_diag_decode_frames = 0; // mad frames decoded OK
+static volatile uint32_t s_diag_decode_errs = 0;   // mad errors
+static volatile uint32_t s_diag_sd_fail = 0;       // SD refill: mutex busy or read failed
+static volatile uint32_t s_diag_max_us = 0;        // longest single update
+static volatile uint64_t s_diag_total_us = 0;
 
 // ── Fed mode: compressed MP3 ring in QMI PSRAM, written by Core 0 (video) ───
 // Uses umm_malloc (not PIO PSRAM) because both cores access this ring
@@ -163,6 +174,7 @@ static void refill_staging_buf(void) {
     if (s_staging_avail >= STAGING_BUF_SIZE / 2)
         return;
 
+    s_diag_refill_calls++;
     if (s_staging_pos > 0 && s_staging_avail > 0) {
         memmove(s_staging_buf, s_staging_buf + s_staging_pos, s_staging_avail);
     }
@@ -171,7 +183,7 @@ static void refill_staging_buf(void) {
     size_t space = STAGING_BUF_SIZE - s_staging_avail;
     size_t avail = ring_available();
     size_t to_read = (space < avail) ? space : avail;
-    if (to_read == 0) return;
+    if (to_read == 0) { s_diag_refill_empty++; return; }
 
     size_t rd = atomic_load_explicit(&s_ring_rd, memory_order_relaxed);
     size_t to_end = PCM_RING_SIZE - rd;
@@ -202,6 +214,37 @@ static void refill_staging_buf(void) {
 // Updated whenever mp3_player_set_volume() is called.
 static uint32_t s_vol_scale = 256;  // 256 = 100%
 
+// Diagnostic: counts sample pairs where the staging buffer was empty and the
+// DMA ISR had to emit PWM_MID (audible as crackle/dropout). Read/reset via
+// the mp3stats dev command. Counters are declared near the top of the file.
+
+uint32_t mp3_player_staging_underruns(void) { return s_staging_underruns; }
+void mp3_player_reset_staging_underruns(void) { s_staging_underruns = 0; }
+
+void mp3_player_get_diag(uint32_t out[11]) {
+    out[0] = s_staging_underruns;
+    out[1] = s_diag_updates;
+    out[2] = s_diag_skip_mutex;
+    out[3] = s_diag_refill_calls;
+    out[4] = s_diag_refill_empty;
+    out[5] = s_diag_decode_runs;
+    out[6] = s_diag_decode_frames;
+    out[7] = s_diag_decode_errs;
+    out[8] = s_diag_sd_fail;
+    out[9] = s_diag_max_us;
+    out[10] = (uint32_t)(s_diag_total_us & 0xFFFFFFFFu);
+}
+
+void mp3_player_reset_diag(void) {
+    s_staging_underruns = 0;
+    s_diag_updates = s_diag_skip_mutex = 0;
+    s_diag_refill_calls = s_diag_refill_empty = 0;
+    s_diag_decode_runs = s_diag_decode_frames = s_diag_decode_errs = 0;
+    s_diag_sd_fail = 0;
+    s_diag_max_us = 0;
+    s_diag_total_us = 0;
+}
+
 static void __time_critical_func(fill_dma_buffer)(uint32_t *buf, int count) {
     size_t bytes_per_pair = (s_pcm_channels > 1) ? 4 : 2;
     uint32_t vol_scale = s_vol_scale;
@@ -210,6 +253,7 @@ static void __time_critical_func(fill_dma_buffer)(uint32_t *buf, int count) {
         int32_t lv, rv;
 
         if (s_staging_avail < bytes_per_pair) {
+            s_staging_underruns++;
             lv = PWM_MID;
             rv = PWM_MID;
         } else {
@@ -303,14 +347,18 @@ static bool refill_decode_buffer(void) {
         } else {
             // SD mode: non-blocking read
             if (!s_file) goto pad;
-            if (!recursive_mutex_try_enter(&g_sdcard_mutex, NULL))
+            if (!recursive_mutex_try_enter(&g_sdcard_mutex, NULL)) {
+                s_diag_sd_fail++;
                 goto pad;
+            }
             int to_read = (space > 4096) ? 4096 : space;
             UINT br = 0;
             FRESULT res = f_read((FIL *)s_file, s_decode_buffer + s_bytes_in_buffer, to_read, &br);
             recursive_mutex_exit(&g_sdcard_mutex);
             if (res == FR_OK && br > 0)
                 s_bytes_in_buffer += (int)br;
+            else
+                s_diag_sd_fail++;
         }
     }
 
@@ -336,6 +384,7 @@ static void decode_fill_ring(void) {
     if (avail > PCM_RING_SIZE / 2)
         return;  // ring buffer is >50% full, skip this cycle
 
+    s_diag_decode_runs++;
     int max_frames = 3;
     int frames_decoded = 0;
     int errors_this_update = 0;
@@ -375,6 +424,7 @@ static void decode_fill_ring(void) {
             }
 
             if (MAD_RECOVERABLE(s_mad_stream->error)) {
+                s_diag_decode_errs++;
                 // For LOSTSYNC with low buffer, try to refill first
                 if (s_mad_stream->error == MAD_ERROR_LOSTSYNC && s_bytes_in_buffer < 256) {
                     if (!refill_decode_buffer()) {
@@ -419,6 +469,7 @@ static void decode_fill_ring(void) {
 
         mad_synth_frame(s_mad_synth, s_mad_frame);
         frames_decoded++;
+        s_diag_decode_frames++;
 
         struct mad_pcm *pcm = &s_mad_synth->pcm;
         s_pcm_channels = pcm->channels;
@@ -433,6 +484,12 @@ static void decode_fill_ring(void) {
                 ring_write((const uint8_t *)&pcm->samplesX[i][0], sizeof(int16_t));
             }
         }
+
+        // Top up the staging buffer between frames: a 3-frame decode burst can
+        // run 10-90ms on Core 1 (libmad resync storms, flash-cold synth), far
+        // longer than the staging cushion, so refilling only once per update
+        // starves the DMA and crackles.
+        refill_staging_buf();
     }
 }
 
@@ -959,10 +1016,20 @@ bool mp3_player_is_fed_mode(void) {
 
 void mp3_player_update(void) {
     if (!s_initialized) return;
-    if (!mutex_try_enter(&s_mp3_mutex, NULL)) return;
+    if (!mutex_try_enter(&s_mp3_mutex, NULL)) { s_diag_skip_mutex++; return; }
+
+    uint64_t upd_t0 = time_us_64();
+    s_diag_updates++;
+
+    if (s_player.playing && !s_player.paused) {
+        refill_staging_buf();
+        decode_fill_ring();
+    }
 
     // Deferred DMA start: register the IRQ handler on THIS core (Core 1)
     // so the audio ISR never preempts the game loop on Core 0.
+    // Runs AFTER the first refill/decode so playback starts with a full
+    // staging buffer instead of ~90ms of underrun gaps while libmad warms up.
     if (s_dma_start_pending) {
         if (!s_irq_on_core1) {
             irq_set_exclusive_handler(DMA_IRQ_1, dma_audio_irq_handler);
@@ -974,9 +1041,8 @@ void mp3_player_update(void) {
         s_dma_start_pending = false;
     }
 
-    if (s_player.playing && !s_player.paused) {
-        refill_staging_buf();
-        decode_fill_ring();
-    }
+    uint32_t upd_us = (uint32_t)(time_us_64() - upd_t0);
+    s_diag_total_us += upd_us;
+    if (upd_us > s_diag_max_us) s_diag_max_us = upd_us;
     mutex_exit(&s_mp3_mutex);
 }

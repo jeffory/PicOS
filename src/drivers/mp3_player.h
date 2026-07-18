@@ -37,6 +37,17 @@ void mp3_player_set_loop(mp3_player_t *player, bool loop);
 uint32_t mp3_player_get_sample_rate(const mp3_player_t *player);
 void mp3_player_update(void);
 
+// Diagnostics: staging-buffer underruns heard as crackle/dropout.
+uint32_t mp3_player_staging_underruns(void);
+void mp3_player_reset_staging_underruns(void);
+
+// Starvation forensics snapshot/reset. out[11]:
+// [0] underruns [1] updates [2] update mutex-skips [3] refill calls
+// [4] refills finding ring empty [5] decode runs [6] frames decoded
+// [7] mad errors [8] SD read fails [9] max update us [10] total update us (lo)
+void mp3_player_get_diag(uint32_t out[11]);
+void mp3_player_reset_diag(void);
+
 // Fed mode: decoder reads from an external ring buffer instead of SD file.
 // Used by video player to feed interleaved AVI audio data.
 bool     mp3_player_start_fed(uint32_t sample_rate, uint16_t channels);
