@@ -72,7 +72,7 @@ PROJECT_ROOT = Path(__file__).resolve().parents[2]
 CDOGS_SRC = PROJECT_ROOT / "apps" / "cdogs"
 
 HEAPSTAT_RE = re.compile(
-    r"HEAPSTAT (\S+) watermark=(\d+) true=(\d+) arena=(\d+) used=(\d+)"
+    r"HEAPSTAT (\S+) watermark=(\d+) true=(\d+) arena=(\d+) used=(\d+) peak=(\d+)"
 )
 
 
@@ -189,6 +189,7 @@ def parse_heapstats(log_text):
             "true": int(m.group(3)),
             "arena": int(m.group(4)),
             "used": int(m.group(5)),
+            "peak": int(m.group(6)),
         })
     return out
 
@@ -201,6 +202,8 @@ def test_heapstat_is_emitted_and_truthful(cdogs_simulator):
     """
     cdogs_simulator.launch_app("cdogs")
 
+    # Wait for the first HEAPSTAT line: a fast, reliable signal that
+    # C-Dogs has booted and reached the main menu.
     deadline = time.time() + 60
     text = ""
     while time.time() < deadline:
@@ -208,6 +211,40 @@ def test_heapstat_is_emitted_and_truthful(cdogs_simulator):
         if "HEAPSTAT" in text:
             break
         time.sleep(0.2)
+
+    assert "HEAPSTAT" in text, f"no HEAPSTAT lines found in log:\n{text[-2000:]}"
+
+    # That first report is not enough on its own to exercise the peak
+    # field. Measured directly against this simulator (fast host-FS
+    # passthrough, no simulated SD latency — see module docstring): the
+    # entire boot-time asset scan (font/wall graphics through the
+    # LoadImgToSurface reserve-guard SKIPs, campaign/dogfight manifest
+    # reads, down to "Entering main menu loop") completes in well under
+    # 500ms of wall-clock time. picos_asset_load_tick's very first call of
+    # the whole process always clears its 500ms tick gate (the static
+    # s_last_tick_ms starts at 0), so exactly one HEAPSTAT line fires
+    # during that scan — and empirically it lands a few dozen ms *before*
+    # the heap actually crosses the 2.5MB reserve, not after. Once C-Dogs
+    # reaches the main menu it goes fully idle (no further file I/O at
+    # all), so no second report would ever follow no matter how long this
+    # loop waits — the peak tracker's "captured between reports" design
+    # only pays off if some later report actually happens.
+    #
+    # So: drive the "Start" quick-play flow, which opens further
+    # campaign/map/sprite data and reliably produces at least one more
+    # report after the heap has grown past the reserve threshold (verified
+    # directly: the resulting peak is consistently 3044520 across repeated
+    # runs). This is the same instrumentation exercising the same code
+    # path the reserve guard itself exercises — not a separate scenario.
+    cdogs_simulator.keypress("enter")
+    time.sleep(0.8)
+    cdogs_simulator.keypress("enter")
+
+    settle_deadline = time.time() + 12
+    while time.time() < settle_deadline:
+        text = cdogs_simulator.stdio_snapshot()
+        time.sleep(0.3)
+    text = cdogs_simulator.stdio_snapshot()
 
     stats = parse_heapstats(text)
 
@@ -220,3 +257,15 @@ def test_heapstat_is_emitted_and_truthful(cdogs_simulator):
         assert s["true"] <= 5 * 1024 * 1024, (
             f"true free ({s['true']}) exceeds the 5MB arena at tag {s['tag']}"
         )
+
+    # The real regression gate: the old watermark-on-a-5s-cadence gauge
+    # could (and did) sample exactly once, before loading even started,
+    # and never witness the heap growing past the 2.5MB LoadImgToSurface
+    # reserve threshold. The peak tracker is sampled on every _sbrk()
+    # growth, not just at report time, so it must have observed the heap
+    # actually filling up regardless of sampling cadence.
+    max_peak = max(s["peak"] for s in stats)
+    assert max_peak > 2_500_000, (
+        f"max observed peak ({max_peak}) never exceeded the 2.5MB reserve "
+        f"threshold — instrumentation did not witness the heap filling"
+    )
