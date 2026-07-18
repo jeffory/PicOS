@@ -46,14 +46,14 @@ a debug line to stdout on every request, sustained RPC polling against
 an undrained simulator eventually stalls entirely. Draining both pipes
 from background threads as soon as the process starts avoids this.
 
-Finally: picos_asset_load_tick()'s 5s report cadence (apps/cdogs/stubs.c)
+Finally: picos_asset_load_tick()'s 1000ms report cadence (apps/cdogs/stubs.c)
 is measured against sys->getTimeMs(), i.e. the simulator's uptime since
 process start (SDL_GetTicks()) — not since C-Dogs launches. C-Dogs' own
 startup scan of data/graphics plus the campaign/dogfight lists finishes
 in well under a second in this simulator (direct host filesystem
-passthrough, no real SD card latency), faster than the 5s cadence, and
+passthrough, no real SD card latency), faster than the 1000ms cadence, and
 the app then idles at the main menu doing no further file I/O. Unless
-the simulator has already been up 5s+ before the scan starts, no
+the simulator has already been up 1000ms+ before the scan starts, no
 HEAPSTAT line is ever emitted — confirmed empirically. This fixture
 waits for that headroom before launching so the cadence's first eligible
 tick fires during the scan.
@@ -74,6 +74,12 @@ CDOGS_SRC = PROJECT_ROOT / "apps" / "cdogs"
 HEAPSTAT_RE = re.compile(
     r"HEAPSTAT (\S+) watermark=(\d+) true=(\d+) arena=(\d+) used=(\d+) peak=(\d+)"
 )
+
+# Mirrors IMG_LOAD_HEAP_RESERVE in apps/cdogs/src/src/cdogs/utils.c
+# (2560 * 1024 bytes = 2.5 MiB) — the real reserve guard the peak
+# assertion below exists to prove fired. Keep this in sync if that
+# constant ever changes.
+PEAK_RESERVE_THRESHOLD = 2_621_440
 
 
 def _drain(stream, sink, lock):
@@ -147,14 +153,15 @@ def cdogs_simulator(simulator_binary, test_sd_card, request):
 
     # Wait for enough simulator uptime that the report cadence's first
     # eligible tick fires during C-Dogs' (fast) asset scan (see module
-    # docstring).
+    # docstring). The cadence itself is 1000ms, so 1100ms is enough
+    # headroom for the first tick to land inside the scan.
     deadline = time.time() + 15
     while time.time() < deadline:
         try:
             status = sim.call("ping", timeout=2.0)
         except Exception:
             status = {}
-        if status.get("uptime_ms", 0) >= 5500:
+        if status.get("uptime_ms", 0) >= 1100:
             break
         time.sleep(0.2)
 
@@ -240,13 +247,19 @@ def test_heapstat_is_emitted_and_truthful(cdogs_simulator):
     time.sleep(0.8)
     cdogs_simulator.keypress("enter")
 
+    # Poll for a HEAPSTAT report whose peak has already cleared the reserve
+    # threshold, breaking out as soon as it shows up, instead of sleeping
+    # the full window unconditionally — quick-play's post-navigation
+    # report typically lands well under the 12s backstop below.
     settle_deadline = time.time() + 12
-    while time.time() < settle_deadline:
-        text = cdogs_simulator.stdio_snapshot()
-        time.sleep(0.3)
     text = cdogs_simulator.stdio_snapshot()
-
     stats = parse_heapstats(text)
+    while time.time() < settle_deadline and not any(
+        s["peak"] > PEAK_RESERVE_THRESHOLD for s in stats
+    ):
+        time.sleep(0.3)
+        text = cdogs_simulator.stdio_snapshot()
+        stats = parse_heapstats(text)
 
     assert stats, f"no HEAPSTAT lines found in log:\n{text[-2000:]}"
     for s in stats:
@@ -258,14 +271,31 @@ def test_heapstat_is_emitted_and_truthful(cdogs_simulator):
             f"true free ({s['true']}) exceeds the 5MB arena at tag {s['tag']}"
         )
 
+    # Navigation sanity check. The peak assertion below is the only gate
+    # between "quick-play loaded" and a pass, and on its own a failure
+    # there just says the heap never filled — which points straight at
+    # stubs.c. But the far more likely real cause is that the two `enter`
+    # keypresses above no longer land on "Start" (e.g. the main menu
+    # gained/lost an item and the layout shifted): C-Dogs would then stay
+    # idle after the first, boot-scan-only HEAPSTAT report and never
+    # produce a second one, since quick-play is what drives the extra
+    # campaign/map/sprite file I/O that triggers it. Catch that case here
+    # with a message that names the actual suspect.
+    assert len(stats) > 1, (
+        "only one HEAPSTAT line observed after the quick-play keypresses — "
+        "the two 'enter' presses likely didn't land on \"Start\" (main menu "
+        "layout may have drifted) rather than a heap-instrumentation bug"
+    )
+
     # The real regression gate: the old watermark-on-a-5s-cadence gauge
     # could (and did) sample exactly once, before loading even started,
-    # and never witness the heap growing past the 2.5MB LoadImgToSurface
+    # and never witness the heap growing past the 2.5 MiB LoadImgToSurface
     # reserve threshold. The peak tracker is sampled on every _sbrk()
     # growth, not just at report time, so it must have observed the heap
     # actually filling up regardless of sampling cadence.
     max_peak = max(s["peak"] for s in stats)
-    assert max_peak > 2_500_000, (
-        f"max observed peak ({max_peak}) never exceeded the 2.5MB reserve "
-        f"threshold — instrumentation did not witness the heap filling"
+    assert max_peak > PEAK_RESERVE_THRESHOLD, (
+        f"max observed peak ({max_peak}) never exceeded the 2.5 MiB reserve "
+        f"threshold ({PEAK_RESERVE_THRESHOLD}) — instrumentation did not "
+        f"witness the heap filling"
     )
