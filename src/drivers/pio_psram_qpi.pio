@@ -3,14 +3,13 @@
 ; Based on polpo/rp2040-psram qspi_psram with the RP2350 read-timing fixes
 ; from polpo/rp2040-psram PR #15 (tested on PicoCalc + Pico 2):
 ;   - CS asserted one cycle before the first data clock
-;   - read phase: one bus-turnaround clock while releasing pindirs, entry at
-;     readloop_mid, sample a half period after the rising edge — PR #15's
-;     empirically validated arrangement (75-115 MHz on this hardware).
-;     This deliberately differs from pio_psram_bulk.pio's 1-bit scheme
-;     (rising-edge sample, no turnaround): quad shares a bidirectional bus
-;     that needs a turnaround clock; the 1-bit bus (separate MOSI/MISO)
-;     does not. Each program's C-side counter accounting matches its own
-;     phase scheme. The init self-test guards this timing on real hardware.
+;   - read phase: pindirs released with SCK LOW (no turnaround clock), entry
+;     at readloop_mid, sample a half period after the rising edge. PR #15
+;     released with SCK HIGH (an extra clock edge); on this PicoCalc that
+;     7th wait cycle made every read arrive one nibble late — verified by
+;     self-test diagnostics (systematic one-nibble shift) and a serial
+;     Read-ID probe (one-bit shift). Exactly 6 driven dummy nibbles now
+;     line up with the chip's 6 wait cycles.
 ;
 ; Header protocol per transaction (bytes via TX FIFO, autopull 8):
 ;   [x = total write nibbles] [y = read nibbles] [cmd/addr/dummy/data bytes...]
@@ -33,7 +32,7 @@ writeloop:
     jmp x--, writeloop  side 0b10  ; Rising edge: PSRAM samples. Loop.
 
     jmp !y, begin       side 0b00  ; Write-only: CS rises at next 'out x'
-    set pindirs, 0      side 0b10  ; Release SIO0-3, one turnaround clock
+    set pindirs, 0      side 0b00  ; Release SIO0-3, SCK stays low (no extra clock)
     jmp readloop_mid    side 0b00
 
 readloop:
