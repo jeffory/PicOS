@@ -71,10 +71,46 @@ static void send_simple_cmd(uint8_t cmd) {
         tight_loop_contents();
 }
 
+// Bit-banged quad EXIT_QPI (0xF5), sent before the PIO takes over the pins.
+// The PSRAM chip keeps QPI mode across warm reboots; firmware without the QPI
+// driver (downgrades, serial-only builds) would otherwise talk 1-bit serial
+// to a chip expecting nibbles, fail the self-test, and lose the PIO PSRAM
+// entirely. If the chip is already in SPI mode the 2-clock partial command is
+// discarded at CS rise — same reasoning as the QPI driver's wake ladder.
+static void bitbang_exit_qpi(void) {
+    static const uint sio_pins[] = { PIO_PSRAM_PIN_SIO0, PIO_PSRAM_PIN_SIO1,
+                                     PIO_PSRAM_PIN_SIO2, PIO_PSRAM_PIN_SIO3 };
+    for (unsigned i = 0; i < 4; i++) {
+        gpio_init(sio_pins[i]);
+        gpio_set_dir(sio_pins[i], GPIO_OUT);
+    }
+    gpio_init(PIO_PSRAM_PIN_CS);
+    gpio_set_dir(PIO_PSRAM_PIN_CS, GPIO_OUT);
+    gpio_init(PIO_PSRAM_PIN_SCK);
+    gpio_set_dir(PIO_PSRAM_PIN_SCK, GPIO_OUT);
+    gpio_put(PIO_PSRAM_PIN_SCK, 0);
+    gpio_put(PIO_PSRAM_PIN_CS, 1);
+    busy_wait_us(1);
+    gpio_put(PIO_PSRAM_PIN_CS, 0);
+    for (unsigned n = 0; n < 2; n++) {          // 0xF5: nibble 0xF then 0x5
+        uint8_t nib = n ? 0x5 : 0xF;
+        for (unsigned i = 0; i < 4; i++)
+            gpio_put(sio_pins[i], (nib >> i) & 1u);
+        busy_wait_us(1);
+        gpio_put(PIO_PSRAM_PIN_SCK, 1);
+        busy_wait_us(1);
+        gpio_put(PIO_PSRAM_PIN_SCK, 0);
+    }
+    gpio_put(PIO_PSRAM_PIN_CS, 1);
+    busy_wait_us(2);
+}
+
 bool pio_psram_bulk_init(void) {
     if (s_available) return true;
 
     printf("[PIO_PSRAM_BULK] Initialising on PIO1...\n");
+
+    bitbang_exit_qpi();   // safe from any prior chip state (warm QPI boot)
 
     // Claim PIO1 state machine
     s_pio = PIO_PSRAM_PIO;

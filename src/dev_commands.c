@@ -1,6 +1,7 @@
 #include "dev_commands.h"
 #include "drivers/display.h"
 #include "drivers/keyboard.h"
+#include "drivers/mp3_player.h"
 #include "drivers/pio_psram.h"
 #include "drivers/sdcard.h"
 #include "os/os.h"
@@ -381,6 +382,23 @@ bool dev_commands_process(void) {
         pio_psram_debug_test(false);
     } else if (strcmp(s_cmd_buf, "psram full") == 0) {
         pio_psram_debug_test(true);
+    } else if (strncmp(s_cmd_buf, "psram stress", 12) == 0) {
+        uint32_t iters = 200;
+        if (s_cmd_buf[12] == ' ') {
+            uint32_t n = (uint32_t)atoi(s_cmd_buf + 13);
+            if (n > 0) iters = n;
+        }
+        pio_psram_stress_test(iters);
+    } else if (strcmp(s_cmd_buf, "mp3stats") == 0) {
+        uint32_t d[11];
+        mp3_player_get_diag(d);
+        printf("[DEV] mp3 @%lums: underrun=%lu upd=%lu skip_mtx=%lu refill=%lu "
+               "ring_empty=%lu dec_run=%lu frames=%lu mad_err=%lu sd_fail=%lu "
+               "max_us=%lu avg_us=%lu (reset)\n",
+               (unsigned long)to_ms_since_boot(get_absolute_time()),
+               d[0], d[1], d[2], d[3], d[4], d[5], d[6], d[7], d[8], d[9],
+               d[1] ? (unsigned long)(d[10] / d[1]) : 0ul);
+        mp3_player_reset_diag();
     } else if (strncmp(s_cmd_buf, "keypress ", 9) == 0) {
         const char *key = s_cmd_buf + 9;
         uint32_t buttons = 0;

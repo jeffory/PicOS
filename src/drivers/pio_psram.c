@@ -77,9 +77,18 @@ const char *pio_psram_mode_str(void) {
 
 #define DBG_BLOCK 4096u
 
+// Static buffer: the SRAM heap can be too fragmented for a 4KB malloc even at
+// the launcher, and a diagnostic must not depend on heap state. Single buffer
+// (SRAM is tight): the expected pattern is regenerated per byte on compare.
+static uint8_t s_dbg_buf[DBG_BLOCK];
+
+static inline uint8_t debug_pattern_byte(uint32_t addr, uint32_t i) {
+    return (uint8_t)((addr >> 12) * 197u + i * 13u + 5u);
+}
+
 static void debug_fill_pattern(uint8_t *buf, uint32_t addr) {
     for (uint32_t i = 0; i < DBG_BLOCK; i++)
-        buf[i] = (uint8_t)((addr >> 12) * 197u + i * 13u + 5u);
+        buf[i] = debug_pattern_byte(addr, i);
 }
 
 void pio_psram_debug_test(bool full) {
@@ -90,11 +99,7 @@ void pio_psram_debug_test(bool full) {
                (unsigned long)pio_psram_qpi_spi_khz());
     pio_psram_qpi_print_diag();
 
-    uint8_t *buf = malloc(DBG_BLOCK);   // SRAM heap; freed below
-    if (!buf) {
-        printf("[PSRAM] SRAM alloc failed\n");
-        return;
-    }
+    uint8_t *buf = s_dbg_buf;
 
     // Throughput: 256KB write then read, app region (above mp3/video pools).
     const uint32_t bench_bytes = 256u * 1024u;
@@ -113,6 +118,14 @@ void pio_psram_debug_test(bool full) {
            (unsigned long)(t2 - t1),
            (unsigned long)((uint64_t)bench_bytes * 1000000u / (t2 - t1) / 1024u));
 
+    // Small-transfer latency: the MP3 staging refill reads ~1KB per call.
+    uint64_t t3 = time_us_64();
+    for (int i = 0; i < 1000; i++)
+        pio_psram_read(PIO_PSRAM_APP_BASE, buf, 1024);
+    uint64_t t4 = time_us_64();
+    printf("[PSRAM] 1000x 1KB reads: %lu us total, %lu us/call\n",
+           (unsigned long)(t4 - t3), (unsigned long)((t4 - t3) / 1000u));
+
     // Integrity: two-pass sweep (write everything, then verify everything).
     // Two passes catch address aliasing that immediate readback would miss.
     uint32_t start = full ? 0u : PIO_PSRAM_APP_BASE;
@@ -127,22 +140,17 @@ void pio_psram_debug_test(bool full) {
     }
     uint32_t errors = 0;
     uint32_t first_bad = 0;
-    uint8_t *expect = malloc(DBG_BLOCK);
-    if (!expect) {
-        printf("[PSRAM] SRAM alloc failed (verify)\n");
-        free(buf);
-        return;
-    }
+    uint8_t *expect = NULL;  // pattern regenerated per byte below
     for (uint32_t addr = start; addr < end; addr += DBG_BLOCK) {
-        debug_fill_pattern(expect, addr);
         memset(buf, 0, DBG_BLOCK);
         pio_psram_read(addr, buf, DBG_BLOCK);
         for (uint32_t i = 0; i < DBG_BLOCK; i++) {
-            if (buf[i] != expect[i]) {
+            uint8_t exp = debug_pattern_byte(addr, i);
+            if (buf[i] != exp) {
                 if (errors == 0) first_bad = addr + i;
                 if (errors < 6)
                     printf("[PSRAM]   mismatch @%06lX exp %02X got %02X\n",
-                           (unsigned long)(addr + i), expect[i], buf[i]);
+                           (unsigned long)(addr + i), exp, buf[i]);
                 errors++;
             }
         }
@@ -152,7 +160,89 @@ void pio_psram_debug_test(bool full) {
                (unsigned long)errors, (unsigned long)first_bad);
     else
         printf("[PSRAM] integrity OK\n");
+}
 
-    free(expect);
-    free(buf);
+// ── Page-end read-disturb stress ─────────────────────────────────────────────
+// The boot self-test only proves the page-end read path with 50 reads of one
+// pattern at two addresses. Audio rings do page-boundary-adjacent reads
+// ~176x/sec, so a residual error rate far below the self-test's sensitivity
+// is still audible as crackle. This hammers the susceptible path: adversarial
+// 16-byte patterns written straddling the last bytes of 1KB pages at 64
+// spread addresses, each read `iters` times, plus a sequential pass over the
+// real MP3 ring region (0x0000-0x7FFF) using the player's own read shape.
+// DESTRUCTIVE to the MP3 ring + app region — run from the launcher only.
+void pio_psram_stress_test(uint32_t iters) {
+    printf("[PSRAM] stress: mode=%s iters=%lu\n",
+           pio_psram_mode_str(), (unsigned long)iters);
+    if (s_mode == PSRAM_MODE_NONE || iters == 0) return;
+    if (s_mode == PSRAM_MODE_QPI)
+        printf("[PSRAM] spi_clock=%lu kHz\n",
+               (unsigned long)pio_psram_qpi_spi_khz());
+
+    // Same adversarial family as the boot probe: patterns chosen so a slow
+    // SIO2 bleeds the previous nibble into the sample near the page end.
+    static const uint8_t pats[3][16] = {
+        { 0x11, 0x22, 0x33, 0x44, 0x95, 0x95, 0xA2, 0xA3,
+          0x74, 0x81, 0x82, 0x55, 0xAA, 0x00, 0xFF, 0x5A },
+        { 0xFB, 0x04, 0xFB, 0x04, 0x40, 0xBF, 0x40, 0xBF,
+          0x20, 0xDF, 0x20, 0xDF, 0x10, 0xEF, 0x10, 0xEF },
+        { 0x5A, 0xA5, 0x5A, 0xA5, 0x95, 0x6A, 0x95, 0x6A,
+          0x65, 0x9A, 0x65, 0x9A, 0x25, 0xDA, 0x25, 0xDA },
+    };
+    uint8_t rd[16];
+    uint32_t total_reads = 0, errors = 0;
+
+    // Phase 1: page-end reads at 64 addresses spread across all 8MB.
+    for (uint32_t pg = 0; pg < 64; pg++) {
+        uint32_t addr = pg * (128u * 1024u) + 1008u;  // last 16 bytes of a page
+        const uint8_t *pat = pats[pg % 3];
+        pio_psram_write(addr, pat, 16);
+        for (uint32_t it = 0; it < iters; it++) {
+            memset(rd, 0, sizeof(rd));
+            pio_psram_read(addr, rd, 16);
+            total_reads++;
+            if (memcmp(pat, rd, 16) != 0) {
+                if (errors < 8)
+                    printf("[PSRAM]   stress mismatch @%06lX it %lu: "
+                           "exp %02X%02X%02X%02X got %02X%02X%02X%02X\n",
+                           (unsigned long)addr, (unsigned long)it,
+                           pat[4], pat[5], pat[6], pat[7],
+                           rd[4], rd[5], rd[6], rd[7]);
+                errors++;
+            }
+        }
+    }
+    printf("[PSRAM] page-end stress: %lu reads, %lu errors\n",
+           (unsigned long)total_reads, (unsigned long)errors);
+
+    // Phase 2: sequential readback of the MP3 ring region, same shape as
+    // refill_staging_buf (1KB at a time, wrapping at 32KB), written once.
+    uint32_t ring_errors = 0;
+    for (uint32_t off = 0; off < 32u * 1024u; off += DBG_BLOCK) {
+        debug_fill_pattern(s_dbg_buf, 0xC000 + off);
+        pio_psram_write(PIO_PSRAM_MP3_RING_BASE + off, s_dbg_buf, DBG_BLOCK);
+    }
+    for (uint32_t pass = 0; pass < iters; pass++) {
+        for (uint32_t off = 0; off < 32u * 1024u; off += DBG_BLOCK) {
+            memset(s_dbg_buf, 0, DBG_BLOCK);
+            pio_psram_read(PIO_PSRAM_MP3_RING_BASE + off, s_dbg_buf, DBG_BLOCK);
+            for (uint32_t i = 0; i < DBG_BLOCK; i++) {
+                uint8_t exp = debug_pattern_byte(0xC000 + off, i);
+                if (s_dbg_buf[i] != exp) {
+                    if (ring_errors < 8)
+                        printf("[PSRAM]   ring mismatch pass %lu @%06lX "
+                               "exp %02X got %02X\n",
+                               (unsigned long)pass,
+                               (unsigned long)(PIO_PSRAM_MP3_RING_BASE + off + i),
+                               exp, s_dbg_buf[i]);
+                    ring_errors++;
+                }
+            }
+        }
+    }
+    printf("[PSRAM] ring stress: %lu passes over 32KB, %lu bad bytes\n",
+           (unsigned long)iters, (unsigned long)ring_errors);
+    printf("[PSRAM] stress %s\n",
+           (errors || ring_errors) ? "FAIL — residual read errors (audible crackle)"
+                                   : "clean");
 }

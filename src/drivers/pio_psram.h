@@ -55,6 +55,13 @@ const char *pio_psram_mode_str(void);
 // from the launcher with no audio/video active.
 void pio_psram_debug_test(bool full);
 
+// Dev-command stress: hammers the page-end read-disturb path (adversarial
+// patterns at page ends across the chip, `iters` reads each) plus sequential
+// readback of the MP3 ring region. Reports residual error counts — anything
+// nonzero at the operating point is audible as audio crackle. DESTRUCTIVE to
+// the MP3 ring + app region — run from the launcher only.
+void pio_psram_stress_test(uint32_t iters);
+
 #ifdef __cplusplus
 }
 #endif
