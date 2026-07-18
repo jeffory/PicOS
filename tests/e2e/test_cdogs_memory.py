@@ -323,8 +323,8 @@ def parse_gfxstats(log_text):
 
 
 def peak_gfx_total(simulator, settle_s=12):
-    """Launch cdogs, drive quick-play, and return the GFXSTAT line that set
-    the peak= high-water mark.
+    """Launch cdogs, drive quick-play, and return the GFXSTAT line whose
+    peak= field equals the overall observed high-water mark.
 
     Mirrors test_heapstat_is_emitted_and_truthful's drive sequence and for
     the same reason: only ~100 of 1683 PNGs are even attempted at the idle
@@ -338,8 +338,18 @@ def peak_gfx_total(simulator, settle_s=12):
     either byte counter grows (see picos_gfx_bytes_peak_sample in
     picos_heap.h) — not just at report time — so unlike a plain instant
     sample it cannot land between two ticks and miss the load entirely.
-    The line with the largest peak= is authoritative regardless of which
-    report tick happened to observe it.
+
+    Because peak= is monotonically non-decreasing, max(stats, key=...)
+    returns the FIRST line that reached the final peak value, not
+    necessarily the last one — any later line sharing that same peak value
+    is skipped over. Only the returned dict's peak field should be treated
+    as meaningful: it genuinely is the high-water mark. Its pics/data/tex/
+    total/skipped fields are just that one tick's own snapshot (recomputed
+    at report time), not the state at the instant the peak was actually
+    set — e.g. data/tex can shrink afterward (PicShrink) while peak holds
+    still. Callers that need the settled end-state should look at the last
+    element of the parsed stats list instead of this function's return
+    value.
     """
     simulator.launch_app("cdogs")
 
@@ -369,6 +379,29 @@ def peak_gfx_total(simulator, settle_s=12):
         stats = parse_gfxstats(text)
 
     assert stats, f"no GFXSTAT lines found in log:\n{text[-2000:]}"
+
+    # Navigation sanity check, mirroring test_heapstat_is_emitted_and_truthful's
+    # guard. The substantive assertions the caller runs against this
+    # function's return value (pics>0, data>0, peak>0, total==data+tex) are
+    # all satisfiable by the boot-time asset scan alone — the idle main menu
+    # already loads ~100 of 1683 PNGs before quick-play is ever driven (see
+    # this function's docstring) — so none of them prove quick-play was
+    # actually reached. A failure there just says the graphics accounting
+    # looks wrong, which points straight at pic.c / picos_heap.h. But the
+    # far more likely real cause is that the two `enter` keypresses above no
+    # longer land on "Start" (e.g. the main menu gained/lost an item and the
+    # layout shifted): C-Dogs would then stay idle after the first,
+    # boot-scan-only GFXSTAT report and never produce a second one, since
+    # quick-play is what drives the campaign/map/sprite load that grows
+    # pics/data/tex further. Catch that case here, before the caller's
+    # substantive assertions run, with a message that names the actual
+    # suspect.
+    assert len(stats) > 1, (
+        "only one GFXSTAT line observed after the quick-play keypresses — "
+        "the two 'enter' presses likely didn't land on \"Start\" (main menu "
+        "layout may have drifted) rather than a graphics-instrumentation bug"
+    )
+
     return max(stats, key=lambda s: s["peak"])
 
 
