@@ -29,7 +29,11 @@
 .side_set 2                        ; bit 1 = SCK, bit 0 = CS
 
 begin:
-    out x, 8            side 0b01  ; x = write nibbles. CS deasserted.
+    out x, 8            side 0b01 [7] ; x = write nibbles. CS held high for
+                                      ; >=8 SM cycles after each transaction:
+                                      ; guarantees the chip's minimum CS-high
+                                      ; time (tCPH ~18ns) even when the next
+                                      ; chunk is already queued in the FIFO
     out y, 8            side 0b01  ; y = read nibbles (0 = write-only)
     jmp x--, writeloop  side 0b00  ; Assert CS one cycle early (CS setup)
 

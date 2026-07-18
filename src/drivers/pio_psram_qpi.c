@@ -243,13 +243,20 @@ static void qpi_read_locked(uint32_t addr, uint8_t *dst, uint32_t len) {
     }
 }
 
-// Write/readback self-test at addr 0 and 4MB. Reads twice to catch marginal
-// timing. Note: 'in pins' never stalls, so an unwired bus returns garbage
-// (clean failure), never a hang.
+// Write/readback self-test. Two stages:
+//  1. Basic patterns at addr 0 and 4MB, read twice.
+//  2. Page-end read-disturb probe: this chip intermittently glitches its
+//     SIO2 output while reading the last bytes of a 1KB page (offset 1022
+//     observed on hardware, ~6% of susceptible reads). The values below are
+//     chosen so a tier with too little settle time bleeds the previous
+//     nibble's SIO2 bit into the sample (e.g. 0x95->0xA2 reads back 0xE2).
+//     Read many times; a tier must survive all of them to be accepted.
+// Note: 'in pins' never stalls, so an unwired bus returns garbage (clean
+// failure), never a hang.
 static bool qpi_self_test(void) {
-    static const uint32_t addrs[] = { 0x000000u, 0x400000u };
     uint8_t pat[16], rd[16];
 
+    static const uint32_t addrs[] = { 0x000000u, 0x400000u };
     for (unsigned a = 0; a < 2; a++) {
         uint32_t addr = addrs[a];
         pat[0] = 0x00; pat[1] = 0xFF; pat[2] = 0xAA; pat[3] = 0x55;
@@ -272,6 +279,31 @@ static bool qpi_self_test(void) {
                 s_diag_fail[slot].addr = addr;
                 memcpy(s_diag_fail[slot].wrote, pat, 8);
                 memcpy(s_diag_fail[slot].got, rd, 8);
+                s_diag_fail[slot].valid = true;
+                return false;
+            }
+        }
+    }
+
+    static const uint8_t page_pat[16] = {
+        0x11, 0x22, 0x33, 0x44, 0x95, 0x95, 0xA2, 0xA3,
+        0x74, 0x81, 0x82, 0x55, 0xAA, 0x00, 0xFF, 0x5A
+    };
+    static const uint32_t page_addrs[] = { 0x0003F8u, 0x4003F8u };
+    for (unsigned a = 0; a < 2; a++) {
+        uint32_t addr = page_addrs[a];
+        qpi_write_locked(addr, page_pat, sizeof(page_pat));
+        for (int pass = 0; pass < 50; pass++) {
+            memset(rd, 0, sizeof(rd));
+            qpi_read_locked(addr, rd, sizeof(rd));
+            if (memcmp(page_pat, rd, sizeof(rd)) != 0) {
+                printf("[PIO_PSRAM_QPI] page-end probe fail @%06lX pass %d\n",
+                       (unsigned long)addr, pass);
+                unsigned slot = s_diag_fail[0].valid ? 1 : 0;
+                s_diag_fail[slot].tier_khz = s_target_khz;
+                s_diag_fail[slot].addr = addr;
+                memcpy(s_diag_fail[slot].wrote, page_pat + 4, 8);
+                memcpy(s_diag_fail[slot].got, rd + 4, 8);
                 s_diag_fail[slot].valid = true;
                 return false;
             }
