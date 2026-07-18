@@ -446,3 +446,33 @@ def test_sd_payload_excludes_non_runtime_sources():
     assert not offenders, (
         f"{len(offenders)} non-runtime files staged, e.g. {offenders[:5]}"
     )
+
+
+def test_textures_borrow_rather_than_duplicate(cdogs_simulator):
+    """Textures alias Pic->Data instead of holding a second copy.
+
+    With no GPU a texture is plain heap, so duplicating every image
+    doubled resident graphics memory for no benefit.
+    """
+    peak = peak_gfx_total(cdogs_simulator)
+
+    assert peak["tex"] == 0, (
+        f"textures still hold {peak['tex']} bytes — expected 0 once borrowed"
+    )
+    assert peak["data"] > 0, "no pic data counted; accounting is broken"
+
+    # Secondary, heap-pressure-immune gate. Freeing the duplicate texture
+    # copy relaxes the reserve guard (utils.c's IMG_LOAD_HEAP_RESERVE), so
+    # it now skips fewer images than Task 3's run did — pics rises, and raw
+    # total/peak can hold steady or even grow instead of halving. Bytes per
+    # pic is not sensitive to how many images got past the guard: Task 3's
+    # baseline was ~320 bytes/pic (163648/512, tex==data duplication in
+    # full); with textures borrowed there is only one copy per pic, so this
+    # should roughly halve to ~160. Assert a generous ceiling rather than
+    # pin an exact figure.
+    assert peak["pics"] > 0, "no pics counted; accounting is broken"
+    bytes_per_pic = peak["total"] / peak["pics"]
+    assert bytes_per_pic < 240, (
+        f"total/pics = {bytes_per_pic:.1f} bytes/pic — expected roughly half "
+        f"of Task 3's ~320 baseline once the duplicate texture copy is gone"
+    )
