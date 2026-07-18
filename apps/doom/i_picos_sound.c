@@ -206,6 +206,26 @@ static void doom_audio_worker(void)
         }
     }
 
+    // PHASE-0 AUDIO DIAGNOSTICS: log producer stats every ~2s so symptoms
+    // from the DOOM side (sample production rate, tick spacing) can be
+    // lined up with firmware [AUDIO] lines (ISR / underruns / ring_used).
+    {
+        static uint32_t s_dbg_last_log_us = 0;
+        static uint32_t s_dbg_samples_sum = 0;
+        static uint32_t s_dbg_calls = 0;
+        s_dbg_samples_sum += samples;
+        s_dbg_calls++;
+        if (now - s_dbg_last_log_us >= 2000000u) {
+            s_dbg_last_log_us = now;
+            printf("[DOOM-AUDIO] calls=%lu samples=%lu elapsed=%lu\n",
+                   (unsigned long)s_dbg_calls,
+                   (unsigned long)s_dbg_samples_sum,
+                   (unsigned long)elapsed_us);
+            s_dbg_samples_sum = 0;
+            s_dbg_calls = 0;
+        }
+    }
+
     // Mix in chunks of MIX_BATCH (reuses s_mix_buf)
     while (samples > 0) {
         int n = (samples > MIX_BATCH) ? MIX_BATCH : (int)samples;
