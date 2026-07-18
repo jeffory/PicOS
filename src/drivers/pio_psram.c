@@ -140,6 +140,9 @@ void pio_psram_debug_test(bool full) {
         for (uint32_t i = 0; i < DBG_BLOCK; i++) {
             if (buf[i] != expect[i]) {
                 if (errors == 0) first_bad = addr + i;
+                if (errors < 6)
+                    printf("[PSRAM]   mismatch @%06lX exp %02X got %02X\n",
+                           (unsigned long)(addr + i), expect[i], buf[i]);
                 errors++;
             }
         }
