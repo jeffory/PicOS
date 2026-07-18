@@ -40,6 +40,10 @@ typedef struct {
 void pio_psram_bulk_get_stats(pio_psram_bulk_stats_t *stats);
 void pio_psram_bulk_reset_stats(void);
 
+// Rescale the PIO clock divider after a sysclk change so the serial SPI clock
+// stays at or below its validated 25 MHz.
+void pio_psram_bulk_set_sysclk(uint32_t sys_khz);
+
 #ifdef __cplusplus
 }
 #endif

@@ -303,3 +303,18 @@ void pio_psram_bulk_get_stats(pio_psram_bulk_stats_t *stats) {
 void pio_psram_bulk_reset_stats(void) {
     memset(&s_stats, 0, sizeof(s_stats));
 }
+
+void pio_psram_bulk_set_sysclk(uint32_t sys_khz) {
+    if (!s_available) return;
+    // Serial SPI clock = sysclk / (2 * div); keep it <= the validated 25 MHz
+    // (clkdiv 4.0 at the 200 MHz boot clock). Integer divider avoids
+    // fractional jitter.
+    uint32_t div = (sys_khz + 2 * 25000 - 1) / (2 * 25000);
+    if (div < 1) div = 1;
+    mutex_enter_blocking(&s_mutex);
+    pio_sm_set_clkdiv_int_frac(s_pio, s_sm, (uint16_t)div, 0);
+    pio_sm_clkdiv_restart(s_pio, s_sm);
+    mutex_exit(&s_mutex);
+    printf("[PIO_PSRAM_BULK] Retimed: %lu kHz SPI at %lu kHz sysclk\n",
+           (unsigned long)(sys_khz / (2 * div)), (unsigned long)sys_khz);
+}
