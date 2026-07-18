@@ -1,19 +1,26 @@
 #!/usr/bin/env python3
-"""PicOS MCP Server — exposes PicOS simulator to coding agents via JSON-RPC 2.0.
+"""PicOS MCP Server — exposes PicOS simulator and hardware to coding agents.
 
-Supports both PicOS Simulator (default, via TCP socket) and hardware devices
-via USB serial: ping, screenshot, list_apps, launch_app, exit_app, reboot,
-send_command, and more.
+Transports: PicOS Simulator (JSON-RPC over TCP) and hardware devices over
+serial (USB CDC /dev/ttyACM* or UART adapters /dev/ttyUSB*).  By default the
+server auto-selects: simulator when reachable, otherwise a detected serial
+device; a per-call device= argument always forces that serial port.
+
+File transfer and screenshots on hardware use the firmware's base64 dev
+commands (getb64/putb64/screenshot64) which work over any transport; flash()
+uploads firmware via the SD-staged OTA path — no BOOTSEL/USB required.
 
 Usage:
     Registered in .mcp.json as an MCP server.
-    Run with simulator (default): python3 tools/picos_mcp.py
-    Run with hardware device: python3 tools/picos_mcp.py --hardware
+    Auto mode (default):   python3 tools/picos_mcp.py
+    Hardware only:         python3 tools/picos_mcp.py --hardware
+    Simulator only:        python3 tools/picos_mcp.py --simulator
 """
 
 import argparse
 import asyncio
 import base64
+import hashlib
 import json
 import os
 import platform
@@ -43,7 +50,10 @@ mcp = FastMCP("picos")
 
 DEFAULT_TIMEOUT = 5
 DEFAULT_TCP_PORT = 7878
-HARDWARE_MODE = False
+HARDWARE_MODE = False   # --hardware: hardware only, never simulator
+SIMULATOR_ONLY = False  # --simulator: simulator only, never hardware
+# Default (neither flag): AUTO — use the simulator when reachable, otherwise
+# fall back to a detected serial device.
 
 SCRN_MAGIC = b"SCRN"
 SCRN_HEADER_SIZE = 12
@@ -422,7 +432,9 @@ _tracked_pids_lock = threading.Lock()
 
 def find_usb_device() -> str | None:
     import glob
-    for pattern in ["/dev/ttyACM*", "/dev/tty.usbmodem*"]:
+    # CDC ACM (USB data port) first, then plain USB-serial adapters (UART).
+    for pattern in ["/dev/ttyACM*", "/dev/tty.usbmodem*",
+                    "/dev/ttyUSB*", "/dev/tty.usbserial*"]:
         matches = sorted(glob.glob(pattern))
         if matches:
             return matches[0]
@@ -433,10 +445,153 @@ def open_serial(port: str, timeout: float = DEFAULT_TIMEOUT):
     if not HAS_SERIAL:
         raise RuntimeError("pyserial not installed. Run: pip install pyserial")
     ser = serial.Serial(port, baudrate=115200, timeout=timeout)
+    # UART adapters (CH340 etc.) garble the first bytes after open while the
+    # control lines settle — flush a newline through and discard everything
+    # before sending the real command.
+    time.sleep(0.35)
     ser.reset_input_buffer()
-    time.sleep(0.05)
+    ser.write(b"\n")
+    ser.flush()
+    time.sleep(0.15)
     ser.reset_input_buffer()
     return ser
+
+
+def _fnv1a(data: bytes, h: int = 2166136261) -> int:
+    for b in data:
+        h = ((h ^ b) * 16777619) & 0xFFFFFFFF
+    return h
+
+
+class LineReader:
+    """Line-splitter over a serial port that survives across wait calls —
+    a partial line buffered between reads must not be dropped when the
+    caller switches from streaming to marker-waiting (or per-chunk ACKs)."""
+
+    def __init__(self, ser):
+        self.ser = ser
+        self.buf = b""
+
+    def lines(self, idle_timeout: float):
+        """Yield stripped lines; return when no data arrives for idle_timeout."""
+        last_data = time.monotonic()
+        while time.monotonic() - last_data < idle_timeout:
+            chunk = self.ser.read(max(1, self.ser.in_waiting))
+            if chunk:
+                last_data = time.monotonic()
+                self.buf += chunk
+            while b"\n" in self.buf:
+                line, self.buf = self.buf.split(b"\n", 1)
+                yield line.strip()
+
+    def wait_marker(self, ok_markers, err_markers, timeout: float) -> bytes:
+        """Wait for a line containing any ok marker; raise on error markers."""
+        for line in self.lines(timeout):
+            for m in err_markers:
+                if m in line:
+                    raise RuntimeError(f"device: {line.decode(errors='replace')}")
+            for m in ok_markers:
+                if m in line:
+                    return line
+        raise TimeoutError(f"no response matching {ok_markers} within {timeout}s")
+
+
+# ── Base64 file transfer (works on UART and CDC — stdio-based) ────────────────
+
+def do_get_file_b64(port: str, remote_path: str) -> bytes:
+    """Fetch a file via the firmware's getb64 command with integrity check."""
+    ser = open_serial(port, timeout=0.2)
+    try:
+        ser.write(f"getb64 {remote_path}\n".encode())
+        ser.flush()
+        raw = bytearray()
+        size = None
+        for line in LineReader(ser).lines(idle_timeout=10.0):
+            if line.startswith(b"~"):
+                try:
+                    raw += base64.b64decode(line[1:], validate=True)
+                except Exception:
+                    raise RuntimeError(
+                        "corrupted base64 line (a device log line may have "
+                        "interleaved mid-transfer) — retry the transfer")
+            elif b"B64 size=" in line:
+                size = int(line.split(b"size=")[1].split()[0])
+            elif b"Failed to open" in line:
+                raise FileNotFoundError(f"device: no such file: {remote_path}")
+            elif b"Unknown command" in line:
+                raise RuntimeError(
+                    "device firmware lacks getb64 — flash the current build")
+            elif b"B64_END" in line:
+                fnv = int(line.split(b"fnv1a=")[1].split()[0], 16)
+                if size is not None and size >= 0 and len(raw) != size:
+                    raise RuntimeError(
+                        f"size mismatch: got {len(raw)}, expected {size}")
+                if _fnv1a(bytes(raw)) != fnv:
+                    raise RuntimeError("integrity check failed (fnv1a mismatch)")
+                return bytes(raw)
+        raise TimeoutError(f"getb64 stalled after {len(raw)} bytes")
+    finally:
+        ser.close()
+
+
+def do_put_file_b64(port: str, data: bytes, remote_path: str) -> str:
+    """Send bytes via the firmware's putb64 command (chunk + ACK pacing)."""
+    b64 = base64.b64encode(data)
+    CHUNK = 512  # b64 chars per line → 384 raw bytes ≤ device write buffer
+    ser = open_serial(port, timeout=0.2)
+    try:
+        reader = LineReader(ser)
+        ser.write(f"putb64 {remote_path} {len(data)}\n".encode())
+        ser.flush()
+        reader.wait_marker([b"Ready B64"],
+                           [b"Failed to open", b"Usage:", b"Unknown command"], 5.0)
+        final = None
+        for off in range(0, len(b64), CHUNK):
+            ser.write(b64[off:off + CHUNK] + b"\n")
+            ser.flush()
+            line = reader.wait_marker([b"ACK ", b"File received"],
+                                      [b"Error"], 15.0)
+            if b"File received" in line:
+                final = line
+        if final is None:
+            final = reader.wait_marker([b"File received"], [b"Error"], 15.0)
+        fnv = int(final.split(b"fnv1a=")[1].split()[0], 16)
+        if _fnv1a(data) != fnv:
+            raise RuntimeError("integrity check failed after upload "
+                               "(device wrote different bytes) — retry")
+        return f"Uploaded {len(data)} bytes to {remote_path} (fnv1a verified)"
+    finally:
+        ser.close()
+
+
+def do_screenshot_b64(port: str) -> bytes:
+    """Capture the framebuffer via screenshot64 (slow on UART: ~25s)."""
+    ser = open_serial(port, timeout=0.2)
+    try:
+        ser.write(b"screenshot64\n")
+        ser.flush()
+        raw = bytearray()
+        w = h = 320
+        for line in LineReader(ser).lines(idle_timeout=10.0):
+            if line.startswith(b"~"):
+                raw += base64.b64decode(line[1:], validate=True)
+            elif b"SCRN64 " in line:
+                for tok in line.split():
+                    if tok.startswith(b"w="):
+                        w = int(tok[2:])
+                    elif tok.startswith(b"h="):
+                        h = int(tok[2:])
+            elif b"Unknown command" in line:
+                raise RuntimeError(
+                    "device firmware lacks screenshot64 — flash the current build")
+            elif b"SCRN64_END" in line:
+                fnv = int(line.split(b"fnv1a=")[1].split()[0], 16)
+                if _fnv1a(bytes(raw)) != fnv:
+                    raise RuntimeError("integrity check failed (fnv1a mismatch)")
+                return rgb565be_to_png(bytes(raw), w, h)
+        raise TimeoutError(f"screenshot64 stalled after {len(raw)} bytes")
+    finally:
+        ser.close()
 
 
 # ── Simulator helpers ────────────────────────────────────────────────────────────
@@ -531,17 +686,41 @@ def do_screenshot_hardware(port: str, timeout: float = DEFAULT_TIMEOUT) -> bytes
 
 # ── Unified dispatch ───────────────────────────────────────────────────────────
 
+_sim_probe_cache = {"t": 0.0, "ok": False}
+
+
+def _sim_reachable() -> bool:
+    now = time.monotonic()
+    if now - _sim_probe_cache["t"] < 3.0:
+        return _sim_probe_cache["ok"]
+    ok = SimulatorManager._probe_port(_configured_port)
+    _sim_probe_cache["t"] = now
+    _sim_probe_cache["ok"] = ok
+    return ok
+
+
 def resolve_port(device: str | None = None) -> str | None:
+    """Pick the transport: a serial port path for hardware, None for simulator.
+
+    An explicit device argument always selects hardware.  Otherwise:
+    --hardware → detected serial device (error if none); --simulator → always
+    simulator; default (auto) → simulator when reachable, else a detected
+    serial device, else simulator (whose error path reports the connect
+    failure)."""
+    if device:
+        return device
     if HARDWARE_MODE:
-        if device:
-            return device
         port = find_usb_device()
         if not port:
             raise RuntimeError(
                 "No PicOS hardware device found. Connect via USB or use --simulator flag."
             )
         return port
-    return None
+    if SIMULATOR_ONLY:
+        return None
+    if _sim_reachable():
+        return None
+    return find_usb_device()  # may be None → simulator error path
 
 
 # ── MCP Tools ──────────────────────────────────────────────────────────────────
@@ -571,11 +750,18 @@ async def ping(device: str | None = None) -> str:
 
 @mcp.tool()
 async def screenshot(device: str | None = None) -> list:
-    """Take a screenshot of the PicOS display. Returns PNG image."""
+    """Take a screenshot of the PicOS display. Returns PNG image.
+
+    Works on simulator and hardware (UART hardware uses a base64 transfer,
+    ~25 seconds at 115200 baud)."""
     port = resolve_port(device)
     if port:
         try:
-            png_bytes = await asyncio.to_thread(do_screenshot_hardware, port)
+            # The binary SCRN path needs a CDC host; base64 works everywhere.
+            if "ttyACM" in port or "usbmodem" in port:
+                png_bytes = await asyncio.to_thread(do_screenshot_hardware, port)
+            else:
+                png_bytes = await asyncio.to_thread(do_screenshot_b64, port)
         except ImportError:
             return [{"type": "text", "text": "Pillow not installed: pip install Pillow"}]
         except Exception as e:
@@ -897,10 +1083,39 @@ async def get_heap_info(device: str | None = None) -> str:
 
 @mcp.tool()
 async def get_crash_log(device: str | None = None) -> str:
-    """Get the simulator crash log (if any). Useful after a simulator crash."""
+    """Get the crash log. Simulator: sim crash file. Hardware: the persisted
+    hard-fault log at /system/crashlog.txt (via the crashlog dev command)."""
     port = resolve_port(device)
     if port:
-        return "(crash log not available in hardware mode)"
+        def _hw_crashlog() -> str:
+            ser = open_serial(port, timeout=0.2)
+            try:
+                ser.write(b"crashlog\n")
+                ser.flush()
+                collecting = False
+                out: list[str] = []
+                for line in LineReader(ser).lines(idle_timeout=5.0):
+                    text = line.decode("utf-8", errors="replace")
+                    if "CRASHLOG BEGIN" in text:
+                        collecting = True
+                    elif "CRASHLOG END" in text:
+                        return "\n".join(out) if out else "(crash log empty)"
+                    elif "No crash log" in text:
+                        return "No crash log on device."
+                    elif "Unknown command" in text:
+                        return ("Device firmware lacks the crashlog command — "
+                                "flash the current build first.")
+                    elif collecting:
+                        out.append(text)
+                if out:
+                    return "\n".join(out) + "\n(warning: END marker not seen)"
+                return "No response to crashlog command."
+            finally:
+                ser.close()
+        try:
+            return await asyncio.to_thread(_hw_crashlog)
+        except Exception as e:
+            return f"Error: {e}"
 
     # Try reading via RPC first
     try:
@@ -1113,13 +1328,13 @@ async def kill_simulators(include_orphans: bool = True) -> str:
 @mcp.tool()
 async def reboot(mode: str = "normal", device: str | None = None) -> str:
     """Reboot the PicOS hardware device (not available in simulator)."""
-    if not HARDWARE_MODE:
-        return "Reboot is only available in hardware mode. Start MCP with --hardware flag."
     if mode not in ("normal", "flash"):
         return f"Unknown mode '{mode}'. Use 'normal' or 'flash'."
     try:
         port = resolve_port(device)
-        assert port is not None
+        if port is None:
+            return ("Reboot targets hardware. No serial device detected "
+                    "(simulator is active); pass device= to force one.")
         cmd = "reboot-flash" if mode == "flash" else "reboot"
         ser = open_serial(port, timeout=1)
         ser.write(f"{cmd}\n".encode())
@@ -1134,19 +1349,57 @@ async def reboot(mode: str = "normal", device: str | None = None) -> str:
 
 
 @mcp.tool()
-async def flash(file: str, device: str | None = None) -> str:
-    """Flash a UF2 file to the PicOS hardware device (not available in simulator)."""
-    if not HARDWARE_MODE:
-        return "Flash is only available in hardware mode."
+async def flash(file: str, device: str | None = None, i_know_ota_is_fixed: bool = False) -> str:
+    """DISABLED — the firmware's OTA flash writer (ota_write_and_reboot) calls
+    the SDK's flash-resident flash_range_erase/program wrappers while
+    overwriting the flash they live in; a full-size update crashes mid-flash
+    and leaves the device unbootable (BOOTSEL recovery required, verified
+    2026-07-18).  Do not use until the writer is rewritten to call ROM
+    functions directly; then pass i_know_ota_is_fixed=True."""
+    if not i_know_ota_is_fixed:
+        return ("REFUSED: OTA flashing bricks the device with current firmware "
+                "(ota_write_and_reboot executes flash-resident SDK wrappers "
+                "mid-overwrite). Flash via BOOTSEL USB instead. Once the OTA "
+                "writer is fixed and verified, call with i_know_ota_is_fixed=True.")
     if not HAS_SERIAL:
         return "pyserial not installed: pip install pyserial"
-    return "Flash not yet implemented in this version."
+    try:
+        port = resolve_port(device)
+        if port is None:
+            return "Flash targets hardware; no serial device detected."
+        data = Path(file).read_bytes()
+        if data[:4] == b"UF2\n" or data[:4] == b"UF2\x0a":
+            return ("This is a UF2 file — the OTA path needs the raw .bin "
+                    "(build/picocalc_os.bin).")
+        if len(data) < 256:
+            return "File too small to be firmware."
+        sha = hashlib.sha256(data).hexdigest()
+
+        def _do_flash() -> str:
+            do_put_file_b64(port, (sha + "\n").encode(), "/system/update.sha256")
+            do_put_file_b64(port, data, "/system/update.bin")
+            ser = open_serial(port, timeout=1)
+            ser.write(b"reboot\n")
+            ser.flush()
+            time.sleep(0.1)
+            ser.close()
+            return (f"Uploaded {len(data)} bytes (sha256 {sha[:12]}…) and "
+                    "rebooted. The device verifies the hash and programs "
+                    "flash on boot — watch its screen; do not power off.")
+        return await asyncio.to_thread(_do_flash)
+    except Exception as e:
+        return f"Error: {e}"
 
 
 @mcp.tool()
 async def put_file(local_path: str, remote_path: str, device: str | None = None) -> str:
-    """Upload a file to the PicOS SD card (simulator: copies to host filesystem)."""
-    if not HARDWARE_MODE:
+    """Upload a file to the PicOS SD card (hardware: base64 over serial;
+    simulator: copies into the simulated SD directory)."""
+    try:
+        port = resolve_port(device)
+    except Exception as e:
+        return f"Error: {e}"
+    if port is None:
         try:
             sim_apps = os.environ.get("PICOS_SIMULATOR_SD", ".")
             dest = Path(sim_apps) / remote_path.lstrip("/")
@@ -1157,13 +1410,22 @@ async def put_file(local_path: str, remote_path: str, device: str | None = None)
             return f"Error: {e}"
     if not HAS_SERIAL:
         return "pyserial not installed: pip install pyserial"
-    return "Hardware put_file not yet implemented."
+    try:
+        data = Path(local_path).read_bytes()
+        return await asyncio.to_thread(do_put_file_b64, port, data, remote_path)
+    except Exception as e:
+        return f"Error: {e}"
 
 
 @mcp.tool()
 async def get_file(remote_path: str, local_path: str, device: str | None = None) -> str:
-    """Download a file from the PicOS SD card (simulator: copies from host filesystem)."""
-    if not HARDWARE_MODE:
+    """Download a file from the PicOS SD card (hardware: base64 over serial;
+    simulator: copies from the simulated SD directory)."""
+    try:
+        port = resolve_port(device)
+    except Exception as e:
+        return f"Error: {e}"
+    if port is None:
         try:
             sim_apps = os.environ.get("PICOS_SIMULATOR_SD", ".")
             src = Path(sim_apps) / remote_path.lstrip("/")
@@ -1173,7 +1435,12 @@ async def get_file(remote_path: str, local_path: str, device: str | None = None)
             return f"Error: {e}"
     if not HAS_SERIAL:
         return "pyserial not installed: pip install pyserial"
-    return "Hardware get_file not yet implemented."
+    try:
+        data = await asyncio.to_thread(do_get_file_b64, port, remote_path)
+        Path(local_path).write_bytes(data)
+        return f"Downloaded {len(data)} bytes: {remote_path} -> {local_path}"
+    except Exception as e:
+        return f"Error: {e}"
 
 
 # ── Display Diagnostics (simulator only) ─────────────────────────────────────
@@ -1312,13 +1579,13 @@ async def get_pixel(
 
 
 def main():
-    global HARDWARE_MODE, _configured_port
+    global HARDWARE_MODE, SIMULATOR_ONLY, _configured_port
 
     parser = argparse.ArgumentParser(
-        description="PicOS MCP Server - Control PicOS simulator (default) or hardware device"
+        description="PicOS MCP Server - Control PicOS simulator and/or hardware device"
     )
-    parser.add_argument("--hardware", action="store_true", help="Use hardware device via USB serial")
-    parser.add_argument("--simulator", action="store_true", help="Use simulator (default)")
+    parser.add_argument("--hardware", action="store_true", help="Hardware only (USB serial)")
+    parser.add_argument("--simulator", action="store_true", help="Simulator only")
     parser.add_argument("--port", type=int, default=DEFAULT_TCP_PORT, help="Simulator TCP port (default: 7878)")
     parser.add_argument("--device", help="Device endpoint (serial port or socket path)")
     parser.add_argument(
@@ -1331,10 +1598,14 @@ def main():
         HARDWARE_MODE = True
         if not HAS_SERIAL:
             print("Warning: pyserial not installed. Hardware mode requires: pip install pyserial", file=sys.stderr)
+    elif args.simulator:
+        SIMULATOR_ONLY = True
 
     _configured_port = args.port
 
-    mode_str = "hardware" if HARDWARE_MODE else "simulator"
+    mode_str = ("hardware" if HARDWARE_MODE
+                else "simulator" if SIMULATOR_ONLY
+                else "auto (simulator if reachable, else serial hardware)")
     print(f"PicOS MCP Server starting in {mode_str} mode (port {_configured_port})...", file=sys.stderr)
     mcp.run(transport=args.transport)
 
