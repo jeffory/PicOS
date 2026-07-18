@@ -29,6 +29,10 @@ void pio_psram_qpi_set_sysclk(uint32_t sys_khz);
 // Currently configured SPI clock in kHz (0 if not available).
 uint32_t pio_psram_qpi_spi_khz(void);
 
+// Print boot-probe failure diagnostics (self-test bytes, serial Read-ID)
+// captured before teardown. No-op if the probe succeeded.
+void pio_psram_qpi_print_diag(void);
+
 #ifdef __cplusplus
 }
 #endif

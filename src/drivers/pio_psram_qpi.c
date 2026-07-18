@@ -65,6 +65,18 @@ static int s_read_dma_chan = -1;
 static dma_channel_config s_write_dma_cfg;
 static dma_channel_config s_read_dma_cfg;
 
+// Boot-probe diagnostics, retrievable after teardown via print_diag.
+typedef struct {
+    uint32_t tier_khz;
+    uint32_t addr;
+    uint8_t wrote[8];
+    uint8_t got[8];
+    bool valid;
+} qpi_diag_fail_t;
+static qpi_diag_fail_t s_diag_fail[2];
+static uint8_t s_diag_readid_raw[8];
+static int s_diag_readid_count = 0;
+
 // Narrow AHB write replicates the byte across the 32-bit word; with autopull 8
 // and left shift the top byte is consumed — same trick as pio_psram_bulk.c.
 static inline void qpi_put_byte(uint8_t val) {
@@ -134,6 +146,35 @@ static void qpi_wake_chip(void) {
     busy_wait_us(100);
     qpi_send_serial_cmd(PSRAM_CMD_ENTER_QPI);
     busy_wait_us(100);
+}
+
+// Diagnostic: serial-format Read ID (0x9F + 3 address bytes) sent through the
+// QPI program with bit-in-nibble encoding. In SPI mode the chip drives SO
+// (= SIO1) during the read phase, so each captured nibble carries one serial
+// bit in bit1. Expected decode for this chip family: MF=0x0D, KGD=0x5D.
+// Runs only on the probe-failure path, before teardown.
+static void qpi_diag_read_id(void) {
+    while (!pio_sm_is_rx_fifo_empty(s_pio, s_sm))
+        (void)pio_sm_get(s_pio, s_sm);
+
+    qpi_put_byte(32);   // write nibbles: 8 cmd bits + 24 addr bits, 1 bit/clock
+    qpi_put_byte(16);   // read nibbles: 16 serial bits (MF ID + KGD)
+    uint8_t cmd = 0x9F;
+    for (int i = 0; i < 4; i++) {
+        uint8_t hi = (cmd >> (7 - 2 * i)) & 1u;
+        uint8_t lo = (cmd >> (6 - 2 * i)) & 1u;
+        qpi_put_byte((uint8_t)((hi << 4) | lo));
+    }
+    for (int i = 0; i < 12; i++)
+        qpi_put_byte(0x00);   // 24 address bits, all zero
+
+    absolute_time_t deadline = make_timeout_time_ms(50);
+    int n = 0;
+    while (n < 8 && !time_reached(deadline)) {
+        if (!pio_sm_is_rx_fifo_empty(s_pio, s_sm))
+            s_diag_readid_raw[n++] = (uint8_t)pio_sm_get(s_pio, s_sm);
+    }
+    s_diag_readid_count = n;
 }
 
 // Core transfer implementations. Callers hold s_mutex.
@@ -214,6 +255,12 @@ static bool qpi_self_test(void) {
                        (unsigned long)addr, pass,
                        pat[0], pat[1], pat[2], pat[3],
                        rd[0], rd[1], rd[2], rd[3]);
+                unsigned slot = s_diag_fail[0].valid ? 1 : 0;
+                s_diag_fail[slot].tier_khz = s_target_khz;
+                s_diag_fail[slot].addr = addr;
+                memcpy(s_diag_fail[slot].wrote, pat, 8);
+                memcpy(s_diag_fail[slot].got, rd, 8);
+                s_diag_fail[slot].valid = true;
                 return false;
             }
         }
@@ -290,6 +337,7 @@ bool pio_psram_qpi_init(void) {
     // Full teardown so the serial fallback can claim everything.
     qpi_send_quad_cmd(PSRAM_CMD_EXIT_QPI);  // in case we are half-entered
     busy_wait_us(100);
+    qpi_diag_read_id();
     pio_sm_set_enabled(s_pio, s_sm, false);
     dma_channel_unclaim(s_write_dma_chan);
     dma_channel_unclaim(s_read_dma_chan);
@@ -338,4 +386,39 @@ void pio_psram_qpi_set_sysclk(uint32_t sys_khz) {
 
 uint32_t pio_psram_qpi_spi_khz(void) {
     return s_available ? s_spi_khz : 0;
+}
+
+void pio_psram_qpi_print_diag(void) {
+    for (int i = 0; i < 2; i++) {
+        if (!s_diag_fail[i].valid) continue;
+        printf("[PSRAM] qpi self-test fail: tier=%lukHz addr=%06lX\n",
+               (unsigned long)s_diag_fail[i].tier_khz,
+               (unsigned long)s_diag_fail[i].addr);
+        printf("[PSRAM]   wrote %02X %02X %02X %02X %02X %02X %02X %02X\n",
+               s_diag_fail[i].wrote[0], s_diag_fail[i].wrote[1],
+               s_diag_fail[i].wrote[2], s_diag_fail[i].wrote[3],
+               s_diag_fail[i].wrote[4], s_diag_fail[i].wrote[5],
+               s_diag_fail[i].wrote[6], s_diag_fail[i].wrote[7]);
+        printf("[PSRAM]   got   %02X %02X %02X %02X %02X %02X %02X %02X\n",
+               s_diag_fail[i].got[0], s_diag_fail[i].got[1],
+               s_diag_fail[i].got[2], s_diag_fail[i].got[3],
+               s_diag_fail[i].got[4], s_diag_fail[i].got[5],
+               s_diag_fail[i].got[6], s_diag_fail[i].got[7]);
+    }
+    if (s_diag_readid_count > 0) {
+        printf("[PSRAM] readid raw (%d bytes):", s_diag_readid_count);
+        for (int i = 0; i < s_diag_readid_count; i++)
+            printf(" %02X", s_diag_readid_raw[i]);
+        printf("\n");
+        // Decode: nibbles arrive high-first per byte; serial SO bit is bit1.
+        uint16_t bits = 0;
+        for (int i = 0; i < s_diag_readid_count && i < 8; i++) {
+            uint8_t hi = (s_diag_readid_raw[i] >> 4) & 0xF;
+            uint8_t lo = s_diag_readid_raw[i] & 0xF;
+            bits = (uint16_t)((bits << 1) | ((hi >> 1) & 1));
+            bits = (uint16_t)((bits << 1) | ((lo >> 1) & 1));
+        }
+        printf("[PSRAM] readid decoded: MF=%02X KGD=%02X (expect 0D 5D)\n",
+               (bits >> 8) & 0xFF, bits & 0xFF);
+    }
 }

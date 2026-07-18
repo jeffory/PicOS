@@ -88,6 +88,7 @@ void pio_psram_debug_test(bool full) {
     if (s_mode == PSRAM_MODE_QPI)
         printf("[PSRAM] spi_clock=%lu kHz\n",
                (unsigned long)pio_psram_qpi_spi_khz());
+    pio_psram_qpi_print_diag();
 
     uint8_t *buf = malloc(DBG_BLOCK);   // SRAM heap; freed below
     if (!buf) {
