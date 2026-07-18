@@ -14,6 +14,10 @@
 //   - Flash write loop is SRAM-resident and never calls flash-resident code
 //     (the old firmware's code is overwritten sector-by-sector, so calling
 //     back into flash would execute new firmware code at old addresses)
+//   - Interrupts masked for the ENTIRE write, not per-sector: IRQ handlers
+//     (timer alarm, stdio_usb, TinyUSB) are flash-resident and become
+//     garbage once their sectors are rewritten with a cross-version image.
+//     Per-sector re-enable windows bricked cross-version updates.
 //   - Sector 0 (boot stage 2 + vector table) written last — if the write is
 //     interrupted, the old firmware's boot code remains intact
 //   - SRAM staging buffer used for flash_range_program (QMI bus may be
@@ -197,6 +201,20 @@ static bool ota_validate_header(const uint8_t *data, int len) {
 // overwritten — any call to a flash-resident function would execute the NEW
 // firmware's code at the OLD addresses, causing undefined behaviour.
 //
+// CRITICAL: interrupts are masked ONCE at entry and never restored.  IRQ
+// *handlers* and their callees (alarm_pool_irq_handler, stdio_usb's
+// low_priority_worker_irq, TinyUSB's tu_fifo_write/memset) are
+// flash-resident.  An earlier version of this function re-enabled
+// interrupts between sector writes; once the sectors holding those
+// handlers were overwritten with an address-shifted (cross-version) image,
+// the next timer/USB interrupt executed garbage and the device crashed
+// mid-flash (half-written image = brick).  Same-version re-flashes only
+// survived because the overwritten bytes were identical.  Everything this
+// function calls (flash_range_erase/program and their helpers, including
+// the QMI CS1/PSRAM save-restore) is RAM- or ROM-resident — verified by
+// disassembly of the linked ELF.  The watchdog and the final AIRCR
+// SYSRESETREQ are unaffected by PRIMASK.
+//
 // The function writes sectors 1..N first (deferring sector 0 so the old
 // boot code stays intact as long as possible), then writes sector 0 last,
 // and reboots without returning to flash.
@@ -214,6 +232,10 @@ static void __no_inline_not_in_flash_func(ota_write_and_reboot)(
     // source must be in SRAM, not PSRAM.
     static uint8_t staging[FLASH_SECTOR_SIZE];
 
+    // Point of no return: mask all interrupts for the entire write (see
+    // header comment).  Never restored — we hard-reset at the end.
+    (void)save_and_disable_interrupts();
+
     // Write sectors 1..N (defer sector 0)
     for (uint32_t off = FLASH_SECTOR_SIZE; off < fw_size;
          off += FLASH_SECTOR_SIZE) {
@@ -226,10 +248,8 @@ static void __no_inline_not_in_flash_func(ota_write_and_reboot)(
         for (uint32_t i = chunk; i < FLASH_SECTOR_SIZE; i++)
             staging[i] = 0xFF; // pad to full sector
 
-        uint32_t ints = save_and_disable_interrupts();
         flash_range_erase(off, FLASH_SECTOR_SIZE);
         flash_range_program(off, staging, FLASH_SECTOR_SIZE);
-        restore_interrupts(ints);
 
         // Feed watchdog directly (watchdog_update is in flash)
         watchdog_hw->load = 10u * 1000u * 1000u; // ~10 s reload
@@ -243,10 +263,8 @@ static void __no_inline_not_in_flash_func(ota_write_and_reboot)(
         for (uint32_t i = chunk; i < FLASH_SECTOR_SIZE; i++)
             staging[i] = 0xFF;
 
-        uint32_t ints = save_and_disable_interrupts();
         flash_range_erase(0, FLASH_SECTOR_SIZE);
         flash_range_program(0, staging, FLASH_SECTOR_SIZE);
-        restore_interrupts(ints);
     }
 
     // Clear scratch registers and reboot into new firmware.

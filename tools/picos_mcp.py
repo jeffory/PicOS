@@ -1349,18 +1349,14 @@ async def reboot(mode: str = "normal", device: str | None = None) -> str:
 
 
 @mcp.tool()
-async def flash(file: str, device: str | None = None, i_know_ota_is_fixed: bool = False) -> str:
-    """DISABLED — the firmware's OTA flash writer (ota_write_and_reboot) calls
-    the SDK's flash-resident flash_range_erase/program wrappers while
-    overwriting the flash they live in; a full-size update crashes mid-flash
-    and leaves the device unbootable (BOOTSEL recovery required, verified
-    2026-07-18).  Do not use until the writer is rewritten to call ROM
-    functions directly; then pass i_know_ota_is_fixed=True."""
-    if not i_know_ota_is_fixed:
-        return ("REFUSED: OTA flashing bricks the device with current firmware "
-                "(ota_write_and_reboot executes flash-resident SDK wrappers "
-                "mid-overwrite). Flash via BOOTSEL USB instead. Once the OTA "
-                "writer is fixed and verified, call with i_know_ota_is_fixed=True.")
+async def flash(file: str, device: str | None = None) -> str:
+    """Flash firmware over the SD-staged OTA path.  Safe for cross-version
+    updates as of 2026-07-18: ota_write_and_reboot now masks interrupts for
+    the entire flash write (IRQ handlers are flash-resident; the old
+    per-sector re-enable windows bricked cross-version updates — verified
+    fixed by an end-to-end cross-version OTA on hardware).  Requires the
+    on-device firmware to include that fix; older firmware may brick on a
+    cross-version flash (recovery: BOOTSEL + copy build/picocalc_os.uf2)."""
     if not HAS_SERIAL:
         return "pyserial not installed: pip install pyserial"
     try:

@@ -359,6 +359,8 @@ bool dev_commands_process(void) {
 
     if (strcmp(s_cmd_buf, "ping") == 0) {
         printf("[DEV] pong\n");
+    } else if (strcmp(s_cmd_buf, "ver") == 0) {
+        printf("[DEV] PicOS build %s %s\n", __DATE__, __TIME__);
     } else if (strcmp(s_cmd_buf, "exit") == 0) {
         s_cmd_exit = true;
     } else if (strcmp(s_cmd_buf, "usb") == 0) {
@@ -542,6 +544,7 @@ bool dev_commands_process(void) {
     } else if (strcmp(s_cmd_buf, "help") == 0) {
         printf("[DEV] Available commands:\n");
         printf("[DEV]   ping           - Check device is responding\n");
+        printf("[DEV]   ver            - Show firmware build date/time\n");
         printf("[DEV]   exit           - Signal current app to exit\n");
         printf("[DEV]   usb            - Enable USB storage mode\n");
         printf("[DEV]   reboot         - Reboot device\n");
