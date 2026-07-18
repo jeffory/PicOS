@@ -301,6 +301,96 @@ def test_heapstat_is_emitted_and_truthful(cdogs_simulator):
     )
 
 
+GFXSTAT_RE = re.compile(
+    r"GFXSTAT (\S+) pics=(\d+) data=(\d+) tex=(\d+) total=(\d+) peak=(\d+) skipped=(\d+)"
+)
+
+
+def parse_gfxstats(log_text):
+    """Return list of dicts for every GFXSTAT line in the log."""
+    out = []
+    for m in GFXSTAT_RE.finditer(log_text):
+        out.append({
+            "tag": m.group(1),
+            "pics": int(m.group(2)),
+            "data": int(m.group(3)),
+            "tex": int(m.group(4)),
+            "total": int(m.group(5)),
+            "peak": int(m.group(6)),
+            "skipped": int(m.group(7)),
+        })
+    return out
+
+
+def peak_gfx_total(simulator, settle_s=12):
+    """Launch cdogs, drive quick-play, and return the GFXSTAT line that set
+    the peak= high-water mark.
+
+    Mirrors test_heapstat_is_emitted_and_truthful's drive sequence and for
+    the same reason: only ~100 of 1683 PNGs are even attempted at the idle
+    main menu (2 succeed, the rest are skipped by the reserve guard before
+    a campaign is loaded) — the real sprite load happens on campaign entry.
+    A plain launch-and-wait would see almost nothing. So this sends the
+    same two 'enter' keypresses that land on "Start" for quick-play, then
+    polls stdio for GFXSTAT lines.
+
+    peak= is a running high-water mark of (data+tex) sampled every time
+    either byte counter grows (see picos_gfx_bytes_peak_sample in
+    picos_heap.h) — not just at report time — so unlike a plain instant
+    sample it cannot land between two ticks and miss the load entirely.
+    The line with the largest peak= is authoritative regardless of which
+    report tick happened to observe it.
+    """
+    simulator.launch_app("cdogs")
+
+    # Wait for the first GFXSTAT line: confirms C-Dogs has booted and the
+    # instrumentation is wired up before driving quick-play.
+    deadline = time.time() + 60
+    text = ""
+    while time.time() < deadline:
+        text = simulator.stdio_snapshot()
+        if "GFXSTAT" in text:
+            break
+        time.sleep(0.2)
+    assert "GFXSTAT" in text, f"no GFXSTAT lines found in log:\n{text[-2000:]}"
+
+    simulator.keypress("enter")
+    time.sleep(0.8)
+    simulator.keypress("enter")
+
+    # Settle window: give quick-play's campaign/map/sprite load time to
+    # run and be observed by at least one more report tick.
+    settle_deadline = time.time() + settle_s
+    text = simulator.stdio_snapshot()
+    stats = parse_gfxstats(text)
+    while time.time() < settle_deadline:
+        time.sleep(0.3)
+        text = simulator.stdio_snapshot()
+        stats = parse_gfxstats(text)
+
+    assert stats, f"no GFXSTAT lines found in log:\n{text[-2000:]}"
+    return max(stats, key=lambda s: s["peak"])
+
+
+def test_gfxstat_reports_resident_graphics(cdogs_simulator):
+    """Resident graphics accounting is emitted and internally consistent.
+
+    Establishes the Stage 1 baseline for Task 4 (collapsing the Data/Tex
+    duplication): total should be roughly 2x data if every pic currently
+    holds two identical copies. Asserts internal consistency and that a
+    peak was actually observed, not any specific byte figure — the point
+    of this test is to measure the current footprint, not pin it.
+    """
+    peak = peak_gfx_total(cdogs_simulator)
+
+    assert peak["total"] == peak["data"] + peak["tex"], (
+        f"total {peak['total']} != data {peak['data']} + tex {peak['tex']}"
+    )
+    assert peak["pics"] > 0, "no pics counted"
+    assert peak["data"] > 0, "no pic data counted"
+    assert peak["peak"] > 0, "no peak recorded"
+
+
 EXCLUDED_PATTERNS = ("*.blend", "*.blend1", "render.py",
                      "make_spritesheet.sh", "src.txt", "README.md")
 
