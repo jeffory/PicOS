@@ -1,0 +1,69 @@
+; PIO PSRAM QPI (quad) transfer program
+;
+; Based on polpo/rp2040-psram qspi_psram with the RP2350 read-timing fixes
+; from polpo/rp2040-psram PR #15 (tested on PicoCalc + Pico 2):
+;   - CS asserted one cycle before the first data clock
+;   - read phase enters at readloop_mid and samples after the falling edge
+;     (no fudge NOP), matching the fix in pio_psram_bulk.pio
+;
+; Header protocol per transaction (bytes via TX FIFO, autopull 8):
+;   [x = total write nibbles] [y = read nibbles] [cmd/addr/dummy/data bytes...]
+; x counts cmd+addr+dummy+data nibbles (2 per byte); y = 0 for write-only.
+; Read dummy cycles are driven as zero nibbles inside the write phase.
+; SIO0-3 are released (pindirs=0) for the read phase and re-driven at the end.
+
+.pio_version 0
+
+.program psram_qpi
+.side_set 2                        ; bit 1 = SCK, bit 0 = CS
+
+begin:
+    out x, 8            side 0b01  ; x = write nibbles. CS deasserted.
+    out y, 8            side 0b01  ; y = read nibbles (0 = write-only)
+    jmp x--, writeloop  side 0b00  ; Assert CS one cycle early (CS setup)
+
+writeloop:
+    out pins, 4         side 0b00  ; Drive nibble on SIO0-3, SCK low
+    jmp x--, writeloop  side 0b10  ; Rising edge: PSRAM samples. Loop.
+
+    jmp !y, begin       side 0b00  ; Write-only: CS rises at next 'out x'
+    set pindirs, 0      side 0b10  ; Release SIO0-3, one turnaround clock
+    jmp readloop_mid    side 0b00
+
+readloop:
+    in pins, 4          side 0b00  ; Sample nibble after the falling edge
+readloop_mid:
+    jmp y--, readloop   side 0b10  ; Rising edge: PSRAM shifts next nibble
+    set pindirs, 0xF    side 0b01  ; Re-drive SIO0-3; CS deasserts. Wraps.
+
+% c-sdk {
+#include "hardware/gpio.h"
+
+static inline void psram_qpi_cs_init(PIO pio, uint sm, uint prog_offs,
+                                     float clkdiv,
+                                     uint pin_cs, uint pin_sio0) {
+    pio_sm_config c = psram_qpi_program_get_default_config(prog_offs);
+
+    sm_config_set_out_pins(&c, pin_sio0, 4);
+    sm_config_set_in_pins(&c, pin_sio0);
+    sm_config_set_set_pins(&c, pin_sio0, 4);
+    sm_config_set_sideset_pins(&c, pin_cs);
+    sm_config_set_out_shift(&c, false, true, 8);   // shift left, autopull 8
+    sm_config_set_in_shift(&c, false, true, 8);    // shift left, autopush 8
+    sm_config_set_clkdiv(&c, clkdiv);
+
+    pio_sm_set_consecutive_pindirs(pio, sm, pin_cs, 2, true);
+    pio_sm_set_consecutive_pindirs(pio, sm, pin_sio0, 4, true);
+    pio_gpio_init(pio, pin_sio0 + 0);
+    pio_gpio_init(pio, pin_sio0 + 1);
+    pio_gpio_init(pio, pin_sio0 + 2);
+    pio_gpio_init(pio, pin_sio0 + 3);
+    pio_gpio_init(pio, pin_cs);
+    pio_gpio_init(pio, pin_cs + 1);
+
+    hw_set_bits(&pio->input_sync_bypass, 0xfu << pin_sio0);
+
+    pio_sm_init(pio, sm, prog_offs, &c);
+    pio_sm_set_enabled(pio, sm, true);
+}
+%}
