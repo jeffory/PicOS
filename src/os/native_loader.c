@@ -594,14 +594,35 @@ static bool native_run(const app_entry_t *app) {
     }
   }
 
-  // ── 7. Flush XIP cache and compute entry point ──────────────────────────
-  #ifndef PICOS_SIMULATOR
-  __asm volatile ("dsb sy");
-  #endif
-  xip_cache_invalidate_all();
-  #ifndef PICOS_SIMULATOR
-  __asm volatile ("isb sy");
-  #endif
+  // ── 7. Invalidate XIP cache for the app image, compute entry point ──────
+  // Scoped to the image range only — NOT invalidate_all.  cyw43 RX IRQs keep
+  // enqueuing frames into the Mongoose recv_queue (core1 PSRAM pool) even
+  // while both cores' thread loops are paused, so a whole-cache invalidate
+  // discards those dirty lines mid-load: the queue head (SRAM) keeps its
+  // advance while the queued bytes are lost, and Core 1 hard-faults on a
+  // garbage frame length in mg_queue_next after resume.  The image itself was
+  // written via the uncached alias, so its lines are at worst stale-clean and
+  // a range invalidate is sufficient for fresh instruction/data fetches.
+  if (load_base &&
+      (uintptr_t)load_base >= PSRAM_CS1_CACHED_BASE &&
+      (uintptr_t)load_base <  PSRAM_CS1_CACHED_END) {
+    size_t inv_size = split_mode ? psram_size : image_size;
+    if (inv_size > 0) {
+      uintptr_t start = (uintptr_t)load_base - XIP_BASE;
+      uintptr_t end = start + inv_size;
+      // Maintenance ops encode the operation in the low address bits, so the
+      // range must be cache-line aligned.
+      start &= ~(uintptr_t)(XIP_CACHE_LINE_SIZE - 1);
+      end = (end + XIP_CACHE_LINE_SIZE - 1) & ~(uintptr_t)(XIP_CACHE_LINE_SIZE - 1);
+      #ifndef PICOS_SIMULATOR
+      __asm volatile ("dsb sy");
+      #endif
+      xip_cache_invalidate_range(start, end - start);
+      #ifndef PICOS_SIMULATOR
+      __asm volatile ("isb sy");
+      #endif
+    }
+  }
 
   uintptr_t entry_voff_raw = ehdr.e_entry & ~1u;
   uintptr_t entry_addr;
