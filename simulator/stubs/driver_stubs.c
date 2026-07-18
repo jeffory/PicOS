@@ -939,6 +939,9 @@ bool pio_psram_available(void) { return false; }
 uint32_t pio_psram_size(void) { return 0; }
 void pio_psram_read(uint32_t addr, uint8_t *dst, uint32_t len) { (void)addr; (void)dst; (void)len; }
 void pio_psram_write(uint32_t addr, const uint8_t *src, uint32_t len) { (void)addr; (void)src; (void)len; }
+void pio_psram_set_sysclk(uint32_t sys_khz) { (void)sys_khz; }
+const char *pio_psram_mode_str(void) { return "none"; }
+void pio_psram_debug_test(bool full) { (void)full; }
 
 // --- Image preload stubs ---
 #include "../../src/drivers/image_api.h"
