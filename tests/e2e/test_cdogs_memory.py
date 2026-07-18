@@ -299,3 +299,27 @@ def test_heapstat_is_emitted_and_truthful(cdogs_simulator):
         f"threshold ({PEAK_RESERVE_THRESHOLD}) — instrumentation did not "
         f"witness the heap filling"
     )
+
+
+EXCLUDED_PATTERNS = ("*.blend", "*.blend1", "render.py",
+                     "make_spritesheet.sh", "src.txt", "README.md")
+
+
+def test_sd_payload_excludes_non_runtime_sources():
+    """Staged game data carries no Blender sources or build scripts.
+
+    These are ~19MB of the 27MB graphics tree and are never opened at
+    runtime; they also inflate directory entry counts during asset scans.
+    """
+    data_dir = CDOGS_SRC / "data"
+    if not data_dir.exists():
+        pytest.skip("apps/cdogs/data not prepared — run ./prepare_data.sh")
+
+    offenders = []
+    for pattern in EXCLUDED_PATTERNS:
+        offenders.extend(str(p.relative_to(data_dir))
+                         for p in data_dir.rglob(pattern))
+
+    assert not offenders, (
+        f"{len(offenders)} non-runtime files staged, e.g. {offenders[:5]}"
+    )
