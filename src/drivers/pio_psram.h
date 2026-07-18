@@ -41,6 +41,20 @@ uint32_t pio_psram_size(void);
 // Returns true after successful init.
 bool pio_psram_available(void);
 
+// Rescale the PIO clock divider after a sysclk change (called from
+// launcher_apply_clock). Keeps the SPI clock at or below the active tier's
+// validated rate. No-op when PSRAM is unavailable.
+void pio_psram_set_sysclk(uint32_t sys_khz);
+
+// Active mode: "qpi", "serial", or "none".
+const char *pio_psram_mode_str(void);
+
+// Dev-command test: prints mode, throughput (256KB write+read), and a
+// two-pass pattern integrity sweep. full=false sweeps 1MB of the app region;
+// full=true sweeps the whole 8MB. DESTRUCTIVE to PSRAM contents — only run
+// from the launcher with no audio/video active.
+void pio_psram_debug_test(bool full);
+
 #ifdef __cplusplus
 }
 #endif

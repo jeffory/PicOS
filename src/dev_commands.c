@@ -1,6 +1,7 @@
 #include "dev_commands.h"
 #include "drivers/display.h"
 #include "drivers/keyboard.h"
+#include "drivers/pio_psram.h"
 #include "drivers/sdcard.h"
 #include "os/os.h"
 #include "tusb.h"
@@ -376,6 +377,10 @@ bool dev_commands_process(void) {
         s_cmd_list = true;
     } else if (strcmp(s_cmd_buf, "screenshot") == 0) {
         dev_commands_send_screenshot();
+    } else if (strcmp(s_cmd_buf, "psram") == 0) {
+        pio_psram_debug_test(false);
+    } else if (strcmp(s_cmd_buf, "psram full") == 0) {
+        pio_psram_debug_test(true);
     } else if (strncmp(s_cmd_buf, "keypress ", 9) == 0) {
         const char *key = s_cmd_buf + 9;
         uint32_t buttons = 0;

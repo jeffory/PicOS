@@ -8,6 +8,7 @@
 #include "../drivers/image_api.h"
 #include "../drivers/keyboard.h"
 #include "../drivers/mp3_player.h"
+#include "../drivers/pio_psram.h"
 #include "../drivers/sdcard.h"
 #include "../drivers/wifi.h"
 
@@ -552,6 +553,7 @@ void launcher_apply_clock(uint32_t khz) {
   // 3b. Pre-scale the QMI PSRAM divider for the worst of both clocks so the
   // PSRAM SCK never exceeds its validated rate, even mid-transition.
   psram_qmi_apply_timing(khz > current_khz ? khz : current_khz);
+  pio_psram_set_sysclk(khz > current_khz ? khz : current_khz);
 
   // 4. Apply the new system clock
   bool ok = set_sys_clock_khz(khz, false);
@@ -560,12 +562,14 @@ void launcher_apply_clock(uint32_t khz) {
     printf("[LAUNCHER] Clock change to %lu MHz failed (PLL cannot produce this frequency)\n",
            (unsigned long)(khz / 1000));
     psram_qmi_apply_timing(current_khz);
+    pio_psram_set_sysclk(current_khz);
     g_core1_pause = false;
     return;
   }
 
   // 4b. Retune the QMI PSRAM divider exactly for the new sysclk.
   psram_qmi_apply_timing(khz);
+  pio_psram_set_sysclk(khz);
 
   // 5. Re-configure peripheral clock so SPI/I2C/UART/PWM stay stable.
   clock_configure(

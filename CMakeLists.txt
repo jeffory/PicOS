@@ -285,6 +285,7 @@ add_executable(picocalc_os
     src/drivers/mod_player.c
     src/drivers/pio_psram.c
     src/drivers/pio_psram_bulk.c
+    src/drivers/pio_psram_qpi.c
     third_party/mongoose/mongoose.c
     third_party/umm_malloc/src/umm_malloc.c
     third_party/miniz/miniz.c
@@ -359,6 +360,7 @@ set_source_files_properties(
 # Supports up to 8187 bytes per transaction (vs 27 bytes in polpo library).
 # Uses a custom PIO program in src/drivers/pio_psram_bulk.pio.
 pico_generate_pio_header(picocalc_os ${CMAKE_SOURCE_DIR}/src/drivers/pio_psram_bulk.pio)
+pico_generate_pio_header(picocalc_os ${CMAKE_SOURCE_DIR}/src/drivers/pio_psram_qpi.pio)
 
 # Rename .text sections in libmad_ram objects to .time_critical.libmad
 # so the SDK linker script places them in SRAM (the default RP2350 linker
