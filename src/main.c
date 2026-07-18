@@ -42,6 +42,30 @@ extern uint32_t __StackOneBottom; // Core 1 MSP lower bound (SCRATCH_X)
 // Used to detect PSP stack overflow in the hardfault handler.
 extern uint8_t *g_native_stack_base;
 
+// Native app image placement (defined in native_loader.c) — lets the
+// hardfault handler report crash PC/LR as ELF-relative offsets.
+extern uintptr_t g_native_code_base, g_native_code_limit;
+extern uint32_t  g_native_code_vaddr;
+extern uintptr_t g_native_data_base, g_native_data_limit;
+extern uint32_t  g_native_data_vaddr;
+
+// DIAG: code-corruption watcher state (defined in native_loader.c).
+extern const uint8_t *g_code_watch_snap;
+extern const uint8_t *g_code_watch_live;
+extern uint32_t       g_code_watch_size;
+extern _Atomic(bool)  g_code_watch_active;
+
+// Translate an absolute address inside the running native app back to its
+// ELF vaddr.  Returns 0xFFFFFFFF when the address is outside the app image.
+static uint32_t native_addr_to_elf_vaddr(uint32_t addr) {
+  uint32_t a = addr & ~1u;
+  if (g_native_code_base && a >= g_native_code_base && a < g_native_code_limit)
+    return a - (uint32_t)g_native_code_base + g_native_code_vaddr;
+  if (g_native_data_base && a >= g_native_data_base && a < g_native_data_limit)
+    return a - (uint32_t)g_native_data_base + g_native_data_vaddr;
+  return 0xFFFFFFFFu;
+}
+
 static void __attribute__((used)) hardfault_c(uint32_t *frame, uint32_t exc_return) {
   // ARM exception frame layout (8 words pushed by hardware on entry):
   //   frame[0]=R0, [1]=R1, [2]=R2, [3]=R3,
@@ -55,11 +79,31 @@ static void __attribute__((used)) hardfault_c(uint32_t *frame, uint32_t exc_retu
   uint32_t bfar = *(volatile uint32_t *)0xE000ED38u; // BFAR (if BFARVALID)
   uint32_t mmar = *(volatile uint32_t *)0xE000ED34u; // MMFAR (if MMFARVALID)
   uint32_t ccr = *(volatile uint32_t *)0xE000ED14u;  // SCB CCR
+  // ARMv8-M Security Extension fault registers.  A SecureFault escalates to
+  // HardFault with HFSR.FORCED set but leaves CFSR untouched — its syndrome
+  // lives in SFSR/SFAR instead.  (CFSR=0 + FORCED is the telltale.)
+  uint32_t sfsr = *(volatile uint32_t *)0xE000EDE4u; // SFSR
+  uint32_t sfar = *(volatile uint32_t *)0xE000EDE8u; // SFAR (if SFARVALID)
+  uint32_t dfsr = *(volatile uint32_t *)0xE000ED30u; // DFSR (debug events)
 
   // Grab app context before anything else (best-effort, pointers may be bad).
   const char *app_name = launcher_get_running_app_name();
   uint32_t uptime_ms = launcher_get_app_uptime_ms();
   uint32_t uptime_sec = uptime_ms / 1000u;
+
+  // Which exception is actually executing (3 = genuine HardFault; anything
+  // else means this handler was reached through a different vector), what
+  // was executing before (stacked xPSR ISR field, 0 = thread mode), and the
+  // instruction at the faulting PC (verifies the stacked PC is sane).
+  uint32_t ipsr;
+  __asm volatile ("mrs %0, ipsr" : "=r"(ipsr));
+  uint32_t stacked_xpsr = frame[7];
+  uint16_t instr16 = 0;
+  uint32_t pc_probe = frame[6] & ~1u;
+  if ((pc_probe >= 0x10000000u && pc_probe < 0x18000000u) ||
+      (pc_probe >= 0x20000000u && pc_probe < 0x20082000u)) {
+    instr16 = *(volatile uint16_t *)pc_probe;
+  }
 
   // Persist fault data in watchdog scratch registers so it survives a
   // watchdog reset and can be dumped to SD on next boot.
@@ -70,11 +114,25 @@ static void __attribute__((used)) hardfault_c(uint32_t *frame, uint32_t exc_retu
   watchdog_hw->scratch[3] = (uint32_t)(uintptr_t)frame + 32u; // pre-fault SP
   watchdog_hw->scratch[4] = cfsr;
   watchdog_hw->scratch[5] = hfsr;
-  watchdog_hw->scratch[6] = bfar;
-  // Pack PSP bit (bit 31) + uptime in seconds (bits 0-30) into scratch[7].
-  // EXC_RETURN only needs bit 2 (PSP vs MSP) for crash log decoding.
+  // scratch[6] is context-dependent (crash_log_save decodes with the same
+  // conditions): SFAR when SFSR.SFARVALID; BFAR when any CFSR/SFSR syndrome
+  // exists; otherwise (no syndrome at all — BFAR is stale garbage then) a
+  // diagnostic pack: instr16@PC (0-15) | live IPSR (16-24) | stacked ISR (25-31).
+  if (sfsr & (1u << 6)) {
+    watchdog_hw->scratch[6] = sfar;
+  } else if (cfsr != 0 || sfsr != 0) {
+    watchdog_hw->scratch[6] = bfar;
+  } else {
+    watchdog_hw->scratch[6] = (uint32_t)instr16
+                            | ((ipsr & 0x1FFu) << 16)
+                            | ((stacked_xpsr & 0x7Fu) << 25);
+  }
+  // Pack PSP bit (bit 31) + SFSR (bits 23-30) + uptime seconds (bits 0-22)
+  // into scratch[7].  EXC_RETURN only needs bit 2 (PSP vs MSP) for crash log
+  // decoding; SFSR is 8 bits; 23 bits of uptime covers 97 days.
   watchdog_hw->scratch[7] = ((exc_return & 4u) ? (1u << 31) : 0u)
-                           | (uptime_sec & 0x7FFFFFFFu);
+                           | ((sfsr & 0xFFu) << 23)
+                           | (uptime_sec & 0x7FFFFFu);
 
   // frame IS the MSP/PSP just after the hardware pushed the 8-word exception
   // frame.  Pre-fault SP = frame + 32 (8 words × 4 bytes).
@@ -110,6 +168,12 @@ static void __attribute__((used)) hardfault_c(uint32_t *frame, uint32_t exc_retu
   printf("  PC   = 0x%08lx\n", (unsigned long)pc);
   printf("  LR   = 0x%08lx\n", (unsigned long)lr);
   printf("  R0   = 0x%08lx\n", (unsigned long)r0);
+  uint32_t pc_rel = native_addr_to_elf_vaddr(pc);
+  uint32_t lr_rel = native_addr_to_elf_vaddr(lr);
+  if (pc_rel != 0xFFFFFFFFu)
+    printf("  PC-ELF = 0x%08lx (app image offset)\n", (unsigned long)pc_rel);
+  if (lr_rel != 0xFFFFFFFFu)
+    printf("  LR-ELF = 0x%08lx (app image offset)\n", (unsigned long)lr_rel);
   printf("  SP   = 0x%08lx  (frame @ 0x%08lx)  stack_limit=0x%08lx [%s]%s\n",
          (unsigned long)sp_at_fault, (unsigned long)(uintptr_t)frame,
          (unsigned long)stack_limit,
@@ -119,6 +183,12 @@ static void __attribute__((used)) hardfault_c(uint32_t *frame, uint32_t exc_retu
   printf("  HFSR = 0x%08lx\n", (unsigned long)hfsr);
   printf("  BFAR = 0x%08lx\n", (unsigned long)bfar);
   printf("  MMAR = 0x%08lx\n", (unsigned long)mmar);
+  printf("  SFSR = 0x%08lx\n", (unsigned long)sfsr);
+  printf("  SFAR = 0x%08lx\n", (unsigned long)sfar);
+  printf("  DFSR = 0x%08lx\n", (unsigned long)dfsr);
+  printf("  IPSR = %lu (3=HardFault)  stacked xPSR = 0x%08lx  [PC] = 0x%04x\n",
+         (unsigned long)(ipsr & 0x1FFu), (unsigned long)stacked_xpsr,
+         (unsigned)instr16);
   printf("  CCR  = 0x%08lx (bit3=UNALIGNED_TRP)\n", (unsigned long)ccr);
   // Decode CFSR flags to UART for easy diagnosis
   if (cfsr & (1u<<17)) printf("  INVSTATE: invalid CPU state (bad Thumb bit?)\n");
@@ -134,8 +204,17 @@ static void __attribute__((used)) hardfault_c(uint32_t *frame, uint32_t exc_retu
   if (cfsr & (1u<< 0)) printf("  IACCVIOL: MPU instr access violation (MMAR=0x%08lx)\n", (unsigned long)mmar);
   if (cfsr & (1u<<25)) printf("  DIVBYZERO: divide by zero\n");
   if (cfsr & (1u<<24)) printf("  UNALIGNED: unaligned access\n");
+  if (cfsr & (1u<<20)) printf("  STKOF: stack limit violation (MSPLIM/PSPLIM)\n");
   if (hfsr & (1u<<30)) printf("  HFSR FORCED: escalated from configurable fault\n");
   if (hfsr & (1u<< 1)) printf("  HFSR VECTTBL: vector table read fault\n");
+  // SecureFault syndrome (ARMv8-M Security Extension)
+  if (sfsr & (1u<<0)) printf("  SFSR INVEP: invalid NS->S entry point\n");
+  if (sfsr & (1u<<1)) printf("  SFSR INVIS: invalid integrity signature\n");
+  if (sfsr & (1u<<2)) printf("  SFSR INVER: invalid exception return\n");
+  if (sfsr & (1u<<3)) printf("  SFSR AUVIOL: attribution unit violation (SFAR=0x%08lx)\n", (unsigned long)sfar);
+  if (sfsr & (1u<<4)) printf("  SFSR INVTRAN: invalid S<->NS transition\n");
+  if (sfsr & (1u<<5)) printf("  SFSR LSPERR: lazy FP state preservation error\n");
+  if (sfsr & (1u<<7)) printf("  SFSR LSERR: lazy state error\n");
   stdio_flush();
 
   // ── Display output (best-effort — lets us see fault info without a UART) ──
@@ -176,8 +255,18 @@ static void __attribute__((used)) hardfault_c(uint32_t *frame, uint32_t exc_retu
   snprintf(ln, sizeof(ln), "BFAR %08lx  MMAR %08lx", (unsigned long)bfar, (unsigned long)mmar);
   display_draw_text(4, 90, ln, 0xFFFF, 0x0000);
 
+  snprintf(ln, sizeof(ln), "SFSR %08lx  SFAR %08lx", (unsigned long)sfsr, (unsigned long)sfar);
+  display_draw_text(4, 104, ln, 0xFFFF, 0x0000);
+
+  if (pc_rel != 0xFFFFFFFFu) {
+    snprintf(ln, sizeof(ln), "PC-ELF %08lx LR-ELF %08lx",
+             (unsigned long)pc_rel,
+             (unsigned long)((lr_rel != 0xFFFFFFFFu) ? lr_rel : 0));
+    display_draw_text(4, 118, ln, 0x07FF, 0x0000); // cyan
+  }
+
   // Decode CFSR fault type flags on-screen
-  int y = 108;
+  int y = 136;
   uint16_t warn = 0xFD20; // orange
   if (cfsr & (1u<<17)) { display_draw_text(4, y, "INVSTATE: invalid CPU state", warn, 0); y += 14; }
   if (cfsr & (1u<<16)) { display_draw_text(4, y, "UNDEFINSTR", warn, 0);                  y += 14; }
@@ -192,9 +281,17 @@ static void __attribute__((used)) hardfault_c(uint32_t *frame, uint32_t exc_retu
   if (cfsr & (1u<< 0)) { display_draw_text(4, y, "IACCVIOL: MPU instr viol",   warn, 0); y += 14; }
   if (cfsr & (1u<<25)) { display_draw_text(4, y, "DIVBYZERO",                   warn, 0); y += 14; }
   if (cfsr & (1u<<24)) { display_draw_text(4, y, "UNALIGNED access",            warn, 0); y += 14; }
+  if (cfsr & (1u<<20)) { display_draw_text(4, y, "STKOF: stack limit viol",     warn, 0); y += 14; }
   if (hfsr & (1u<<30)) { display_draw_text(4, y, "HFSR: FORCED escalation",    warn, 0); y += 14; }
   if (hfsr & (1u<< 1)) { display_draw_text(4, y, "HFSR: vector table fault",   warn, 0); y += 14; }
-  if (y == 104)         { display_draw_text(4, y, "(no CFSR flags set)",        warn, 0); }
+  if (sfsr & (1u<<0))  { display_draw_text(4, y, "SFSR INVEP",                  warn, 0); y += 14; }
+  if (sfsr & (1u<<1))  { display_draw_text(4, y, "SFSR INVIS",                  warn, 0); y += 14; }
+  if (sfsr & (1u<<2))  { display_draw_text(4, y, "SFSR INVER",                  warn, 0); y += 14; }
+  if (sfsr & (1u<<3))  { display_draw_text(4, y, "SFSR AUVIOL",                 warn, 0); y += 14; }
+  if (sfsr & (1u<<4))  { display_draw_text(4, y, "SFSR INVTRAN",                warn, 0); y += 14; }
+  if (sfsr & (1u<<5))  { display_draw_text(4, y, "SFSR LSPERR",                 warn, 0); y += 14; }
+  if (sfsr & (1u<<7))  { display_draw_text(4, y, "SFSR LSERR",                  warn, 0); y += 14; }
+  if (y == 136)        { display_draw_text(4, y, "(no fault flags set)",         warn, 0); }
 
   display_flush();
 
@@ -1310,6 +1407,101 @@ static void core1_entry(void) {
         audio_cb();
 
       image_preload_update();
+
+      // DIAG: code-corruption watcher — scan the native app's read-only
+      // image against the load-time snapshot in rotating 32KB chunks (both
+      // via the uncached PSRAM alias: no XIP-cache pollution).  On a hit,
+      // report onset time, offsets, and old/new/cached-view bytes — the
+      // data pattern fingerprints whoever tramples app code — then repair
+      // the damage so the run continues and repeat events get logged.
+      if (atomic_load(&g_code_watch_active)) {
+        static uint32_t s_watch_pos = 0;
+        static uint32_t s_watch_passes = 0;
+        static int s_watch_reports = 0;
+        const uint8_t *snap = g_code_watch_snap;
+        const uint8_t *live = g_code_watch_live;
+        uint32_t size = g_code_watch_size;
+        if (snap && live && size) {
+          uint32_t chunk = 32u * 1024;
+          if (s_watch_pos >= size) {
+            s_watch_pos = 0;
+            if ((++s_watch_passes % 64) == 0)
+              printf("[CODEWATCH] clean pass #%lu\n",
+                     (unsigned long)s_watch_passes);
+          }
+          uint32_t n = size - s_watch_pos;
+          if (n > chunk) n = chunk;
+          const uint8_t *s = snap + s_watch_pos;
+          const uint8_t *l = live + s_watch_pos;
+          if (memcmp(s, l, n) != 0 && s_watch_reports < 40) {
+            uint32_t first = 0, last = 0, count = 0;
+            for (uint32_t i = 0; i < n; i++) {
+              if (s[i] != l[i]) {
+                if (!count) first = i;
+                last = i;
+                count++;
+              }
+            }
+            // Re-read the differing span: uncached PSRAM reads have been
+            // seen to glitch transiently, and a transient misread is itself
+            // a finding (report, but don't "repair" good memory with it).
+            if (memcmp(s + first, l + first, last - first + 1) == 0) {
+              printf("[CODEWATCH] TRANSIENT misread t=%lums off=0x%05lx n=%lu\n",
+                     (unsigned long)(time_us_64() / 1000),
+                     (unsigned long)(s_watch_pos + first),
+                     (unsigned long)count);
+            } else {
+              uint32_t off = s_watch_pos + first;
+              printf("[CODEWATCH] CORRUPT t=%lums off=0x%05lx..0x%05lx n=%lu\n",
+                     (unsigned long)(time_us_64() / 1000),
+                     (unsigned long)off,
+                     (unsigned long)(s_watch_pos + last),
+                     (unsigned long)count);
+              uint32_t d = first & ~15u;
+              printf("[CODEWATCH] was:");
+              for (int i = 0; i < 16; i++) printf(" %02x", s[d + i]);
+              printf("\n[CODEWATCH] psram:");
+              for (int i = 0; i < 16; i++) printf(" %02x", l[d + i]);
+              // Cached view of the same bytes — if it differs from the psram
+              // view, the corruption lives in the XIP cache, not PSRAM.
+              const uint8_t *lc = l + d - 0x04000000u; // uncached -> cached
+              printf("\n[CODEWATCH] cache:");
+              for (int i = 0; i < 16; i++) printf(" %02x", lc[i]);
+              printf("\n");
+              // Repair: restore PSRAM from the snapshot, then invalidate the
+              // XIP range so the CPU refetches the clean bytes.
+              memcpy((void *)(uintptr_t)(l + first), s + first,
+                     last - first + 1);
+              uintptr_t inv_start =
+                  ((uintptr_t)(l + first) - 0x04000000u - XIP_BASE) & ~7u;
+              uintptr_t inv_end =
+                  (((uintptr_t)(l + last) - 0x04000000u - XIP_BASE) + 8u) & ~7u;
+              __asm volatile ("dsb sy");
+              xip_cache_invalidate_range(inv_start, inv_end - inv_start);
+              __asm volatile ("isb sy");
+            }
+            s_watch_reports++;
+          }
+          s_watch_pos += n;
+        }
+      }
+
+      // PHASE-0 AUDIO DIAGNOSTICS: log stream stats every ~2s when something
+      // is driving the audio callback.  Helps classify Doom-audio symptoms —
+      // zero ISR ⇒ DMA never started; spiking underruns ⇒ Core 1 starvation;
+      // steady ISR + zero underruns ⇒ producer issue in the app itself.
+      if (audio_cb) {
+        static uint64_t s_last_audio_debug_us = 0;
+        uint64_t now = time_us_64();
+        if (now - s_last_audio_debug_us >= 2000000) {
+          s_last_audio_debug_us = now;
+          uint32_t isr_cnt = 0, underruns = 0, ring_used = 0;
+          audio_stream_debug(&isr_cnt, &underruns, &ring_used);
+          printf("[AUDIO] ISR=%lu underruns=%lu ring_used=%lu\n",
+                 (unsigned long)isr_cnt, (unsigned long)underruns,
+                 (unsigned long)ring_used);
+        }
+      }
     }
 
     __wfi();
@@ -1338,9 +1530,11 @@ static void crash_log_save(void) {
 
   uint32_t cfsr = s_crash_data[4];
   uint32_t hfsr = s_crash_data[5];
-  // scratch[7] packing: bit 31 = PSP flag, bits 0-30 = uptime in seconds
+  // scratch[7] packing: bit 31 = PSP flag, bits 23-30 = SFSR (low 8 bits),
+  // bits 0-22 = uptime in seconds
   bool was_psp = (s_crash_data[7] & (1u << 31)) != 0;
-  uint32_t crash_uptime_sec = s_crash_data[7] & 0x7FFFFFFFu;
+  uint32_t sfsr = (s_crash_data[7] >> 23) & 0xFFu;
+  uint32_t crash_uptime_sec = s_crash_data[7] & 0x7FFFFFu;
 
   char line[512];
   int n = snprintf(line, sizeof(line),
@@ -1351,13 +1545,28 @@ static void crash_log_save(void) {
     "  SP   = 0x%08lx\n"
     "  CFSR = 0x%08lx\n"
     "  HFSR = 0x%08lx\n"
-    "  BFAR = 0x%08lx\n"
+    "  SFSR = 0x%08lx\n"
     "  Stack: %s\n",
     (unsigned long)(crash_uptime_sec / 60u), (unsigned long)(crash_uptime_sec % 60u),
     (unsigned long)s_crash_data[1], (unsigned long)s_crash_data[2],
     (unsigned long)s_crash_data[3], (unsigned long)cfsr,
-    (unsigned long)hfsr, (unsigned long)s_crash_data[6],
+    (unsigned long)hfsr, (unsigned long)sfsr,
     was_psp ? "PSP (native app)" : "MSP (OS)");
+
+  // scratch[6] decode mirrors hardfault_c's packing conditions.
+  if (sfsr & (1u << 6)) {
+    n += snprintf(line+n, sizeof(line)-n, "  SFAR = 0x%08lx\n",
+                  (unsigned long)s_crash_data[6]);
+  } else if (cfsr != 0 || sfsr != 0) {
+    n += snprintf(line+n, sizeof(line)-n, "  BFAR = 0x%08lx\n",
+                  (unsigned long)s_crash_data[6]);
+  } else {
+    n += snprintf(line+n, sizeof(line)-n,
+                  "  IPSR = %lu (3=HardFault)  stackedISR = %lu  [PC] = 0x%04lx\n",
+                  (unsigned long)((s_crash_data[6] >> 16) & 0x1FFu),
+                  (unsigned long)((s_crash_data[6] >> 25) & 0x7Fu),
+                  (unsigned long)(s_crash_data[6] & 0xFFFFu));
+  }
 
   // Decode CFSR/HFSR flags into human-readable text
   if (cfsr & (1u<<17)) n += snprintf(line+n, sizeof(line)-n, "  INVSTATE: invalid CPU state\n");
@@ -1373,8 +1582,16 @@ static void crash_log_save(void) {
   if (cfsr & (1u<< 0)) n += snprintf(line+n, sizeof(line)-n, "  IACCVIOL: MPU instruction access violation\n");
   if (cfsr & (1u<<25)) n += snprintf(line+n, sizeof(line)-n, "  DIVBYZERO\n");
   if (cfsr & (1u<<24)) n += snprintf(line+n, sizeof(line)-n, "  UNALIGNED access\n");
+  if (cfsr & (1u<<20)) n += snprintf(line+n, sizeof(line)-n, "  STKOF: stack limit violation\n");
   if (hfsr & (1u<<30)) n += snprintf(line+n, sizeof(line)-n, "  HFSR: FORCED escalation\n");
   if (hfsr & (1u<< 1)) n += snprintf(line+n, sizeof(line)-n, "  HFSR: vector table fault\n");
+  if (sfsr & (1u<<0))  n += snprintf(line+n, sizeof(line)-n, "  SFSR INVEP: invalid NS->S entry\n");
+  if (sfsr & (1u<<1))  n += snprintf(line+n, sizeof(line)-n, "  SFSR INVIS: invalid integrity signature\n");
+  if (sfsr & (1u<<2))  n += snprintf(line+n, sizeof(line)-n, "  SFSR INVER: invalid exception return\n");
+  if (sfsr & (1u<<3))  n += snprintf(line+n, sizeof(line)-n, "  SFSR AUVIOL: attribution violation\n");
+  if (sfsr & (1u<<4))  n += snprintf(line+n, sizeof(line)-n, "  SFSR INVTRAN: invalid S<->NS transition\n");
+  if (sfsr & (1u<<5))  n += snprintf(line+n, sizeof(line)-n, "  SFSR LSPERR: lazy FP preservation error\n");
+  if (sfsr & (1u<<7))  n += snprintf(line+n, sizeof(line)-n, "  SFSR LSERR: lazy state error\n");
   n += snprintf(line+n, sizeof(line)-n, "\n");
 
   sdcard_fwrite(f, line, n);

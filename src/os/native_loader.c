@@ -152,6 +152,31 @@ static void show_error(const char *line1, const char *line2) {
 // is running.
 uint8_t *g_native_stack_base = NULL;
 
+// Where the running native app's image landed, read by the HardFault handler
+// (main.c) to report crash PC/LR as ELF-relative offsets so they can be
+// symbolicated against the app's .elf.  In split mode the code segment lives
+// in SRAM apart from the PSRAM data segment, hence two ranges.  All zero when
+// no native app is running.
+uintptr_t g_native_code_base = 0, g_native_code_limit = 0;
+uint32_t  g_native_code_vaddr = 0;
+uintptr_t g_native_data_base = 0, g_native_data_limit = 0;
+uint32_t  g_native_data_vaddr = 0;
+
+// DIAG: code-corruption watcher.  A snapshot of the app's read-only image
+// (.text + .rodata) taken right after load; Core 1 scans it against the live
+// image in rotating chunks and reports + repairs any divergence (onset time
+// + data pattern identify whoever is trampling app code in PSRAM).  Both
+// pointers are UNCACHED-alias addresses so the scan neither pollutes the
+// XIP cache nor misses direct-to-PSRAM writes.  Active only while a native
+// app is running and the snapshot allocation succeeded.
+// Cap: Doom's .rodata ends at vaddr 0x58C84; everything below 0x58C00 is
+// read-only at runtime (diagnostic constant — adjust per app if reused).
+#define CODE_WATCH_MAX_SIZE (0x58C00u)
+const uint8_t     *g_code_watch_snap = NULL;   // uncached alias
+const uint8_t     *g_code_watch_live = NULL;   // uncached alias
+uint32_t           g_code_watch_size = 0;
+_Atomic(bool)      g_code_watch_active = false;
+
 // Stack canary: the bottom NATIVE_STACK_GUARD_WORDS words are filled with a
 // sentinel before launch and checked afterwards.  If the stack overflows into
 // this guard zone the corruption is detected and reported.  The stack grows
@@ -643,6 +668,63 @@ static bool native_run(const app_entry_t *app) {
   printf("[NATIVE] Entry %p (thumb%s)\n", (void *)entry_addr,
          split_mode ? ", SRAM" : ", cached PSRAM");
 
+  // Record image placement so the HardFault handler can report crash PC/LR
+  // as ELF-relative offsets (symbolicate with: arm-none-eabi-addr2line -e
+  // <unstripped>.elf <offset>).
+  if (split_mode) {
+    g_native_code_base  = (uintptr_t)code_buf;
+    g_native_code_limit = (uintptr_t)code_buf + code_memsz;
+    g_native_code_vaddr = code_vaddr;
+    g_native_data_base  = (uintptr_t)load_base;
+    g_native_data_limit = (uintptr_t)load_base + psram_size;
+    g_native_data_vaddr = data_vaddr_start;
+  } else {
+    g_native_code_base  = (uintptr_t)load_base;
+    g_native_code_limit = (uintptr_t)load_base + image_size;
+    g_native_code_vaddr = mem_min;
+    g_native_data_base  = 0;
+    g_native_data_limit = 0;
+    g_native_data_vaddr = 0;
+  }
+  printf("[NATIVE] Image base %p = ELF vaddr 0x%08lx\n",
+         (void *)g_native_code_base, (unsigned long)g_native_code_vaddr);
+
+  // DIAG: snapshot the read-only image region for the Core 1 corruption
+  // watcher.  Taken after relocation + cache invalidate, copied uncached →
+  // uncached so it reflects PSRAM truth and leaves the XIP cache untouched.
+  if (!split_mode &&
+      (uintptr_t)load_base >= PSRAM_CS1_CACHED_BASE &&
+      (uintptr_t)load_base <  PSRAM_CS1_CACHED_END) {
+    uint32_t wsize = (uint32_t)(g_native_code_limit - g_native_code_base);
+    if (wsize > CODE_WATCH_MAX_SIZE) wsize = CODE_WATCH_MAX_SIZE;
+    uint8_t *snap = (uint8_t *)umm_malloc(wsize);
+    if (snap) {
+      const uint8_t *live_u =
+          (const uint8_t *)(g_native_code_base + PSRAM_CACHED_TO_UNCACHED);
+      uint8_t *snap_u = snap + PSRAM_CACHED_TO_UNCACHED;
+      memcpy(snap_u, live_u, wsize);
+      // Verify the copy against the CACHED view: the uncached alias has been
+      // seen to misread the image's first word persistently right after
+      // load (returns zeros), while the cached view is correct.  One-time
+      // cache thrash here is fine — the app hasn't started yet.
+      {
+        const uint8_t *live_c = (const uint8_t *)g_native_code_base;
+        for (int pass = 0;
+             pass < 3 && memcmp(snap_u, live_c, wsize) != 0; pass++) {
+          for (uint32_t i = 0; i < wsize; i++)
+            if (snap_u[i] != live_c[i]) snap_u[i] = live_c[i];
+        }
+      }
+      g_code_watch_snap = snap_u;
+      g_code_watch_live = live_u;
+      g_code_watch_size = wsize;
+      __dmb();
+      atomic_store(&g_code_watch_active, true);
+      printf("[CODEWATCH] armed: %lu bytes @ %p (uncached)\n",
+             (unsigned long)wsize, (const void *)live_u);
+    }
+  }
+
   kbd_clear_state();
 
   // ── 8. Launch app ─────────────────────────────────────────────────────────
@@ -687,7 +769,11 @@ out:
   // ── 9. Cleanup ─────────────────────────────────────────────────────────────
   __dmb(); // ensure all app writes visible before clearing callback
   atomic_store(&g_native_audio_callback, NULL);
+  atomic_store(&g_code_watch_active, false);
   g_native_stack_base = NULL;
+  g_native_code_base = g_native_code_limit = 0;
+  g_native_data_base = g_native_data_limit = 0;
+  g_native_code_vaddr = g_native_data_vaddr = 0;
   g_core1_pause = true;
   for (int i = 0; i < 200 && !g_core1_paused; i++)
     sleep_ms(1);
@@ -695,6 +781,14 @@ out:
     printf("[NATIVE] Core 1 pause timeout (200ms) at cleanup\n");
   audio_stop_stream();
   audio_stop_tone();
+  // Core 1 is paused (or timed out) — safe to drop the watcher snapshot now.
+  // g_code_watch_snap holds the uncached alias; umm_free wants the original.
+  if (g_code_watch_snap) {
+    umm_free((void *)(g_code_watch_snap - PSRAM_CACHED_TO_UNCACHED));
+    g_code_watch_snap = NULL;
+    g_code_watch_live = NULL;
+    g_code_watch_size = 0;
+  }
   if (code_buf)
     free(code_buf);
   if (stack_buf)
