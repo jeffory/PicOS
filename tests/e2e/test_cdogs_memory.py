@@ -166,24 +166,20 @@ def cdogs_simulator(simulator_binary, test_sd_card, request):
         time.sleep(0.2)
 
     yield sim
-    sim.stop()
 
-
-def read_log_text(simulator, since_seq=0):
-    """Concatenate the simulator log buffer into one searchable string.
-
-    get_log_buffer returns {lines: [...], next_seq: int}, and each line is
-    either a bare string or a dict carrying a "text" key.
-
-    Not used by the native-app test below (see module docstring) — kept
-    for Lua-side instrumentation in later stages of this spec.
-    """
-    result = simulator.get_log_buffer(since_seq=since_seq)
-    lines = [
-        line if isinstance(line, str) else line.get("text", "")
-        for line in result.get("lines", [])
-    ]
-    return "\n".join(lines)
+    # The autouse _check_crash_log fixture in conftest.py depends on the
+    # shared `simulator` fixture, not this one — every test in this module
+    # uses cdogs_simulator instead, so that autouse check silently inspects
+    # a second, unused simulator instance and never looks at this one. This
+    # is the only native ELF app under e2e test, in exactly the
+    # memory-fragile regime this test module exists to cover, so check here
+    # explicitly before tearing down. try/finally so a crash (or a failed
+    # get_crash_log call) still lets sim.stop() run and reap the process.
+    try:
+        crash = sim.call("get_crash_log", timeout=2.0).get("crash_log")
+        assert not crash, f"C-Dogs simulator crashed during test:\n{crash}"
+    finally:
+        sim.stop()
 
 
 def parse_heapstats(log_text):
@@ -271,6 +267,21 @@ def test_heapstat_is_emitted_and_truthful(cdogs_simulator):
             f"true free ({s['true']}) exceeds the 5MB arena at tag {s['tag']}"
         )
 
+    # The actual Stage 0 gate (specs/2026-07-19-cdogs-asset-memory-design.md):
+    # true-free and watermark must DIFFER, not just satisfy true >= watermark.
+    # true==watermark everywhere (e.g. if mallinfo().fordblks were always 0,
+    # as it would be under the old watermark-only gauge this instrumentation
+    # replaced) would still pass the >= check above while proving nothing —
+    # this is the only assertion that actually proves newlib is recycling
+    # freed blocks the watermark-only gauge couldn't see.
+    assert max(s["true"] - s["watermark"] for s in stats) > 0, (
+        "true free was never greater than watermark across any HEAPSTAT "
+        "line — this is supposed to prove newlib recycles freed blocks "
+        "(via mallinfo().fordblks) that the sbrk watermark alone cannot "
+        "see; if this never diverges, the 'true' gauge isn't measuring "
+        "anything the old watermark-only gauge didn't already"
+    )
+
     # Navigation sanity check. The peak assertion below is the only gate
     # between "quick-play loaded" and a pass, and on its own a failure
     # there just says the heap never filled — which points straight at
@@ -302,7 +313,7 @@ def test_heapstat_is_emitted_and_truthful(cdogs_simulator):
 
 
 GFXSTAT_RE = re.compile(
-    r"GFXSTAT (\S+) pics=(\d+) data=(\d+) tex=(\d+) total=(\d+) peak=(\d+) skipped=(\d+)"
+    r"GFXSTAT (\S+) pics=(-?\d+) data=(\d+) tex=(\d+) total=(\d+) peak=(\d+) skipped=(-?\d+)"
 )
 
 
@@ -408,11 +419,15 @@ def peak_gfx_total(simulator, settle_s=12):
 def test_gfxstat_reports_resident_graphics(cdogs_simulator):
     """Resident graphics accounting is emitted and internally consistent.
 
-    Establishes the Stage 1 baseline for Task 4 (collapsing the Data/Tex
-    duplication): total should be roughly 2x data if every pic currently
-    holds two identical copies. Asserts internal consistency and that a
-    peak was actually observed, not any specific byte figure — the point
-    of this test is to measure the current footprint, not pin it.
+    Originally established the Stage 1 baseline for Task 4 (collapsing the
+    Data/Tex duplication), back when total was roughly 2x data because
+    every pic held two identical copies. Task 4 has since landed (textures
+    borrow Pic->Data instead of copying it — see
+    test_textures_borrow_rather_than_duplicate below), so that 2x
+    relationship no longer holds and this docstring no longer claims it.
+    Asserts internal consistency and that a peak was actually observed, not
+    any specific byte figure — the point of this test is to measure the
+    current footprint, not pin it.
     """
     peak = peak_gfx_total(cdogs_simulator)
 
@@ -425,7 +440,7 @@ def test_gfxstat_reports_resident_graphics(cdogs_simulator):
 
 
 EXCLUDED_PATTERNS = ("*.blend", "*.blend1", "render.py",
-                     "make_spritesheet.sh", "src.txt", "README.md")
+                     "make_spritesheet.sh", "README.md")
 
 
 def test_sd_payload_excludes_non_runtime_sources():
@@ -452,27 +467,56 @@ def test_textures_borrow_rather_than_duplicate(cdogs_simulator):
     """Textures alias Pic->Data instead of holding a second copy.
 
     With no GPU a texture is plain heap, so duplicating every image
-    doubled resident graphics memory for no benefit.
+    doubled resident graphics memory for no benefit. tex_bytes accounting
+    was moved from pic.c (caller) into the SDL texture shim itself
+    (picos_sdl_impl.c's SDL_CreateTexture/SDL_DestroyTexture) so it counts
+    bytes a texture actually OWNS — PicosTextureBorrow (used for every
+    per-pic texture on this port) adds nothing. That means tex is NOT
+    expected to be 0: a handful of textures legitimately own their pixels
+    — grafx.c's GraphicsInitialize creates 5 whole-screen ARGB8888 buffers
+    (bkgTgt, bkg, screen, hud, brightnessOverlay) via SDL_CreateTexture,
+    none of which are per-pic sprite copies. See TEX_CEILING_BYTES below
+    for the measured legitimate baseline and how the ceiling was chosen.
     """
     peak = peak_gfx_total(cdogs_simulator)
 
-    assert peak["tex"] == 0, (
-        f"textures still hold {peak['tex']} bytes — expected 0 once borrowed"
+    # Measured on this simulator (deterministic across repeated runs — these
+    # are fixed 320x240 ARGB8888 window buffers created once during
+    # GraphicsInitialize, independent of how many sprites load):
+    #   5 owning textures * 320 * 240 * 4 bytes = 1_536_000
+    # If a per-pic duplication path were reintroduced (i.e. Task 3's
+    # regression), tex would additionally gain roughly one more copy of
+    # `data` per pic — using this run's own data=81824 as the estimate,
+    # that's ~1_536_000 + 81_824 ~= 1_617_824. The ceiling below sits
+    # roughly halfway between the measured legitimate baseline and that
+    # regression estimate: generous headroom over what's actually observed,
+    # but comfortably below the point a reintroduced duplication path would
+    # reach.
+    TEX_CEILING_BYTES = 1_580_000
+    assert peak["tex"] < TEX_CEILING_BYTES, (
+        f"tex holds {peak['tex']} bytes, expected under {TEX_CEILING_BYTES} "
+        "— legitimate owning textures (grafx.c's window-sized render "
+        "buffers) measured at 1_536_000 on this simulator; a figure "
+        "meaningfully above that suggests a per-pic texture-duplication "
+        "path was reintroduced somewhere"
     )
     assert peak["data"] > 0, "no pic data counted; accounting is broken"
 
     # Secondary, heap-pressure-immune gate. Freeing the duplicate texture
     # copy relaxes the reserve guard (utils.c's IMG_LOAD_HEAP_RESERVE), so
     # it now skips fewer images than Task 3's run did — pics rises, and raw
-    # total/peak can hold steady or even grow instead of halving. Bytes per
+    # data/peak can hold steady or even grow instead of halving. Bytes per
     # pic is not sensitive to how many images got past the guard: Task 3's
     # baseline was ~320 bytes/pic (163648/512, tex==data duplication in
     # full); with textures borrowed there is only one copy per pic, so this
-    # should roughly halve to ~160. Assert a generous ceiling rather than
-    # pin an exact figure.
+    # should roughly halve to ~160. Uses `data` rather than `total` here
+    # deliberately: `total` now includes the fixed, non-per-pic window-
+    # buffer bytes accounted for above, which would swamp this ratio and
+    # defeat its purpose. Assert a generous ceiling rather than pin an
+    # exact figure.
     assert peak["pics"] > 0, "no pics counted; accounting is broken"
-    bytes_per_pic = peak["total"] / peak["pics"]
+    bytes_per_pic = peak["data"] / peak["pics"]
     assert bytes_per_pic < 240, (
-        f"total/pics = {bytes_per_pic:.1f} bytes/pic — expected roughly half "
+        f"data/pics = {bytes_per_pic:.1f} bytes/pic — expected roughly half "
         f"of Task 3's ~320 baseline once the duplicate texture copy is gone"
     )
