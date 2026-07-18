@@ -287,19 +287,24 @@ bool pio_psram_qpi_init(void) {
     psram_qpi_cs_init(s_pio, s_sm, s_prog_offs, 4.0f,
                       PIO_PSRAM_PIN_CS, PIO_PSRAM_PIN_SIO0);
 
-    // Electrical config from polpo/rp2040-psram PR #15: 8mA + fast slew on
-    // everything, hysteresis off on the data pins for faster input paths.
-    static const uint pins[] = { PIO_PSRAM_PIN_CS, PIO_PSRAM_PIN_SCK,
-                                 PIO_PSRAM_PIN_SIO0, PIO_PSRAM_PIN_SIO1,
-                                 PIO_PSRAM_PIN_SIO2, PIO_PSRAM_PIN_SIO3 };
-    for (unsigned i = 0; i < sizeof(pins) / sizeof(pins[0]); i++) {
-        gpio_set_drive_strength(pins[i], GPIO_DRIVE_STRENGTH_8MA);
-        gpio_set_slew_rate(pins[i], GPIO_SLEW_RATE_FAST);
+    // Electrical profile: match the proven serial driver (4mA, fast slew on
+    // CS/SCK) and keep input hysteresis ENABLED on the data pins. The PR #15
+    // profile (8mA, fast slew, hysteresis off) targets 75-115 MHz; on this
+    // board at 25-50 MHz it produced sparse transient bit errors (crosstalk /
+    // simultaneous-switching noise on the four data lines). Data pins use
+    // slow slew to cut aggressor noise; edge rate is no constraint at these
+    // clocks.
+    gpio_set_drive_strength(PIO_PSRAM_PIN_CS, GPIO_DRIVE_STRENGTH_4MA);
+    gpio_set_drive_strength(PIO_PSRAM_PIN_SCK, GPIO_DRIVE_STRENGTH_4MA);
+    gpio_set_slew_rate(PIO_PSRAM_PIN_CS, GPIO_SLEW_RATE_FAST);
+    gpio_set_slew_rate(PIO_PSRAM_PIN_SCK, GPIO_SLEW_RATE_FAST);
+    static const uint data_pins[] = { PIO_PSRAM_PIN_SIO0, PIO_PSRAM_PIN_SIO1,
+                                      PIO_PSRAM_PIN_SIO2, PIO_PSRAM_PIN_SIO3 };
+    for (unsigned i = 0; i < 4; i++) {
+        gpio_set_drive_strength(data_pins[i], GPIO_DRIVE_STRENGTH_4MA);
+        gpio_set_slew_rate(data_pins[i], GPIO_SLEW_RATE_SLOW);
+        gpio_set_input_hysteresis_enabled(data_pins[i], true);
     }
-    gpio_set_input_hysteresis_enabled(PIO_PSRAM_PIN_SIO0, false);
-    gpio_set_input_hysteresis_enabled(PIO_PSRAM_PIN_SIO1, false);
-    gpio_set_input_hysteresis_enabled(PIO_PSRAM_PIN_SIO2, false);
-    gpio_set_input_hysteresis_enabled(PIO_PSRAM_PIN_SIO3, false);
 
     s_write_dma_chan = dma_claim_unused_channel(true);
     s_read_dma_chan = dma_claim_unused_channel(true);
