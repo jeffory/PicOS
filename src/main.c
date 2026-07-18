@@ -30,6 +30,7 @@ uint32_t    launcher_get_app_uptime_ms(void);
 // Linker symbols for the main stack limits (see boot2/memmap_*.ld)
 extern uint32_t __StackTop;    // initial SP (stack grows DOWN from here)
 extern uint32_t __StackBottom; // lowest valid address (4KB below StackTop)
+extern uint32_t __StackOneBottom; // Core 1 MSP lower bound (SCRATCH_X)
 
 // ── HardFault handler ─────────────────────────────────────────────────────────
 // Captures the exception frame (stacked registers) and prints fault registers
@@ -81,19 +82,26 @@ static void __attribute__((used)) hardfault_c(uint32_t *frame, uint32_t exc_retu
 
   // Determine which stack was active: EXC_RETURN bit 2 = 1 means PSP (native
   // app), 0 means MSP (OS).  Compare SP against the correct stack bounds.
+  // Each core has its own MSP: Core 0 in SCRATCH_Y (__StackBottom), Core 1 in
+  // SCRATCH_X (__StackOneBottom) — comparing against the wrong core's bounds
+  // yields false OVERFLOW reports for Core 1 faults.
+  uint32_t core = sio_hw->cpuid;
   bool on_psp = (exc_return & 4u) != 0;
   bool stack_overflow;
   uint32_t stack_limit;
   if (on_psp) {
     stack_limit = (uint32_t)(uintptr_t)g_native_stack_base;
     stack_overflow = g_native_stack_base && (sp_at_fault < stack_limit);
+  } else if (core == 1) {
+    stack_limit = (uint32_t)(uintptr_t)&__StackOneBottom;
+    stack_overflow = (sp_at_fault < stack_limit);
   } else {
     stack_limit = (uint32_t)(uintptr_t)&__StackBottom;
     stack_overflow = (sp_at_fault < stack_limit);
   }
 
   // ── UART output (always works — polling-based, no IRQ required) ────────────
-  printf("\n!!! HARDFAULT !!!\n");
+  printf("\n!!! HARDFAULT (core %lu) !!!\n", (unsigned long)core);
   if (app_name)
     printf("  App  = %s (uptime %lum %lus)\n",
            app_name, (unsigned long)(uptime_sec / 60u), (unsigned long)(uptime_sec % 60u));
@@ -158,7 +166,8 @@ static void __attribute__((used)) hardfault_c(uint32_t *frame, uint32_t exc_retu
            stack_overflow ? " OVFL!" : "");
   display_draw_text(4, 48, ln, stack_overflow ? 0xF800 : 0xFFFF, 0x0000);
 
-  snprintf(ln, sizeof(ln), "Stack: %s", on_psp ? "PSP (native app)" : "MSP (OS)");
+  snprintf(ln, sizeof(ln), "Stack: %s core %lu",
+           on_psp ? "PSP (native app)" : "MSP (OS)", (unsigned long)core);
   display_draw_text(4, 62, ln, 0x07E0, 0x0000); // green
 
   snprintf(ln, sizeof(ln), "CFSR %08lx  HFSR %08lx", (unsigned long)cfsr, (unsigned long)hfsr);
