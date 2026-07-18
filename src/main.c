@@ -349,6 +349,13 @@ static void sys_log(const char *fmt, ...) {
 // consumed by sys_shouldExit() which the app checks each frame.
 static volatile bool s_native_exit = false;
 
+// Core 0 liveness heartbeat, stamped by sys_poll().  Core 1 keeps the
+// watchdog fed while this is fresh (< 60s), so apps doing long CPU-bound
+// work between polls (asset decoding, sprite mask generation) are not
+// rebooted by the 10s watchdog; a genuinely hung Core 0 still trips it
+// once the heartbeat goes stale.
+volatile uint32_t g_core0_heartbeat_ms = 0;
+
 // Pending app launch from serial command
 static const char* s_pending_launch = NULL;
 
@@ -357,6 +364,7 @@ static const char* s_pending_launch = NULL;
 static void sys_poll(void) {
   kbd_poll();
   watchdog_update();
+  g_core0_heartbeat_ms = to_ms_since_boot(get_absolute_time());
   http_fire_c_pending();
   if (kbd_consume_menu_press()) {
     if (system_menu_show_for_native())
@@ -1280,6 +1288,15 @@ static void core1_entry(void) {
 
     if (s_core1_tick_pending) {
       s_core1_tick_pending = false;
+
+      // Relay the watchdog for Core 0 while its heartbeat is fresh — long
+      // CPU-bound stretches in apps (no poll for >10s) must not reboot the
+      // device, but a Core 0 hung for over a minute still should.
+      {
+        uint32_t now_ms = to_ms_since_boot(get_absolute_time());
+        if (now_ms - g_core0_heartbeat_ms < 60000u)
+          watchdog_update();
+      }
 
       wifi_poll();
       http_fire_c_pending();
