@@ -30,6 +30,54 @@ static sdfile_t s_file_recv_handle = NULL;
 static uint32_t s_file_recv_expected = 0;
 static uint32_t s_file_recv_received = 0;
 
+// Base64 receive mode (UART-safe alternative to the CDC binary path).
+// Chars arrive via stdio, so this works on any transport.  The host sends
+// newline-terminated chunks of base64 (multiple of 4 chars); each chunk is
+// decoded, flushed to SD, and acknowledged so the sender can pace itself —
+// the UART RX FIFO is only 32 bytes and SD write latency can exceed it.
+#define B64_RECV_TIMEOUT_US (10u * 1000u * 1000u)
+#define B64_WRITE_BUF_SIZE 512
+static bool s_b64_recv_active = false;
+static char s_b64_group[4];
+static uint32_t s_b64_group_len = 0;
+static uint8_t s_b64_writebuf[B64_WRITE_BUF_SIZE];
+static uint32_t s_b64_writelen = 0;
+static uint32_t s_b64_hash = 2166136261u; // FNV-1a running hash
+static uint64_t s_b64_last_rx_us = 0;
+
+// FNV-1a 32-bit — cheap integrity check for serial transfers (not
+// cryptographic; OTA does its own SHA-256 before touching flash).
+static inline uint32_t fnv1a_update(uint32_t h, const uint8_t *p, uint32_t n) {
+    while (n--) { h ^= *p++; h *= 16777619u; }
+    return h;
+}
+
+static const char s_b64_enc[] =
+    "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+
+static int b64_decode_char(char c) {
+    if (c >= 'A' && c <= 'Z') return c - 'A';
+    if (c >= 'a' && c <= 'z') return c - 'a' + 26;
+    if (c >= '0' && c <= '9') return c - '0' + 52;
+    if (c == '+') return 62;
+    if (c == '/') return 63;
+    return -1;
+}
+
+static void b64_recv_char(int c);
+static void b64_recv_abort(const char *why);
+
+// Encode exactly n (1-3) bytes into 4 chars.
+static void b64_encode_group(const uint8_t *in, uint32_t n, char out[4]) {
+    uint32_t v = (uint32_t)in[0] << 16;
+    if (n > 1) v |= (uint32_t)in[1] << 8;
+    if (n > 2) v |= in[2];
+    out[0] = s_b64_enc[(v >> 18) & 63];
+    out[1] = s_b64_enc[(v >> 12) & 63];
+    out[2] = (n > 1) ? s_b64_enc[(v >> 6) & 63] : '=';
+    out[3] = (n > 2) ? s_b64_enc[v & 63] : '=';
+}
+
 static void dev_ls_callback(const sdcard_entry_t *entry, void *user) {
     (void)user;
     if (entry->name[0] == '.') return;
@@ -53,6 +101,9 @@ void dev_commands_init(void) {
     s_file_recv_handle = NULL;
     s_file_recv_expected = 0;
     s_file_recv_received = 0;
+    s_b64_recv_active = false;
+    s_b64_group_len = 0;
+    s_b64_writelen = 0;
 }
 
 const char* dev_commands_get_device(void) {
@@ -61,11 +112,24 @@ const char* dev_commands_get_device(void) {
 }
 
 void dev_commands_poll(void) {
+    if (s_file_recv_handle && s_b64_recv_active) {
+        while (true) {
+            int c = getchar_timeout_us(0);
+            if (c == PICO_ERROR_TIMEOUT) break;
+            b64_recv_char(c);
+            if (!s_b64_recv_active) return;
+        }
+        if (time_us_64() - s_b64_last_rx_us > B64_RECV_TIMEOUT_US)
+            b64_recv_abort("timeout");
+        return;
+    }
+
     if (s_file_recv_handle) {
         uint8_t buf[FILE_RECEIVE_CHUNK_SIZE];
         while (s_file_recv_received < s_file_recv_expected) {
             uint32_t got = tud_cdc_read(buf, FILE_RECEIVE_CHUNK_SIZE);
             if (got == 0) break;
+            s_b64_last_rx_us = time_us_64();
             int written = sdcard_fwrite(s_file_recv_handle, buf, got);
             if (written < 0) {
                 printf("[DEV] Error writing file\n");
@@ -79,6 +143,14 @@ void dev_commands_poll(void) {
             sdcard_fclose(s_file_recv_handle);
             s_file_recv_handle = NULL;
             printf("[DEV] File received: %s (%lu bytes)\n", s_file_recv_path, (unsigned long)s_file_recv_received);
+        } else if (time_us_64() - s_b64_last_rx_us > B64_RECV_TIMEOUT_US) {
+            // Stalled CDC transfer (e.g. host went away): abort so the console
+            // does not stay captured in receive mode forever.
+            sdcard_fclose(s_file_recv_handle);
+            s_file_recv_handle = NULL;
+            printf("[DEV] Error: put timed out at %lu/%lu bytes\n",
+                   (unsigned long)s_file_recv_received,
+                   (unsigned long)s_file_recv_expected);
         }
         return;
     }
@@ -105,23 +177,121 @@ void dev_commands_poll(void) {
 
 // Write binary data over CDC, bypassing stdio (for screenshot bulk transfer).
 // Caller must call stdio_flush() / fflush(stdout) before this.
-static void cdc_write_all(const uint8_t *data, uint32_t len) {
+// Returns false if CDC is not mounted or the host stops draining: spinning
+// unconditionally here starves the watchdog and resets the device when the
+// only connection is UART (no CDC host to drain the FIFO).
+static bool cdc_write_all(const uint8_t *data, uint32_t len) {
+    if (!tud_cdc_connected()) return false;
+    uint64_t last_progress_us = time_us_64();
     while (len > 0) {
         uint32_t avail = tud_cdc_write_available();
         if (avail == 0) {
             tud_cdc_write_flush();
             tud_task();
+            if (time_us_64() - last_progress_us > 2000000u) return false;
             continue;
         }
         uint32_t chunk = (len < avail) ? len : avail;
         uint32_t written = tud_cdc_write(data, chunk);
         data += written;
         len -= written;
+        if (written > 0) {
+            last_progress_us = time_us_64();
+            watchdog_update();
+        }
     }
     tud_cdc_write_flush();
+    return true;
+}
+
+static void b64_recv_abort(const char *why) {
+    if (s_file_recv_handle) {
+        sdcard_fclose(s_file_recv_handle);
+        s_file_recv_handle = NULL;
+    }
+    s_b64_recv_active = false;
+    printf("[DEV] Error: b64 receive aborted (%s) at %lu/%lu bytes\n",
+           why, (unsigned long)s_file_recv_received,
+           (unsigned long)s_file_recv_expected);
+}
+
+static void b64_recv_flush(void) {
+    if (s_b64_writelen == 0) return;
+    int written = sdcard_fwrite(s_file_recv_handle, s_b64_writebuf, s_b64_writelen);
+    if (written < 0) {
+        b64_recv_abort("SD write failed");
+        return;
+    }
+    s_b64_hash = fnv1a_update(s_b64_hash, s_b64_writebuf, s_b64_writelen);
+    s_file_recv_received += (uint32_t)written;
+    s_b64_writelen = 0;
+}
+
+static void b64_recv_char(int c) {
+    s_b64_last_rx_us = time_us_64();
+    if (c == 0x03) { // Ctrl-C abort from host
+        b64_recv_abort("host abort");
+        return;
+    }
+    if (c == '\n' || c == '\r') {
+        if (c == '\n') {
+            b64_recv_flush();
+            if (!s_b64_recv_active) return; // flush may have aborted
+            if (s_file_recv_received >= s_file_recv_expected) {
+                sdcard_fclose(s_file_recv_handle);
+                s_file_recv_handle = NULL;
+                s_b64_recv_active = false;
+                printf("[DEV] File received: %s (%lu bytes) fnv1a=%08lx\n",
+                       s_file_recv_path, (unsigned long)s_file_recv_received,
+                       (unsigned long)s_b64_hash);
+            } else {
+                printf("[DEV] ACK %lu\n", (unsigned long)s_file_recv_received);
+            }
+        }
+        return;
+    }
+    if (c == '=') { // padding: decode the final partial group
+        // "xx==" → 1 byte (handled on first '='; second '=' sees group_len 0),
+        // "xxx=" → 2 bytes.
+        if (s_b64_group_len >= 2 && s_b64_writelen + 2 <= B64_WRITE_BUF_SIZE) {
+            uint32_t v = ((uint32_t)b64_decode_char(s_b64_group[0]) << 18) |
+                         ((uint32_t)b64_decode_char(s_b64_group[1]) << 12);
+            s_b64_writebuf[s_b64_writelen++] = (uint8_t)(v >> 16);
+            if (s_b64_group_len == 3) {
+                v |= (uint32_t)b64_decode_char(s_b64_group[2]) << 6;
+                s_b64_writebuf[s_b64_writelen++] = (uint8_t)(v >> 8);
+            }
+        }
+        s_b64_group_len = 0;
+        return;
+    }
+    int v = b64_decode_char((char)c);
+    if (v < 0) {
+        b64_recv_abort("invalid base64 char");
+        return;
+    }
+    s_b64_group[s_b64_group_len++] = (char)c;
+    if (s_b64_group_len == 4) {
+        s_b64_group_len = 0;
+        uint32_t g = ((uint32_t)b64_decode_char(s_b64_group[0]) << 18) |
+                     ((uint32_t)b64_decode_char(s_b64_group[1]) << 12) |
+                     ((uint32_t)b64_decode_char(s_b64_group[2]) << 6) |
+                     (uint32_t)b64_decode_char(s_b64_group[3]);
+        if (s_b64_writelen + 3 > B64_WRITE_BUF_SIZE) {
+            b64_recv_abort("chunk exceeds buffer");
+            return;
+        }
+        s_b64_writebuf[s_b64_writelen++] = (uint8_t)(g >> 16);
+        s_b64_writebuf[s_b64_writelen++] = (uint8_t)(g >> 8);
+        s_b64_writebuf[s_b64_writelen++] = (uint8_t)g;
+    }
 }
 
 void dev_commands_send_screenshot(void) {
+    if (!tud_cdc_connected()) {
+        printf("[DEV] Error: CDC not connected — use screenshot64\n");
+        return;
+    }
     const uint16_t *fb = display_get_screen_buffer();
 
     // Header: "SCRN" + width(u16 LE) + height(u16 LE) + format(u16 LE) + pad(2)
@@ -136,8 +306,50 @@ void dev_commands_send_screenshot(void) {
     // Flush stdio so our raw CDC writes don't interleave with printf output
     stdio_flush();
 
-    cdc_write_all(header, sizeof(header));
-    cdc_write_all((const uint8_t *)fb, FB_WIDTH * FB_HEIGHT * sizeof(uint16_t));
+    if (!cdc_write_all(header, sizeof(header)) ||
+        !cdc_write_all((const uint8_t *)fb, FB_WIDTH * FB_HEIGHT * sizeof(uint16_t)))
+        printf("[DEV] Error: CDC write stalled\n");
+}
+
+// Stream a memory buffer as '~'-prefixed base64 lines over stdio.  The '~'
+// prefix lets the host discard any log lines Core 1 interleaves into the
+// stream; the FNV-1a in the caller's footer catches mid-line interleaving.
+#define B64_LINE_RAW 72 // 96 base64 chars per line
+static uint32_t b64_send_buf(const uint8_t *data, uint32_t len, uint32_t hash) {
+    char line[(B64_LINE_RAW / 3) * 4 + 1];
+    for (uint32_t off = 0; off < len; off += B64_LINE_RAW) {
+        uint32_t n = len - off < B64_LINE_RAW ? len - off : B64_LINE_RAW;
+        uint32_t li = 0;
+        for (uint32_t i = 0; i < n; i += 3) {
+            uint32_t g = n - i < 3 ? n - i : 3;
+            b64_encode_group(data + off + i, g, &line[li]);
+            li += 4;
+        }
+        line[li] = '\0';
+        printf("~%s\n", line);
+        hash = fnv1a_update(hash, data + off, n);
+        watchdog_update();
+    }
+    return hash;
+}
+
+// Stream a file as base64 over stdio (any transport).  Single pass: the
+// FNV-1a of the raw bytes is only known at the end, so it rides the footer.
+static void dev_send_file_b64(const char *path) {
+    sdfile_t f = sdcard_fopen(path, "rb");
+    if (!f) {
+        printf("[DEV] Failed to open file: %s\n", path);
+        return;
+    }
+    int size = sdcard_fsize_handle(f);
+    printf("[DEV] B64 size=%d\n", size);
+    uint8_t buf[B64_LINE_RAW * 4];
+    uint32_t hash = 2166136261u;
+    int nread;
+    while ((nread = sdcard_fread(f, buf, sizeof(buf))) > 0)
+        hash = b64_send_buf(buf, (uint32_t)nread, hash);
+    sdcard_fclose(f);
+    printf("[DEV] B64_END fnv1a=%08lx path=%s\n", (unsigned long)hash, path);
 }
 
 bool dev_commands_process(void) {
@@ -225,11 +437,76 @@ bool dev_commands_process(void) {
         }
         s_file_recv_expected = size;
         s_file_recv_received = 0;
+        s_b64_last_rx_us = time_us_64();
         printf("[DEV] Ready to receive %lu bytes for %s\n", (unsigned long)size, args);
+    } else if (strncmp(s_cmd_buf, "putb64 ", 7) == 0) {
+        char *args = s_cmd_buf + 7;
+        uint32_t size = 0;
+        char *size_str = strchr(args, ' ');
+        if (size_str) {
+            *size_str = '\0';
+            size = atoi(size_str + 1);
+        }
+        if (size == 0 || strlen(args) == 0) {
+            printf("[DEV] Usage: putb64 <path> <raw_size>\n");
+            s_cmd_buf[0] = '\0';
+            s_cmd_ready = false;
+            return true;
+        }
+        strncpy(s_file_recv_path, args, sizeof(s_file_recv_path) - 1);
+        s_file_recv_path[sizeof(s_file_recv_path) - 1] = '\0';
+        s_file_recv_handle = sdcard_fopen(s_file_recv_path, "wb");
+        if (!s_file_recv_handle) {
+            printf("[DEV] Failed to open file for writing: %s\n", args);
+            s_cmd_buf[0] = '\0';
+            s_cmd_ready = false;
+            return true;
+        }
+        s_file_recv_expected = size;
+        s_file_recv_received = 0;
+        s_b64_recv_active = true;
+        s_b64_group_len = 0;
+        s_b64_writelen = 0;
+        s_b64_hash = 2166136261u;
+        s_b64_last_rx_us = time_us_64();
+        printf("[DEV] Ready B64 %lu bytes for %s (chunk<=%u raw, newline-terminated, await ACK)\n",
+               (unsigned long)size, args, (unsigned)B64_WRITE_BUF_SIZE);
+    } else if (strncmp(s_cmd_buf, "getb64 ", 7) == 0) {
+        dev_send_file_b64(s_cmd_buf + 7);
+    } else if (strcmp(s_cmd_buf, "screenshot64") == 0) {
+        const uint8_t *fb = (const uint8_t *)display_get_screen_buffer();
+        printf("[DEV] SCRN64 w=%u h=%u fmt=565\n", (unsigned)FB_WIDTH, (unsigned)FB_HEIGHT);
+        uint32_t hash = b64_send_buf(fb, FB_WIDTH * FB_HEIGHT * 2u, 2166136261u);
+        printf("[DEV] SCRN64_END fnv1a=%08lx\n", (unsigned long)hash);
+    } else if (strcmp(s_cmd_buf, "crashlog") == 0) {
+        sdfile_t f = sdcard_fopen("/system/crashlog.txt", "rb");
+        if (!f) {
+            printf("[DEV] No crash log\n");
+        } else {
+            printf("[DEV] CRASHLOG BEGIN\n");
+            char buf[257];
+            int nread;
+            while ((nread = sdcard_fread(f, buf, sizeof(buf) - 1)) > 0) {
+                buf[nread] = '\0';
+                printf("%s", buf);
+                watchdog_update();
+            }
+            sdcard_fclose(f);
+            printf("\n[DEV] CRASHLOG END\n");
+        }
+    } else if (strcmp(s_cmd_buf, "crashlog clear") == 0) {
+        sdcard_delete("/system/crashlog.txt");
+        printf("[DEV] Crash log cleared\n");
     } else if (strncmp(s_cmd_buf, "get ", 4) == 0) {
         const char *path = s_cmd_buf + 4;
         if (strlen(path) == 0) {
             printf("[DEV] Usage: get <path>\n");
+            s_cmd_buf[0] = '\0';
+            s_cmd_ready = false;
+            return true;
+        }
+        if (!tud_cdc_connected()) {
+            printf("[DEV] Error: CDC not connected — use getb64\n");
             s_cmd_buf[0] = '\0';
             s_cmd_ready = false;
             return true;
@@ -248,7 +525,10 @@ bool dev_commands_process(void) {
         uint8_t buf[256];
         int read;
         while ((read = sdcard_fread(f, buf, sizeof(buf))) > 0) {
-            cdc_write_all(buf, read);
+            if (!cdc_write_all(buf, read)) {
+                printf("[DEV] Error: CDC write stalled\n");
+                break;
+            }
         }
         sdcard_fclose(f);
         printf("[DEV] File sent: %s (%d bytes)\n", path, size);
@@ -270,8 +550,12 @@ bool dev_commands_process(void) {
         printf("[DEV]   list           - List installed apps\n");
         printf("[DEV]   screenshot     - Capture screen\n");
         printf("[DEV]   keypress <key> - Inject keypress\n");
-        printf("[DEV]   put <path> <size> - Receive file from host\n");
-        printf("[DEV]   get <path>     - Send file to host\n");
+        printf("[DEV]   put <path> <size> - Receive file from host (USB CDC only)\n");
+        printf("[DEV]   get <path>     - Send file to host (USB CDC only)\n");
+        printf("[DEV]   putb64 <path> <size> - Receive file as base64 (any transport)\n");
+        printf("[DEV]   getb64 <path>  - Send file as base64 (any transport)\n");
+        printf("[DEV]   screenshot64   - Capture screen as base64 (any transport)\n");
+        printf("[DEV]   crashlog       - Print /system/crashlog.txt ('crashlog clear' deletes)\n");
         printf("[DEV]   ls <dir>       - List directory contents\n");
         printf("[DEV]   help           - Show this help\n");
         printf("[DEV] Valid keys: up, down, left, right, enter, esc, menu, f1-f10, backspace, tab, del, shift, a-z, A-Z, 0-9, punctuation\n");
