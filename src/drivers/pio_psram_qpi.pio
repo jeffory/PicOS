@@ -4,16 +4,18 @@
 ; from polpo/rp2040-psram PR #15 (tested on PicoCalc + Pico 2):
 ;   - CS asserted one cycle before the first data clock
 ;   - read phase: pindirs released with SCK LOW (no turnaround clock), entry
-;     at readloop_mid, sample ON the rising edge. Two deviations from PR #15,
+;     at readloop_mid, sample mid-high-phase. Two deviations from PR #15,
 ;     both found by on-hardware diagnostics on this PicoCalc:
 ;       1. PR #15 released pindirs with SCK HIGH — the extra clock edge made
 ;          a 7th wait cycle and every read arrived one nibble late.
-;       2. PR #15 sampled at the falling edge — the chip drives a new nibble
-;          on falling edges, so the sample raced the transition and sparse
-;          next-nibble captures corrupted ~1e-5 of bytes. Rising-edge
-;          sampling (the original upstream polpo arrangement) gives the
-;          nibble a half period to settle. PR #15's late sampling only pays
-;          off at 75 MHz+, where chip output delay eats the half period.
+;       2. Read sampling is mid-high-phase (3 SM cycles per read clock:
+;          rise, sample, fall). Falling-edge sampling raced the chip's
+;          next-nibble transition; rising-edge sampling gave the slowest
+;          data line (SIO2) only a half period to settle — page-boundary
+;          forensics showed its previous value bleeding into reads. The
+;          mid-phase point gets both a full extra SM cycle of settle and
+;          a full SM cycle of guard. Read clock = sysclk/(div*3); the
+;          write phase still runs at sysclk/(div*2).
 ;
 ; Header protocol per transaction (bytes via TX FIFO, autopull 8):
 ;   [x = total write nibbles] [y = read nibbles] [cmd/addr/dummy/data bytes...]
@@ -40,9 +42,11 @@ writeloop:
     jmp readloop_mid    side 0b00
 
 readloop:
-    in pins, 4          side 0b10  ; Rising edge + sample: chip drove this
-                                   ; nibble on the previous falling edge, so
-                                   ; it has had a half period to settle
+    nop                 side 0b10  ; Rising edge; data has been settling
+                                   ; since the previous falling edge
+    in pins, 4          side 0b10  ; Sample mid-high-phase: a full SM cycle
+                                   ; of extra settle, and a full SM cycle of
+                                   ; guard before the chip's next transition
 readloop_mid:
     jmp y--, readloop   side 0b00  ; Falling edge: chip drives next nibble
     set pindirs, 0xF    side 0b01  ; Re-drive SIO0-3; CS deasserts. Wraps.

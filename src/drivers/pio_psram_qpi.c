@@ -113,12 +113,16 @@ static void qpi_send_serial_cmd(uint8_t cmd) {
 }
 
 // Compute divider + tCEM-compliant chunk sizes for the current sysclk and
-// tier target. SPI clock = sysclk / (2 * div); integer divider avoids
+// tier target. SPI clock = sysclk / (3 * div); integer divider avoids
 // fractional-divider jitter on the SPI edges.
 static void qpi_apply_timing(uint32_t sys_khz) {
-    uint32_t div = (sys_khz + 2 * s_target_khz - 1) / (2 * s_target_khz);
+    // Read loop is 3 SM cycles per clock (see .pio); divider targets the
+    // read clock. The 2-cycle write phase runs 1.5x faster, still far
+    // inside the chip's 84 MHz limit, and the tCEM chunk math below uses
+    // the slower read clock for both directions (conservative).
+    uint32_t div = (sys_khz + 3 * s_target_khz - 1) / (3 * s_target_khz);
     if (div < 1) div = 1;
-    s_spi_khz = sys_khz / (2 * div);
+    s_spi_khz = sys_khz / (3 * div);
 
     // Keep CS low <= ~6us (chip tCEM max is 8us; 2us margin).
     uint32_t max_clocks = s_spi_khz * 6 / 1000;
@@ -183,6 +187,10 @@ static void qpi_write_locked(uint32_t addr, const uint8_t *src, uint32_t len) {
     const uint8_t *p = src;
     while (remaining > 0) {
         uint32_t chunk = (remaining > s_chunk_write) ? s_chunk_write : remaining;
+        // Never cross a 1KB page boundary in one burst: the chip's internal
+        // page transition glitched its slowest data line on this hardware.
+        uint32_t to_page_end = 1024u - (addr & 1023u);
+        if (chunk > to_page_end) chunk = to_page_end;
 
         qpi_put_byte((uint8_t)((4 + chunk) * 2));  // write nibbles
         qpi_put_byte(0);                           // no read
@@ -207,6 +215,10 @@ static void qpi_read_locked(uint32_t addr, uint8_t *dst, uint32_t len) {
     uint8_t *p = dst;
     while (remaining > 0) {
         uint32_t chunk = (remaining > s_chunk_read) ? s_chunk_read : remaining;
+        // Never cross a 1KB page boundary in one burst: the chip's internal
+        // page transition glitched its slowest data line on this hardware.
+        uint32_t to_page_end = 1024u - (addr & 1023u);
+        if (chunk > to_page_end) chunk = to_page_end;
 
         while (!pio_sm_is_rx_fifo_empty(s_pio, s_sm))
             (void)pio_sm_get(s_pio, s_sm);
