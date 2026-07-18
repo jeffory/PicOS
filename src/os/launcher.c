@@ -482,6 +482,39 @@ static const AppRunner *s_runners[] = {
 extern _Atomic bool g_core1_pause;
 extern _Atomic bool g_core1_paused;
 
+// Keep the QMI CS1 (PSRAM) clock at the rate validated at the 200 MHz boot
+// clock.  The QMI M1 registers are never explicitly configured — PSRAM runs
+// on the reset M1_TIMING (CLKDIV=4 → 50 MHz SCK at 200 MHz clk_sys).  A bare
+// sysclk change silently scales the PSRAM clock with it: at 300 MHz the SCK
+// becomes 75 MHz, out of spec for the serial read mode in use, and reads
+// start glitching — app code fetched from PSRAM corrupts transiently and
+// apps hardfault within seconds (verified live with the CODEWATCH scanner:
+// Doom dies in 3-22 s at 300 MHz, runs clean at 200 MHz).  Rescale CLKDIV
+// whenever clk_sys changes so the SCK stays at ≤50 MHz.
+#define PSRAM_QMI_MAX_SCK_KHZ 50000u
+#if defined(PICO_RP2350) && !defined(PICOS_SIMULATOR)
+#include "hardware/structs/qmi.h"
+#include "hardware/sync.h"
+static void psram_qmi_apply_timing(uint32_t sys_khz) {
+  uint32_t clkdiv = (sys_khz + PSRAM_QMI_MAX_SCK_KHZ - 1) / PSRAM_QMI_MAX_SCK_KHZ;
+  if (clkdiv < 1) clkdiv = 1;
+  if (clkdiv > QMI_M1_TIMING_CLKDIV_BITS >> QMI_M1_TIMING_CLKDIV_LSB)
+    clkdiv = QMI_M1_TIMING_CLKDIV_BITS >> QMI_M1_TIMING_CLKDIV_LSB;
+  uint32_t save = save_and_disable_interrupts();
+  uint32_t timing = qmi_hw->m[1].timing;
+  timing = (timing & ~QMI_M1_TIMING_CLKDIV_BITS)
+         | (clkdiv << QMI_M1_TIMING_CLKDIV_LSB);
+  qmi_hw->m[1].timing = timing;
+  __asm volatile ("dsb sy" ::: "memory");
+  restore_interrupts(save);
+  printf("[LAUNCHER] QMI PSRAM clkdiv=%lu (%lu kHz SCK at %lu kHz sysclk)\n",
+         (unsigned long)clkdiv, (unsigned long)(sys_khz / clkdiv),
+         (unsigned long)sys_khz);
+}
+#else
+static void psram_qmi_apply_timing(uint32_t sys_khz) { (void)sys_khz; }
+#endif
+
 void launcher_apply_clock(uint32_t khz) {
   if (khz == 0) khz = 200000; // Default OS clock
   uint32_t current_khz = clock_get_hz(clk_sys) / 1000;
@@ -516,15 +549,23 @@ void launcher_apply_clock(uint32_t khz) {
   // 3. Ensure display DMA is finished before changing clock source
   display_apply_clock(); // This now waits for DMA internally
 
+  // 3b. Pre-scale the QMI PSRAM divider for the worst of both clocks so the
+  // PSRAM SCK never exceeds its validated rate, even mid-transition.
+  psram_qmi_apply_timing(khz > current_khz ? khz : current_khz);
+
   // 4. Apply the new system clock
   bool ok = set_sys_clock_khz(khz, false);
 
   if (!ok) {
     printf("[LAUNCHER] Clock change to %lu MHz failed (PLL cannot produce this frequency)\n",
            (unsigned long)(khz / 1000));
+    psram_qmi_apply_timing(current_khz);
     g_core1_pause = false;
     return;
   }
+
+  // 4b. Retune the QMI PSRAM divider exactly for the new sysclk.
+  psram_qmi_apply_timing(khz);
 
   // 5. Re-configure peripheral clock so SPI/I2C/UART/PWM stay stable.
   clock_configure(
