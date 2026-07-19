@@ -811,6 +811,20 @@ static char *h_get_wifi_state(const char *params) {
     if (st == WIFI_STATUS_ONLINE) status_str = "online";
     else if (st == WIFI_STATUS_CONNECTED) status_str = "connected";
     else if (st == WIFI_STATUS_CONNECTING) status_str = "connecting";
+    else if (st == WIFI_STATUS_FAILED) status_str = "failed";
+
+    // Injected state (set_wifi_state) overrides the real status. Without this
+    // the injection was write-only: sim_wifi_is_available()/sim_network_blocked()
+    // honoured it, but this getter reported the underlying status, so a
+    // set→get roundtrip never observed what was injected.
+    if (s_wifi_error.enabled) {
+        switch (s_wifi_error.mode) {
+            case WIFI_DISCONNECTED:   status_str = "disconnected";   break;
+            case WIFI_NOT_AVAILABLE:  status_str = "not_available";  break;
+            case WIFI_ERROR:          status_str = "error";          break;
+            case WIFI_NORMAL:         break;  // report the real status
+        }
+    }
     static char buf[256];
     snprintf(buf, sizeof(buf),
              "{\"jsonrpc\":\"2.0\",\"result\":{\"status\":\"%s\",\"ssid\":\"%s\",\"ip\":\"%s\"}}",

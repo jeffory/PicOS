@@ -39,4 +39,10 @@ pc.sys.sleep(100)
 log("DRAW:color_bands")
 
 log("DISPLAY_TESTS_DONE")
-pc.sys.sleep(100)
+
+-- Hold the colour bands on screen. When the script returns the app exits and
+-- the launcher immediately repaints, so this sleep has to outlast the
+-- screenshot test's sampling (it waits for DRAW:color_bands, delays ~200ms,
+-- then makes four get_pixel calls). At 100ms it never could, and the test
+-- sampled the launcher background instead of the bands.
+pc.sys.sleep(3000)

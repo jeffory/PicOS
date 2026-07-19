@@ -178,7 +178,13 @@ class TestWifiState:
         """Test that get_wifi_state returns valid structure."""
         result = simulator.call("get_wifi_state")
         assert "status" in result
-        assert result["status"] in ("connected", "connecting", "disconnected")
+        # Mirrors wifi_status_t in src/os/os.h. "online" (internet confirmed) is
+        # a distinct, stronger state than "connected" (IP assigned, internet
+        # unverified) — it was missing here, so this failed against a simulator
+        # that had finished connecting.
+        assert result["status"] in (
+            "connected", "connecting", "disconnected", "online", "failed"
+        )
 
     def test_set_wifi_error_injection(self, simulator):
         """Test WiFi error injection for network fault testing."""
