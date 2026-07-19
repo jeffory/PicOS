@@ -81,6 +81,15 @@ HEAPSTAT_RE = re.compile(
 # constant ever changes.
 PEAK_RESERVE_THRESHOLD = 2_621_440
 
+# Logged once via api->sys->log() in apps/cdogs/cdogs_picos.c, right
+# before the menu's LoopRunnerRun() starts consuming input — the first
+# point C-Dogs is actually ready to receive a keypress. _drive_quickplay
+# waits for this literal line before sending any Enters (see its
+# docstring for why: the boot-time HEAPSTAT/GFXSTAT report alone fires far
+# too early, during font init, well before the campaign manifest scan
+# that follows it finishes).
+MENU_READY_MARKER = "CDOGS: Entering main menu loop"
+
 
 def _drain(stream, sink, lock):
     """Read a subprocess pipe to EOF, appending decoded lines to sink.
@@ -197,67 +206,176 @@ def parse_heapstats(log_text):
     return out
 
 
+def _drive_quickplay(simulator, boot_marker, parse_fn, settle_s=12, done=None):
+    """Launch C-Dogs, drive the quick-play menu flow, and return the parsed
+    reports once navigation has demonstrably worked.
+
+    Shared by test_heapstat_is_emitted_and_truthful and peak_gfx_total
+    (issue #14) — both need the exact same launch / wait-for-boot-report /
+    navigate / poll-until-settled sequence, only the report tag and parser
+    differ.
+
+    Real main menu structure (verified empirically by driving the
+    simulator manually and screenshotting each step — see
+    .superpowers/sdd/prereq-3-report.md for the captures). This replaced an
+    older two-`enter` sequence that stopped working once verified against
+    the actual UI:
+
+        main menu: Start / Options... / Quit   ("Start" is default-selected)
+          Enter -> "Start:" submenu:
+            Campaign / Dogfight / Deathmatch / Join game (disabled) / Back
+                                                 ("Campaign" is default-selected)
+          Enter -> "Select a campaign:" list, one entry per campaign file
+                                                 (first entry is default-selected)
+          Enter -> loads it, producing further HEAPSTAT/GFXSTAT reports
+
+    All three Enters land on an already-default-selected item, so no
+    Down/Up presses are needed. That is also this drive's explicit
+    layout dependency: if a menu item is ever added/reordered above
+    "Start", "Campaign", or the first campaign in the list, the default
+    selection at that level changes and this breaks — see the assertion
+    message below, which names this exact dependency rather than failing
+    silently.
+
+    Sends the 3-Enter sequence up to twice: if the first attempt's report
+    count never proves navigation worked, it retries once rather than
+    failing immediately (self-healing, not a fixed-delay guess — see the
+    retry loop's own comment for why resending 3 Enters is safe from any
+    of the three levels this drive can get stuck at).
+
+    done: optional predicate(stats) -> bool checked every poll of the
+    settle loop; polling stops as soon as it returns True (or settle_s
+    elapses, whichever first). Defaults to "at least two reports have
+    arrived" — the signal that quick-play's post-navigation report
+    actually landed, not just the boot-time one. Callers with a more
+    specific completion signal (e.g. "peak has cleared a threshold") can
+    supply their own so the loop breaks the moment that particular
+    condition is satisfied rather than always waiting on report count.
+    """
+    if done is None:
+        done = lambda stats: len(stats) > 1  # noqa: E731
+
+    simulator.launch_app("cdogs")
+
+    # Wait for the first report: a fast, reliable signal that the
+    # instrumentation is wired up and C-Dogs has started booting. NOT a
+    # signal that the main menu is ready for input — empirically this
+    # fires during early graphics/font init (picos_asset_load_tick's very
+    # first call always clears its tick gate), well before the campaign
+    # manifest scan that follows it finishes.
+    deadline = time.time() + 60
+    text = ""
+    while time.time() < deadline:
+        text = simulator.stdio_snapshot()
+        if boot_marker in text:
+            break
+        time.sleep(0.2)
+    assert boot_marker in text, f"no {boot_marker} lines found in log:\n{text[-2000:]}"
+
+    # The real "ready for input" signal: cdogs_picos.c logs this literal
+    # line via api->sys->log() (routed to real stdout the same way
+    # HEAPSTAT/GFXSTAT are — see module docstring) immediately before
+    # entering the menu's LoopRunnerRun(), i.e. the first point input is
+    # actually consumed. Sending Enters before this landed is the failure
+    # mode that broke this drive previously: the campaign manifest scan
+    # after the boot_marker tick can still be in flight, so an early Enter
+    # is silently dropped (the app isn't polling input yet), leaving one
+    # too few keypresses actually registered and the flow stuck one menu
+    # level short of loading anything. Waiting for this line explicitly
+    # replaces what used to be an assumption baked into fixed sleeps.
+    deadline = time.time() + 60
+    while time.time() < deadline:
+        text = simulator.stdio_snapshot()
+        if MENU_READY_MARKER in text:
+            break
+        time.sleep(0.1)
+    assert MENU_READY_MARKER in text, (
+        f"'{MENU_READY_MARKER}' never appeared in the log — C-Dogs did not "
+        f"reach an input-ready main menu:\n{text[-2000:]}"
+    )
+
+    # Two attempts: send Start > Campaign > first campaign, then poll for
+    # the completion signal; if it never arrives, send the same 3 Enters
+    # again before giving up. This is a genuine self-healing retry, not a
+    # blind resend: from any of the three menu levels this drive can get
+    # stuck at (main menu, "Start:" submenu, or the campaign list — e.g.
+    # if the very first Enter races LoopRunnerRun's first input poll and
+    # gets dropped, observed directly under host CPU contention from other
+    # concurrent processes), 3 fresh Enters from wherever navigation
+    # actually stalled always reaches a loaded campaign. A real menu-layout
+    # drift, by contrast, reproduces identically on the retry and still
+    # fails below with the same diagnostic.
+    stats = []
+    text = ""
+    for attempt in range(2):
+        for _ in range(3):
+            simulator.keypress("enter")
+            time.sleep(0.8)
+
+        # Poll for the completion signal, breaking out as soon as it's met
+        # instead of sleeping the full window unconditionally — quick-play's
+        # post-navigation report typically lands well under the settle_s
+        # backstop.
+        settle_deadline = time.time() + settle_s
+        text = simulator.stdio_snapshot()
+        stats = parse_fn(text)
+        while time.time() < settle_deadline and not done(stats):
+            time.sleep(0.3)
+            text = simulator.stdio_snapshot()
+            stats = parse_fn(text)
+
+        if len(stats) > 1:
+            break
+
+    assert stats, f"no {boot_marker} lines found in log:\n{text[-2000:]}"
+
+    # Navigation sanity check. The caller's own substantive assertions are
+    # the only gate between "quick-play loaded" and a pass, and on their
+    # own a failure there just says the expected data never showed up —
+    # which points straight at the instrumentation (stubs.c / pic.c /
+    # picos_heap.h). But the far more likely real cause is that the three
+    # `enter` presses above no longer land on Start > Campaign > first
+    # campaign (e.g. the main menu or a submenu gained/lost/reordered an
+    # item and the default selection shifted): C-Dogs would then stay idle
+    # after the first, boot-scan-only report and never produce a second
+    # one, since quick-play is what drives the extra campaign/map/sprite
+    # file I/O that triggers it. Catch that case here with a message that
+    # names the actual suspect.
+    assert len(stats) > 1, (
+        f"only one {boot_marker} line observed after driving quick-play "
+        "(3 Enters: Start > Campaign > first campaign in the list) — the "
+        "main menu layout likely drifted from what this drive expects "
+        "(main menu Start/Options/Quit -> \"Start:\" submenu "
+        "Campaign/Dogfight/Deathmatch/Join game/Back -> \"Select a "
+        "campaign:\" list; every Enter here relies on landing on an "
+        "already-default-selected top item at that level) rather than a "
+        f"{'heap' if boot_marker == 'HEAPSTAT' else 'graphics'}-instrumentation bug"
+    )
+
+    return stats
+
+
 def test_heapstat_is_emitted_and_truthful(cdogs_simulator):
     """The heap gauge reports both readings, and true >= watermark.
 
     Guards against regressing to the watermark-only gauge, which silently
     under-reported free memory and mis-tuned the reserve guard.
+
+    Drives the "Start" quick-play flow (see _drive_quickplay), which opens
+    campaign/map/sprite data and reliably produces at least one more
+    report after the heap has grown past the reserve threshold (verified
+    directly: the resulting peak is consistently well above
+    PEAK_RESERVE_THRESHOLD). This is the same instrumentation exercising
+    the same code path the reserve guard itself exercises — not a separate
+    scenario. The idle main menu alone never re-triggers file I/O, so
+    without this drive only the single boot-time report would ever arrive
+    and the peak field would go unexercised.
     """
-    cdogs_simulator.launch_app("cdogs")
+    stats = _drive_quickplay(
+        cdogs_simulator, "HEAPSTAT", parse_heapstats,
+        done=lambda s: any(x["peak"] > PEAK_RESERVE_THRESHOLD for x in s),
+    )
 
-    # Wait for the first HEAPSTAT line: a fast, reliable signal that
-    # C-Dogs has booted and reached the main menu.
-    deadline = time.time() + 60
-    text = ""
-    while time.time() < deadline:
-        text = cdogs_simulator.stdio_snapshot()
-        if "HEAPSTAT" in text:
-            break
-        time.sleep(0.2)
-
-    assert "HEAPSTAT" in text, f"no HEAPSTAT lines found in log:\n{text[-2000:]}"
-
-    # That first report is not enough on its own to exercise the peak
-    # field. Measured directly against this simulator (fast host-FS
-    # passthrough, no simulated SD latency — see module docstring): the
-    # entire boot-time asset scan (font/wall graphics through the
-    # LoadImgToSurface reserve-guard SKIPs, campaign/dogfight manifest
-    # reads, down to "Entering main menu loop") completes in well under
-    # 500ms of wall-clock time. picos_asset_load_tick's very first call of
-    # the whole process always clears its 500ms tick gate (the static
-    # s_last_tick_ms starts at 0), so exactly one HEAPSTAT line fires
-    # during that scan — and empirically it lands a few dozen ms *before*
-    # the heap actually crosses the 2.5MB reserve, not after. Once C-Dogs
-    # reaches the main menu it goes fully idle (no further file I/O at
-    # all), so no second report would ever follow no matter how long this
-    # loop waits — the peak tracker's "captured between reports" design
-    # only pays off if some later report actually happens.
-    #
-    # So: drive the "Start" quick-play flow, which opens further
-    # campaign/map/sprite data and reliably produces at least one more
-    # report after the heap has grown past the reserve threshold (verified
-    # directly: the resulting peak is consistently 3044520 across repeated
-    # runs). This is the same instrumentation exercising the same code
-    # path the reserve guard itself exercises — not a separate scenario.
-    cdogs_simulator.keypress("enter")
-    time.sleep(0.8)
-    cdogs_simulator.keypress("enter")
-
-    # Poll for a HEAPSTAT report whose peak has already cleared the reserve
-    # threshold, breaking out as soon as it shows up, instead of sleeping
-    # the full window unconditionally — quick-play's post-navigation
-    # report typically lands well under the 12s backstop below.
-    settle_deadline = time.time() + 12
-    text = cdogs_simulator.stdio_snapshot()
-    stats = parse_heapstats(text)
-    while time.time() < settle_deadline and not any(
-        s["peak"] > PEAK_RESERVE_THRESHOLD for s in stats
-    ):
-        time.sleep(0.3)
-        text = cdogs_simulator.stdio_snapshot()
-        stats = parse_heapstats(text)
-
-    assert stats, f"no HEAPSTAT lines found in log:\n{text[-2000:]}"
     for s in stats:
         assert s["true"] >= s["watermark"], (
             f"true free ({s['true']}) below watermark ({s['watermark']}) "
@@ -280,22 +398,6 @@ def test_heapstat_is_emitted_and_truthful(cdogs_simulator):
         "(via mallinfo().fordblks) that the sbrk watermark alone cannot "
         "see; if this never diverges, the 'true' gauge isn't measuring "
         "anything the old watermark-only gauge didn't already"
-    )
-
-    # Navigation sanity check. The peak assertion below is the only gate
-    # between "quick-play loaded" and a pass, and on its own a failure
-    # there just says the heap never filled — which points straight at
-    # stubs.c. But the far more likely real cause is that the two `enter`
-    # keypresses above no longer land on "Start" (e.g. the main menu
-    # gained/lost an item and the layout shifted): C-Dogs would then stay
-    # idle after the first, boot-scan-only HEAPSTAT report and never
-    # produce a second one, since quick-play is what drives the extra
-    # campaign/map/sprite file I/O that triggers it. Catch that case here
-    # with a message that names the actual suspect.
-    assert len(stats) > 1, (
-        "only one HEAPSTAT line observed after the quick-play keypresses — "
-        "the two 'enter' presses likely didn't land on \"Start\" (main menu "
-        "layout may have drifted) rather than a heap-instrumentation bug"
     )
 
     # The real regression gate: the old watermark-on-a-5s-cadence gauge
@@ -337,13 +439,14 @@ def peak_gfx_total(simulator, settle_s=12):
     """Launch cdogs, drive quick-play, and return the GFXSTAT line whose
     peak= field equals the overall observed high-water mark.
 
-    Mirrors test_heapstat_is_emitted_and_truthful's drive sequence and for
-    the same reason: only ~100 of 1683 PNGs are even attempted at the idle
-    main menu (2 succeed, the rest are skipped by the reserve guard before
-    a campaign is loaded) — the real sprite load happens on campaign entry.
-    A plain launch-and-wait would see almost nothing. So this sends the
-    same two 'enter' keypresses that land on "Start" for quick-play, then
-    polls stdio for GFXSTAT lines.
+    Uses _drive_quickplay for the shared launch / wait-for-boot-report /
+    navigate / poll-until-settled sequence (issue #14 — this used to carry
+    its own near-identical copy of that logic) for the same reason
+    test_heapstat_is_emitted_and_truthful does: only ~100 of 1683 PNGs are
+    even attempted at the idle main menu (2 succeed, the rest are skipped
+    by the reserve guard before a campaign is loaded) — the real sprite
+    load happens on campaign entry. A plain launch-and-wait would see
+    almost nothing.
 
     peak= is a running high-water mark of (data+tex) sampled every time
     either byte counter grows (see picos_gfx_bytes_peak_sample in
@@ -362,56 +465,7 @@ def peak_gfx_total(simulator, settle_s=12):
     element of the parsed stats list instead of this function's return
     value.
     """
-    simulator.launch_app("cdogs")
-
-    # Wait for the first GFXSTAT line: confirms C-Dogs has booted and the
-    # instrumentation is wired up before driving quick-play.
-    deadline = time.time() + 60
-    text = ""
-    while time.time() < deadline:
-        text = simulator.stdio_snapshot()
-        if "GFXSTAT" in text:
-            break
-        time.sleep(0.2)
-    assert "GFXSTAT" in text, f"no GFXSTAT lines found in log:\n{text[-2000:]}"
-
-    simulator.keypress("enter")
-    time.sleep(0.8)
-    simulator.keypress("enter")
-
-    # Settle window: give quick-play's campaign/map/sprite load time to
-    # run and be observed by at least one more report tick.
-    settle_deadline = time.time() + settle_s
-    text = simulator.stdio_snapshot()
-    stats = parse_gfxstats(text)
-    while time.time() < settle_deadline:
-        time.sleep(0.3)
-        text = simulator.stdio_snapshot()
-        stats = parse_gfxstats(text)
-
-    assert stats, f"no GFXSTAT lines found in log:\n{text[-2000:]}"
-
-    # Navigation sanity check, mirroring test_heapstat_is_emitted_and_truthful's
-    # guard. The substantive assertions the caller runs against this
-    # function's return value (pics>0, data>0, peak>0, total==data+tex) are
-    # all satisfiable by the boot-time asset scan alone — the idle main menu
-    # already loads ~100 of 1683 PNGs before quick-play is ever driven (see
-    # this function's docstring) — so none of them prove quick-play was
-    # actually reached. A failure there just says the graphics accounting
-    # looks wrong, which points straight at pic.c / picos_heap.h. But the
-    # far more likely real cause is that the two `enter` keypresses above no
-    # longer land on "Start" (e.g. the main menu gained/lost an item and the
-    # layout shifted): C-Dogs would then stay idle after the first,
-    # boot-scan-only GFXSTAT report and never produce a second one, since
-    # quick-play is what drives the campaign/map/sprite load that grows
-    # pics/data/tex further. Catch that case here, before the caller's
-    # substantive assertions run, with a message that names the actual
-    # suspect.
-    assert len(stats) > 1, (
-        "only one GFXSTAT line observed after the quick-play keypresses — "
-        "the two 'enter' presses likely didn't land on \"Start\" (main menu "
-        "layout may have drifted) rather than a graphics-instrumentation bug"
-    )
+    stats = _drive_quickplay(simulator, "GFXSTAT", parse_gfxstats, settle_s=settle_s)
 
     return max(stats, key=lambda s: s["peak"])
 
