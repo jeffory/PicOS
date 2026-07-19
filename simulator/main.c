@@ -252,7 +252,11 @@ static void* core1_thread(void* arg) {
 
 // ── g_api wiring (required by lua_bridge_sound, lua_bridge_network, etc.) ─────
 
-PicoCalcAPI g_api;
+// g_api is DEFINED once in stubs/driver_stubs.c and declared extern in os.h.
+// A second definition here was an ODR violation: two translation units each
+// claiming the storage. It happened to be harmless only because both saw the
+// same 160-byte layout — if the os.h copies ever drift, the two definitions
+// disagree on the size of the same object and writes run past it.
 
 // -- Sound player wrappers (same pattern as src/main.c) --
 
