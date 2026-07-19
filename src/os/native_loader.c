@@ -146,6 +146,10 @@ static void show_error(const char *line1, const char *line2) {
 // plenty of headroom for deep recursion (e.g. Doom's BSP tree traversal).
 // Stack accesses go through the cached XIP alias for performance.
 #define NATIVE_STACK_SIZE (64 * 1024)
+// Preferred SRAM stack size — used when the SRAM heap can supply it (see the
+// allocation site).  Double the 8 KB static SRAM stack all native apps
+// originally ran on (Doom included), so it is not a regression for depth.
+#define NATIVE_STACK_SRAM_SIZE (16 * 1024)
 
 // Pointer to the dynamically-allocated stack buffer.  Read by the HardFault
 // handler (main.c) to detect PSP stack overflow.  NULL when no native app
@@ -291,6 +295,7 @@ static bool native_run(const app_entry_t *app) {
   uint8_t *load_base = NULL;
   uint8_t *code_buf = NULL;
   uint8_t *stack_buf = NULL;
+  bool stack_in_sram = false;
   sdfile_t f = NULL;
   Elf32_Phdr *phdr_table = NULL;
 
@@ -689,10 +694,18 @@ static bool native_run(const app_entry_t *app) {
   printf("[NATIVE] Image base %p = ELF vaddr 0x%08lx\n",
          (void *)g_native_code_base, (unsigned long)g_native_code_vaddr);
 
-  // DIAG: snapshot the read-only image region for the Core 1 corruption
-  // watcher.  Taken after relocation + cache invalidate, copied uncached →
-  // uncached so it reflects PSRAM truth and leaves the XIP cache untouched.
-  if (!split_mode &&
+  // DIAG: snapshot region for the Core 1 corruption watcher.
+  //
+  // PERMANENTLY DISARMED (2026-07-19).  The watcher's fixed window
+  // (CODE_WATCH_MAX_SIZE, sized for Doom's read-only layout) covered the GBC
+  // emulator's writable .bss, and its auto-repair path memcpy'd stale snapshot
+  // bytes over the app's live data and invalidated the XIP cache mid-write —
+  // corrupting SD reads into PSRAM buffers and tearing pointer loads (wild
+  // jumps at fs->close, in-game crashes).  If image watching is ever needed
+  // again: derive the watched range from the app's own read-only PT_LOAD
+  // flags, and REPORT ONLY — never write to or cache-invalidate memory the
+  // running app owns.
+  if (0 && !split_mode &&
       (uintptr_t)load_base >= PSRAM_CS1_CACHED_BASE &&
       (uintptr_t)load_base <  PSRAM_CS1_CACHED_END) {
     uint32_t wsize = (uint32_t)(g_native_code_limit - g_native_code_base);
@@ -733,18 +746,39 @@ static bool native_run(const app_entry_t *app) {
 
   picos_app_entry_t entry_fn = (picos_app_entry_t)entry_addr;
 
-  stack_buf = (uint8_t *)umm_malloc(NATIVE_STACK_SIZE);
+  // Prefer an SRAM stack: PSRAM stacks funnel every call frame, local array
+  // and register spill through the XIP cache, which measurably slows
+  // memory-bound apps (GBC emulator).  16 KB SRAM is double the original
+  // static stack all native apps ran on; fall back to the roomy 64 KB PSRAM
+  // stack when SRAM is unavailable.
+  uint32_t stack_size = 0;
+  for (uint32_t try_size = NATIVE_STACK_SRAM_SIZE; try_size >= 8u * 1024;
+       try_size -= 4u * 1024) {
+    stack_buf = (uint8_t *)malloc(try_size);
+    if (stack_buf) {
+      stack_size = try_size;
+      stack_in_sram = true;
+      break;
+    }
+  }
+  if (!stack_in_sram) {
+    stack_size = NATIVE_STACK_SIZE;
+    stack_buf = (uint8_t *)umm_malloc(NATIVE_STACK_SIZE);
+  }
   if (!stack_buf) {
     show_error("Out of memory for app stack", NULL);
     goto out;
   }
+  printf("[NATIVE] App stack: %lu KB in %s @ %p\n",
+         (unsigned long)(stack_size / 1024), stack_in_sram ? "SRAM" : "PSRAM",
+         (void *)stack_buf);
   g_native_stack_base = stack_buf;
 
   uint32_t *guard = (uint32_t *)stack_buf;
   for (int i = 0; i < NATIVE_STACK_GUARD_WORDS; i++)
     guard[i] = NATIVE_STACK_CANARY;
 
-  uint32_t stack_top = (uint32_t)(stack_buf + NATIVE_STACK_SIZE);
+  uint32_t stack_top = (uint32_t)(stack_buf + stack_size);
 
   g_core1_pause = false;
 
@@ -791,8 +825,12 @@ out:
   }
   if (code_buf)
     free(code_buf);
-  if (stack_buf)
-    umm_free(stack_buf);
+  if (stack_buf) {
+    if (stack_in_sram)
+      free(stack_buf);
+    else
+      umm_free(stack_buf);
+  }
   if (load_base)
     umm_free(load_base);
   if (phdr_table)
