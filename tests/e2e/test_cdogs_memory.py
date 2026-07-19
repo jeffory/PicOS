@@ -31,20 +31,25 @@ summary:
    only ever returns what sim_log_append() recorded, so it can never see
    a native app's log output, no matter how long wait_for_log() waits.
    Fixing the simulator side would need a rebuild, which is out of scope
-   here (and the existing binary must not be rebuilt), so this test
-   drains the simulator subprocess's real stdout/stderr pipes directly
-   and searches that text for HEAPSTAT lines instead of using
-   get_log_buffer()/wait_for_log().
+   here (and the existing binary must not be rebuilt), so this test reads
+   the simulator subprocess's real stdout/stderr via the shared
+   PicosSimulator harness's own get_output() (backed by its
+   _start_pipe_drains() background threads, started automatically in
+   sim.start()) and searches that text for HEAPSTAT/GFXSTAT lines instead
+   of using get_log_buffer()/wait_for_log().
 
-That draining is also load-bearing for a third, unrelated reason: nothing
-in the existing harness reads the simulator's stdout/stderr pipes at all,
-and C-Dogs' startup burst of "[TRAMP] fs_*" stderr tracing (one line per
-file operation across ~2700 SD directory entries) exceeds the OS pipe
-buffer in well under a second. Once that pipe fills, the simulator
-process blocks on write() — and since the RPC socket thread also prints
-a debug line to stdout on every request, sustained RPC polling against
-an undrained simulator eventually stalls entirely. Draining both pipes
-from background threads as soon as the process starts avoids this.
+The one hazard get_output() doesn't remove on its own: its stdout/stderr
+tails are each bounded at 2000 lines (collections.deque(maxlen=2000) in
+picos_simulator.py), and C-Dogs' startup burst of "[TRAMP] fs_*" stderr
+tracing (one line per file operation across ~2700 SD directory entries)
+comfortably exceeds that in well under a second — easily enough volume to
+evict an early HEAPSTAT/GFXSTAT line (in particular the very first,
+boot-time report) from the tail before this module ever reads it.
+_drive_quickplay below therefore polls get_output() throughout the whole
+drive and accumulates every new matching line into a running list
+(deduped by field values) instead of reading the tail once at the end —
+a report is only lost if it's evicted before the very first poll after
+it was written, never merely before the last one.
 
 Finally: picos_asset_load_tick()'s 1000ms report cadence (apps/cdogs/stubs.c)
 is measured against sys->getTimeMs(), i.e. the simulator's uptime since
@@ -60,7 +65,6 @@ tick fires during the scan.
 """
 import re
 import shutil
-import threading
 import time
 from pathlib import Path
 
@@ -91,43 +95,6 @@ PEAK_RESERVE_THRESHOLD = 2_621_440
 MENU_READY_MARKER = "CDOGS: Entering main menu loop"
 
 
-def _drain(stream, sink, lock):
-    """Read a subprocess pipe to EOF, appending decoded lines to sink.
-
-    Line-based on purpose: BufferedReader.read(n) on a non-interactive
-    pipe keeps issuing raw reads until it gathers n bytes or hits EOF, so
-    with a fixed size it can block indefinitely once the app goes quiet
-    even though bytes are already sitting in the pipe. readline() returns
-    as soon as a line is available instead.
-    """
-    try:
-        for raw in iter(stream.readline, b""):
-            with lock:
-                sink.append(raw.decode("utf-8", errors="replace"))
-    except (ValueError, OSError):
-        pass  # stream closed under us during simulator teardown
-
-
-def start_stdio_drain(simulator):
-    """Continuously drain the simulator subprocess's stdout and stderr.
-
-    Returns a callable that snapshots everything captured so far as one
-    string. See the module docstring for why this is necessary instead of
-    get_log_buffer()/wait_for_log().
-    """
-    lines = []
-    lock = threading.Lock()
-    for stream in (simulator.process.stdout, simulator.process.stderr):
-        t = threading.Thread(target=_drain, args=(stream, lines, lock), daemon=True)
-        t.start()
-
-    def snapshot():
-        with lock:
-            return "".join(lines)
-
-    return snapshot
-
-
 @pytest.fixture
 def cdogs_simulator(simulator_binary, test_sd_card, request):
     """Simulator with C-Dogs staged onto the SD card before boot.
@@ -155,10 +122,6 @@ def cdogs_simulator(simulator_binary, test_sd_card, request):
         tcp_port=port,
     )
     sim.start()
-
-    # Start draining before launch so the pipes never get a chance to
-    # back up (see module docstring).
-    sim.stdio_snapshot = start_stdio_drain(sim)
 
     # Wait for enough simulator uptime that the report cadence's first
     # eligible tick fires during C-Dogs' (fast) asset scan (see module
@@ -204,6 +167,74 @@ def parse_heapstats(log_text):
             "peak": int(m.group(6)),
         })
     return out
+
+
+def _combined_output(simulator):
+    """Return the simulator's captured stdout+stderr as one string.
+
+    HEAPSTAT/GFXSTAT are written to stderr (see apps/cdogs/picos_heap.h),
+    but the simulator's own [TRAMP]/[UNICORN] trampoline tracing and the
+    app's own logging don't reliably land on the same stream — combine
+    both rather than assume which one a given marker is on.
+    """
+    out = simulator.get_output()
+    return out["stdout"] + "\n" + out["stderr"]
+
+
+def _poll_and_accumulate(simulator, parse_fn, seen, stats):
+    """One poll of the simulator's output, merging any not-yet-seen
+    matching lines into `stats` (in first-seen order), and returning the
+    raw combined text polled.
+
+    get_output()'s stdout/stderr tails are each bounded at 2000 lines
+    (see module docstring), and C-Dogs' asset scan can emit thousands of
+    "[TRAMP] fs_*" lines between two HEAPSTAT/GFXSTAT reports — easily
+    enough to evict an earlier report (especially the very first,
+    boot-time one) from the tail before anything ever reads it.
+    Accumulating on every poll instead of parsing one snapshot at the end
+    means a report is only ever lost if it's evicted before the very
+    first poll to observe it, never merely before a later one. `seen` is
+    a set of hashable field-tuples already recorded, so a report still
+    present in both this poll's window and an earlier one isn't
+    double-counted.
+    """
+    text = _combined_output(simulator)
+    for stat in parse_fn(text):
+        key = tuple(sorted(stat.items()))
+        if key not in seen:
+            seen.add(key)
+            stats.append(stat)
+    return text
+
+
+# How often _sleep_and_accumulate re-polls while waiting. Deliberately
+# tight: campaign/map/sprite loading after the third Enter can emit a
+# dense burst of "[TRAMP] fs_*" lines (see module docstring), and the
+# whole point of polling throughout the drive instead of once at the end
+# is that a burst entirely contained within one gap between polls can
+# still evict a report no poll ever saw. Empirically, blindly sleeping
+# 0.8s between keypresses with no polling in between (the very gap this
+# closes) was enough to occasionally lose the post-navigation report
+# under ordinary host load — confirmed by reproducing the miss with a
+# poll-only-at-the-edges variant of this same drive.
+_POLL_INTERVAL_S = 0.05
+
+
+def _sleep_and_accumulate(simulator, parse_fn, seen, stats, duration):
+    """Sleep ~duration seconds, polling and accumulating every
+    _POLL_INTERVAL_S throughout instead of once at the end or start.
+
+    Used in place of a blind time.sleep() anywhere in the drive below
+    that waits on the app doing work (e.g. between keypresses) — see
+    _POLL_INTERVAL_S for why an unpolled sleep is unsafe here.
+    """
+    deadline = time.time() + duration
+    while True:
+        _poll_and_accumulate(simulator, parse_fn, seen, stats)
+        remaining = deadline - time.time()
+        if remaining <= 0:
+            return
+        time.sleep(min(_POLL_INTERVAL_S, remaining))
 
 
 def _drive_quickplay(simulator, boot_marker, parse_fn, settle_s=12, done=None):
@@ -255,6 +286,12 @@ def _drive_quickplay(simulator, boot_marker, parse_fn, settle_s=12, done=None):
     if done is None:
         done = lambda stats: len(stats) > 1  # noqa: E731
 
+    # Accumulated across every poll for the rest of this drive — see
+    # _poll_and_accumulate's docstring for why a single end-of-drive read
+    # of get_output() isn't safe against its bounded tails.
+    seen = set()
+    stats = []
+
     simulator.launch_app("cdogs")
 
     # Wait for the first report: a fast, reliable signal that the
@@ -266,11 +303,11 @@ def _drive_quickplay(simulator, boot_marker, parse_fn, settle_s=12, done=None):
     deadline = time.time() + 60
     text = ""
     while time.time() < deadline:
-        text = simulator.stdio_snapshot()
-        if boot_marker in text:
+        text = _poll_and_accumulate(simulator, parse_fn, seen, stats)
+        if stats:
             break
-        time.sleep(0.2)
-    assert boot_marker in text, f"no {boot_marker} lines found in log:\n{text[-2000:]}"
+        time.sleep(_POLL_INTERVAL_S)
+    assert stats, f"no {boot_marker} lines found in log:\n{text[-2000:]}"
 
     # The real "ready for input" signal: cdogs_picos.c logs this literal
     # line via api->sys->log() (routed to real stdout the same way
@@ -283,12 +320,14 @@ def _drive_quickplay(simulator, boot_marker, parse_fn, settle_s=12, done=None):
     # too few keypresses actually registered and the flow stuck one menu
     # level short of loading anything. Waiting for this line explicitly
     # replaces what used to be an assumption baked into fixed sleeps.
+    # Keeps accumulating stats each poll too — the campaign manifest scan
+    # (and any reports it produces) can still be in flight here.
     deadline = time.time() + 60
     while time.time() < deadline:
-        text = simulator.stdio_snapshot()
+        text = _poll_and_accumulate(simulator, parse_fn, seen, stats)
         if MENU_READY_MARKER in text:
             break
-        time.sleep(0.1)
+        time.sleep(_POLL_INTERVAL_S)
     assert MENU_READY_MARKER in text, (
         f"'{MENU_READY_MARKER}' never appeared in the log — C-Dogs did not "
         f"reach an input-ready main menu:\n{text[-2000:]}"
@@ -305,24 +344,25 @@ def _drive_quickplay(simulator, boot_marker, parse_fn, settle_s=12, done=None):
     # actually stalled always reaches a loaded campaign. A real menu-layout
     # drift, by contrast, reproduces identically on the retry and still
     # fails below with the same diagnostic.
-    stats = []
-    text = ""
     for attempt in range(2):
         for _ in range(3):
             simulator.keypress("enter")
-            time.sleep(0.8)
+            # Not a blind time.sleep(0.8): the third Enter (loading a
+            # campaign) is exactly when the dense "[TRAMP] fs_*" burst
+            # from campaign/map/sprite I/O happens, so this window must
+            # keep polling throughout rather than only checking once
+            # after the fact — see _POLL_INTERVAL_S.
+            _sleep_and_accumulate(simulator, parse_fn, seen, stats, 0.8)
 
         # Poll for the completion signal, breaking out as soon as it's met
         # instead of sleeping the full window unconditionally — quick-play's
         # post-navigation report typically lands well under the settle_s
         # backstop.
         settle_deadline = time.time() + settle_s
-        text = simulator.stdio_snapshot()
-        stats = parse_fn(text)
+        text = _poll_and_accumulate(simulator, parse_fn, seen, stats)
         while time.time() < settle_deadline and not done(stats):
-            time.sleep(0.3)
-            text = simulator.stdio_snapshot()
-            stats = parse_fn(text)
+            time.sleep(_POLL_INTERVAL_S)
+            text = _poll_and_accumulate(simulator, parse_fn, seen, stats)
 
         if len(stats) > 1:
             break
