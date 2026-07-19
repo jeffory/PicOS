@@ -24,6 +24,7 @@ void gbc_display_init(GBCDisplay *ctx) {
     ctx->frame_count = 0;
     ctx->cgb_mode = false;
     ctx->cgb_palette = NULL;
+    ctx->draw_image_nn_fn = NULL;
 }
 
 void gbc_display_update_cgb_lut(GBCDisplay *ctx) {
@@ -58,7 +59,7 @@ void gbc_display_draw_line(GBCDisplay *ctx, const uint8_t pixels[GB_WIDTH], uint
         return;
     }
 
-    uint16_t *row = &ctx->framebuffer[line * GB_WIDTH];
+    uint16_t *row = ctx->linebuf;
 
     if (ctx->cgb_mode && ctx->cgb_palette) {
         // CGB mode: pixel value is an index into fixPalette[0x40]
@@ -76,6 +77,11 @@ void gbc_display_draw_line(GBCDisplay *ctx, const uint8_t pixels[GB_WIDTH], uint
         }
     }
 
+    // Blit this line straight into the OS framebuffer (2x scale → 2 rows).
+    // The 320B linebuf stays cache-hot, so this adds no PSRAM read traffic.
+    if (ctx->draw_image_nn_fn)
+        ctx->draw_image_nn_fn(0, 16 + (int)line * SCALE, row, GB_WIDTH, 1, SCALE);
+
     ctx->frame_count++;
 }
 
@@ -83,19 +89,17 @@ void gbc_display_render(GBCDisplay *ctx,
                         void (*draw_image_nn_fn)(int, int, const uint16_t *, int, int, int),
                         void (*flush_fn)(void),
                         void (*flush_rows_fn)(int, int)) {
+    (void)draw_image_nn_fn;
+    (void)flush_rows_fn;
     if (ctx->frame_count == 0) {
         return;
     }
 
-    draw_image_nn_fn(0, 16, ctx->framebuffer, GB_WIDTH, GB_HEIGHT, SCALE);
-
-    if (flush_rows_fn) {
-        // Flush only the dirty region: FPS bar (row 0) through GBC image bottom
-        // (row 16 + 144*SCALE - 1 = 303 at SCALE 2)
-        flush_rows_fn(0, 16 + GB_HEIGHT * SCALE - 1);
-    } else {
-        flush_fn();
-    }
+    // Full flush (with buffer swap): the DMA then reads the buffer we just
+    // finished while we draw the next frame into the other one.  flushRows
+    // (no swap) had the DMA reading the same buffer the per-line blits write,
+    // stalling the CPU on SRAM contention and tearing the panel.
+    flush_fn();
 
     ctx->frame_count = 0;
 }
