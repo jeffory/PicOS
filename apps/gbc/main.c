@@ -3,6 +3,7 @@
 #include "display.h"
 #include "input.h"
 #include "fs.h"
+#include "state.h"
 #include <stddef.h>
 #include "minigb_apu.h"
 #include "peanut_gb.h"
@@ -29,6 +30,11 @@ static GBCDisplay s_display;
 static GBCInput s_input;
 static GBCFilesystem s_fs;
 static const PicoCalcAPI *s_api;
+
+// Save-state scratch: gbc_state_load validates into these; s_gb/s_ram are
+// only overwritten after a fully successful read (~50KB + 32KB in PSRAM BSS).
+static struct gb_s s_gb_scratch;
+static uint8_t     s_ram_scratch[CART_RAM_SIZE];
 
 static uint8_t gb_rom_read(struct gb_s *gb, const uint_fast32_t addr) {
     (void)gb;
@@ -82,6 +88,7 @@ static void menu_cb_load_state(void *user) { (void)user; s_req_load_state = true
 // Transient status text drawn in the 16px top bar (right of the FPS text).
 static char     s_notice[24];
 static uint32_t s_notice_until;
+static int s_notice_scrub;
 
 static void set_notice(const char *msg) {
     int i = 0;
@@ -184,6 +191,33 @@ static bool start_rom(const char *path) {
     return true;
 }
 
+// Copy a validated state blob into the live emulator and re-patch every
+// pointer field: the saved values may come from a previous run of this
+// app loaded at a different PSRAM address.
+static void apply_loaded_state(void) {
+    memcpy(&s_gb, &s_gb_scratch, sizeof(s_gb));
+    memcpy(s_ram, s_ram_scratch, CART_RAM_SIZE);
+
+    s_gb.gb_rom_read        = gb_rom_read;
+    s_gb.gb_cart_ram_read   = gb_cart_ram_read;
+    s_gb.gb_cart_ram_write  = gb_cart_ram_write;
+    s_gb.gb_error           = gb_error;
+    s_gb.gb_serial_tx       = NULL;
+    s_gb.gb_serial_rx       = NULL;
+    s_gb.display.lcd_draw_line = lcd_draw_line;
+    s_gb.direct.priv        = NULL;
+    s_gb.rom                = s_rom;
+    s_gb.rom_size           = (uint32_t)s_rom_size;
+    s_gb.cart_ram_data      = s_ram;
+    s_gb.cart_ram_data_size = CART_RAM_SIZE;
+
+    // Same ROM guaranteed by the header checks, so cgb_mode is unchanged;
+    // palette contents may differ — rebuild the LUT.
+    s_display.cgb_palette = s_gb.cgb.fixPalette;
+    if (s_display.cgb_mode)
+        gbc_display_update_cgb_lut(&s_display);
+}
+
 // Loop structure: GB_FRAMES_PER_FLUSH emulated frames per display flush,
 // paced to native GB speed (59.73 Hz).  With peanut_gb frame_skip=1 the
 // emulator renders LCD lines every other frame, so 2 frames per flush
@@ -255,6 +289,31 @@ static int run_game(char *rom_path, int rom_path_len) {
                     }
                     force_full_redraw(d);
                 }
+            }
+            if (s_req_save_state) {
+                s_req_save_state = false;
+                bool ok = gbc_state_save(api, s_fs.current_rom_name,
+                                         &s_gb, (uint32_t)sizeof(s_gb),
+                                         s_ram, CART_RAM_SIZE,
+                                         s_rom, (uint32_t)s_rom_size);
+                sys->log("[GBC] save state: %s\n", ok ? "ok" : "FAILED");
+                set_notice(ok ? "State saved" : "Save failed");
+                force_full_redraw(d);
+            }
+            if (s_req_load_state) {
+                s_req_load_state = false;
+                if (gbc_state_load(api, s_fs.current_rom_name,
+                                   &s_gb_scratch, (uint32_t)sizeof(s_gb_scratch),
+                                   s_ram_scratch, CART_RAM_SIZE,
+                                   s_rom, (uint32_t)s_rom_size)) {
+                    apply_loaded_state();
+                    sys->log("[GBC] load state: ok\n");
+                    set_notice("State loaded");
+                } else {
+                    sys->log("[GBC] load state: missing or mismatched\n");
+                    set_notice("No state found");
+                }
+                force_full_redraw(d);
             }
             PROF_ADD(t_poll, t0);
         }
@@ -347,6 +406,21 @@ static int run_game(char *rom_path, int rom_path_len) {
             // Draw in the 16px black bar above the GBC image
             d->drawText(2, 4, fps_str, 0x07E0, 0x0000);
 
+            // Transient notice right of the FPS counter; drawing blanks
+            // after expiry scrubs both swap buffers over two frames.
+            if (s_notice[0]) {
+                bool active = sys->getTimeMs() < s_notice_until;
+                d->drawText(120, 4,
+                            active ? s_notice : "                       ",
+                            0xFFE0, 0x0000);
+                if (!active && ++s_notice_scrub >= 2) {
+                    s_notice[0] = '\0';
+                    s_notice_scrub = 0;
+                }
+                if (active)
+                    s_notice_scrub = 0;
+            }
+
             // Refresh CGB palette LUT (palettes can change mid-game)
             if (s_display.cgb_mode)
                 gbc_display_update_cgb_lut(&s_display);
@@ -403,6 +477,8 @@ void picos_main(const PicoCalcAPI *api,
     ensure_data_dirs();
 
     sys->addMenuItem("Load ROM...", menu_cb_load_rom, NULL);
+    sys->addMenuItem("Save State", menu_cb_save_state, NULL);
+    sys->addMenuItem("Load State", menu_cb_load_state, NULL);
 
     char rom_path[192];
     if (!pick_rom(rom_path, sizeof(rom_path))) {
