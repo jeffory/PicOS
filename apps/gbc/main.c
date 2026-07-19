@@ -204,6 +204,7 @@ static void apply_loaded_state(void) {
     s_gb.gb_error           = gb_error;
     s_gb.gb_serial_tx       = NULL;
     s_gb.gb_serial_rx       = NULL;
+    s_gb.gb_bootrom_read    = NULL;
     s_gb.display.lcd_draw_line = lcd_draw_line;
     s_gb.direct.priv        = NULL;
     s_gb.rom                = s_rom;
