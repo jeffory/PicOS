@@ -241,7 +241,18 @@ static int run_game(char *rom_path, int rom_path_len) {
                     exit_reason = RUN_SWITCH_ROM;
                     running = false;
                 } else {
-                    // Cancelled — resume the current game.
+                    // Cancelled — resume. The Esc that closed the browser is
+                    // still latched in the poll-edge state (kbd_poll rate-limits
+                    // the I2C read to once per 50ms, so a single sys->poll()
+                    // right here may not refresh it); drain it here so the
+                    // game's own Esc-exit check below doesn't see a stale edge
+                    // and quit. Bounded to 300ms (6x the 50ms rate limit) so a
+                    // stuck bus can't hang the resume.
+                    uint32_t drain_start = sys->getTimeMs();
+                    while ((in->getButtonsPressed() & BTN_ESC) &&
+                           (sys->getTimeMs() - drain_start) < 300) {
+                        sys->poll();
+                    }
                     force_full_redraw(d);
                 }
             }
