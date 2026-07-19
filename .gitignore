@@ -71,3 +71,5 @@ apps/**/*.su
 
 # Design mockups (not tracked)
 *.aseprite
+
+.cursor/

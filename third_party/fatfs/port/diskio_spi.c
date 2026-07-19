@@ -268,6 +268,7 @@ DSTATUS disk_status(BYTE pdrv) {
  * Polls for each 0xFE data token individually — compatible with all SD cards.
  */
 static bool sd_read_multi(BYTE *buff, uint32_t addr, UINT count) {
+  UINT count0 = count;
   /* Send CMD18: READ_MULTIPLE_BLOCK */
   if (sd_send_cmd(18, addr) != 0x00) {
     return false;
@@ -289,6 +290,8 @@ static bool sd_read_multi(BYTE *buff, uint32_t addr, UINT count) {
       tok = spi_byte(0xFF);
     } while (tok != SD_TOKEN_DATA_START && !time_reached(deadline));
     if (tok != SD_TOKEN_DATA_START) {
+      printf("[SD] multi-block token timeout blk %u/%u tok=0x%02x\n",
+             (unsigned)(count0 - count - 1), (unsigned)count0, tok);
       sd_send_cmd(12, 0); /* Try to stop anyway */
       spi_byte(0xFF);
       return false;
