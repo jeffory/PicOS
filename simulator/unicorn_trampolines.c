@@ -1180,16 +1180,121 @@ static void tramp_sys_is_usb_powered(uc_engine *uc) {
     write_reg(uc, UC_ARM_REG_R0, 1);  // Always USB in simulator
 }
 
+// ── Native-app system-menu items ────────────────────────────────────────
+//
+// A native app's sys->addMenuItem(label, callback, user) registers a guest
+// (ARM) callback with the host system menu. The host menu (system_menu.c,
+// real OS code compiled into the sim) is pure C and has no notion of guest
+// addresses, so each item is backed by a small host-side slot holding the
+// guest callback/user pointers; the host menu is given a "relay" trampoline
+// that, when the item is selected, performs a nested reverse-call into the
+// guest — the same pattern tramp_fs_list_dir uses to invoke listDir's
+// per-entry callback, except here the call is triggered from inside the
+// blocking system_menu_show_for_native() modal (itself invoked synchronously
+// from tramp_sys_poll's dispatch) rather than from a trampoline handler
+// directly. g_uc is valid throughout: the outer uc_emu_start is merely
+// suspended in its interrupt hook while the modal runs.
+//
+// The OS caps native/Lua apps at SYSMENU_MAX_APP_ITEMS (4); size this table
+// larger defensively so a slot leak never silently drops a legitimate item.
+#define MAX_NATIVE_MENU_ITEMS 8
+
+typedef struct {
+    bool in_use;
+    char label[32];
+    uint32_t callback_addr;  // guest address of void callback(void *user)
+    uint32_t user_addr;      // guest address passed back as the argument
+} native_menu_item_t;
+
+static native_menu_item_t s_native_menu_items[MAX_NATIVE_MENU_ITEMS];
+
+// Host callback registered with system_menu_add_item(). Runs on the host
+// thread while the guest's outer uc_emu_start is suspended in its SVC hook.
+static void native_menu_item_relay(void *user_data) {
+    native_menu_item_t *slot = (native_menu_item_t *)user_data;
+    if (!slot || !slot->in_use || slot->callback_addr == 0 || !g_uc) {
+        // Emulation ended or the slot went stale (app exited/relaunched) —
+        // never invoke a callback into a dead guest address space.
+        return;
+    }
+
+    uc_engine *uc = g_uc;
+
+    // Save registers clobbered by the nested call (mirrors tramp_fs_list_dir).
+    uint32_t save_r0, save_r1, save_r2, save_r3, save_lr, save_sp;
+    uc_reg_read(uc, UC_ARM_REG_R0, &save_r0);
+    uc_reg_read(uc, UC_ARM_REG_R1, &save_r1);
+    uc_reg_read(uc, UC_ARM_REG_R2, &save_r2);
+    uc_reg_read(uc, UC_ARM_REG_R3, &save_r3);
+    uc_reg_read(uc, UC_ARM_REG_LR, &save_lr);
+    uc_reg_read(uc, UC_ARM_REG_SP, &save_sp);
+
+    // callback(user)
+    write_reg(uc, UC_ARM_REG_R0, slot->user_addr);
+
+    // LR = REVCALL_BASE (SVC #254 + BX LR): when the callback returns, it
+    // executes SVC #254, which the interrupt hook uses to stop this nested
+    // uc_emu_start and hand control back here.
+    uint32_t lr_val = EMU_REVCALL_BASE | 1u;  // Thumb bit
+    uc_reg_write(uc, UC_ARM_REG_LR, &lr_val);
+
+    uint32_t callback_addr = slot->callback_addr | 1u;  // Thumb bit
+    fprintf(stderr, "[TRAMP] menu item '%s' selected, calling guest cb=0x%08x user=0x%08x\n",
+            slot->label, callback_addr, slot->user_addr);
+    uc_err err = uc_emu_start(uc, callback_addr, 0, 0, 0);
+    if (err != UC_ERR_OK) {
+        uint32_t pc;
+        uc_reg_read(uc, UC_ARM_REG_PC, &pc);
+        fprintf(stderr, "[UNICORN] menu item '%s' callback error: %s (PC=0x%08x)\n",
+                slot->label, uc_strerror(err), pc);
+    }
+
+    // Restore registers.
+    uc_reg_write(uc, UC_ARM_REG_R0, &save_r0);
+    uc_reg_write(uc, UC_ARM_REG_R1, &save_r1);
+    uc_reg_write(uc, UC_ARM_REG_R2, &save_r2);
+    uc_reg_write(uc, UC_ARM_REG_R3, &save_r3);
+    uc_reg_write(uc, UC_ARM_REG_LR, &save_lr);
+    uc_reg_write(uc, UC_ARM_REG_SP, &save_sp);
+}
+
 static void tramp_sys_add_menu_item(uc_engine *uc) {
     // addMenuItem(label, callback, user)
-    // For now, just log it. Full implementation would need reverse callbacks.
     uint32_t label_addr = read_reg(uc, UC_ARM_REG_R0);
+    uint32_t cb_addr    = read_reg(uc, UC_ARM_REG_R1);
+    uint32_t user_addr  = read_reg(uc, UC_ARM_REG_R2);
     char *label = uc_read_string(uc, label_addr);
-    printf("[UNICORN] addMenuItem('%s') — stub\n", label ? label : "?");
+
+    if (!label || cb_addr == 0) {
+        fprintf(stderr, "[TRAMP] addMenuItem: NULL label or callback, ignoring\n");
+        return;
+    }
+
+    int slot_idx = -1;
+    for (int i = 0; i < MAX_NATIVE_MENU_ITEMS; i++) {
+        if (!s_native_menu_items[i].in_use) { slot_idx = i; break; }
+    }
+    if (slot_idx < 0) {
+        fprintf(stderr, "[TRAMP] addMenuItem: no free slots, dropping '%s'\n", label);
+        return;
+    }
+
+    native_menu_item_t *slot = &s_native_menu_items[slot_idx];
+    snprintf(slot->label, sizeof(slot->label), "%s", label);
+    slot->callback_addr = cb_addr;
+    slot->user_addr = user_addr;
+    slot->in_use = true;
+
+    printf("[UNICORN] addMenuItem('%s') registered (slot %d, cb=0x%08x, user=0x%08x)\n",
+           slot->label, slot_idx, cb_addr, user_addr);
+    system_menu_add_item(slot->label, native_menu_item_relay, slot);
 }
 
 static void tramp_sys_clear_menu_items(uc_engine *uc) {
     (void)uc;
+    for (int i = 0; i < MAX_NATIVE_MENU_ITEMS; i++) {
+        s_native_menu_items[i].in_use = false;
+    }
     system_menu_clear_items();
 }
 
@@ -2545,6 +2650,15 @@ static tramp_handler_t s_dispatch[SLOT_TOTAL_COUNT];
 void unicorn_tramp_init(uc_engine *uc) {
     (void)uc;
     memset(s_dispatch, 0, sizeof(s_dispatch));
+
+    // Reset native-app system-menu item slots on every app launch so a
+    // previous (possibly crashed) app's guest callback pointers can never
+    // be invoked once its address space is gone. The host menu itself is
+    // cleared separately by launcher.c (system_menu_clear_items()) between
+    // app runs; clearing here too guards the slot table specifically.
+    for (int i = 0; i < MAX_NATIVE_MENU_ITEMS; i++) {
+        s_native_menu_items[i].in_use = false;
+    }
 
     // Display
     s_dispatch[SLOT_DISPLAY_CLEAR]          = tramp_display_clear;
