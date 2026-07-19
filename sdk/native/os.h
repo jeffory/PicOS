@@ -135,6 +135,13 @@ typedef struct {
     bool     (*renameFile)(const char *src, const char *dst);
     // Check if path is a directory. Returns true if it exists and is a directory.
     bool     (*isDir)(const char *path);
+    // Modal file-browser overlay (system-menu styling). Blocks until the
+    // user picks a file or cancels. start_path: directory shown first.
+    // root_path: topmost directory reachable via Esc (NULL = start_path);
+    // Esc at root cancels. On success returns true with the full file
+    // path in out_path. Requires api->version >= 3.
+    bool     (*browse)(const char *start_path, const char *root_path,
+                       char *out_path, int out_len);
 } picocalc_fs_t;
 
 // --- System -----------------------------------------------------------------
@@ -546,7 +553,7 @@ typedef struct PicoCalcAPI {
     const picocalc_graphics_t    *graphics;    // image loading/drawing
     const picocalc_video_t       *video;       // MJPEG video playback
     const picocalc_modplayer_t   *modplayer;   // MOD tracker music
-    uint32_t                      version;     // 1=Phase1, 2=Phase2
+    uint32_t                      version;     // 1=Phase1, 2=Phase2, 3=fs->browse
 } PicoCalcAPI;
 
 // The global API instance, populated during os_init()

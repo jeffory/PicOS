@@ -324,6 +324,7 @@ void __attribute__((naked)) isr_hardfault(void) {
 #include "drivers/fileplayer.h"
 #include "drivers/mp3_player.h"
 #include "drivers/pio_psram.h"
+#include "drivers/qmi_psram.h"
 #include "drivers/pio_psram_bulk.h"
 #include "drivers/sound.h"
 #include "drivers/mod_player.h"
@@ -341,6 +342,7 @@ void __attribute__((naked)) isr_hardfault(void) {
 #include "os/config.h"
 #include "os/core1_alloc.h"
 #include "os/crypto.h"
+#include "os/file_browser.h"
 #include "os/launcher.h"
 #include "os/lua_psram_alloc.h"
 #include "os/os.h"
@@ -719,6 +721,7 @@ static picocalc_fs_t s_fs_impl = {
     .deleteFile = fs_delete,
     .renameFile = fs_rename,
     .isDir = fs_is_dir,
+    .browse = file_browser_show,
 };
 
 // ── HTTP impl ─────────────────────────────────────────────────────────────────
@@ -1695,14 +1698,31 @@ int main(void) {
   g_api.video       = &s_video_impl;
   g_api.modplayer   = &s_modplayer_impl;
   g_api.zip         = &s_zip_impl;
-  g_api.version     = 2;
+  g_api.version     = 3;
   // fs wired after SD card init
 
-  // Explicitly configure PSRAM hardware pins and XIP write logic for the Pico
-  // Plus 2W before any PSRAM pointers are accessed.
+  // Bring up the QMI PSRAM in quad (QPI) mode before any PSRAM pointers are
+  // accessed.  Falls back to the reset-default serial mode if the chip fails
+  // the quad self-test (see drivers/qmi_psram.c).
+  //
+  // Self-recovery guard: a bug in the direct-mode window stalls flash XIP and
+  // hangs the CPU with no watchdog armed — an unrecoverable brick (happened
+  // 2026-07-19; needed BOOTSEL).  Arm the watchdog for the attempt and mark
+  // it in a scratch register: if the init hangs, the watchdog reboots and the
+  // next boot sees the flag and stays on the reset-default serial mode.
 #ifdef PICO_RP2350
-  gpio_set_function(47, GPIO_FUNC_XIP_CS1);
-  xip_ctrl_hw->ctrl |= XIP_CTRL_WRITABLE_M1_BITS;
+#define QMI_QUAD_ATTEMPT_MAGIC 0x51AD9E7Bu
+  if (watchdog_hw->scratch[4] == QMI_QUAD_ATTEMPT_MAGIC) {
+    printf("[QMI_PSRAM] previous quad-mode attempt hung — serial mode\n");
+    gpio_set_function(47, GPIO_FUNC_XIP_CS1);
+    xip_ctrl_hw->ctrl |= XIP_CTRL_WRITABLE_M1_BITS;
+  } else {
+    watchdog_hw->scratch[4] = QMI_QUAD_ATTEMPT_MAGIC;
+    watchdog_enable(8000, true);
+    qmi_psram_init(47);
+    watchdog_update();
+    watchdog_hw->scratch[4] = 0;
+  }
 #endif
 
   gpio_init(USB_VBUS_PIN);
