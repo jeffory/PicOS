@@ -208,7 +208,6 @@ static int run_game(char *rom_path, int rom_path_len) {
     const picocalc_sys_t *sys = s_api->sys;
     const picocalc_input_t *in = s_api->input;
     const PicoCalcAPI *api = s_api;
-    (void)rom_path; (void)rom_path_len;  // used from Task 3 onward
     int exit_reason = RUN_EXIT;
 
     sys->log("[GBC] entering main loop\n");
@@ -233,6 +232,19 @@ static int run_game(char *rom_path, int rom_path_len) {
             sys->poll();
             gbc_input_update(&s_input, in->getButtons);
             // --- system-menu request handling (Load ROM / states) ---
+            if (s_req_load_rom) {
+                s_req_load_rom = false;
+                // Save the outgoing game's battery RAM before anything else so
+                // it survives even if the user picks a new ROM.
+                flush_battery_save();
+                if (pick_rom(rom_path, rom_path_len)) {
+                    exit_reason = RUN_SWITCH_ROM;
+                    running = false;
+                } else {
+                    // Cancelled — resume the current game.
+                    force_full_redraw(d);
+                }
+            }
             PROF_ADD(t_poll, t0);
         }
         for (int f = 0; f < GB_FRAMES_PER_FLUSH && running; f++) {
