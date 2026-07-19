@@ -28,6 +28,11 @@ static uint16_t s_framebuffers[2][FB_WIDTH * FB_HEIGHT];
 // Pointer to the current back buffer
 static uint16_t *s_framebuffer = s_framebuffers[0];
 static int s_back_buffer_idx = 0;
+// Buffer most recently sent to the panel.  display_flush() presents the old
+// back buffer (after swap); display_flush_rows() presents the current draw
+// buffer without swapping.  Screenshot/readback must follow this, not the
+// front-buffer index, or flushRows-only apps read back a stale frame.
+static const uint16_t *s_last_presented = s_framebuffers[0];
 static bool s_dma_active = false;
 
 // DMA channel for LCD transfers
@@ -1313,6 +1318,7 @@ void display_flush(void) {
                             false);
   dma_channel_set_trans_count(s_dma_chan, FB_SIZE, true); // start transfer
   s_dma_active = true;
+  s_last_presented = s_framebuffers[front_buffer_idx];
 
   if (g_display_flush_blocking) {
     // Native PSRAM apps: must not return while DMA holds the SPI bus,
@@ -1405,6 +1411,7 @@ void display_flush_rows(int y0, int y1) {
   dma_channel_set_trans_count(s_dma_chan,
                               row_count * FB_WIDTH * sizeof(uint16_t), true);
   s_dma_active = true;
+  s_last_presented = s_framebuffer;
   // Non-blocking: no buffer swap — caller uses display_flush() for that.
 }
 
@@ -1842,7 +1849,7 @@ const uint16_t *display_get_screen_buffer(void) {
     lcd_cs_high();
     s_dma_active = false;
   }
-  return display_get_front_buffer();
+  return s_last_presented;
 }
 
 // Hardware vertical scroll using ST7365P VSCRDEF + VSCRSADD registers.
