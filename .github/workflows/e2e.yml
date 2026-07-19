@@ -51,6 +51,14 @@ jobs:
       - name: Run E2E tests
         run: |
           source .venv/bin/activate
+          # tee opens its output file when the pipeline starts, before pytest
+          # has created reports/ for --html — without this the step failed with
+          # "tee: reports/test-output.txt: No such file or directory" even when
+          # every test passed.
+          mkdir -p reports
+          # And take pytest's status, not tee's: a bare pipeline reports the
+          # last command, so a passing tee would mask a failing suite.
+          set -o pipefail
           export SDL_VIDEODRIVER=dummy
           pytest tests/e2e/ \
             -v \
