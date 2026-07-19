@@ -1,6 +1,7 @@
 #include "system_menu.h"
 #include "lua_bridge.h"
 #include "lua_psram_alloc.h"
+#include "../dev_commands.h"
 #include "../drivers/display.h"
 #include "../drivers/keyboard.h"
 #include "../drivers/sdcard.h"
@@ -407,6 +408,10 @@ static bool menu_loop(lua_State *L, int context) {
     }
 
     kbd_poll();
+    // Pump dev commands (keypress/screenshot/exit) so they don't stall
+    // for the entire time this modal is open.
+    dev_commands_poll();
+    dev_commands_process();
     uint32_t pressed = kbd_get_buttons_pressed();
 
     if (pressed & BTN_UP) {

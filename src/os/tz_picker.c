@@ -1,6 +1,7 @@
 #include "tz_picker.h"
 #include "config.h"
 #include "os.h"
+#include "../dev_commands.h"
 #include "../drivers/display.h"
 #include "../drivers/keyboard.h"
 
@@ -183,6 +184,11 @@ bool tz_picker_show(void) {
         }
 
         kbd_poll();
+
+        // Pump dev commands (keypress/screenshot/exit) so they don't stall
+        // for the entire time this modal is open.
+        dev_commands_poll();
+        dev_commands_process();
 
         char     ch      = kbd_get_char();
         uint32_t pressed = kbd_get_buttons_pressed();

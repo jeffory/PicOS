@@ -424,7 +424,7 @@ bool dev_commands_process(void) {
         else if (strcmp(key, "f7") == 0)       buttons = BTN_F7;
         else if (strcmp(key, "f8") == 0)       buttons = BTN_F8;
         else if (strcmp(key, "f9") == 0)       buttons = BTN_F9;
-        else if (strcmp(key, "f10") == 0)      buttons = (1 << 15);
+        else if (strcmp(key, "f10") == 0)      buttons = BTN_MENU;
         else if (strlen(key) == 1 && key[0] >= 0x20 && key[0] < 0x7F) {
             ch = key[0];
         } else {

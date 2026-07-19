@@ -464,6 +464,15 @@ void kbd_clear_state(void) {
 }
 
 void kbd_inject_buttons(uint32_t buttons) {
+  // Mirror the physical-key intercepts: BTN_MENU is an OS-level trigger that
+  // must set the menu flag and stay hidden from apps (physical MENU is
+  // intercepted in kbd_poll and stripped from s_buttons_curr). Without this,
+  // an injected MENU reached apps as a plain button and never opened the
+  // system menu.
+  if (buttons & BTN_MENU) {
+    s_menu_pressed = true;
+    buttons &= ~BTN_MENU;
+  }
   s_injected_buttons = buttons;
 }
 

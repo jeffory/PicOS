@@ -7,6 +7,7 @@
 
 static uint32_t g_buttons = 0;
 static uint32_t g_buttons_pressed = 0;
+static uint32_t g_injected_held = 0;  // injected buttons, auto-released on read
 static char g_char_buffer[256];
 static int g_char_head = 0;
 static int g_char_tail = 0;
@@ -92,6 +93,18 @@ void hal_input_update(void) {
     pthread_mutex_lock(&s_input_mutex);
     // Clear pressed flags each frame (they're edge-triggered)
     g_buttons_pressed = 0;
+    g_buttons &= ~g_injected_held;
+    g_injected_held = 0;
+    pthread_mutex_unlock(&s_input_mutex);
+}
+
+void hal_input_read_buttons(uint32_t* out_buttons, uint32_t* out_pressed) {
+    pthread_mutex_lock(&s_input_mutex);
+    if (out_buttons) *out_buttons = g_buttons;
+    if (out_pressed) *out_pressed = g_buttons_pressed;
+    g_buttons_pressed = 0;
+    g_buttons &= ~g_injected_held;
+    g_injected_held = 0;
     pthread_mutex_unlock(&s_input_mutex);
 }
 
@@ -99,6 +112,24 @@ void hal_input_inject_buttons(uint32_t buttons) {
     pthread_mutex_lock(&s_input_mutex);
     g_buttons |= buttons;
     g_buttons_pressed |= buttons;
+    g_injected_held |= buttons;
+    pthread_mutex_unlock(&s_input_mutex);
+}
+
+void hal_input_release_buttons(uint32_t buttons) {
+    pthread_mutex_lock(&s_input_mutex);
+    g_buttons &= ~buttons;
+    g_injected_held &= ~buttons;
+    pthread_mutex_unlock(&s_input_mutex);
+}
+
+void hal_input_inject_char(char c) {
+    pthread_mutex_lock(&s_input_mutex);
+    int next = (g_char_head + 1) % sizeof(g_char_buffer);
+    if (next != g_char_tail) {
+        g_char_buffer[g_char_head] = c;
+        g_char_head = next;
+    }
     pthread_mutex_unlock(&s_input_mutex);
 }
 

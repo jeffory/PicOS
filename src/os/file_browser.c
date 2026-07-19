@@ -2,6 +2,7 @@
 #include "../drivers/display.h"
 #include "../drivers/keyboard.h"
 #include "../drivers/sdcard.h"
+#include "../dev_commands.h"
 #include "os.h"
 
 #include "hardware/watchdog.h"
@@ -195,6 +196,10 @@ bool file_browser_show(const char *start_path, const char *root_path,
     }
 
     kbd_poll();
+    // Pump dev commands (keypress/screenshot/exit) so they don't stall
+    // for the entire time this modal is open.
+    dev_commands_poll();
+    dev_commands_process();
     uint32_t pressed = kbd_get_buttons_pressed();
 
     if (pressed & BTN_UP) {

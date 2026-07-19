@@ -439,9 +439,14 @@ static uint32_t button_name_to_mask(const char *button) {
     if (strcmp(button, "tab") == 0) return BTN_TAB;
     if (strcmp(button, "backspace") == 0 || strcmp(button, "bkspc") == 0) return BTN_BACKSPACE;
     if (strcmp(button, "del") == 0 || strcmp(button, "delete") == 0) return BTN_DEL;
-    if (strncmp(button, "f", 1) == 0 && strlen(button) <= 4) {
+    if (strcmp(button, "shift") == 0) return BTN_SHIFT;
+    if (strcmp(button, "ctrl") == 0) return BTN_CTRL;
+    if (strcmp(button, "sym") == 0 || strcmp(button, "fn") == 0) return BTN_FN;
+    // F10 is the hardware Menu key; there are no BTN_F10+ constants.
+    if (strcmp(button, "f10") == 0) return BTN_MENU;
+    if (strncmp(button, "f", 1) == 0 && strlen(button) <= 3) {
         int f = atoi(button + 1);
-        if (f >= 1 && f <= 12) return (uint32_t)(BTN_F1 << (f - 1));
+        if (f >= 1 && f <= 9) return (uint32_t)(BTN_F1 << (f - 1));
     }
     return 0;
 }
@@ -460,6 +465,7 @@ static char *h_inject_button(const char *params) {
     }
 
     if (strcmp(action, "release") == 0) {
+        hal_input_release_buttons(btn_mask);
         return strdup("{\"jsonrpc\":\"2.0\",\"result\":{\"ok\":true}}");
     }
     kbd_inject_buttons(btn_mask);
