@@ -48,7 +48,11 @@ static int g_auto_launch_done = 0;   // Flag to track if auto-launch was attempt
 static int g_show_splash = 0;        // Show boot splash screen
 static int g_tcp_port = 7878;        // TCP port for RPC socket
 static char g_instance_id[64] = "";  // Instance ID for unique socket paths
-char g_crash_log_path[512] = "/tmp/picos_sim_crash.log";
+// Per-process by default. A single shared path meant that under parallel test
+// runs (pytest -n auto) one crashing instance was reported as a crash by every
+// other instance's get_crash_log, and the file outlived the run so a crash in
+// one run kept failing later ones. Overridable with --crash-log.
+char g_crash_log_path[512] = "";
 
 // External function from keyboard stub
 extern void set_simulator_exit_flag(volatile int *flag);
@@ -154,6 +158,15 @@ static void parse_args(int argc, char** argv) {
             exit(1);
         }
     }
+
+    // Default the crash log to a per-process path so parallel instances never
+    // read each other's crashes, and a stale file cannot outlive the process.
+    if (g_crash_log_path[0] == '\0') {
+        snprintf(g_crash_log_path, sizeof(g_crash_log_path),
+                 "/tmp/picos_sim_crash_%d.log", (int)getpid());
+    }
+    // A previous process may have died holding this PID's name.
+    unlink(g_crash_log_path);
 }
 
 // Draw splash screen with status message

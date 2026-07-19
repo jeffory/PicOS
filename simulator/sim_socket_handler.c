@@ -178,35 +178,48 @@ const char *sim_wifi_get_error(void) {
 
 // ── Path sandboxing ───────────────────────────────────────────────────────────
 
+// NOTE ON BUFFER SIZES: every realpath() destination below must be at least
+// PATH_MAX bytes. glibc's _FORTIFY_SOURCE wrapper __realpath_chk() aborts the
+// process when it can see at compile time that the destination is smaller —
+// unconditionally, regardless of how short the actual path is. These buffers
+// were 1024 bytes, which aborted every sandboxed request on distros that
+// fortify by default (Ubuntu/CI) while working fine on those that do not
+// (Fedora). Never realpath() into a buffer of unknown or sub-PATH_MAX size.
 static bool sandbox_path(const char *path, char *out_resolved, size_t max) {
     extern char g_base_path[512];
     // Resolve base path to absolute for consistent comparison with realpath output
-    char abs_base[1024];
+    char abs_base[PATH_MAX];
     if (!realpath(g_base_path, abs_base)) return false;
     size_t base_len = strlen(abs_base);
 
-    char full[1024];
+    char full[PATH_MAX];
     if (path[0] == '/') {
         snprintf(full, sizeof(full), "%s%s", abs_base, path);
     } else {
         snprintf(full, sizeof(full), "%s/%s", abs_base, path);
     }
-    // Try realpath first (works for existing files)
-    if (realpath(full, out_resolved)) {
-        return strncmp(out_resolved, abs_base, base_len) == 0;
+    // Try realpath first (works for existing files). Resolve into a local
+    // PATH_MAX buffer rather than the caller's, whose size we only know as
+    // `max` — which may legitimately be smaller than PATH_MAX.
+    char tmp[PATH_MAX];
+    if (realpath(full, tmp)) {
+        if (strncmp(tmp, abs_base, base_len) != 0) return false;
+        if (strlen(tmp) >= max) return false;  // refuse to truncate a sandboxed path
+        memcpy(out_resolved, tmp, strlen(tmp) + 1);
+        return true;
     }
-    // For new files: resolve the parent directory and append the filename
-    char parent[1024];
-    snprintf(parent, sizeof(parent), "%s", full);
-    char *slash = strrchr(parent, '/');
+    // For new files: resolve the parent directory and append the filename.
+    // `full` is no longer needed, so reuse it as the parent scratch buffer.
+    char *slash = strrchr(full, '/');
     if (!slash) return false;
     char filename[256];
     snprintf(filename, sizeof(filename), "%s", slash + 1);
     *slash = '\0';
-    char resolved_parent[1024];
-    if (!realpath(parent, resolved_parent)) return false;
+    char resolved_parent[PATH_MAX];
+    if (!realpath(full, resolved_parent)) return false;
     if (strncmp(resolved_parent, abs_base, base_len) != 0) return false;
-    snprintf(out_resolved, max, "%s/%s", resolved_parent, filename);
+    int n = snprintf(out_resolved, max, "%s/%s", resolved_parent, filename);
+    if (n < 0 || (size_t)n >= max) return false;  // truncated — reject
     return true;
 }
 
