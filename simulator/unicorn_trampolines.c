@@ -2651,6 +2651,15 @@ void unicorn_tramp_init(uc_engine *uc) {
     (void)uc;
     memset(s_dispatch, 0, sizeof(s_dispatch));
 
+    // Reset the emulated shouldExit() latch for the new app run. s_emu_exit
+    // is intentionally sticky within a single run (tramp_sys_should_exit()
+    // never clears it, matching hardware's "stays true once set" contract),
+    // but it is a process-lifetime static — without this reset, exiting any
+    // app once (exit_app, Sym-menu exit) leaves it permanently true and every
+    // native app launched afterward in the same simulator session observes
+    // shouldExit()==true on its very first poll and self-exits within seconds.
+    s_emu_exit = false;
+
     // Reset native-app system-menu item slots on every app launch so a
     // previous (possibly crashed) app's guest callback pointers can never
     // be invoked once its address space is gone. The host menu itself is
