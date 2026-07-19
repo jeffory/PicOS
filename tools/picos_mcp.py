@@ -24,6 +24,7 @@ import hashlib
 import json
 import os
 import platform
+import re
 import signal
 import shutil
 import socket
@@ -310,9 +311,13 @@ class SimulatorManager:
             if self._probe_port(self.port):
                 return self.port
 
-        # Build if needed
+        # Build if needed (missing binary, or sources newer than the binary —
+        # a stale simulator silently running old source cost real debugging time)
         binary = self.project_root / "build_sim" / "picos_simulator"
         if not binary.exists():
+            self._build()
+        elif self._sources_newer_than(binary):
+            print("[picos] simulator binary is stale (source changed) — rebuilding…")
             self._build()
 
         # Start simulator
@@ -396,6 +401,27 @@ class SimulatorManager:
                 _tracked_pids.discard(self.process.pid)
             self.process = None
             self.port = 0
+
+    def _sources_newer_than(self, binary: Path) -> bool:
+        """True if any simulator/OS/driver source is newer than the binary."""
+        try:
+            bin_mtime = binary.stat().st_mtime
+        except OSError:
+            return True
+        roots = (self.project_root / "simulator", self.project_root / "src")
+        exts = {".c", ".h", ".cpp", ".pio", ".txt"}
+        for root in roots:
+            for dirpath, dirnames, filenames in os.walk(root):
+                dirnames[:] = [d for d in dirnames if d not in ("build", ".git")]
+                for name in filenames:
+                    if os.path.splitext(name)[1] not in exts:
+                        continue
+                    try:
+                        if os.path.getmtime(os.path.join(dirpath, name)) > bin_mtime:
+                            return True
+                    except OSError:
+                        continue
+        return False
 
     def _build(self):
         """Build the simulator."""
@@ -880,34 +906,144 @@ async def exit_app(device: str | None = None) -> str:
             return f"Error: {e}"
 
 
-@mcp.tool()
-async def keypress(key: str, device: str | None = None) -> str:
-    """Inject a keypress on the PicOS simulator.
+# ── Keypress helpers ──────────────────────────────────────────────────────────
 
-    Valid keys: up, down, left, right, enter, esc, menu, f1-f10,
-    backspace, tab, del, shift, a-z, A-Z, 0-9.
+# Named keys valid on both transports (aliases normalized before sending).
+_KEY_ALIASES = {"escape": "esc", "delete": "del", "bkspc": "backspace", "fn": "sym"}
+
+
+def _expand_key_sequence(spec: str, count: int) -> list[str]:
+    """Expand a key spec into the ordered list of keys to press.
+
+    Accepted forms: "down" | "down,down,enter" | "down down enter" |
+    "down 5x" (repeat previous key N times) | "downx5". A bare "5x" repeats
+    the preceding key. `count` repeats the whole expanded sequence.
     """
+    tokens = [t for t in re.split(r"[\s,]+", spec.strip()) if t]
+    keys: list[str] = []
+    for tok in tokens:
+        m = re.fullmatch(r"(\d+)[xX]", tok)
+        if m:
+            if not keys:
+                raise ValueError(f"repeat token '{tok}' has no preceding key")
+            keys.extend([keys[-1]] * (int(m.group(1)) - 1))
+            continue
+        m = re.fullmatch(r"(.+?)[xX](\d+)", tok)
+        if m:
+            base = m.group(1)
+            if len(base) == 1 or base.lower() in _NAMED_KEYS or base.lower() in _KEY_ALIASES:
+                keys.extend([base] * int(m.group(2)))
+                continue
+        keys.append(tok)
+    if not keys:
+        raise ValueError("empty key spec")
+    return keys * max(1, count)
+
+
+# Named keys accepted by the simulator's inject_button (after alias
+# normalization). Anything else of length 1 is typed via inject_char.
+_NAMED_KEYS = {
+    "up", "down", "left", "right", "enter", "esc", "menu", "tab",
+    "backspace", "del", "shift", "ctrl", "sym",
+    "f1", "f2", "f3", "f4", "f5", "f6", "f7", "f8", "f9", "f10",
+}
+
+
+def _normalize_key(key: str) -> str:
+    k = key.lower()
+    return _KEY_ALIASES.get(k, k) if len(k) > 1 else key
+
+
+def _is_char_key(key: str) -> bool:
+    return len(key) == 1 and key.lower() not in _NAMED_KEYS
+
+
+def do_keysequence_hardware(keys: list[str], port: str, delay_ms: int,
+                            timeout: float = DEFAULT_TIMEOUT) -> list[str]:
+    """Send a sequence of `keypress <key>` commands over one serial session."""
+    ser = open_serial(port, timeout)
+    try:
+        results = []
+        for i, key in enumerate(keys):
+            ser.write(f"keypress {_normalize_key(key)}\n".encode())
+            ser.flush()
+            status = "no ack"
+            deadline = time.monotonic() + timeout
+            while time.monotonic() < deadline:
+                raw = ser.readline()
+                if not raw:
+                    break
+                line = raw.decode("utf-8", errors="replace").rstrip("\r\n")
+                if "Key injected" in line:
+                    status = "ok"
+                    break
+                if "Unknown key" in line:
+                    status = "unknown key"
+                    break
+            results.append(f"{key}: {status}")
+            if i < len(keys) - 1:
+                time.sleep(max(0, delay_ms) / 1000.0)
+        return results
+    finally:
+        ser.close()
+
+
+@mcp.tool()
+async def keypress(key: str, count: int = 1, delay_ms: int = 100,
+                   device: str | None = None) -> str:
+    """Inject keypress(es) on the PicOS simulator or hardware.
+
+    Valid named keys: up, down, left, right, enter, esc, menu, f1-f10,
+    backspace, tab, del, shift, ctrl, sym. Single characters (a-z, A-Z,
+    0-9, punctuation) are typed as character input.
+
+    Sequences: "down,down,enter" or "down down enter" presses keys in
+    order; "down 5x" repeats the previous key 5 times ("downx5" also
+    works). `count` repeats the whole sequence; `delay_ms` is the gap
+    between presses (default 100ms).
+    """
+    try:
+        keys = _expand_key_sequence(key, count)
+    except ValueError as e:
+        return f"Error: {e}"
+
     port = resolve_port(device)
     if port:
         try:
-            lines = await asyncio.to_thread(do_command_hardware, f"keypress {key}", port)
-            for line in lines:
-                if "injected" in line.lower():
-                    return f"Key '{key}' injected."
-            return "\n".join(lines)
-        except Exception as e:
-            return f"Error: {e}"
-    else:
-        try:
-            conn = get_connection()
-            result = await asyncio.to_thread(
-                conn.call, "inject_button", {"button": key, "action": "click"}, timeout=5
+            results = await asyncio.to_thread(
+                do_keysequence_hardware, keys, port, delay_ms
             )
-            return f"Key '{key}' injected: {result}"
-        except JRpcError as e:
-            return f"Unknown key '{key}': {e.message}" if e.code == -32602 else str(e)
+            bad = [r for r in results if not r.endswith(": ok")]
+            summary = f"{len(keys)} key(s) injected: " + ", ".join(results)
+            return summary if not bad else f"PARTIAL FAILURE — {summary}"
         except Exception as e:
             return f"Error: {e}"
+
+    # Simulator: route single chars to inject_char, named keys to inject_button
+    sent = []
+    try:
+        conn = get_connection()
+        for i, k in enumerate(keys):
+            name = _normalize_key(k)
+            if _is_char_key(k):
+                method, params = "inject_char", {"char": k}
+            else:
+                method, params = "inject_button", {"button": name, "action": "click"}
+            try:
+                await asyncio.to_thread(conn.call, method, params, timeout=5)
+                sent.append(f"{k}: ok")
+            except JRpcError as e:
+                if e.code == -32602:
+                    sent.append(f"{k}: unknown key")
+                else:
+                    sent.append(f"{k}: {e.message}")
+            if i < len(keys) - 1:
+                await asyncio.sleep(max(0, delay_ms) / 1000.0)
+    except Exception as e:
+        return f"Error: {e}"
+    bad = [s for s in sent if not s.endswith(": ok")]
+    summary = f"{len(keys)} key(s) injected: " + ", ".join(sent)
+    return summary if not bad else f"PARTIAL FAILURE — {summary}"
 
 
 @mcp.tool()
