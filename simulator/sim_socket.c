@@ -16,7 +16,12 @@
 #include <stdbool.h>
 
 #define MAX_CLIENTS 8
-#define WRITE_BUF_SIZE 4096
+// Large enough to hold a full base64-encoded screenshot response (PNG or
+// raw RGB565 framebuffer, ~273KB base64) in one shot — queue_response()
+// aborts and silently truncates the message if the socket's kernel send
+// buffer is still full after one flush attempt, so undersizing this
+// caused truncated PNGs on anything but a near-empty screen.
+#define WRITE_BUF_SIZE (512 * 1024)
 #define READ_BUF_INIT 4096
 #define READ_BUF_MAX (256 * 1024)  // 256KB max for large base64 payloads
 #define DEFAULT_UNIX_SOCK_PATH "./picos_control"

@@ -332,7 +332,7 @@ enum {
     SLOT_INPUT_GET_CHAR,
     SLOT_INPUT_END,
 
-    // picocalc_fs_t (10 functions)
+    // picocalc_fs_t (15 functions)
     SLOT_FS_OPEN = SLOT_INPUT_END,
     SLOT_FS_READ,
     SLOT_FS_WRITE,
@@ -347,6 +347,7 @@ enum {
     SLOT_FS_DELETE_FILE,
     SLOT_FS_RENAME_FILE,
     SLOT_FS_IS_DIR,
+    SLOT_FS_BROWSE,
     SLOT_FS_END,
 
     // picocalc_sys_t (11 functions)
@@ -587,7 +588,29 @@ enum {
     SLOT_VIDEO_RESET_STATS,
     SLOT_VIDEO_END,
 
-    SLOT_TOTAL_COUNT = SLOT_VIDEO_END,
+    // picocalc_modplayer_t (11 functions) — stubs only; MOD playback is not
+    // exercised by any currently-tested native app. Present purely to keep
+    // this sub-table's slot count in sync with os.h so `zip` and `version`
+    // land at the byte offsets the real (compiled) PicoCalcAPI struct expects.
+    SLOT_MODPLAYER_CREATE = SLOT_VIDEO_END,
+    SLOT_MODPLAYER_DESTROY,
+    SLOT_MODPLAYER_LOAD,
+    SLOT_MODPLAYER_PLAY,
+    SLOT_MODPLAYER_STOP,
+    SLOT_MODPLAYER_PAUSE,
+    SLOT_MODPLAYER_RESUME,
+    SLOT_MODPLAYER_IS_PLAYING,
+    SLOT_MODPLAYER_SET_VOLUME,
+    SLOT_MODPLAYER_GET_VOLUME,
+    SLOT_MODPLAYER_SET_LOOP,
+    SLOT_MODPLAYER_END,
+
+    // picocalc_zip_t (2 functions) — stub only, same rationale as above.
+    SLOT_ZIP_EXTRACT = SLOT_MODPLAYER_END,
+    SLOT_ZIP_LIST,
+    SLOT_ZIP_END,
+
+    SLOT_TOTAL_COUNT = SLOT_ZIP_END,
 };
 
 // =============================================================================
@@ -1087,6 +1110,47 @@ static void tramp_fs_is_dir(uc_engine *uc) {
     write_reg(uc, UC_ARM_REG_R0, is_dir ? 1 : 0);
 }
 
+// file_browser_show() is real OS code (src/os/file_browser.c), compiled
+// natively into the simulator host binary — it is NOT ARM/Unicorn code.
+// This trampoline just marshals guest strings in and the result string
+// back out; the modal itself blocks on the host thread exactly like it
+// would on real hardware, drawing via the host display HAL and polling
+// host keyboard state. The dedicated socket thread (sim_socket.c) keeps
+// servicing MCP keypress/screenshot calls the whole time.
+extern bool file_browser_show(const char *start_path, const char *root_path,
+                              char *out_path, int out_len);
+
+static void tramp_fs_browse(uc_engine *uc) {
+    uint32_t start_addr = read_reg(uc, UC_ARM_REG_R0);
+    uint32_t root_addr  = read_reg(uc, UC_ARM_REG_R1);
+    uint32_t out_addr   = read_reg(uc, UC_ARM_REG_R2);
+    int out_len = (int)read_reg(uc, UC_ARM_REG_R3);
+
+    char *start_path = uc_read_string(uc, start_addr);
+    char *root_path  = uc_read_string(uc, root_addr);
+    // Snapshot both strings into local buffers before the blocking call —
+    // uc_read_string() rotates through a small shared pool, and we read
+    // twice back-to-back above.
+    char start_buf[256] = {0};
+    char root_buf[256] = {0};
+    snprintf(start_buf, sizeof(start_buf), "%s", start_path ? start_path : "");
+    snprintf(root_buf, sizeof(root_buf), "%s", root_path ? root_path : "");
+
+    char host_out[512] = {0};
+    int host_out_len = (out_len > 0) ? out_len : 1;
+    if (host_out_len > (int)sizeof(host_out)) host_out_len = (int)sizeof(host_out);
+
+    bool ok = file_browser_show(start_buf, root_addr ? root_buf : NULL,
+                                 host_out, host_out_len);
+
+    if (ok && out_addr && out_len > 0) {
+        size_t n = strlen(host_out) + 1;
+        if ((int)n > out_len) n = (size_t)out_len;
+        uc_mem_write(uc, out_addr, host_out, n);
+    }
+    write_reg(uc, UC_ARM_REG_R0, ok ? 1 : 0);
+}
+
 // =============================================================================
 // System trampoline handlers
 // =============================================================================
@@ -1224,6 +1288,14 @@ static void tramp_sys_log(uc_engine *uc) {
     }
     output[out_pos] = '\0';
     printf("[APP] %s\n", output);
+
+    // Also route into the MCP log ring buffer (get_log_buffer) — this was
+    // dead-wired before: sim_log_append() existed but nothing ever called
+    // it for native-app logs, so get_log_buffer() always returned empty.
+    extern void sim_log_append(const char *line);
+    char log_line[1040];
+    snprintf(log_line, sizeof(log_line), "[APP] %s", output);
+    sim_log_append(log_line);
 }
 
 static void tramp_sys_poll(uc_engine *uc) {
@@ -2523,6 +2595,7 @@ void unicorn_tramp_init(uc_engine *uc) {
     s_dispatch[SLOT_FS_DELETE_FILE] = tramp_fs_delete_file;
     s_dispatch[SLOT_FS_RENAME_FILE] = tramp_fs_rename_file;
     s_dispatch[SLOT_FS_IS_DIR]    = tramp_fs_is_dir;
+    s_dispatch[SLOT_FS_BROWSE]    = tramp_fs_browse;
 
     // System
     s_dispatch[SLOT_SYS_GET_TIME_MS]       = tramp_sys_get_time_ms;
@@ -2741,6 +2814,26 @@ void unicorn_tramp_init(uc_engine *uc) {
     s_dispatch[SLOT_VIDEO_GET_MUTED]       = tramp_video_get_muted;
     s_dispatch[SLOT_VIDEO_GET_DROPPED_FRAMES] = tramp_video_get_dropped_frames;
     s_dispatch[SLOT_VIDEO_RESET_STATS]     = tramp_video_reset_stats;
+
+    // MOD player + ZIP (stubs — unicorn_tramp_dispatch() falls back to the
+    // generic tramp_stub() for any slot with no s_dispatch entry; these
+    // names just make the "not implemented" log line readable). These
+    // sub-tables exist purely to keep byte offsets in this struct aligned
+    // with os.h's PicoCalcAPI — without them, `version` (the very next
+    // field) is read from the wrong offset by native apps.
+    s_stub_names[SLOT_MODPLAYER_CREATE]     = "modplayer.create";
+    s_stub_names[SLOT_MODPLAYER_DESTROY]    = "modplayer.destroy";
+    s_stub_names[SLOT_MODPLAYER_LOAD]       = "modplayer.load";
+    s_stub_names[SLOT_MODPLAYER_PLAY]       = "modplayer.play";
+    s_stub_names[SLOT_MODPLAYER_STOP]       = "modplayer.stop";
+    s_stub_names[SLOT_MODPLAYER_PAUSE]      = "modplayer.pause";
+    s_stub_names[SLOT_MODPLAYER_RESUME]     = "modplayer.resume";
+    s_stub_names[SLOT_MODPLAYER_IS_PLAYING] = "modplayer.isPlaying";
+    s_stub_names[SLOT_MODPLAYER_SET_VOLUME] = "modplayer.setVolume";
+    s_stub_names[SLOT_MODPLAYER_GET_VOLUME] = "modplayer.getVolume";
+    s_stub_names[SLOT_MODPLAYER_SET_LOOP]   = "modplayer.setLoop";
+    s_stub_names[SLOT_ZIP_EXTRACT]          = "zip.extract";
+    s_stub_names[SLOT_ZIP_LIST]             = "zip.list";
 }
 
 void unicorn_tramp_dispatch(uc_engine *uc, uint32_t slot) {
@@ -2784,7 +2877,7 @@ static uint32_t write_func_table(uc_engine *uc, uint32_t base_addr,
 void unicorn_build_api_struct(uc_engine *uc, uint32_t api_base, uint32_t tramp_base) {
     // Layout: PicoCalcAPI struct at api_base, followed by sub-tables
     // PicoCalcAPI has 17 pointer fields + 1 uint32_t (version)
-    uint32_t api_struct_size = 18 * 4;  // 17 pointers + version
+    uint32_t api_struct_size = 20 * 4;  // 19 pointers + version
 
     // Sub-tables start after the main struct
     uint32_t sub_base = api_base + api_struct_size;
@@ -2802,7 +2895,7 @@ void unicorn_build_api_struct(uc_engine *uc, uint32_t api_base, uint32_t tramp_b
     uint32_t display_count = SLOT_DISPLAY_END - SLOT_DISPLAY_CLEAR;
     sub_base = write_func_table(uc, sub_base, tramp_base, SLOT_DISPLAY_CLEAR, display_count);
 
-    // picocalc_fs_t (14 function pointers)
+    // picocalc_fs_t (15 function pointers)
     uint32_t fs_addr = sub_base;
     uint32_t fs_count = SLOT_FS_END - SLOT_FS_OPEN;
     sub_base = write_func_table(uc, sub_base, tramp_base, SLOT_FS_OPEN, fs_count);
@@ -2877,6 +2970,16 @@ void unicorn_build_api_struct(uc_engine *uc, uint32_t api_base, uint32_t tramp_b
     uint32_t video_count = SLOT_VIDEO_END - SLOT_VIDEO_NEW_PLAYER;
     sub_base = write_func_table(uc, sub_base, tramp_base, SLOT_VIDEO_NEW_PLAYER, video_count);
 
+    // picocalc_modplayer_t (11 function pointers, stubs)
+    uint32_t modplayer_addr = sub_base;
+    uint32_t modplayer_count = SLOT_MODPLAYER_END - SLOT_MODPLAYER_CREATE;
+    sub_base = write_func_table(uc, sub_base, tramp_base, SLOT_MODPLAYER_CREATE, modplayer_count);
+
+    // picocalc_zip_t (2 function pointers, stubs)
+    uint32_t zip_addr = sub_base;
+    uint32_t zip_count = SLOT_ZIP_END - SLOT_ZIP_EXTRACT;
+    sub_base = write_func_table(uc, sub_base, tramp_base, SLOT_ZIP_EXTRACT, zip_count);
+
     printf("[UNICORN] API sub-tables written, total %u bytes at 0x%08x..0x%08x\n",
            sub_base - api_base, api_base, sub_base);
     printf("[UNICORN] Total trampoline slots: %u\n", SLOT_TOTAL_COUNT);
@@ -2900,8 +3003,15 @@ void unicorn_build_api_struct(uc_engine *uc, uint32_t api_base, uint32_t tramp_b
     //   const picocalc_crypto_t  *crypto;       // offset 56
     //   const picocalc_graphics_t *graphics;    // offset 60
     //   const picocalc_video_t   *video;        // offset 64
-    //   uint32_t                  version;      // offset 68
+    //   const picocalc_modplayer_t *modplayer;  // offset 68
+    //   const picocalc_zip_t     *zip;          // offset 72
+    //   uint32_t                  version;      // offset 76
     // };
+    // NOTE: keep this struct (and api_struct_size above) in lockstep with
+    // src/os/os.h's `struct PicoCalcAPI` — a mismatch here silently shifts
+    // every field after the divergence, and `version` in particular reads
+    // as garbage (this exact bug previously made api->version read as a
+    // huge garbage value instead of 3, since modplayer/zip were missing).
 
     write32(uc, api_base +  0, input_addr);
     write32(uc, api_base +  4, display_addr);
@@ -2920,7 +3030,9 @@ void unicorn_build_api_struct(uc_engine *uc, uint32_t api_base, uint32_t tramp_b
     write32(uc, api_base + 56, crypto_addr);
     write32(uc, api_base + 60, graphics_addr);
     write32(uc, api_base + 64, video_addr);
-    write32(uc, api_base + 68, 2);  // version = 2 (Phase 2)
+    write32(uc, api_base + 68, modplayer_addr);
+    write32(uc, api_base + 72, zip_addr);
+    write32(uc, api_base + 76, 3);  // version = 3 (fs->browse)
 
-    printf("[UNICORN] PicoCalcAPI struct at 0x%08x, version=2\n", api_base);
+    printf("[UNICORN] PicoCalcAPI struct at 0x%08x, version=3\n", api_base);
 }
