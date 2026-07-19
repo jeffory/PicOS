@@ -182,6 +182,11 @@ static bool start_rom(const char *path) {
         sys->log("[GBC] audio started at %u Hz\n", AUDIO_SAMPLE_RATE);
     }
 
+    // Fresh cart RAM for the incoming ROM — real hardware powers up with
+    // undefined SRAM, and without this a ROM with no .sav would inherit
+    // (and later persist) the previous game's cart RAM.
+    memset(s_ram, 0xFF, CART_RAM_SIZE);
+
     uint32_t save_size = gb_get_save_size(&s_gb);
     sys->log("[GBC] save_size=%lu\n", (unsigned long)save_size);
     if (save_size > 0 && save_size <= CART_RAM_SIZE)
@@ -276,13 +281,14 @@ static int run_game(char *rom_path, int rom_path_len) {
                     exit_reason = RUN_SWITCH_ROM;
                     running = false;
                 } else {
-                    // Cancelled — resume. The Esc that closed the browser is
-                    // still latched in the poll-edge state (kbd_poll rate-limits
-                    // the I2C read to once per 50ms, so a single sys->poll()
-                    // right here may not refresh it); drain it here so the
-                    // game's own Esc-exit check below doesn't see a stale edge
-                    // and quit. Bounded to 300ms (6x the 50ms rate limit) so a
-                    // stuck bus can't hang the resume.
+                    // Cancelled — resume. The Esc that closed the browser may
+                    // still be latched in the poll-edge state. One fresh
+                    // kbd_poll() clears the stale edge (prev=curr runs even
+                    // when the I2C read is rate-limited); the bounded loop is
+                    // belt-and-braces for injected/simulated input paths, so
+                    // the game's own Esc-exit check below doesn't see a stale
+                    // edge and quit. Bounded to 300ms (6x the 50ms rate limit)
+                    // so a stuck bus can't hang the resume.
                     uint32_t drain_start = sys->getTimeMs();
                     while ((in->getButtonsPressed() & BTN_ESC) &&
                            (sys->getTimeMs() - drain_start) < 300) {
@@ -354,8 +360,9 @@ static int run_game(char *rom_path, int rom_path_len) {
             // When emulation is behind schedule this never waits.
             next_frame_us += GB_FRAME_US;
             uint64_t now_us = sys->getTimeUs();
-            if (now_us + GB_FRAME_US * 2 < next_frame_us) {
-                // Fell hopelessly behind (e.g. system menu open) — resync.
+            if (now_us > next_frame_us + GB_FRAME_US * 2) {
+                // Schedule fell far behind wall-clock (e.g. a modal was open) — resync
+                // instead of fast-forwarding through the accumulated deficit.
                 next_frame_us = now_us;
             }
             while (sys->getTimeUs() < next_frame_us) { /* spin */ }
@@ -500,9 +507,12 @@ void picos_main(const PicoCalcAPI *api,
 
         int reason = run_game(rom_path, sizeof(rom_path));
 
-        // s_gb / current_rom_name still refer to the outgoing ROM here,
-        // for both exit and switch.
-        flush_battery_save();
+        // On exit, s_gb / current_rom_name still refer to the outgoing ROM
+        // here, so flush now. On switch, the s_req_load_rom handler inside
+        // run_game already flushed the outgoing ROM's save before the
+        // browser opened — flushing again here would be redundant.
+        if (reason == RUN_EXIT)
+            flush_battery_save();
 
         if (reason == RUN_EXIT)
             break;
