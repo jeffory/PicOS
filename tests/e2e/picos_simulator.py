@@ -21,6 +21,7 @@ import subprocess
 import sys
 import time
 import threading
+from collections import deque
 from pathlib import Path
 from typing import Any, Optional, List
 
@@ -59,6 +60,13 @@ class PicosSimulator:
         self._id_counter = 0
         self._connected = False
         self._recv_buf = ""
+        # Bounded tails of the child's stdout/stderr. The pipes MUST be drained
+        # continuously (see _start_pipe_drains) or the simulator deadlocks once
+        # the 64KB kernel pipe buffer fills; these keep the output available for
+        # diagnostics without growing without bound.
+        self._stdout_tail: deque = deque(maxlen=2000)
+        self._stderr_tail: deque = deque(maxlen=2000)
+        self._drain_threads: list[threading.Thread] = []
 
     # ── Context Manager ──────────────────────────────────────────────────────
 
@@ -94,6 +102,10 @@ class PicosSimulator:
         # Parse the actual TCP port from simulator stdout
         self.tcp_port = self._parse_port()
 
+        # From here on nothing else reads these pipes, so they must be drained
+        # continuously — see _start_pipe_drains for why.
+        self._start_pipe_drains()
+
         # Connect and start reader
         self._connect()
 
@@ -116,6 +128,47 @@ class PicosSimulator:
                 self.process.kill()
                 self.process.wait(timeout=2)
             self.process = None
+
+    def _start_pipe_drains(self):
+        """Continuously drain the child's stdout/stderr.
+
+        The simulator is spawned with stdout=PIPE and stderr=PIPE, but after
+        _parse_port() nothing reads them again. Once the kernel pipe buffer
+        (64KB) fills, the simulator blocks in write(). That is not a clean
+        stall: the blocking write happens inside fflush() on the socket thread
+        while it holds the stdio FILE lock, so the main thread then blocks in
+        printf() waiting for that lock and the whole simulator deadlocks —
+        RPCs stop being answered and every subsequent call times out.
+
+        This showed up as 'App hung on cycle 5/10' in the stress tests: it took
+        about five app launches' worth of output to fill the pipe.
+        """
+        def drain(stream, tail):
+            try:
+                for raw in iter(stream.readline, b""):
+                    tail.append(raw.decode("utf-8", errors="replace").rstrip("\n"))
+            except (ValueError, OSError):
+                pass  # stream closed during shutdown
+            finally:
+                try:
+                    stream.close()
+                except Exception:
+                    pass
+
+        for stream, tail in ((self.process.stdout, self._stdout_tail),
+                             (self.process.stderr, self._stderr_tail)):
+            if stream is None:
+                continue
+            t = threading.Thread(target=drain, args=(stream, tail), daemon=True)
+            t.start()
+            self._drain_threads.append(t)
+
+    def get_output(self) -> dict:
+        """Recent simulator stdout/stderr, for diagnostics."""
+        return {
+            "stdout": "\n".join(self._stdout_tail),
+            "stderr": "\n".join(self._stderr_tail),
+        }
 
     def _parse_port(self) -> int:
         """Read stdout lines until we find '[Socket] TCP port: N'."""

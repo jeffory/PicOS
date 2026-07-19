@@ -269,10 +269,12 @@ void sim_socket_poll(void) {
     }
 
     struct timeval tv = {0, 0};
+    // NOTE: no logging on this path. sim_socket_poll() runs every 10ms on the
+    // socket thread, so anything printed here floods stdout — which deadlocked
+    // the simulator whenever its stdout was an undrained pipe: the write blocks
+    // inside fflush() while holding the stdio lock, and the main thread then
+    // blocks in printf() waiting for it.
     int n = select(max_fd + 1, &read_fds, NULL, NULL, &tv);
-    if (n > 0) {
-        printf("[Socket] select returned %d\n", n); fflush(stdout);
-    }
     if (n <= 0) return;
 
     if (s_unix_fd >= 0 && FD_ISSET(s_unix_fd, &read_fds)) {
