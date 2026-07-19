@@ -483,21 +483,25 @@ static const AppRunner *s_runners[] = {
 extern _Atomic bool g_core1_pause;
 extern _Atomic bool g_core1_paused;
 
-// Keep the QMI CS1 (PSRAM) clock at the rate validated at the 200 MHz boot
-// clock.  The QMI M1 registers are never explicitly configured — PSRAM runs
-// on the reset M1_TIMING (CLKDIV=4 → 50 MHz SCK at 200 MHz clk_sys).  A bare
-// sysclk change silently scales the PSRAM clock with it: at 300 MHz the SCK
-// becomes 75 MHz, out of spec for the serial read mode in use, and reads
-// start glitching — app code fetched from PSRAM corrupts transiently and
-// apps hardfault within seconds (verified live with the CODEWATCH scanner:
-// Doom dies in 3-22 s at 300 MHz, runs clean at 200 MHz).  Rescale CLKDIV
-// whenever clk_sys changes so the SCK stays at ≤50 MHz.
-#define PSRAM_QMI_MAX_SCK_KHZ 50000u
+// Retime the QMI CS1 (PSRAM) interface whenever clk_sys changes.  A bare
+// sysclk change silently scales the PSRAM SCK with it and reads start
+// glitching (verified live: Doom died in 3-22 s at 300 MHz on the old serial
+// mode).  In quad mode (drivers/qmi_psram.c) the full timing (CLKDIV,
+// MAX_SELECT, MIN_DESELECT — all in sysclk units) is recomputed; if the boot
+// quad init fell back to serial mode, rescale CLKDIV to keep SCK ≤50 MHz as
+// before.
+#define PSRAM_QMI_SERIAL_MAX_SCK_KHZ 50000u
 #if defined(PICO_RP2350) && !defined(PICOS_SIMULATOR)
 #include "hardware/structs/qmi.h"
 #include "hardware/sync.h"
+#include "drivers/qmi_psram.h"
 static void psram_qmi_apply_timing(uint32_t sys_khz) {
-  uint32_t clkdiv = (sys_khz + PSRAM_QMI_MAX_SCK_KHZ - 1) / PSRAM_QMI_MAX_SCK_KHZ;
+  if (qmi_psram_is_quad()) {
+    qmi_psram_update_timing();
+    return;
+  }
+  uint32_t clkdiv = (sys_khz + PSRAM_QMI_SERIAL_MAX_SCK_KHZ - 1)
+                  / PSRAM_QMI_SERIAL_MAX_SCK_KHZ;
   if (clkdiv < 1) clkdiv = 1;
   if (clkdiv > QMI_M1_TIMING_CLKDIV_BITS >> QMI_M1_TIMING_CLKDIV_LSB)
     clkdiv = QMI_M1_TIMING_CLKDIV_BITS >> QMI_M1_TIMING_CLKDIV_LSB;
@@ -508,7 +512,7 @@ static void psram_qmi_apply_timing(uint32_t sys_khz) {
   qmi_hw->m[1].timing = timing;
   __asm volatile ("dsb sy" ::: "memory");
   restore_interrupts(save);
-  printf("[LAUNCHER] QMI PSRAM clkdiv=%lu (%lu kHz SCK at %lu kHz sysclk)\n",
+  printf("[LAUNCHER] QMI PSRAM (serial) clkdiv=%lu (%lu kHz SCK at %lu kHz sysclk)\n",
          (unsigned long)clkdiv, (unsigned long)(sys_khz / clkdiv),
          (unsigned long)sys_khz);
 }

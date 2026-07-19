@@ -284,6 +284,7 @@ add_executable(picocalc_os
     src/drivers/tcp.c
     src/drivers/mod_player.c
     src/drivers/pio_psram.c
+    src/drivers/qmi_psram.c
     src/drivers/pio_psram_bulk.c
     src/drivers/pio_psram_qpi.c
     third_party/mongoose/mongoose.c
