@@ -10,8 +10,14 @@
 #define SCREEN_HEIGHT (GB_HEIGHT * SCALE)
 
 typedef struct {
-    uint16_t framebuffer[GB_WIDTH * GB_HEIGHT];
+    // Single-line staging buffer: converted GB line, blitted immediately via
+    // drawImageNN.  Replaces the old 46KB full-frame buffer whose per-frame
+    // write+readback through the XIP cache dominated PSRAM bandwidth.
+    uint16_t linebuf[GB_WIDTH];
+    // drawImageNN callback used by gbc_display_draw_line for the per-line blit
+    void (*draw_image_nn_fn)(int, int, const uint16_t *, int, int, int);
     uint16_t palette[3][4];       // DMG palettes (BG, OBJ0, OBJ1)
+    uint16_t cgb_lut[64];         // cached RGB565 lookup for CGB palette indices
     int selected_palette;
     int frame_count;
     bool cgb_mode;                // true when ROM is a GBC game
@@ -19,6 +25,7 @@ typedef struct {
 } GBCDisplay;
 
 void gbc_display_init(GBCDisplay *ctx);
+void gbc_display_update_cgb_lut(GBCDisplay *ctx);
 void gbc_display_set_palette(GBCDisplay *ctx, int palette_idx);
 void gbc_display_next_palette(GBCDisplay *ctx);
 void gbc_display_prev_palette(GBCDisplay *ctx);

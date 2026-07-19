@@ -3,5 +3,8 @@
   "name": "3D Test",
   "description": "Spinning 3D icosahedron with FPS counter",
   "version": "1.0.0",
-  "author": "PicOS"
+  "author": "PicOS",
+  "category": "demos",
+  "repo": "jeffory/picos-apps",
+  "min_firmware": "1.0.0"
 }

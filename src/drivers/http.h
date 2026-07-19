@@ -14,6 +14,7 @@
 #include <stdint.h>
 #include <stdbool.h>
 #include <stddef.h>
+#include "hardware/sync.h"
 
 #ifdef WIFI_ENABLED
 // No-op for now, Mongoose handles its own includes
@@ -91,11 +92,14 @@ typedef struct {
     int         hdr_count;
 
     // Receive ring buffer (body data)
+    // Protected by rx_spinlock — Core 1 writes (rx_write), Core 0 reads (http_read)
+    spin_lock_t *rx_spinlock;
+    int          rx_spin_num;  // hardware spinlock number (for unclaim)
     uint8_t *rx_buf;
     uint32_t rx_cap;   // allocated size
-    uint32_t rx_head;  // write index
-    uint32_t rx_tail;  // read index
-    uint32_t rx_count; // bytes available
+    uint32_t rx_head;  // write index  (Core 1 only, under lock)
+    uint32_t rx_tail;  // read index   (Core 0 only, under lock)
+    uint32_t rx_count; // bytes available (both cores, under lock)
 
     // Transmit buffer (HTTP request, heap-alloc'd, freed after sent)
     char    *tx_buf;
@@ -105,6 +109,8 @@ typedef struct {
     // Deadline timestamps (ms since boot)
     uint32_t deadline_connect;
     uint32_t deadline_read;
+    uint32_t max_transfer_ms;    // 0 = disabled (default)
+    uint32_t deadline_transfer;  // hard ceiling for total transfer time
 
     // Opaque pointer back to Lua userdata (set by lua_bridge.c)
     void *lua_ud;
@@ -162,6 +168,9 @@ uint8_t http_take_pending(http_conn_t *c);
 
 // Poll Mongoose for network events.
 void http_poll(void);
+
+// Check and enforce connect/read timeouts. Called from wifi_poll() on Core 1.
+void http_check_timeouts(void);
 
 // Fire any pending C-language (non-Lua) HTTP callbacks.
 // Called from Core 1 after wifi_poll() so native apps get network events

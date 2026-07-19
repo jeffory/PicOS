@@ -63,9 +63,9 @@ void ui_draw_header(const char *title) {
   s_last_wifi_status = wifi_is_available() ? (int)wifi_get_status() : -1;
   if (wifi_is_available()) {
     wifi_status_t status = wifi_get_status();
-    const char *icon = (status == WIFI_STATUS_CONNECTED) ? "WiFi" : "WiFi!";
-    uint16_t c =
-        (status == WIFI_STATUS_CONNECTED) ? C_BATTERY_OK : C_BATTERY_LO;
+    bool connected = (status == WIFI_STATUS_CONNECTED || status == WIFI_STATUS_ONLINE);
+    const char *icon = connected ? "WiFi" : "WiFi!";
+    uint16_t c = connected ? C_BATTERY_OK : C_BATTERY_LO;
 
     int icon_w = (int)strlen(icon) * 6;
     x -= icon_w;

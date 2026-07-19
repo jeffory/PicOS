@@ -6183,16 +6183,17 @@ static void handle_tls_recv(struct mg_connection *c) {
   if (io->size - io->len < min && !mg_iobuf_resize(io, io->len + min)) {
     mg_error(c, "oom");
   } else {
+    size_t space = io->size - io->len;
     // Decrypt data directly into c->recv
     long n = mg_tls_recv(c, io->buf != NULL ? &io->buf[io->len] : io->buf,
-                         io->size - io->len);
+                         space);
     if (n == MG_IO_ERR) {
       mg_error(c, "TLS recv error");
     } else if (n > 0) {
       // Decrypted successfully - trigger MG_EV_READ
       io->len += (size_t) n;
       mg_call(c, MG_EV_READ, &n);
-    }  // else n < 0: outstanding data to be moved to c->recv
+    }
   }
 }
 
@@ -16646,6 +16647,15 @@ void mg_tls_init(struct mg_connection *c, const struct mg_tls_opts *opts) {
   mbedtls_ssl_conf_rng(&tls->conf, mg_mbed_rng, c);
 #endif
 
+  // Always set SNI hostname when provided — required for shared-IP hosts
+  // (Cloudflare, AWS ALBs, etc.) regardless of certificate verification mode
+  if (c->is_client && opts->name.buf != NULL && opts->name.buf[0] != '\0') {
+    char *host = mg_mprintf("%.*s", opts->name.len, opts->name.buf);
+    mbedtls_ssl_set_hostname(&tls->ssl, host);
+    MG_DEBUG(("%lu SNI hostname: %s", c->id, host));
+    mg_free(host);
+  }
+
   if (opts->ca.len == 0 || mg_strcmp(opts->ca, mg_str("*")) == 0) {
     // NOTE: MBEDTLS_SSL_VERIFY_NONE is not supported for TLS1.3 on client side
     // See https://github.com/Mbed-TLS/mbedtls/issues/7075
@@ -16653,17 +16663,6 @@ void mg_tls_init(struct mg_connection *c, const struct mg_tls_opts *opts) {
   } else {
     if (mg_load_cert(opts->ca, &tls->ca) == false) goto fail;
     mbedtls_ssl_conf_ca_chain(&tls->conf, &tls->ca, NULL);
-    if (c->is_client) {
-      if (opts->name.buf != NULL && opts->name.buf[0] != '\0') {
-        char *host = mg_mprintf("%.*s", opts->name.len, opts->name.buf);
-        mbedtls_ssl_set_hostname(&tls->ssl, host);
-        MG_DEBUG(("%lu hostname verification: %s", c->id, host));
-        mg_free(host);
-      } else {
-        MG_DEBUG(("%lu skipping hostname verification", c->id));
-        mbedtls_ssl_set_hostname(&tls->ssl, NULL);
-      }
-    }
     mbedtls_ssl_conf_authmode(&tls->conf, MBEDTLS_SSL_VERIFY_REQUIRED);
   }
   if (!mg_load_cert(opts->cert, &tls->cert)) goto fail;

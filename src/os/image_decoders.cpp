@@ -165,7 +165,7 @@ bool decode_png_buffer(const uint8_t *data, size_t len,
   if (!png)
     return false;
 
-  if (png->openRAM((uint8_t *)data, (int)len, my_PNGDraw)) {
+  if (png->openRAM((uint8_t *)data, (int)len, my_PNGDraw) == PNG_SUCCESS) {
     int w = png->getWidth();
     int h = png->getHeight();
     result->w = w;
@@ -291,25 +291,20 @@ bool decode_jpeg_file(const char *path, image_decode_result_t *result) {
 }
 
 bool decode_png_file(const char *path, image_decode_result_t *result) {
-  if (!path || !result) {
+  if (!path || !result)
     return false;
-  }
 
   PNG *png = (PNG *)umm_malloc(sizeof(PNG));
-  if (!png) {
+  if (!png)
     return false;
-  }
 
   if (png->open(path, my_file_open, my_file_close, my_png_read, my_png_seek,
-                my_PNGDraw)) {
+                my_PNGDraw) == PNG_SUCCESS) {
     int w = png->getWidth();
     int h = png->getHeight();
     size_t req_mem = w * h * sizeof(uint16_t);
 
     if (req_mem > 4000000) {
-      printf("[TGX] Image too large! PNG cannot be hardware downscaled: %zu "
-             "bytes\n",
-             req_mem);
       png->close();
       umm_free(png);
       return false;

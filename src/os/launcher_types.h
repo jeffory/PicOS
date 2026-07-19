@@ -17,9 +17,11 @@ typedef struct {
     char path[128];        // Full path to app directory ("/apps/foo")
     char description[128]; // Short description from app.json
     char version[16];
+    char category[24];     // "games", "tools", "system", "demos", "emulators", "network"
     app_type_t type;               // Detected app type
     bool has_root_filesystem;      // "root-filesystem" requirement
     bool has_http;                 // "http" requirement
     bool has_audio;                // "audio" requirement
     uint32_t system_clock_khz;     // Optional overclock (0 = use system default)
+    void *icon;                    // pc_image_t*, loaded from icon.png/bmp, NULL if absent
 } app_entry_t;

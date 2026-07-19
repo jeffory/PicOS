@@ -38,10 +38,18 @@ SDK.md
 Code Review.md
 review.md
 testplan.md
+specs/
 
 # Debugging artifacts
 screenshots/
 screen.png
+screenshot.png
+
+# Binary assets (not tracked in git)
+apps/doom/doom1.wad
+apps/gbc/main.elf
+apps/block.exe/inspiration.jpg
+apps/tic-80/
 
 # Simulator user data
 data/
@@ -51,3 +59,17 @@ sim_*.log
 
 tests/e2e/__pycache__/
 *.patch
+
+saves/
+
+graphify-out/
+src/graphify-out/
+
+# Native app build artifacts
+apps/**/*.o
+apps/**/*.su
+
+# Design mockups (not tracked)
+*.aseprite
+
+.cursor/

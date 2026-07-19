@@ -6,10 +6,8 @@ on:
       - 'v*'
 
 jobs:
-  build:
+  build-firmware:
     runs-on: ubuntu-latest
-    permissions:
-      contents: write  # This allows the action to create/update releases
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -58,10 +56,76 @@ jobs:
           cd build
           sha256sum picocalc_os.bin | awk '{print $1}' > picocalc_os.sha256
 
+      - name: Upload firmware artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: firmware
+          path: |
+            build/picocalc_os.uf2
+            build/picocalc_os.bin
+            build/picocalc_os.sha256
+
+  build-simulator:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update -q
+          sudo apt-get install -y \
+            cmake \
+            build-essential \
+            libsdl2-dev \
+            libsdl2-image-dev \
+            libcurl4-openssl-dev
+
+      - name: Fetch Lua
+        run: |
+          mkdir -p third_party/lua-5.4
+          curl -fL https://www.lua.org/ftp/lua-5.4.7.tar.gz \
+            | tar -xz --strip-components=1 -C third_party/lua-5.4/
+
+      - name: Build simulator
+        run: make simulator
+
+      - name: Upload simulator artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: simulator
+          path: build_sim/picos_simulator
+
+  release:
+    needs: [build-firmware, build-simulator]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Download firmware artifacts
+        uses: actions/download-artifact@v4
+        with:
+          name: firmware
+          path: firmware/
+
+      - name: Download simulator artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: simulator
+          path: simulator/
+
+      - name: Prepare simulator binary
+        run: |
+          chmod +x simulator/picos_simulator
+          mv simulator/picos_simulator simulator/picos-simulator-linux
+
       - name: Upload artifacts to release
         uses: softprops/action-gh-release@v2
         with:
           files: |
-            build/picocalc_os.uf2
-            build/picocalc_os.bin
-            build/picocalc_os.sha256
+            firmware/picocalc_os.uf2
+            firmware/picocalc_os.bin
+            firmware/picocalc_os.sha256
+            simulator/picos-simulator-linux

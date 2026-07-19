@@ -1,12 +1,14 @@
 #include "hardware/clocks.h"
 #include "hardware/gpio.h"
 #include "hardware/structs/xip.h"
+#include "hardware/xip_cache.h"
 #include "hardware/watchdog.h"
 #include "pico/bootrom.h"
 #include "pico/multicore.h"
 #include "pico/stdlib.h"
 
 #include <stdarg.h>
+#include <stdatomic.h>
 #include <stdio.h>
 #include <stdlib.h>
 
@@ -21,18 +23,48 @@ void display_clear(uint16_t color);
 int  display_draw_text(int x, int y, const char *text, uint16_t fg, uint16_t bg);
 void display_flush(void);
 
+// Forward declarations for launcher functions used in hardfault_c.
+const char* launcher_get_running_app_name(void);
+uint32_t    launcher_get_app_uptime_ms(void);
+
 // Linker symbols for the main stack limits (see boot2/memmap_*.ld)
 extern uint32_t __StackTop;    // initial SP (stack grows DOWN from here)
 extern uint32_t __StackBottom; // lowest valid address (4KB below StackTop)
+extern uint32_t __StackOneBottom; // Core 1 MSP lower bound (SCRATCH_X)
 
 // ── HardFault handler ─────────────────────────────────────────────────────────
 // Captures the exception frame (stacked registers) and prints fault registers
 // to UART+USB so we can identify the crash address.  UART stdio is polling-
 // based, so this works even with interrupts disabled inside the fault handler.
 
-// Native app stack bounds (defined in native_loader.c).
-// Used to detect PSP stack overflow correctly in the hardfault handler.
-extern uint8_t s_native_stack[];
+// Native app stack base pointer (defined in native_loader.c).
+// Dynamically allocated from PSRAM; NULL when no native app is running.
+// Used to detect PSP stack overflow in the hardfault handler.
+extern uint8_t *g_native_stack_base;
+
+// Native app image placement (defined in native_loader.c) — lets the
+// hardfault handler report crash PC/LR as ELF-relative offsets.
+extern uintptr_t g_native_code_base, g_native_code_limit;
+extern uint32_t  g_native_code_vaddr;
+extern uintptr_t g_native_data_base, g_native_data_limit;
+extern uint32_t  g_native_data_vaddr;
+
+// DIAG: code-corruption watcher state (defined in native_loader.c).
+extern const uint8_t *g_code_watch_snap;
+extern const uint8_t *g_code_watch_live;
+extern uint32_t       g_code_watch_size;
+extern _Atomic(bool)  g_code_watch_active;
+
+// Translate an absolute address inside the running native app back to its
+// ELF vaddr.  Returns 0xFFFFFFFF when the address is outside the app image.
+static uint32_t native_addr_to_elf_vaddr(uint32_t addr) {
+  uint32_t a = addr & ~1u;
+  if (g_native_code_base && a >= g_native_code_base && a < g_native_code_limit)
+    return a - (uint32_t)g_native_code_base + g_native_code_vaddr;
+  if (g_native_data_base && a >= g_native_data_base && a < g_native_data_limit)
+    return a - (uint32_t)g_native_data_base + g_native_data_vaddr;
+  return 0xFFFFFFFFu;
+}
 
 static void __attribute__((used)) hardfault_c(uint32_t *frame, uint32_t exc_return) {
   // ARM exception frame layout (8 words pushed by hardware on entry):
@@ -47,6 +79,31 @@ static void __attribute__((used)) hardfault_c(uint32_t *frame, uint32_t exc_retu
   uint32_t bfar = *(volatile uint32_t *)0xE000ED38u; // BFAR (if BFARVALID)
   uint32_t mmar = *(volatile uint32_t *)0xE000ED34u; // MMFAR (if MMFARVALID)
   uint32_t ccr = *(volatile uint32_t *)0xE000ED14u;  // SCB CCR
+  // ARMv8-M Security Extension fault registers.  A SecureFault escalates to
+  // HardFault with HFSR.FORCED set but leaves CFSR untouched — its syndrome
+  // lives in SFSR/SFAR instead.  (CFSR=0 + FORCED is the telltale.)
+  uint32_t sfsr = *(volatile uint32_t *)0xE000EDE4u; // SFSR
+  uint32_t sfar = *(volatile uint32_t *)0xE000EDE8u; // SFAR (if SFARVALID)
+  uint32_t dfsr = *(volatile uint32_t *)0xE000ED30u; // DFSR (debug events)
+
+  // Grab app context before anything else (best-effort, pointers may be bad).
+  const char *app_name = launcher_get_running_app_name();
+  uint32_t uptime_ms = launcher_get_app_uptime_ms();
+  uint32_t uptime_sec = uptime_ms / 1000u;
+
+  // Which exception is actually executing (3 = genuine HardFault; anything
+  // else means this handler was reached through a different vector), what
+  // was executing before (stacked xPSR ISR field, 0 = thread mode), and the
+  // instruction at the faulting PC (verifies the stacked PC is sane).
+  uint32_t ipsr;
+  __asm volatile ("mrs %0, ipsr" : "=r"(ipsr));
+  uint32_t stacked_xpsr = frame[7];
+  uint16_t instr16 = 0;
+  uint32_t pc_probe = frame[6] & ~1u;
+  if ((pc_probe >= 0x10000000u && pc_probe < 0x18000000u) ||
+      (pc_probe >= 0x20000000u && pc_probe < 0x20082000u)) {
+    instr16 = *(volatile uint16_t *)pc_probe;
+  }
 
   // Persist fault data in watchdog scratch registers so it survives a
   // watchdog reset and can be dumped to SD on next boot.
@@ -57,8 +114,25 @@ static void __attribute__((used)) hardfault_c(uint32_t *frame, uint32_t exc_retu
   watchdog_hw->scratch[3] = (uint32_t)(uintptr_t)frame + 32u; // pre-fault SP
   watchdog_hw->scratch[4] = cfsr;
   watchdog_hw->scratch[5] = hfsr;
-  watchdog_hw->scratch[6] = bfar;
-  watchdog_hw->scratch[7] = exc_return;
+  // scratch[6] is context-dependent (crash_log_save decodes with the same
+  // conditions): SFAR when SFSR.SFARVALID; BFAR when any CFSR/SFSR syndrome
+  // exists; otherwise (no syndrome at all — BFAR is stale garbage then) a
+  // diagnostic pack: instr16@PC (0-15) | live IPSR (16-24) | stacked ISR (25-31).
+  if (sfsr & (1u << 6)) {
+    watchdog_hw->scratch[6] = sfar;
+  } else if (cfsr != 0 || sfsr != 0) {
+    watchdog_hw->scratch[6] = bfar;
+  } else {
+    watchdog_hw->scratch[6] = (uint32_t)instr16
+                            | ((ipsr & 0x1FFu) << 16)
+                            | ((stacked_xpsr & 0x7Fu) << 25);
+  }
+  // Pack PSP bit (bit 31) + SFSR (bits 23-30) + uptime seconds (bits 0-22)
+  // into scratch[7].  EXC_RETURN only needs bit 2 (PSP vs MSP) for crash log
+  // decoding; SFSR is 8 bits; 23 bits of uptime covers 97 days.
+  watchdog_hw->scratch[7] = ((exc_return & 4u) ? (1u << 31) : 0u)
+                           | ((sfsr & 0xFFu) << 23)
+                           | (uptime_sec & 0x7FFFFFu);
 
   // frame IS the MSP/PSP just after the hardware pushed the 8-word exception
   // frame.  Pre-fault SP = frame + 32 (8 words × 4 bytes).
@@ -66,11 +140,18 @@ static void __attribute__((used)) hardfault_c(uint32_t *frame, uint32_t exc_retu
 
   // Determine which stack was active: EXC_RETURN bit 2 = 1 means PSP (native
   // app), 0 means MSP (OS).  Compare SP against the correct stack bounds.
+  // Each core has its own MSP: Core 0 in SCRATCH_Y (__StackBottom), Core 1 in
+  // SCRATCH_X (__StackOneBottom) — comparing against the wrong core's bounds
+  // yields false OVERFLOW reports for Core 1 faults.
+  uint32_t core = sio_hw->cpuid;
   bool on_psp = (exc_return & 4u) != 0;
   bool stack_overflow;
   uint32_t stack_limit;
   if (on_psp) {
-    stack_limit = (uint32_t)(uintptr_t)s_native_stack;
+    stack_limit = (uint32_t)(uintptr_t)g_native_stack_base;
+    stack_overflow = g_native_stack_base && (sp_at_fault < stack_limit);
+  } else if (core == 1) {
+    stack_limit = (uint32_t)(uintptr_t)&__StackOneBottom;
     stack_overflow = (sp_at_fault < stack_limit);
   } else {
     stack_limit = (uint32_t)(uintptr_t)&__StackBottom;
@@ -78,10 +159,21 @@ static void __attribute__((used)) hardfault_c(uint32_t *frame, uint32_t exc_retu
   }
 
   // ── UART output (always works — polling-based, no IRQ required) ────────────
-  printf("\n!!! HARDFAULT !!!\n");
+  printf("\n!!! HARDFAULT (core %lu) !!!\n", (unsigned long)core);
+  if (app_name)
+    printf("  App  = %s (uptime %lum %lus)\n",
+           app_name, (unsigned long)(uptime_sec / 60u), (unsigned long)(uptime_sec % 60u));
+  else
+    printf("  App  = (none -- OS/launcher)\n");
   printf("  PC   = 0x%08lx\n", (unsigned long)pc);
   printf("  LR   = 0x%08lx\n", (unsigned long)lr);
   printf("  R0   = 0x%08lx\n", (unsigned long)r0);
+  uint32_t pc_rel = native_addr_to_elf_vaddr(pc);
+  uint32_t lr_rel = native_addr_to_elf_vaddr(lr);
+  if (pc_rel != 0xFFFFFFFFu)
+    printf("  PC-ELF = 0x%08lx (app image offset)\n", (unsigned long)pc_rel);
+  if (lr_rel != 0xFFFFFFFFu)
+    printf("  LR-ELF = 0x%08lx (app image offset)\n", (unsigned long)lr_rel);
   printf("  SP   = 0x%08lx  (frame @ 0x%08lx)  stack_limit=0x%08lx [%s]%s\n",
          (unsigned long)sp_at_fault, (unsigned long)(uintptr_t)frame,
          (unsigned long)stack_limit,
@@ -91,6 +183,12 @@ static void __attribute__((used)) hardfault_c(uint32_t *frame, uint32_t exc_retu
   printf("  HFSR = 0x%08lx\n", (unsigned long)hfsr);
   printf("  BFAR = 0x%08lx\n", (unsigned long)bfar);
   printf("  MMAR = 0x%08lx\n", (unsigned long)mmar);
+  printf("  SFSR = 0x%08lx\n", (unsigned long)sfsr);
+  printf("  SFAR = 0x%08lx\n", (unsigned long)sfar);
+  printf("  DFSR = 0x%08lx\n", (unsigned long)dfsr);
+  printf("  IPSR = %lu (3=HardFault)  stacked xPSR = 0x%08lx  [PC] = 0x%04x\n",
+         (unsigned long)(ipsr & 0x1FFu), (unsigned long)stacked_xpsr,
+         (unsigned)instr16);
   printf("  CCR  = 0x%08lx (bit3=UNALIGNED_TRP)\n", (unsigned long)ccr);
   // Decode CFSR flags to UART for easy diagnosis
   if (cfsr & (1u<<17)) printf("  INVSTATE: invalid CPU state (bad Thumb bit?)\n");
@@ -106,8 +204,17 @@ static void __attribute__((used)) hardfault_c(uint32_t *frame, uint32_t exc_retu
   if (cfsr & (1u<< 0)) printf("  IACCVIOL: MPU instr access violation (MMAR=0x%08lx)\n", (unsigned long)mmar);
   if (cfsr & (1u<<25)) printf("  DIVBYZERO: divide by zero\n");
   if (cfsr & (1u<<24)) printf("  UNALIGNED: unaligned access\n");
+  if (cfsr & (1u<<20)) printf("  STKOF: stack limit violation (MSPLIM/PSPLIM)\n");
   if (hfsr & (1u<<30)) printf("  HFSR FORCED: escalated from configurable fault\n");
   if (hfsr & (1u<< 1)) printf("  HFSR VECTTBL: vector table read fault\n");
+  // SecureFault syndrome (ARMv8-M Security Extension)
+  if (sfsr & (1u<<0)) printf("  SFSR INVEP: invalid NS->S entry point\n");
+  if (sfsr & (1u<<1)) printf("  SFSR INVIS: invalid integrity signature\n");
+  if (sfsr & (1u<<2)) printf("  SFSR INVER: invalid exception return\n");
+  if (sfsr & (1u<<3)) printf("  SFSR AUVIOL: attribution unit violation (SFAR=0x%08lx)\n", (unsigned long)sfar);
+  if (sfsr & (1u<<4)) printf("  SFSR INVTRAN: invalid S<->NS transition\n");
+  if (sfsr & (1u<<5)) printf("  SFSR LSPERR: lazy FP state preservation error\n");
+  if (sfsr & (1u<<7)) printf("  SFSR LSERR: lazy state error\n");
   stdio_flush();
 
   // ── Display output (best-effort — lets us see fault info without a UART) ──
@@ -122,26 +229,44 @@ static void __attribute__((used)) hardfault_c(uint32_t *frame, uint32_t exc_retu
   snprintf(ln, sizeof(ln), "!!! HARDFAULT !!!");
   display_draw_text(4,  4, ln, 0xF800, 0x0000); // red
 
+  if (app_name)
+    snprintf(ln, sizeof(ln), "App: %.28s (%lum %lus)",
+             app_name, (unsigned long)(uptime_sec / 60u), (unsigned long)(uptime_sec % 60u));
+  else
+    snprintf(ln, sizeof(ln), "App: (none -- OS/launcher)");
+  display_draw_text(4, 18, ln, 0x07FF, 0x0000); // cyan
+
   snprintf(ln, sizeof(ln), "PC %08lx  LR %08lx", (unsigned long)pc, (unsigned long)lr);
-  display_draw_text(4, 20, ln, 0xFFFF, 0x0000);
+  display_draw_text(4, 34, ln, 0xFFFF, 0x0000);
 
   snprintf(ln, sizeof(ln), "SP %08lx  lim %08lx%s",
            (unsigned long)sp_at_fault,
            (unsigned long)stack_limit,
            stack_overflow ? " OVFL!" : "");
-  display_draw_text(4, 36, ln, stack_overflow ? 0xF800 : 0xFFFF, 0x0000);
+  display_draw_text(4, 48, ln, stack_overflow ? 0xF800 : 0xFFFF, 0x0000);
 
-  snprintf(ln, sizeof(ln), "Stack: %s", on_psp ? "PSP (native app)" : "MSP (OS)");
-  display_draw_text(4, 52, ln, 0x07E0, 0x0000); // green
+  snprintf(ln, sizeof(ln), "Stack: %s core %lu",
+           on_psp ? "PSP (native app)" : "MSP (OS)", (unsigned long)core);
+  display_draw_text(4, 62, ln, 0x07E0, 0x0000); // green
 
   snprintf(ln, sizeof(ln), "CFSR %08lx  HFSR %08lx", (unsigned long)cfsr, (unsigned long)hfsr);
-  display_draw_text(4, 68, ln, 0xFFFF, 0x0000);
+  display_draw_text(4, 76, ln, 0xFFFF, 0x0000);
 
   snprintf(ln, sizeof(ln), "BFAR %08lx  MMAR %08lx", (unsigned long)bfar, (unsigned long)mmar);
-  display_draw_text(4, 84, ln, 0xFFFF, 0x0000);
+  display_draw_text(4, 90, ln, 0xFFFF, 0x0000);
+
+  snprintf(ln, sizeof(ln), "SFSR %08lx  SFAR %08lx", (unsigned long)sfsr, (unsigned long)sfar);
+  display_draw_text(4, 104, ln, 0xFFFF, 0x0000);
+
+  if (pc_rel != 0xFFFFFFFFu) {
+    snprintf(ln, sizeof(ln), "PC-ELF %08lx LR-ELF %08lx",
+             (unsigned long)pc_rel,
+             (unsigned long)((lr_rel != 0xFFFFFFFFu) ? lr_rel : 0));
+    display_draw_text(4, 118, ln, 0x07FF, 0x0000); // cyan
+  }
 
   // Decode CFSR fault type flags on-screen
-  int y = 104;
+  int y = 136;
   uint16_t warn = 0xFD20; // orange
   if (cfsr & (1u<<17)) { display_draw_text(4, y, "INVSTATE: invalid CPU state", warn, 0); y += 14; }
   if (cfsr & (1u<<16)) { display_draw_text(4, y, "UNDEFINSTR", warn, 0);                  y += 14; }
@@ -156,9 +281,17 @@ static void __attribute__((used)) hardfault_c(uint32_t *frame, uint32_t exc_retu
   if (cfsr & (1u<< 0)) { display_draw_text(4, y, "IACCVIOL: MPU instr viol",   warn, 0); y += 14; }
   if (cfsr & (1u<<25)) { display_draw_text(4, y, "DIVBYZERO",                   warn, 0); y += 14; }
   if (cfsr & (1u<<24)) { display_draw_text(4, y, "UNALIGNED access",            warn, 0); y += 14; }
+  if (cfsr & (1u<<20)) { display_draw_text(4, y, "STKOF: stack limit viol",     warn, 0); y += 14; }
   if (hfsr & (1u<<30)) { display_draw_text(4, y, "HFSR: FORCED escalation",    warn, 0); y += 14; }
   if (hfsr & (1u<< 1)) { display_draw_text(4, y, "HFSR: vector table fault",   warn, 0); y += 14; }
-  if (y == 104)         { display_draw_text(4, y, "(no CFSR flags set)",        warn, 0); }
+  if (sfsr & (1u<<0))  { display_draw_text(4, y, "SFSR INVEP",                  warn, 0); y += 14; }
+  if (sfsr & (1u<<1))  { display_draw_text(4, y, "SFSR INVIS",                  warn, 0); y += 14; }
+  if (sfsr & (1u<<2))  { display_draw_text(4, y, "SFSR INVER",                  warn, 0); y += 14; }
+  if (sfsr & (1u<<3))  { display_draw_text(4, y, "SFSR AUVIOL",                 warn, 0); y += 14; }
+  if (sfsr & (1u<<4))  { display_draw_text(4, y, "SFSR INVTRAN",                warn, 0); y += 14; }
+  if (sfsr & (1u<<5))  { display_draw_text(4, y, "SFSR LSPERR",                 warn, 0); y += 14; }
+  if (sfsr & (1u<<7))  { display_draw_text(4, y, "SFSR LSERR",                  warn, 0); y += 14; }
+  if (y == 136)        { display_draw_text(4, y, "(no fault flags set)",         warn, 0); }
 
   display_flush();
 
@@ -191,10 +324,13 @@ void __attribute__((naked)) isr_hardfault(void) {
 #include "drivers/fileplayer.h"
 #include "drivers/mp3_player.h"
 #include "drivers/pio_psram.h"
+#include "drivers/qmi_psram.h"
 #include "drivers/pio_psram_bulk.h"
 #include "drivers/sound.h"
+#include "drivers/mod_player.h"
 #include "drivers/display.h"
 #include "drivers/image_api.h"
+#include "drivers/image_preload.h"
 #include "drivers/video_player.h"
 #include "drivers/http.h"
 #include "drivers/tcp.h"
@@ -204,13 +340,16 @@ void __attribute__((naked)) isr_hardfault(void) {
 #include "hardware.h"
 #include "os/appconfig.h"
 #include "os/config.h"
+#include "os/core1_alloc.h"
 #include "os/crypto.h"
+#include "os/file_browser.h"
 #include "os/launcher.h"
 #include "os/lua_psram_alloc.h"
 #include "os/os.h"
 #include "os/ota_update.h"
 #include "os/perf.h"
 #include "os/system_menu.h"
+#include "os/toast.h"
 #include "os/terminal.h"
 #include "os/terminal_render.h"
 #include "os/text_input.h"
@@ -223,6 +362,14 @@ void __attribute__((naked)) isr_hardfault(void) {
 // reference.
 
 PicoCalcAPI g_api;
+
+// Wrapper that composites toast notifications before flushing to display.
+// Assigned to g_api.display->flush so all callers (Lua, native, launcher)
+// see toasts without modifying their render loops.
+static void display_flush_with_toasts(void) {
+    toast_draw();
+    display_flush();
+}
 
 static picocalc_tcp_t s_tcp_impl = {
     .connect = (pctcp_t (*)(const char *, uint16_t, bool))tcp_connect,
@@ -252,7 +399,7 @@ static picocalc_display_t s_display_impl = {
     .drawCircle = display_draw_circle,
     .fillCircle = display_fill_circle,
     .drawText = display_draw_text,
-    .flush = display_flush,
+    .flush = display_flush_with_toasts,
     .getWidth = display_get_width_fn,
     .getHeight = display_get_height_fn,
     .setBrightness = display_set_brightness,
@@ -270,6 +417,9 @@ static picocalc_display_t s_display_impl = {
     .effectDither = display_effect_dither,
     .effectScanline = display_effect_scanline,
     .effectPosterize = display_effect_posterize,
+    .fillVLine = display_fill_vline,
+    .drawTexturedColumn = display_draw_textured_column,
+    .fillVLineGradient = display_fill_vline_gradient,
 };
 
 static uint32_t sys_getTimeMs(void) {
@@ -298,6 +448,13 @@ static void sys_log(const char *fmt, ...) {
 // consumed by sys_shouldExit() which the app checks each frame.
 static volatile bool s_native_exit = false;
 
+// Core 0 liveness heartbeat, stamped by sys_poll().  Core 1 keeps the
+// watchdog fed while this is fresh (< 60s), so apps doing long CPU-bound
+// work between polls (asset decoding, sprite mask generation) are not
+// rebooted by the 10s watchdog; a genuinely hung Core 0 still trips it
+// once the heartbeat goes stale.
+volatile uint32_t g_core0_heartbeat_ms = 0;
+
 // Pending app launch from serial command
 static const char* s_pending_launch = NULL;
 
@@ -306,6 +463,7 @@ static const char* s_pending_launch = NULL;
 static void sys_poll(void) {
   kbd_poll();
   watchdog_update();
+  g_core0_heartbeat_ms = to_ms_since_boot(get_absolute_time());
   http_fire_c_pending();
   if (kbd_consume_menu_press()) {
     if (system_menu_show_for_native())
@@ -448,8 +606,8 @@ static bool psram_pio_available(void) { return pio_psram_available(); }
 static bool psram_pio_bulk_available(void) { return pio_psram_bulk_available(); }
 static void psram_pio_read(uint32_t addr, uint8_t *dst, uint32_t len) { pio_psram_read(addr, dst, len); }
 static void psram_pio_write(uint32_t addr, const uint8_t *src, uint32_t len) { pio_psram_write(addr, src, len); }
-static void psram_pio_bulk_read(uint32_t addr, uint8_t *dst, uint32_t len) { pio_psram_bulk_read_large(addr, dst, len); }
-static void psram_pio_bulk_write(uint32_t addr, const uint8_t *src, uint32_t len) { pio_psram_bulk_write_large(addr, src, len); }
+static void psram_pio_bulk_read(uint32_t addr, uint8_t *dst, uint32_t len) { pio_psram_bulk_read(addr, dst, len); }
+static void psram_pio_bulk_write(uint32_t addr, const uint8_t *src, uint32_t len) { pio_psram_bulk_write(addr, src, len); }
 static void *psram_qmi_alloc(uint32_t size) { return umm_malloc(size); }
 static void psram_qmi_free(void *ptr) { umm_free(ptr); }
 
@@ -531,6 +689,23 @@ static picocalc_terminal_t s_terminal_impl = {
     .calculateLineWraps = terminal_calculateLineWraps,
 };
 
+static bool fs_mkdir(const char *path) {
+    return sdcard_mkdir(path);
+}
+
+static bool fs_delete(const char *path) {
+    return sdcard_delete(path);
+}
+
+static bool fs_rename(const char *src, const char *dst) {
+    return sdcard_rename(src, dst);
+}
+
+static bool fs_is_dir(const char *path) {
+    sdcard_stat_t st;
+    return sdcard_stat(path, &st) && st.is_dir;
+}
+
 static picocalc_fs_t s_fs_impl = {
     .open = fs_open,
     .read = fs_read,
@@ -542,6 +717,11 @@ static picocalc_fs_t s_fs_impl = {
     .seek = fs_seek,
     .tell = fs_tell,
     .listDir = fs_list_dir,
+    .mkdir = fs_mkdir,
+    .deleteFile = fs_delete,
+    .renameFile = fs_rename,
+    .isDir = fs_is_dir,
+    .browse = file_browser_show,
 };
 
 // ── HTTP impl ─────────────────────────────────────────────────────────────────
@@ -611,8 +791,13 @@ static void http_setReadTimeout_w(pchttp_t c, int seconds) {
     ((http_conn_t *)c)->read_timeout_ms = (uint32_t)(seconds * 1000);
 }
 
-static void http_setReadBufferSize_w(pchttp_t c, int bytes) {
-    http_set_recv_buf((http_conn_t *)c, (uint32_t)bytes);
+static bool http_setReadBufferSize_w(pchttp_t c, int bytes) {
+    return http_set_recv_buf((http_conn_t *)c, (uint32_t)bytes);
+}
+
+static bool http_isComplete_w(pchttp_t c) {
+    http_conn_t *hc = (http_conn_t *)c;
+    return hc->state == HTTP_STATE_DONE || hc->state == HTTP_STATE_FAILED;
 }
 
 static const picocalc_http_t s_http_impl = {
@@ -630,6 +815,7 @@ static const picocalc_http_t s_http_impl = {
     .setConnectTimeout = http_setConnectTimeout_w,
     .setReadTimeout    = http_setReadTimeout_w,
     .setReadBufferSize = http_setReadBufferSize_w,
+    .isComplete        = http_isComplete_w,
 };
 
 // ── Sound player impl ─────────────────────────────────────────────────────────
@@ -1038,7 +1224,107 @@ static const picocalc_video_t s_video_impl = {
     .resetStats      = video_reset_stats_w,
 };
 
-// ── Core 1 entry — background WiFi polling ────────────────────────────────────
+// ── MOD player wrappers (opaque void* API) ───────────────────────────────────
+static pcmodplayer_t mod_create_w(void) { return mod_player_create(); }
+static void mod_destroy_w(pcmodplayer_t mp) { mod_player_destroy((mod_player_t *)mp); }
+static bool mod_load_w(pcmodplayer_t mp, const char *p) { return mod_player_load((mod_player_t *)mp, p); }
+static void mod_play_w(pcmodplayer_t mp, bool loop) { mod_player_play((mod_player_t *)mp, loop); }
+static void mod_stop_w(pcmodplayer_t mp) { mod_player_stop((mod_player_t *)mp); }
+static void mod_pause_w(pcmodplayer_t mp) { mod_player_pause((mod_player_t *)mp); }
+static void mod_resume_w(pcmodplayer_t mp) { mod_player_resume((mod_player_t *)mp); }
+static bool mod_is_playing_w(pcmodplayer_t mp) { return mod_player_is_playing((const mod_player_t *)mp); }
+static void mod_set_volume_w(pcmodplayer_t mp, uint8_t v) { mod_player_set_volume((mod_player_t *)mp, v); }
+static uint8_t mod_get_volume_w(pcmodplayer_t mp) { return mod_player_get_volume((const mod_player_t *)mp); }
+static void mod_set_loop_w(pcmodplayer_t mp, bool l) { mod_player_set_loop((mod_player_t *)mp, l); }
+
+static const picocalc_modplayer_t s_modplayer_impl = {
+    .create    = mod_create_w,
+    .destroy   = mod_destroy_w,
+    .load      = mod_load_w,
+    .play      = mod_play_w,
+    .stop      = mod_stop_w,
+    .pause     = mod_pause_w,
+    .resume    = mod_resume_w,
+    .isPlaying = mod_is_playing_w,
+    .setVolume = mod_set_volume_w,
+    .getVolume = mod_get_volume_w,
+    .setLoop   = mod_set_loop_w,
+};
+
+// ── ZIP extraction (thin wrappers for g_api — Lua bridge has its own richer API) ──
+
+#define MINIZ_NO_STDIO
+#define MINIZ_NO_ARCHIVE_WRITING_APIS
+#define MINIZ_NO_ZLIB_COMPATIBLE_NAMES
+// Redirect miniz allocations to PSRAM (umm_malloc), not tiny SRAM heap
+#define MZ_MALLOC(x)     umm_malloc(x)
+#define MZ_FREE(x)       umm_free(x)
+#define MZ_REALLOC(p, x) umm_realloc(p, x)
+#include "miniz.h"
+
+static bool zip_extract_w(const char *zip_path, const char *dest_dir) {
+    int zip_len = 0;
+    char *zip_data = sdcard_read_file(zip_path, &zip_len);
+    if (!zip_data) return false;
+
+    mz_zip_archive zip;
+    memset(&zip, 0, sizeof(zip));
+    if (!mz_zip_reader_init_mem(&zip, zip_data, (size_t)zip_len, 0)) {
+        umm_free(zip_data);
+        return false;
+    }
+
+    bool ok = true;
+    int n = (int)mz_zip_reader_get_num_files(&zip);
+    for (int i = 0; i < n && ok; i++) {
+        if (mz_zip_reader_is_file_a_directory(&zip, (mz_uint)i)) continue;
+        mz_zip_archive_file_stat st;
+        if (!mz_zip_reader_file_stat(&zip, (mz_uint)i, &st)) { ok = false; break; }
+
+        char path[256];
+        snprintf(path, sizeof(path), "%s/%s", dest_dir, st.m_filename);
+
+        size_t uncomp = 0;
+        void *data = mz_zip_reader_extract_to_heap(&zip, (mz_uint)i, &uncomp, 0);
+        if (!data) { ok = false; break; }
+
+        sdcard_mkdir(dest_dir);  // ensure dest exists
+        sdfile_t f = sdcard_fopen(path, "w");
+        if (f) {
+            sdcard_fwrite(f, data, (int)uncomp);
+            sdcard_fclose(f);
+        } else { ok = false; }
+        mz_free(data);
+    }
+
+    mz_zip_reader_end(&zip);
+    umm_free(zip_data);
+    return ok;
+}
+
+static int zip_list_w(const char *zip_path) {
+    int zip_len = 0;
+    char *zip_data = sdcard_read_file(zip_path, &zip_len);
+    if (!zip_data) return -1;
+
+    mz_zip_archive zip;
+    memset(&zip, 0, sizeof(zip));
+    if (!mz_zip_reader_init_mem(&zip, zip_data, (size_t)zip_len, 0)) {
+        umm_free(zip_data);
+        return -1;
+    }
+    int n = (int)mz_zip_reader_get_num_files(&zip);
+    mz_zip_reader_end(&zip);
+    umm_free(zip_data);
+    return n;
+}
+
+static const picocalc_zip_t s_zip_impl = {
+    .extract = zip_extract_w,
+    .list    = zip_list_w,
+};
+
+// ── Core 1 entry — background WiFi polling ──────��─────────────────────────────
 // Core 1 drives the Mongoose / CYW43 network stack every 5 ms.
 // wifi_poll() acquires display_spi_lock() internally, so the SPI1 bus
 // (shared between the LCD and the WiFi chip) is safe to access from here.
@@ -1047,12 +1333,12 @@ static const picocalc_video_t s_video_impl = {
 // Set to true to temporarily pause Core 1's Mongoose/WiFi polling.
 // Used during native app loading to eliminate PSRAM heap contention between
 // Core 1's umm_malloc/umm_free and the ELF loader on Core 0.
-volatile bool g_core1_pause = false;
-volatile bool g_core1_paused = false; // acknowledgment flag for Core 1 pause handshake
+_Atomic bool g_core1_pause = false;
+_Atomic bool g_core1_paused = false; // acknowledgment flag for Core 1 pause handshake
 
 // Optional audio callback for native apps (e.g. DOOM) that offload mixing
 // to Core 1.  Set by the app at startup, cleared on exit.
-void (*g_native_audio_callback)(void) = NULL;
+_Atomic(void (*)(void)) g_native_audio_callback = NULL;
 
 static repeating_timer_t s_core1_timer;
 static volatile bool s_core1_tick_pending = false;
@@ -1088,18 +1374,29 @@ static void core1_entry(void) {
   alarm_pool_add_repeating_timer_ms(pool, -1, core1_timer_callback, NULL, &s_core1_timer);
 
   while (true) {
-    if (g_core1_pause) {
-      g_core1_paused = true; // signal Core 0 that we've stopped
-      while (g_core1_pause) {
+    if (atomic_load(&g_core1_pause)) {
+      atomic_store(&g_core1_paused, true);
+      __dmb(); // ensure paused flag visible to Core 0 before we spin
+      while (atomic_load(&g_core1_pause)) {
         watchdog_update(); // keep watchdog alive while paused
         sleep_ms(1);
       }
-      g_core1_paused = false;
+      atomic_store(&g_core1_paused, false);
+      __dmb(); // ensure resumed state visible to Core 0
       continue;
     }
 
     if (s_core1_tick_pending) {
       s_core1_tick_pending = false;
+
+      // Relay the watchdog for Core 0 while its heartbeat is fresh — long
+      // CPU-bound stretches in apps (no poll for >10s) must not reboot the
+      // device, but a Core 0 hung for over a minute still should.
+      {
+        uint32_t now_ms = to_ms_since_boot(get_absolute_time());
+        if (now_ms - g_core0_heartbeat_ms < 60000u)
+          watchdog_update();
+      }
 
       wifi_poll();
       http_fire_c_pending();
@@ -1107,8 +1404,107 @@ static void core1_entry(void) {
       audio_stream_poll();
       mp3_player_update();
       fileplayer_update();
-      if (g_native_audio_callback)
-        g_native_audio_callback();
+      mod_player_update();
+      void (*audio_cb)(void) = atomic_load(&g_native_audio_callback);
+      if (audio_cb)
+        audio_cb();
+
+      image_preload_update();
+
+      // DIAG: code-corruption watcher — scan the native app's read-only
+      // image against the load-time snapshot in rotating 32KB chunks (both
+      // via the uncached PSRAM alias: no XIP-cache pollution).  On a hit,
+      // report onset time, offsets, and old/new/cached-view bytes — the
+      // data pattern fingerprints whoever tramples app code — then repair
+      // the damage so the run continues and repeat events get logged.
+      if (atomic_load(&g_code_watch_active)) {
+        static uint32_t s_watch_pos = 0;
+        static uint32_t s_watch_passes = 0;
+        static int s_watch_reports = 0;
+        const uint8_t *snap = g_code_watch_snap;
+        const uint8_t *live = g_code_watch_live;
+        uint32_t size = g_code_watch_size;
+        if (snap && live && size) {
+          uint32_t chunk = 32u * 1024;
+          if (s_watch_pos >= size) {
+            s_watch_pos = 0;
+            if ((++s_watch_passes % 64) == 0)
+              printf("[CODEWATCH] clean pass #%lu\n",
+                     (unsigned long)s_watch_passes);
+          }
+          uint32_t n = size - s_watch_pos;
+          if (n > chunk) n = chunk;
+          const uint8_t *s = snap + s_watch_pos;
+          const uint8_t *l = live + s_watch_pos;
+          if (memcmp(s, l, n) != 0 && s_watch_reports < 40) {
+            uint32_t first = 0, last = 0, count = 0;
+            for (uint32_t i = 0; i < n; i++) {
+              if (s[i] != l[i]) {
+                if (!count) first = i;
+                last = i;
+                count++;
+              }
+            }
+            // Re-read the differing span: uncached PSRAM reads have been
+            // seen to glitch transiently, and a transient misread is itself
+            // a finding (report, but don't "repair" good memory with it).
+            if (memcmp(s + first, l + first, last - first + 1) == 0) {
+              printf("[CODEWATCH] TRANSIENT misread t=%lums off=0x%05lx n=%lu\n",
+                     (unsigned long)(time_us_64() / 1000),
+                     (unsigned long)(s_watch_pos + first),
+                     (unsigned long)count);
+            } else {
+              uint32_t off = s_watch_pos + first;
+              printf("[CODEWATCH] CORRUPT t=%lums off=0x%05lx..0x%05lx n=%lu\n",
+                     (unsigned long)(time_us_64() / 1000),
+                     (unsigned long)off,
+                     (unsigned long)(s_watch_pos + last),
+                     (unsigned long)count);
+              uint32_t d = first & ~15u;
+              printf("[CODEWATCH] was:");
+              for (int i = 0; i < 16; i++) printf(" %02x", s[d + i]);
+              printf("\n[CODEWATCH] psram:");
+              for (int i = 0; i < 16; i++) printf(" %02x", l[d + i]);
+              // Cached view of the same bytes — if it differs from the psram
+              // view, the corruption lives in the XIP cache, not PSRAM.
+              const uint8_t *lc = l + d - 0x04000000u; // uncached -> cached
+              printf("\n[CODEWATCH] cache:");
+              for (int i = 0; i < 16; i++) printf(" %02x", lc[i]);
+              printf("\n");
+              // Repair: restore PSRAM from the snapshot, then invalidate the
+              // XIP range so the CPU refetches the clean bytes.
+              memcpy((void *)(uintptr_t)(l + first), s + first,
+                     last - first + 1);
+              uintptr_t inv_start =
+                  ((uintptr_t)(l + first) - 0x04000000u - XIP_BASE) & ~7u;
+              uintptr_t inv_end =
+                  (((uintptr_t)(l + last) - 0x04000000u - XIP_BASE) + 8u) & ~7u;
+              __asm volatile ("dsb sy");
+              xip_cache_invalidate_range(inv_start, inv_end - inv_start);
+              __asm volatile ("isb sy");
+            }
+            s_watch_reports++;
+          }
+          s_watch_pos += n;
+        }
+      }
+
+      // PHASE-0 AUDIO DIAGNOSTICS: log stream stats every ~2s when something
+      // is driving the audio callback.  Helps classify Doom-audio symptoms —
+      // zero ISR ⇒ DMA never started; spiking underruns ⇒ Core 1 starvation;
+      // steady ISR + zero underruns ⇒ producer issue in the app itself.
+      if (audio_cb) {
+        static uint64_t s_last_audio_debug_us = 0;
+        uint64_t now = time_us_64();
+        if (now - s_last_audio_debug_us >= 2000000) {
+          s_last_audio_debug_us = now;
+          uint32_t isr_cnt = 0, underruns = 0, ring_used = 0;
+          audio_stream_debug(&isr_cnt, &underruns, &ring_used);
+          printf("[AUDIO] ISR=%lu underruns=%lu ring_used=%lu\n",
+                 (unsigned long)isr_cnt, (unsigned long)underruns,
+                 (unsigned long)ring_used);
+        }
+      }
     }
 
     __wfi();
@@ -1137,21 +1533,43 @@ static void crash_log_save(void) {
 
   uint32_t cfsr = s_crash_data[4];
   uint32_t hfsr = s_crash_data[5];
+  // scratch[7] packing: bit 31 = PSP flag, bits 23-30 = SFSR (low 8 bits),
+  // bits 0-22 = uptime in seconds
+  bool was_psp = (s_crash_data[7] & (1u << 31)) != 0;
+  uint32_t sfsr = (s_crash_data[7] >> 23) & 0xFFu;
+  uint32_t crash_uptime_sec = s_crash_data[7] & 0x7FFFFFu;
 
   char line[512];
   int n = snprintf(line, sizeof(line),
     "--- HARDFAULT ---\n"
+    "  Uptime: %lum %lus\n"
     "  PC   = 0x%08lx\n"
     "  LR   = 0x%08lx\n"
     "  SP   = 0x%08lx\n"
     "  CFSR = 0x%08lx\n"
     "  HFSR = 0x%08lx\n"
-    "  BFAR = 0x%08lx\n"
+    "  SFSR = 0x%08lx\n"
     "  Stack: %s\n",
+    (unsigned long)(crash_uptime_sec / 60u), (unsigned long)(crash_uptime_sec % 60u),
     (unsigned long)s_crash_data[1], (unsigned long)s_crash_data[2],
     (unsigned long)s_crash_data[3], (unsigned long)cfsr,
-    (unsigned long)hfsr, (unsigned long)s_crash_data[6],
-    (s_crash_data[7] & 4u) ? "PSP (native app)" : "MSP (OS)");
+    (unsigned long)hfsr, (unsigned long)sfsr,
+    was_psp ? "PSP (native app)" : "MSP (OS)");
+
+  // scratch[6] decode mirrors hardfault_c's packing conditions.
+  if (sfsr & (1u << 6)) {
+    n += snprintf(line+n, sizeof(line)-n, "  SFAR = 0x%08lx\n",
+                  (unsigned long)s_crash_data[6]);
+  } else if (cfsr != 0 || sfsr != 0) {
+    n += snprintf(line+n, sizeof(line)-n, "  BFAR = 0x%08lx\n",
+                  (unsigned long)s_crash_data[6]);
+  } else {
+    n += snprintf(line+n, sizeof(line)-n,
+                  "  IPSR = %lu (3=HardFault)  stackedISR = %lu  [PC] = 0x%04lx\n",
+                  (unsigned long)((s_crash_data[6] >> 16) & 0x1FFu),
+                  (unsigned long)((s_crash_data[6] >> 25) & 0x7Fu),
+                  (unsigned long)(s_crash_data[6] & 0xFFFFu));
+  }
 
   // Decode CFSR/HFSR flags into human-readable text
   if (cfsr & (1u<<17)) n += snprintf(line+n, sizeof(line)-n, "  INVSTATE: invalid CPU state\n");
@@ -1167,8 +1585,16 @@ static void crash_log_save(void) {
   if (cfsr & (1u<< 0)) n += snprintf(line+n, sizeof(line)-n, "  IACCVIOL: MPU instruction access violation\n");
   if (cfsr & (1u<<25)) n += snprintf(line+n, sizeof(line)-n, "  DIVBYZERO\n");
   if (cfsr & (1u<<24)) n += snprintf(line+n, sizeof(line)-n, "  UNALIGNED access\n");
+  if (cfsr & (1u<<20)) n += snprintf(line+n, sizeof(line)-n, "  STKOF: stack limit violation\n");
   if (hfsr & (1u<<30)) n += snprintf(line+n, sizeof(line)-n, "  HFSR: FORCED escalation\n");
   if (hfsr & (1u<< 1)) n += snprintf(line+n, sizeof(line)-n, "  HFSR: vector table fault\n");
+  if (sfsr & (1u<<0))  n += snprintf(line+n, sizeof(line)-n, "  SFSR INVEP: invalid NS->S entry\n");
+  if (sfsr & (1u<<1))  n += snprintf(line+n, sizeof(line)-n, "  SFSR INVIS: invalid integrity signature\n");
+  if (sfsr & (1u<<2))  n += snprintf(line+n, sizeof(line)-n, "  SFSR INVER: invalid exception return\n");
+  if (sfsr & (1u<<3))  n += snprintf(line+n, sizeof(line)-n, "  SFSR AUVIOL: attribution violation\n");
+  if (sfsr & (1u<<4))  n += snprintf(line+n, sizeof(line)-n, "  SFSR INVTRAN: invalid S<->NS transition\n");
+  if (sfsr & (1u<<5))  n += snprintf(line+n, sizeof(line)-n, "  SFSR LSPERR: lazy FP preservation error\n");
+  if (sfsr & (1u<<7))  n += snprintf(line+n, sizeof(line)-n, "  SFSR LSERR: lazy state error\n");
   n += snprintf(line+n, sizeof(line)-n, "\n");
 
   sdcard_fwrite(f, line, n);
@@ -1270,14 +1696,33 @@ int main(void) {
   g_api.crypto      = &s_crypto_impl;
   g_api.graphics    = &s_graphics_impl;
   g_api.video       = &s_video_impl;
-  g_api.version     = 2;
+  g_api.modplayer   = &s_modplayer_impl;
+  g_api.zip         = &s_zip_impl;
+  g_api.version     = 3;
   // fs wired after SD card init
 
-  // Explicitly configure PSRAM hardware pins and XIP write logic for the Pico
-  // Plus 2W before any PSRAM pointers are accessed.
+  // Bring up the QMI PSRAM in quad (QPI) mode before any PSRAM pointers are
+  // accessed.  Falls back to the reset-default serial mode if the chip fails
+  // the quad self-test (see drivers/qmi_psram.c).
+  //
+  // Self-recovery guard: a bug in the direct-mode window stalls flash XIP and
+  // hangs the CPU with no watchdog armed — an unrecoverable brick (happened
+  // 2026-07-19; needed BOOTSEL).  Arm the watchdog for the attempt and mark
+  // it in a scratch register: if the init hangs, the watchdog reboots and the
+  // next boot sees the flag and stays on the reset-default serial mode.
 #ifdef PICO_RP2350
-  gpio_set_function(47, GPIO_FUNC_XIP_CS1);
-  xip_ctrl_hw->ctrl |= XIP_CTRL_WRITABLE_M1_BITS;
+#define QMI_QUAD_ATTEMPT_MAGIC 0x51AD9E7Bu
+  if (watchdog_hw->scratch[4] == QMI_QUAD_ATTEMPT_MAGIC) {
+    printf("[QMI_PSRAM] previous quad-mode attempt hung — serial mode\n");
+    gpio_set_function(47, GPIO_FUNC_XIP_CS1);
+    xip_ctrl_hw->ctrl |= XIP_CTRL_WRITABLE_M1_BITS;
+  } else {
+    watchdog_hw->scratch[4] = QMI_QUAD_ATTEMPT_MAGIC;
+    watchdog_enable(8000, true);
+    qmi_psram_init(47);
+    watchdog_update();
+    watchdog_hw->scratch[4] = 0;
+  }
 #endif
 
   gpio_init(USB_VBUS_PIN);
@@ -1296,10 +1741,20 @@ int main(void) {
   // Non-fatal if chip not present (some boards may not have it).
   // Uses bulk driver internally for 8KB transfers (300x faster than 27-byte chunks).
   pio_psram_init();
+  printf("[BOOT] pio_psram done\n"); stdio_flush(); watchdog_update();
 
   sound_init();
+  printf("[BOOT] sound done\n"); stdio_flush(); watchdog_update();
+
   audio_init();
+  printf("[BOOT] audio done\n"); stdio_flush(); watchdog_update();
+
+  mod_player_init();
+  printf("[BOOT] mod_player done\n"); stdio_flush(); watchdog_update();
+
+  printf("[BOOT] drawing splash...\n"); stdio_flush();
   ui_draw_splash("Initialising keyboard...", NULL);
+  printf("[BOOT] splash done\n"); stdio_flush(); watchdog_update();
 
   bool kbd_ok = kbd_init();
   watchdog_update();
@@ -1355,8 +1810,50 @@ int main(void) {
   g_api.fs = &s_fs_impl;
   watchdog_update();
 
-  // Check for pending OTA firmware update (must be before Core 1 launch)
-  if (ota_check_pending()) {
+  watchdog_update();
+
+  if (s_had_crash) {
+    display_clear(COLOR_BLACK);
+    display_draw_text(8, 8, "Recovered from crash", COLOR_YELLOW, COLOR_BLACK);
+    display_draw_text(8, 24, "See /system/crashlog.txt", COLOR_GRAY, COLOR_BLACK);
+    display_flush();
+    watchdog_update();
+    sleep_ms(2000);
+    watchdog_update();
+  }
+
+  // Initialize the PSRAM allocator BEFORE anything that uses it
+  // (SD card file ops use umm_malloc for FIL/FILINFO structs, config_load,
+  // WiFi, Lua, OTA update, etc.)
+  lua_psram_alloc_init();
+  {
+    void *pool = lua_psram_get_core1_pool();
+    size_t pool_size = lua_psram_get_core1_pool_size();
+    if (pool && pool_size > 0) {
+      core1_alloc_init(pool, pool_size);
+      // Flush dirty cache lines so Core 1 sees the init block header.
+      // core1_alloc_init writes through Core 0's write-back XIP cache;
+      // Core 1 has its own cache and would read stale zeros on a cold miss.
+#ifndef PICOS_SIMULATOR
+      __asm volatile ("dsb sy" ::: "memory");
+      xip_cache_clean_all();
+      __asm volatile ("isb sy" ::: "memory");
+#endif
+      printf("[MAIN] Core 1 allocator: %u KB at %p\n",
+             (unsigned)(pool_size / 1024), pool);
+    }
+  }
+  watchdog_update();
+
+  // Check for pending OTA firmware update (must be before Core 1 launch).
+  // Primary: watchdog scratch register set by ota_trigger_update().
+  // Fallback: /system/update.bin exists on SD (manually placed firmware).
+  bool ota_pending = ota_check_pending();
+  if (!ota_pending && sdcard_fsize(OTA_BIN_PATH) > 0) {
+    printf("[OTA] Found %s on SD — filesystem fallback trigger\n", OTA_BIN_PATH);
+    ota_pending = true;
+  }
+  if (ota_pending) {
     ui_draw_splash("Applying firmware update...", "DO NOT POWER OFF!");
     watchdog_update();
     if (!ota_apply_update()) {
@@ -1372,21 +1869,6 @@ int main(void) {
   }
   watchdog_update();
 
-  if (s_had_crash) {
-    display_clear(COLOR_BLACK);
-    display_draw_text(8, 8, "Recovered from crash", COLOR_YELLOW, COLOR_BLACK);
-    display_draw_text(8, 24, "See /system/crashlog.txt", COLOR_GRAY, COLOR_BLACK);
-    display_flush();
-    watchdog_update();
-    sleep_ms(2000);
-    watchdog_update();
-  }
-
-  // Initialize the PSRAM allocator BEFORE anything that uses it
-  // (config_load, WiFi, Lua, etc.)
-  lua_psram_alloc_init();
-  watchdog_update();
-
   // Write crash log from previous boot (if any) — must be after PSRAM init
   // because sdcard_fopen() uses umm_malloc() for the FIL struct.
   crash_log_save();
@@ -1399,6 +1881,7 @@ int main(void) {
   // Initialise WiFi hardware (auto-connects if credentials are in config)
   ui_draw_splash("Initialising WiFi...", NULL);
   watchdog_update();
+  toast_init();
   wifi_init();
   http_init();
   tcp_init();
@@ -1408,6 +1891,8 @@ int main(void) {
   extern size_t lua_psram_alloc_free_size(void);
   printf("[PSRAM] Free after WiFi/HTTP init: %zu bytes (%zuK)\n",
          lua_psram_alloc_free_size(), lua_psram_alloc_free_size() / 1024);
+
+  image_preload_init();
 
   // Launch Core 1 background tasks
   multicore_launch_core1(core1_entry);

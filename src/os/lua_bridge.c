@@ -62,8 +62,17 @@ static void menu_lua_hook(lua_State *L, lua_Debug *ar) {
   watchdog_update(); // kick watchdog — fires every 256 Lua opcodes
   http_lua_fire_pending(L); // fire any queued HTTP Lua callbacks
   tcp_lua_fire_pending(L);  // fire any queued TCP Lua callbacks
+  lua_bridge_sound_poll(L); // fire any pending sound finish/loop callbacks
   dev_commands_poll();
   dev_commands_process();
+#ifdef PICOS_SIMULATOR
+  // Socket polling is handled by the dedicated socket thread.
+  // Check the global running flag (set by signal handler or shutdown RPC).
+  extern volatile int g_running;
+  if (!g_running) {
+    dev_commands_set_exit();
+  }
+#endif
   if (dev_commands_wants_exit()) {
     dev_commands_clear_exit();
     lua_bridge_raise_exit(L);
@@ -112,6 +121,7 @@ static void menu_lua_hook(lua_State *L, lua_Debug *ar) {
 void lua_bridge_game_init(lua_State *L);
 void lua_bridge_terminal_init(lua_State *L);
 void lua_bridge_register_3d(lua_State *L);
+void lua_bridge_zip_init(lua_State *L);
 
 void lua_bridge_register(lua_State *L) {
   printf("[LUA] lua_bridge_register start, PSRAM free=%lu\n",
@@ -180,6 +190,10 @@ void lua_bridge_register(lua_State *L) {
   lua_bridge_terminal_init(L);
   printf("[LUA] registering crypto...\n");
   lua_bridge_crypto_init(L);
+  printf("[LUA] registering modplayer...\n");
+  lua_bridge_mod_init(L);
+  printf("[LUA] registering zip...\n");
+  lua_bridge_zip_init(L);
   printf("[LUA] all modules done, PSRAM free=%lu\n",
          (unsigned long)umm_free_heap_size());
   // Set as global

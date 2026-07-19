@@ -8,5 +8,8 @@
     "requirements": [
         "filesystem",
         "audio"
-    ]
+    ],
+    "category": "emulators",
+    "repo": "jeffory/picos-apps",
+    "min_firmware": "1.0.0"
 }

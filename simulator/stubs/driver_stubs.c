@@ -1,4 +1,6 @@
 // driver_stubs.c - Stubs for PicOS driver functions
+#define _XOPEN_SOURCE 500  // for nftw()
+#include <ftw.h>
 #include <stdint.h>
 #include <stdbool.h>
 #include <stdio.h>
@@ -8,7 +10,9 @@
 #include <string.h>
 #include <dirent.h>
 #include <sys/stat.h>
+#include <sys/statvfs.h>
 #include "../hal/hal_display.h"
+#include "../sim_socket.h"
 
 // External base path from hal_sdcard.c
 extern char g_base_path[512];
@@ -358,7 +362,7 @@ int display_get_font_height(void) {
 }
 
 void display_flush(void) {
-    // Swap buffers and copy to HAL framebuffer
+    // Copy back buffer to HAL framebuffer and present
     uint16_t* back = display_get_back_buffer();
     uint16_t* hal_fb = hal_display_get_framebuffer();
     if (hal_fb) {
@@ -436,16 +440,73 @@ void display_fill_circle(int x, int y, int r, uint16_t color) {
 }
 
 void display_fill_triangle(int x0, int y0, int x1, int y1, int x2, int y2, uint16_t color) {
-    // Simple triangle fill - stub
-    (void)x0; (void)y0; (void)x1; (void)y1; (void)x2; (void)y2; (void)color;
+    // Sort vertices by Y coordinate
+    if (y0 > y1) { int t; t=y0; y0=y1; y1=t; t=x0; x0=x1; x1=t; }
+    if (y0 > y2) { int t; t=y0; y0=y2; y2=t; t=x0; x0=x2; x2=t; }
+    if (y1 > y2) { int t; t=y1; y1=y2; y2=t; t=x1; x1=x2; x2=t; }
+    if (y0 == y2) return;
+    float inv_dy02 = 1.0f / (float)(y2 - y0);
+    if (y0 == y1) {
+        for (int y = y0; y <= y2; y++) {
+            float t = (float)(y - y0) * inv_dy02;
+            int xa = x0 + (int)((x2 - x0) * t);
+            int xb = x1 + (int)((x2 - x1) * t);
+            if (xa > xb) { int tmp = xa; xa = xb; xb = tmp; }
+            display_draw_line(xa, y, xb, y, color);
+        }
+    } else if (y1 == y2) {
+        float inv_dy01 = 1.0f / (float)(y1 - y0);
+        for (int y = y0; y <= y1; y++) {
+            float t = (float)(y - y0) * inv_dy01;
+            int xa = x0 + (int)((x1 - x0) * t);
+            int xb = x0 + (int)((x2 - x0) * t);
+            if (xa > xb) { int tmp = xa; xa = xb; xb = tmp; }
+            display_draw_line(xa, y, xb, y, color);
+        }
+    } else {
+        float inv_dy01 = 1.0f / (float)(y1 - y0);
+        float inv_dy12 = 1.0f / (float)(y2 - y1);
+        for (int y = y0; y <= y1; y++) {
+            float t_short = (float)(y - y0) * inv_dy01;
+            float t_long  = (float)(y - y0) * inv_dy02;
+            int xa = x0 + (int)((x1 - x0) * t_short);
+            int xb = x0 + (int)((x2 - x0) * t_long);
+            if (xa > xb) { int tmp = xa; xa = xb; xb = tmp; }
+            display_draw_line(xa, y, xb, y, color);
+        }
+        for (int y = y1; y <= y2; y++) {
+            float t_short = (float)(y - y1) * inv_dy12;
+            float t_long  = (float)(y - y0) * inv_dy02;
+            int xa = x1 + (int)((x2 - x1) * t_short);
+            int xb = x0 + (int)((x2 - x0) * t_long);
+            if (xa > xb) { int tmp = xa; xa = xb; xb = tmp; }
+            display_draw_line(xa, y, xb, y, color);
+        }
+    }
 }
 
+void display_draw_textured_column(int x, int y0, int y1,
+                                  const uint16_t *tex, int tex_w, int tex_h,
+                                  int tex_x, int tex_y0, int tex_y1) {
+    (void)tex; (void)tex_w; (void)tex_h; (void)tex_x; (void)tex_y0; (void)tex_y1;
+    display_draw_line(x, y0, x, y1, 0x7BEF); // gray stub
+}
+void display_fill_vline(int x, int y0, int y1, uint16_t color) {
+    display_draw_line(x, y0, x, y1, color);
+}
+void display_fill_vline_gradient(int x, int y0, int y1, uint16_t color_top, uint16_t color_bottom) {
+    (void)color_bottom;
+    display_draw_line(x, y0, x, y1, color_top);
+}
 void display_set_scroll_area(int y, int h) { (void)y; (void)h; }
 void display_set_scroll_offset(int offset) { (void)offset; }
 void display_set_transparent_color(uint16_t color) { (void)color; }
 uint16_t display_get_transparent_color(void) { return 0; }
 uint16_t* display_get_framebuffer(void) { return display_get_back_buffer(); }
-uint16_t* display_get_screen_buffer(void) { return display_get_back_buffer(); }
+uint16_t* display_get_screen_buffer(void) {
+    // Return the front buffer (what's currently on screen), not the back buffer
+    return g_current_buffer == 0 ? g_front_buffer : g_back_buffer;
+}
 
 void display_draw_image(int x, int y, const uint16_t* data, int w, int h) {
     uint16_t* fb = display_get_back_buffer();
@@ -458,36 +519,61 @@ void display_draw_image(int x, int y, const uint16_t* data, int w, int h) {
     }
 }
 
-void display_draw_image_partial(int x, int y, const uint16_t* data, int w, int h, int src_x, int src_y, int src_w, int src_h) {
+void display_draw_image_partial(int x, int y, int img_w, int img_h,
+                                const uint16_t *data, int sx, int sy, int sw,
+                                int sh, bool flip_x, bool flip_y,
+                                uint16_t transparent_color) {
+    if (!data || sw <= 0 || sh <= 0) return;
+    // Clip source rect to image bounds
+    if (sx < 0) { sw += sx; sx = 0; }
+    if (sy < 0) { sh += sy; sy = 0; }
+    if (sx + sw > img_w) sw = img_w - sx;
+    if (sy + sh > img_h) sh = img_h - sy;
+    if (sw <= 0 || sh <= 0) return;
+
     uint16_t* fb = display_get_back_buffer();
-    for (int dy = 0; dy < src_h && y + dy < 320; dy++) {
-        for (int dx = 0; dx < src_w && x + dx < 320; dx++) {
-            if (x + dx >= 0 && y + dy >= 0) {
-                fb[(y + dy) * 320 + (x + dx)] = data[(src_y + dy) * w + (src_x + dx)];
-            }
+    for (int row = 0; row < sh; row++) {
+        int py = y + row;
+        if (py < 0 || py >= 320) continue;
+        int src_row = flip_y ? (sy + sh - 1 - row) : (sy + row);
+        for (int col = 0; col < sw; col++) {
+            int px = x + col;
+            if (px < 0 || px >= 320) continue;
+            int src_col = flip_x ? (sx + sw - 1 - col) : (sx + col);
+            uint16_t c = data[src_row * img_w + src_col];
+            if (transparent_color != 0 && c == transparent_color) continue;
+            fb[py * 320 + px] = c;
         }
     }
 }
 
-void display_draw_image_scaled_nn(int x, int y, const uint16_t* data, int w, int h, float scale) {
+void display_draw_image_scaled_nn(int x, int y, const uint16_t *data,
+                                  int src_w, int src_h, int dst_w, int dst_h,
+                                  uint16_t transparent_color) {
+    if (!data || dst_w <= 0 || dst_h <= 0 || src_w <= 0 || src_h <= 0) return;
     uint16_t* fb = display_get_back_buffer();
-    int new_w = (int)(w * scale);
-    int new_h = (int)(h * scale);
-    for (int dy = 0; dy < new_h && y + dy < 320; dy++) {
-        for (int dx = 0; dx < new_w && x + dx < 320; dx++) {
+    for (int dy = 0; dy < dst_h && y + dy < 320; dy++) {
+        for (int dx = 0; dx < dst_w && x + dx < 320; dx++) {
             if (x + dx >= 0 && y + dy >= 0) {
-                int src_x = (int)(dx / scale);
-                int src_y = (int)(dy / scale);
-                if (src_x < w && src_y < h) {
-                    fb[(y + dy) * 320 + (x + dx)] = data[src_y * w + src_x];
+                int sx = dx * src_w / dst_w;
+                int sy = dy * src_h / dst_h;
+                if (sx < src_w && sy < src_h) {
+                    uint16_t c = data[sy * src_w + sx];
+                    if (transparent_color != 0 && c == transparent_color) continue;
+                    fb[(y + dy) * 320 + (x + dx)] = c;
                 }
             }
         }
     }
 }
 
-void display_draw_image_scaled(int x, int y, const uint16_t* data, int w, int h, float scale) {
-    display_draw_image_scaled_nn(x, y, data, w, h, scale);
+void display_draw_image_scaled(int x, int y, int img_w, int img_h,
+                               const uint16_t *data, float scale, float angle,
+                               uint16_t transparent_color) {
+    if (!data || img_w <= 0 || img_h <= 0) return;
+    int dst_w = (int)(img_w * scale);
+    int dst_h = (int)(img_h * scale);
+    display_draw_image_scaled_nn(x, y, data, img_w, img_h, dst_w, dst_h, transparent_color);
 }
 
 // Keyboard stubs are now in keyboard_stub.c
@@ -500,8 +586,10 @@ void usb_msc_enter_mode(void) {
 }
 
 // SD card stubs
-void sdcard_remount(void) {}
+bool sdcard_remount(void) { return true; }
 void sdcard_apply_clock(void) {}
+bool sdcard_ensure_ready(void) { return true; }
+void sd_set_slow_mode(bool slow) { (void)slow; }
 
 bool sdcard_fexists(const char* path) {
     extern char g_base_path[512];
@@ -650,27 +738,83 @@ int sdcard_fseek(void* f, long offset, int whence) {
     return hal_sdcard_seek(f, offset); 
 }
 long sdcard_ftell(void* f) { return hal_sdcard_tell(f); }
-size_t sdcard_fsize_handle(void* f) { 
-    long pos = hal_sdcard_tell(f);
-    hal_sdcard_seek(f, 0);
-    hal_sdcard_seek(f, 0); // go to end would need SEEK_END support
-    return (size_t)pos; 
+size_t sdcard_fsize_handle(void* f) {
+    if (!f) return 0;
+    /* hal_sdcard_seek only supports SEEK_SET, so use fseek/ftell directly */
+    FILE *fp = (FILE *)f;
+    long pos = ftell(fp);
+    fseek(fp, 0, SEEK_END);
+    long size = ftell(fp);
+    fseek(fp, pos, SEEK_SET);
+    return (size_t)(size > 0 ? size : 0);
 }
 int sdcard_fwrite(void* f, const void* buf, int len) { return (int)hal_sdcard_write(f, buf, (size_t)len); }
 size_t sdcard_fsize(const char* path) { return (size_t)hal_sdcard_size(path); }
-bool sdcard_mkdir(const char* path) { return hal_sdcard_mkdir(path); }
-bool sdcard_delete(const char* path) { (void)path; return false; }
-bool sdcard_rename(const char* oldpath, const char* newpath) { (void)oldpath; (void)newpath; return false; }
+bool sdcard_mkdir(const char* path) { return hal_sdcard_mkdir(path) == 0; }
+bool sdcard_delete(const char* path) {
+    extern char g_base_path[512];
+    char full[1024];
+    if (path[0] == '/') snprintf(full, sizeof(full), "%s%s", g_base_path, path);
+    else snprintf(full, sizeof(full), "%s/%s", g_base_path, path);
+    return remove(full) == 0;
+}
+// Recursive delete helper using nftw
+static int nftw_remove_cb(const char *fpath, const struct stat *sb,
+                          int typeflag, struct FTW *ftwbuf) {
+    (void)sb; (void)typeflag; (void)ftwbuf;
+    return remove(fpath);
+}
+bool sdcard_delete_recursive(const char* path) {
+    extern char g_base_path[512];
+    char full[1024];
+    if (path[0] == '/') snprintf(full, sizeof(full), "%s%s", g_base_path, path);
+    else snprintf(full, sizeof(full), "%s/%s", g_base_path, path);
+    return nftw(full, nftw_remove_cb, 64, FTW_DEPTH | FTW_PHYS) == 0;
+}
+bool sdcard_rename(const char* oldpath, const char* newpath) {
+    extern char g_base_path[512];
+    char full_old[1024], full_new[1024];
+    if (oldpath[0] == '/') snprintf(full_old, sizeof(full_old), "%s%s", g_base_path, oldpath);
+    else snprintf(full_old, sizeof(full_old), "%s/%s", g_base_path, oldpath);
+    if (newpath[0] == '/') snprintf(full_new, sizeof(full_new), "%s%s", g_base_path, newpath);
+    else snprintf(full_new, sizeof(full_new), "%s/%s", g_base_path, newpath);
+    return rename(full_old, full_new) == 0;
+}
 bool sdcard_copy(const char* src, const char* dst,
                  void (*progress_cb)(uint32_t done, uint32_t total, void* user),
                  void* user) {
     (void)src; (void)dst; (void)progress_cb; (void)user; return false;
 }
-bool sdcard_stat(const char* path, void* st) { (void)path; (void)st; return false; }
+bool sdcard_stat(const char* path, void* st_out) {
+    extern char g_base_path[512];
+    char full_path[1024];
+    if (path[0] == '/') {
+        snprintf(full_path, sizeof(full_path), "%s%s", g_base_path, path);
+    } else {
+        snprintf(full_path, sizeof(full_path), "%s/%s", g_base_path, path);
+    }
+    struct stat host_st;
+    if (stat(full_path, &host_st) != 0) return false;
+    // sdcard_stat_t layout: uint32_t size, bool is_dir, uint16_t fdate, uint16_t ftime
+    typedef struct { uint32_t size; bool is_dir; uint16_t fdate; uint16_t ftime; } sim_stat_t;
+    sim_stat_t *out = (sim_stat_t *)st_out;
+    out->size = (uint32_t)host_st.st_size;
+    out->is_dir = S_ISDIR(host_st.st_mode);
+    out->fdate = 0;
+    out->ftime = 0;
+    return true;
+}
 bool sdcard_disk_info(uint32_t* out_free_kb, uint32_t* out_total_kb) {
-    if (out_free_kb) *out_free_kb = 0;
-    if (out_total_kb) *out_total_kb = 0;
-    return false;
+    extern char g_base_path[512];
+    struct statvfs st;
+    if (statvfs(g_base_path, &st) != 0) {
+        if (out_free_kb) *out_free_kb = 0;
+        if (out_total_kb) *out_total_kb = 0;
+        return false;
+    }
+    if (out_total_kb) *out_total_kb = (uint32_t)((st.f_blocks * st.f_frsize) / 1024);
+    if (out_free_kb)  *out_free_kb  = (uint32_t)((st.f_bavail * st.f_frsize) / 1024);
+    return true;
 }
 
 // Crashlog stub
@@ -679,10 +823,30 @@ void crashlog_write_lua_error(const char *app_name, const char *context, const c
     if (message) fprintf(stderr, "[CRASHLOG] %s\n", message);
 }
 
+// Display effects (no-op stubs for simulator)
+void display_effect_invert(void) {}
+void display_effect_darken(uint8_t factor) { (void)factor; }
+void display_effect_brighten(uint8_t factor) { (void)factor; }
+void display_effect_tint(uint8_t r, uint8_t g, uint8_t b, uint8_t strength) { (void)r; (void)g; (void)b; (void)strength; }
+void display_effect_grayscale(void) {}
+void display_effect_blend(const uint16_t *src, int w, int h, uint8_t alpha) { (void)src; (void)w; (void)h; (void)alpha; }
+void display_effect_palette(const uint16_t *lut, int lut_size) { (void)lut; (void)lut_size; }
+void display_effect_dither(uint8_t levels) { (void)levels; }
+void display_effect_scanline(uint8_t intensity) { (void)intensity; }
+void display_effect_posterize(uint8_t levels) { (void)levels; }
+
 // Audio/sound/fileplayer/mp3 are implemented in simulator/sim_audio.c
 
 // Native audio callback
-void (*g_native_audio_callback)(void) = NULL;
+_Atomic(void (*)(void)) g_native_audio_callback = NULL;
+
+// Audio ring buffer stubs
+uint32_t audio_ring_free(void) { return 4096; }
+void audio_stream_debug(uint32_t *isr_count, uint32_t *underruns, uint32_t *ring_used) {
+    if (isr_count) *isr_count = 0;
+    if (underruns) *underruns = 0;
+    if (ring_used) *ring_used = 0;
+}
 
 // umm_malloc stubs (simulator maps to standard malloc)
 size_t umm_free_heap_size(void) { return 8 * 1024 * 1024; }
@@ -724,3 +888,91 @@ void video_player_set_audio_volume(void* player, uint8_t volume) { (void)player;
 uint8_t video_player_get_audio_volume(void* player) { (void)player; return 100; }
 void video_player_set_audio_muted(void* player, bool muted) { (void)player; (void)muted; }
 bool video_player_get_audio_muted(void* player) { (void)player; return false; }
+
+// ── g_api global ────────────────────────────────────────────────────────────
+#include "os.h"
+PicoCalcAPI g_api = {0};
+
+// ── Image API stubs ─────────────────────────────────────────────────────────
+#include "image_api.h"
+
+pc_image_t *image_load(const char *path) {
+    (void)path;
+    printf("[SIM] image_load() not implemented in simulator\n");
+    return NULL;
+}
+
+pc_image_t *image_new_blank(int width, int height) {
+    (void)width; (void)height;
+    printf("[SIM] image_new_blank() not implemented in simulator\n");
+    return NULL;
+}
+
+void image_free(pc_image_t *img) {
+    (void)img;
+}
+
+void image_draw(const pc_image_t *img, int x, int y) {
+    (void)img; (void)x; (void)y;
+}
+
+void image_draw_region(const pc_image_t *img,
+                       int sx, int sy, int sw, int sh,
+                       int dx, int dy) {
+    (void)img; (void)sx; (void)sy; (void)sw; (void)sh; (void)dx; (void)dy;
+}
+
+void image_draw_scaled(const pc_image_t *img, int x, int y, int dst_w, int dst_h) {
+    (void)img; (void)x; (void)y; (void)dst_w; (void)dst_h;
+}
+
+// --- Basic runner stub ---
+#include "../../src/os/app_runner.h"
+#include "../../src/os/launcher_types.h"
+static bool basic_stub_can_handle(const app_entry_t *app) { (void)app; return false; }
+static bool basic_stub_run(const app_entry_t *app) { (void)app; return false; }
+const AppRunner g_basic_runner = {"basic", basic_stub_can_handle, basic_stub_run};
+
+// --- PIO PSRAM stubs ---
+bool pio_psram_init(void) { return false; }
+bool pio_psram_available(void) { return false; }
+uint32_t pio_psram_size(void) { return 0; }
+void pio_psram_read(uint32_t addr, uint8_t *dst, uint32_t len) { (void)addr; (void)dst; (void)len; }
+void pio_psram_write(uint32_t addr, const uint8_t *src, uint32_t len) { (void)addr; (void)src; (void)len; }
+void pio_psram_set_sysclk(uint32_t sys_khz) { (void)sys_khz; }
+const char *pio_psram_mode_str(void) { return "none"; }
+void pio_psram_debug_test(bool full) { (void)full; }
+
+// --- Image preload stubs ---
+#include "../../src/drivers/image_api.h"
+void image_preload_init(void) {}
+bool image_preload_start(const char *path) { (void)path; return false; }
+pc_image_t *image_preload_poll(bool *ready) { if (ready) *ready = false; return NULL; }
+void image_preload_cancel(void) {}
+void image_preload_update(void) {}
+
+// --- display_draw_text_to_buffer stub ---
+int display_draw_text_to_buffer(uint16_t *buf, int buf_w, int buf_h,
+                                int x, int y, const char *text,
+                                uint16_t fg, uint16_t bg) {
+    (void)buf; (void)buf_w; (void)buf_h; (void)x; (void)y;
+    (void)text; (void)fg; (void)bg;
+    return 0;
+}
+
+// --- Fileplayer rate/callback stubs ---
+#include "../../src/drivers/fileplayer.h"
+void fileplayer_set_rate(fileplayer_t *player, float rate) { (void)player; (void)rate; }
+float fileplayer_get_rate(const fileplayer_t *player) { (void)player; return 1.0f; }
+void fileplayer_set_loop_callback(fileplayer_t *player, int (*cb)(void *), void *arg) {
+    (void)player; (void)cb; (void)arg;
+}
+
+// --- Sound player callback stubs ---
+#include "../../src/drivers/sound.h"
+void sound_player_set_finish_callback(sound_player_t *player, int (*cb)(void *), void *arg) {
+    (void)player; (void)cb; (void)arg;
+}
+void sound_player_set_loop_callback(sound_player_t *player, int (*cb)(void *), void *arg) {
+    (void)player; (void)cb; (void)arg;
+}

@@ -2,6 +2,8 @@
 #include "../hardware.h"
 #include "hardware/gpio.h"
 #include "hardware/pwm.h"
+#include "hardware/dma.h"
+#include "hardware/irq.h"
 #include "hardware/clocks.h"
 #include "pico/time.h"
 
@@ -11,9 +13,10 @@
 // keeping Core 0 free for the app/game loop.
 static alarm_pool_t *s_core1_alarm_pool = NULL;
 
+// --- Tone generation (square wave via PWM frequency modulation) -------------
 #define MIN_FREQ 20
 #define MAX_FREQ 20000
-#define PWM_WRAP 255
+#define TONE_PWM_WRAP 255
 
 static unsigned int s_pwm_slice_l = 0;
 static unsigned int s_pwm_slice_r = 0;
@@ -41,7 +44,7 @@ void audio_init(void) {
   s_pwm_slice_r = pwm_gpio_to_slice_num(AUDIO_PIN_R);
 
   pwm_config cfg = pwm_get_default_config();
-  pwm_config_set_wrap(&cfg, PWM_WRAP);
+  pwm_config_set_wrap(&cfg, TONE_PWM_WRAP);
   pwm_init(s_pwm_slice_l, &cfg, false);
   pwm_init(s_pwm_slice_r, &cfg, false);
 
@@ -50,7 +53,7 @@ void audio_init(void) {
 
 void audio_core1_init(void) {
   // Hardware alarm 2 (default pool uses 3). 4 slots covers all audio
-  // timers: tone, sound sample, fileplayer, PCM stream.
+  // timers: tone, sound sample, fileplayer.
   s_core1_alarm_pool = alarm_pool_create(2, 4);
   if (!s_core1_alarm_pool) {
     printf("[AUDIO] WARNING: failed to create Core 1 alarm pool\n");
@@ -69,10 +72,10 @@ void audio_pwm_setup(uint32_t sample_rate) {
   s_pwm_slice_r = pwm_gpio_to_slice_num(AUDIO_PIN_R);
 
   pwm_config cfg = pwm_get_default_config();
-  pwm_config_set_wrap(&cfg, PWM_WRAP);
+  pwm_config_set_wrap(&cfg, TONE_PWM_WRAP);
 
   uint32_t sys_clk = clock_get_hz(clk_sys);
-  uint32_t div = sys_clk / (sample_rate * (PWM_WRAP + 1));
+  uint32_t div = sys_clk / (sample_rate * (TONE_PWM_WRAP + 1));
   if (div < 1) div = 1;
   if (div > 255) div = 255;
   pwm_config_set_clkdiv(&cfg, div);
@@ -91,13 +94,13 @@ static void audio_configure_freq(uint32_t freq_hz) {
     freq_hz = MAX_FREQ;
 
   uint32_t sys_clk = clock_get_hz(clk_sys);
-  uint32_t div = sys_clk / (freq_hz * (PWM_WRAP + 1));
+  uint32_t div = sys_clk / (freq_hz * (TONE_PWM_WRAP + 1));
   if (div < 1)
     div = 1;
   if (div > 255)
     div = 255;
 
-  uint16_t level = (PWM_WRAP + 1) / 2;
+  uint16_t level = (TONE_PWM_WRAP + 1) / 2;
 
   pwm_set_clkdiv(s_pwm_slice_l, div);
   pwm_set_clkdiv(s_pwm_slice_r, div);
@@ -107,7 +110,7 @@ static void audio_configure_freq(uint32_t freq_hz) {
 
 // Logarithmic volume curve: lut[i] = round((10^(i/100) - 1) / 9 * 128), i=0..100
 // Replaces runtime exp()/log() with a compile-time table (~5 cycles vs ~100+).
-// Values are 0..128 (half of PWM_WRAP+1=256), matching max_level = (PWM_WRAP+1)/2.
+// Values are 0..128 (half of TONE_PWM_WRAP+1=256), matching max_level = (TONE_PWM_WRAP+1)/2.
 static const uint8_t s_log_volume_lut[101] = {
     0,   0,   1,   1,   1,   2,   2,   2,   3,   3,   //  0-  9
     4,   4,   5,   5,   5,   6,   6,   7,   7,   8,   // 10- 19
@@ -143,6 +146,7 @@ void audio_play_tone(uint32_t freq_hz, uint32_t duration_ms) {
     freq_hz = MAX_FREQ;
 
   audio_stop_tone();
+  audio_stop_stream(); // tones and streaming are mutually exclusive
 
   audio_configure_freq(freq_hz);
   audio_apply_volume();
@@ -182,33 +186,84 @@ void audio_set_volume(uint8_t volume) {
   audio_apply_volume();
 }
 
-// --- PCM sample streaming via ring buffer + repeating timer -----------------
+// --- PCM sample streaming via DMA paced by PWM DREQ -------------------------
+//
+// Replaces the old timer-based approach (one ISR per sample = 22k ISR/sec)
+// with hardware-paced DMA (one ISR per 256-sample buffer = ~85 ISR/sec).
+// The DMA controller autonomously transfers samples to the PWM CC register
+// at the exact PWM cycle rate — zero jitter, zero CPU involvement per sample.
 
-#define AUDIO_RING_SIZE 8192 // must be power of 2
+#define STREAM_PWM_WRAP   1699
+#define STREAM_PWM_MID    ((STREAM_PWM_WRAP + 1) / 2)  // 850
+#define STREAM_DMA_SAMPLES 128
+
+#define AUDIO_RING_SIZE 4096 // must be power of 2
 #define AUDIO_RING_MASK (AUDIO_RING_SIZE - 1)
 
 static uint8_t s_ring_l[AUDIO_RING_SIZE];
 static uint8_t s_ring_r[AUDIO_RING_SIZE];
 static volatile uint32_t s_ring_write = 0;
 static volatile uint32_t s_ring_read = 0;
-static repeating_timer_t s_stream_timer;
 static bool s_streaming = false;
 
-static bool audio_stream_tick(repeating_timer_t *rt) {
-  (void)rt;
-  uint32_t w = s_ring_write;
-  uint32_t r = s_ring_read;
-  if (r == w) {
-    // Underrun — hold at midpoint (silence)
-    pwm_set_gpio_level(AUDIO_PIN_L, 128);
-    pwm_set_gpio_level(AUDIO_PIN_R, 128);
-    return true;
+static int          s_stream_dma_chan = -1;
+static uint32_t     s_stream_dma_buf[2][STREAM_DMA_SAMPLES];
+static volatile int s_stream_dma_active_buf = 0;
+static volatile bool s_stream_dma_active = false;
+static volatile bool s_stream_dma_start_pending = false;
+static bool          s_stream_irq_on_core1 = false;
+static unsigned int  s_stream_pwm_slice = 0;
+
+static volatile uint32_t s_stream_dma_isr_count = 0;
+static volatile uint32_t s_stream_underrun_count = 0;
+
+// Fill one DMA buffer from the ring buffer (called from DMA ISR on Core 1)
+static void __time_critical_func(audio_fill_dma_buffer)(uint32_t *buf, int count) {
+  uint32_t vol = s_volume_scale;
+  for (int i = 0; i < count; i++) {
+    uint32_t w = s_ring_write;
+    uint32_t r = s_ring_read;
+    int32_t lv, rv;
+
+    if (r == w) {
+      // Underrun: output silence (midpoint)
+      s_stream_underrun_count++;
+      lv = STREAM_PWM_MID;
+      rv = STREAM_PWM_MID;
+    } else {
+      uint32_t idx = r & AUDIO_RING_MASK;
+      // uint8 [0,255] -> PWM range [0,STREAM_PWM_WRAP] with volume
+      lv = ((uint32_t)s_ring_l[idx] * (STREAM_PWM_WRAP + 1)) >> 8;
+      rv = ((uint32_t)s_ring_r[idx] * (STREAM_PWM_WRAP + 1)) >> 8;
+      lv = (lv * vol) >> 8;
+      rv = (rv * vol) >> 8;
+      if (lv > STREAM_PWM_WRAP) lv = STREAM_PWM_WRAP;
+      if (rv > STREAM_PWM_WRAP) rv = STREAM_PWM_WRAP;
+      s_ring_read = r + 1;
+    }
+    buf[i] = ((uint32_t)rv << 16) | (uint32_t)lv;
   }
-  uint32_t idx = r & AUDIO_RING_MASK;
-  pwm_set_gpio_level(AUDIO_PIN_L, s_ring_l[idx]);
-  pwm_set_gpio_level(AUDIO_PIN_R, s_ring_r[idx]);
-  s_ring_read = r + 1;
-  return true;
+}
+
+// DMA completion ISR: swap ping-pong buffers and refill
+static void __time_critical_func(audio_stream_dma_isr)(void) {
+  s_stream_dma_isr_count++;
+  dma_hw->ints0 = 1u << s_stream_dma_chan;
+
+  if (!s_stream_dma_active || !s_streaming) {
+    // Stopped: silence outputs, don't restart DMA
+    pwm_set_both_levels(s_stream_pwm_slice, STREAM_PWM_MID, STREAM_PWM_MID);
+    s_stream_dma_active = false;
+    return;
+  }
+
+  // Swap to the pre-filled buffer and start DMA immediately
+  int next = s_stream_dma_active_buf ^ 1;
+  dma_channel_set_read_addr(s_stream_dma_chan, s_stream_dma_buf[next], true);
+
+  // Refill the buffer that just finished playing
+  audio_fill_dma_buffer(s_stream_dma_buf[s_stream_dma_active_buf], STREAM_DMA_SAMPLES);
+  s_stream_dma_active_buf = next;
 }
 
 void audio_start_stream(uint32_t sample_rate) {
@@ -216,48 +271,97 @@ void audio_start_stream(uint32_t sample_rate) {
   if (s_streaming)
     audio_stop_stream();
 
+  // Configure PWM with fractional divider for accurate sample rate
   gpio_set_function(AUDIO_PIN_L, GPIO_FUNC_PWM);
   gpio_set_function(AUDIO_PIN_R, GPIO_FUNC_PWM);
+  s_stream_pwm_slice = pwm_gpio_to_slice_num(AUDIO_PIN_L);
 
-  s_pwm_slice_l = pwm_gpio_to_slice_num(AUDIO_PIN_L);
-  s_pwm_slice_r = pwm_gpio_to_slice_num(AUDIO_PIN_R);
+  uint32_t sys_clk = clock_get_hz(clk_sys);
+  uint32_t target = sample_rate * (uint32_t)(STREAM_PWM_WRAP + 1);
+  uint32_t div_int = sys_clk / target;
+  uint32_t remainder = sys_clk - div_int * target;
+  uint32_t div_frac = (remainder * 16 + target / 2) / target;
+  if (div_int < 1) { div_int = 1; div_frac = 0; }
 
   pwm_config cfg = pwm_get_default_config();
-  pwm_config_set_wrap(&cfg, PWM_WRAP);
-  pwm_init(s_pwm_slice_l, &cfg, true);
-  pwm_init(s_pwm_slice_r, &cfg, true);
+  pwm_config_set_wrap(&cfg, STREAM_PWM_WRAP);
+  pwm_config_set_clkdiv_int_frac(&cfg, div_int, div_frac);
+  pwm_init(s_stream_pwm_slice, &cfg, true);
 
-  pwm_set_gpio_level(AUDIO_PIN_L, 128);
-  pwm_set_gpio_level(AUDIO_PIN_R, 128);
+  // Set up DMA channel paced by PWM DREQ
+  if (s_stream_dma_chan < 0)
+    s_stream_dma_chan = dma_claim_unused_channel(true);
 
+  dma_channel_config dc = dma_channel_get_default_config(s_stream_dma_chan);
+  channel_config_set_transfer_data_size(&dc, DMA_SIZE_32);
+  channel_config_set_read_increment(&dc, true);
+  channel_config_set_write_increment(&dc, false);
+  channel_config_set_dreq(&dc, DREQ_PWM_WRAP0 + s_stream_pwm_slice);
+
+  dma_channel_configure(s_stream_dma_chan, &dc,
+      &pwm_hw->slice[s_stream_pwm_slice].cc,
+      s_stream_dma_buf[0],
+      STREAM_DMA_SAMPLES,
+      false);  // don't start yet
+
+  // Use DMA_IRQ_0 (mp3_player uses DMA_IRQ_1 — no conflict)
+  dma_channel_set_irq0_enabled(s_stream_dma_chan, true);
+
+  // Reset ring buffer and pre-fill DMA buffers with silence
   s_ring_read = 0;
   s_ring_write = 0;
   s_streaming = true;
 
-  // Negative period = fixed interval regardless of callback duration
-  int32_t period_us = -(int32_t)(1000000 / sample_rate);
-  if (s_core1_alarm_pool) {
-    alarm_pool_add_repeating_timer_us(s_core1_alarm_pool, period_us,
-                                      audio_stream_tick, NULL, &s_stream_timer);
-  } else {
-    add_repeating_timer_us(period_us, audio_stream_tick, NULL, &s_stream_timer);
-  }
+  audio_fill_dma_buffer(s_stream_dma_buf[0], STREAM_DMA_SAMPLES);
+  audio_fill_dma_buffer(s_stream_dma_buf[1], STREAM_DMA_SAMPLES);
+  s_stream_dma_active_buf = 0;
+
+  // Signal Core 1 to register IRQ handler and start DMA
+  s_stream_dma_start_pending = true;
 }
 
 void audio_stop_stream(void) {
   if (!s_streaming)
     return;
-  cancel_repeating_timer(&s_stream_timer);
-  pwm_set_gpio_level(AUDIO_PIN_L, 0);
-  pwm_set_gpio_level(AUDIO_PIN_R, 0);
-  pwm_set_enabled(s_pwm_slice_l, false);
-  pwm_set_enabled(s_pwm_slice_r, false);
+
+  s_stream_dma_start_pending = false;
+  if (s_stream_dma_chan >= 0) {
+    dma_channel_set_irq0_enabled(s_stream_dma_chan, false);
+    dma_channel_abort(s_stream_dma_chan);
+  }
+  s_stream_dma_active = false;
+
+  // Midpoint is true silence for AC-coupled output (no pop)
+  pwm_set_both_levels(s_stream_pwm_slice, STREAM_PWM_MID, STREAM_PWM_MID);
+  pwm_set_enabled(s_stream_pwm_slice, false);
   s_streaming = false;
 }
 
 void audio_stream_poll(void) {
-  // No-op: timer-based streaming doesn't need deferred start.
-  // Kept for API compatibility with Core 1 loop in main.c.
+  if (!s_stream_dma_start_pending)
+    return;
+
+  if (!s_stream_irq_on_core1) {
+    irq_set_exclusive_handler(DMA_IRQ_0, audio_stream_dma_isr);
+    irq_set_enabled(DMA_IRQ_0, true);
+    s_stream_irq_on_core1 = true;
+  }
+
+  s_stream_dma_active = true;
+  dma_channel_start(s_stream_dma_chan);
+  s_stream_dma_start_pending = false;
+}
+
+void audio_stream_debug(uint32_t *isr_count, uint32_t *underruns, uint32_t *ring_used) {
+  if (isr_count) *isr_count = s_stream_dma_isr_count;
+  if (underruns) *underruns = s_stream_underrun_count;
+  if (ring_used) *ring_used = s_ring_write - s_ring_read;
+}
+
+uint32_t audio_ring_free(void) {
+  uint32_t used = s_ring_write - s_ring_read;
+  if (used > AUDIO_RING_SIZE) return 0; // shouldn't happen
+  return AUDIO_RING_SIZE - used;
 }
 
 void audio_push_samples(const int16_t *samples, int count) {
@@ -269,12 +373,8 @@ void audio_push_samples(const int16_t *samples, int count) {
     int16_t l = samples[i * 2 + 0];
     int16_t r = samples[i * 2 + 1];
 
-    // Apply master volume via precomputed multiply+shift (avoids division)
-    l = (int16_t)(((int32_t)l * (int32_t)s_volume_scale) >> 8);
-    r = (int16_t)(((int32_t)r * (int32_t)s_volume_scale) >> 8);
-
     uint32_t idx = s_ring_write & AUDIO_RING_MASK;
-    // int16_t [-32768,32767] → uint8_t [0,255] for PWM
+    // int16_t [-32768,32767] → uint8_t [0,255]
     s_ring_l[idx] = (uint8_t)((l + 32768) >> 8);
     s_ring_r[idx] = (uint8_t)((r + 32768) >> 8);
     s_ring_write++;

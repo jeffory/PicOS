@@ -31,7 +31,8 @@
 #define SD_PIN_SCK 18  // GP18 / SPI0 SCK
 #define SD_PIN_MOSI 19 // GP19 / SPI0 TX
 #define SD_SPI_BAUD                                                            \
-  (40 * 1000 * 1000) // 40 MHz (most modern SD cards support this in SPI mode)
+  (25 * 1000 * 1000) // 25 MHz — SD spec SPI-mode max; 40 MHz caused card
+                      // resets (R1=0x3f) during heavy WiFi/PSRAM activity
 
 // --- Keyboard: STM32F103 via I2C1 -------------------------------------------
 // Pins confirmed from working constellation-pico Rust project (official
@@ -63,15 +64,19 @@
 #define DBG_UART_TX 0 // GP0 / UART0 TX → USB serial on Pico
 #define DBG_UART_RX 1 // GP1 / UART0 RX
 
-// --- PIO PSRAM: Mainboard 8MB PSRAM via PIO1 SPI ----------------------------
+// --- PIO PSRAM: Mainboard 8MB PSRAM via PIO1 ---------------------------------
 // Connected on the PicoCalc v2.0 mainboard (separate from Pimoroni QMI PSRAM).
-// SPI mode (1-bit) initially; QSPI upgrade path uses GP2-GP5 as SIO0-SIO3.
-// PIO1 is used (PIO0 is the LCD).
+// QPI (4-bit) mode via GP2-GP5 as SIO0-SIO3, probed at boot with automatic
+// fallback to 1-bit serial mode. PIO1 is used (PIO0 is the LCD).
 #define PIO_PSRAM_PIO      pio1
 #define PIO_PSRAM_PIN_CS   20  // GP20
 #define PIO_PSRAM_PIN_SCK  21  // GP21 (= CS+1, required by polpo sideset)
-#define PIO_PSRAM_PIN_MOSI  2  // GP2
-#define PIO_PSRAM_PIN_MISO  3  // GP3
+#define PIO_PSRAM_PIN_MOSI  2  // GP2 (serial fallback)
+#define PIO_PSRAM_PIN_MISO  3  // GP3 (serial fallback)
+#define PIO_PSRAM_PIN_SIO0  2  // GP2 (QPI data 0, = MOSI)
+#define PIO_PSRAM_PIN_SIO1  3  // GP3 (QPI data 1, = MISO)
+#define PIO_PSRAM_PIN_SIO2  4  // GP4 (QPI data 2)
+#define PIO_PSRAM_PIN_SIO3  5  // GP5 (QPI data 3)
 #define PIO_PSRAM_SIZE     (8 * 1024 * 1024)  // 8MB
 
 // --- USB VBUS Sense ----------------------------------------------------------

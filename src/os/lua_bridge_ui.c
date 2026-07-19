@@ -2,6 +2,7 @@
 #include "../../third_party/lua-5.4/src/lauxlib.h"
 #include "ui_widgets.h"
 #include "text_wrap.h"
+#include "toast.h"
 #include "umm_malloc.h"
 
 // ── picocalc.ui.*
@@ -238,11 +239,21 @@ static int l_ui_drawDivider(lua_State *L) {
   return 0;
 }
 
-// picocalc.ui.drawToast(y, text)
+// picocalc.ui.drawToast(y, text, [bg_color])
 static int l_ui_drawToast(lua_State *L) {
   int y = (int)luaL_checkinteger(L, 1);
   const char *text = luaL_checkstring(L, 2);
-  ui_widget_toast(y, text);
+  uint16_t bg = (lua_gettop(L) >= 3) ? (uint16_t)luaL_checkinteger(L, 3) : 0;
+  ui_widget_toast(y, text, bg);
+  return 0;
+}
+
+// picocalc.ui.toast(text, [style]) — push a system toast notification
+// style: picocalc.ui.TOAST_INFO (default), TOAST_SUCCESS, TOAST_WARNING, TOAST_ERROR
+static int l_ui_toast(lua_State *L) {
+  const char *text = luaL_checkstring(L, 1);
+  uint8_t style = (lua_gettop(L) >= 2) ? (uint8_t)luaL_checkinteger(L, 2) : TOAST_STYLE_INFO;
+  toast_push(text, style);
   return 0;
 }
 
@@ -307,6 +318,7 @@ static const luaL_Reg l_ui_lib[] = {{"drawHeader",    l_ui_drawHeader},
                                     {"drawRadio",     l_ui_drawRadio},
                                     {"drawDivider",   l_ui_drawDivider},
                                     {"drawToast",     l_ui_drawToast},
+                                    {"toast",         l_ui_toast},
                                     {"drawButton",    l_ui_drawButton},
                                     {"wrapText",      l_ui_wrapText},
                                     {NULL, NULL}};
@@ -314,4 +326,12 @@ static const luaL_Reg l_ui_lib[] = {{"drawHeader",    l_ui_drawHeader},
 
 void lua_bridge_ui_init(lua_State *L) {
   register_subtable(L, "ui", l_ui_lib);
+
+  // Toast style constants: picocalc.ui.TOAST_INFO, etc.
+  lua_getfield(L, -1, "ui");
+  lua_pushinteger(L, TOAST_STYLE_INFO);    lua_setfield(L, -2, "TOAST_INFO");
+  lua_pushinteger(L, TOAST_STYLE_SUCCESS); lua_setfield(L, -2, "TOAST_SUCCESS");
+  lua_pushinteger(L, TOAST_STYLE_WARNING); lua_setfield(L, -2, "TOAST_WARNING");
+  lua_pushinteger(L, TOAST_STYLE_ERROR);   lua_setfield(L, -2, "TOAST_ERROR");
+  lua_pop(L, 1);
 }

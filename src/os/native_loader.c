@@ -12,6 +12,7 @@
 #include "hardware/watchdog.h"
 #include "hardware/xip_cache.h"
 
+#include <stdatomic.h>
 #include <stdint.h>
 #include <stdlib.h>
 #include <string.h>
@@ -31,8 +32,9 @@
 
 // Maximum virtual address range accepted for a native app image.
 // Rejects malformed or malicious ELFs before attempting a heap allocation.
-// 5 MB is generous — real apps are well under 512 KB, but DOOM needs ~4MB.
-#define NATIVE_MAX_IMAGE_SIZE (5u * 1024u * 1024u)
+// 7 MB covers apps like TIC-80 (~5.4 MB with 4 MB sbrk heap in BSS).
+// The real limit is available PSRAM (6 MB on Pimoroni Pico Plus 2 W).
+#define NATIVE_MAX_IMAGE_SIZE (7u * 1024u * 1024u)
 
 // =============================================================================
 // Minimal ELF32 type definitions
@@ -140,17 +142,50 @@ static void show_error(const char *line1, const char *line2) {
 // stacks are completely independent: app stack pressure and interrupt stacking
 // do not interfere with each other.
 //
-// 8 KB gives comfortable headroom for the GBC emulator's call depth and any
-// local arrays allocated on the stack.  The buffer lives in SRAM (fast) and
-// is a module-level static so it is zero-initialised.
-#define NATIVE_STACK_SIZE (8 * 1024)
-uint8_t s_native_stack[NATIVE_STACK_SIZE] __attribute__((aligned(8)));
+// 64 KB is allocated from PSRAM (via umm_malloc) at launch time, giving
+// plenty of headroom for deep recursion (e.g. Doom's BSP tree traversal).
+// Stack accesses go through the cached XIP alias for performance.
+#define NATIVE_STACK_SIZE (64 * 1024)
+// Preferred SRAM stack size — used when the SRAM heap can supply it (see the
+// allocation site).  Double the 8 KB static SRAM stack all native apps
+// originally ran on (Doom included), so it is not a regression for depth.
+#define NATIVE_STACK_SRAM_SIZE (16 * 1024)
+
+// Pointer to the dynamically-allocated stack buffer.  Read by the HardFault
+// handler (main.c) to detect PSP stack overflow.  NULL when no native app
+// is running.
+uint8_t *g_native_stack_base = NULL;
+
+// Where the running native app's image landed, read by the HardFault handler
+// (main.c) to report crash PC/LR as ELF-relative offsets so they can be
+// symbolicated against the app's .elf.  In split mode the code segment lives
+// in SRAM apart from the PSRAM data segment, hence two ranges.  All zero when
+// no native app is running.
+uintptr_t g_native_code_base = 0, g_native_code_limit = 0;
+uint32_t  g_native_code_vaddr = 0;
+uintptr_t g_native_data_base = 0, g_native_data_limit = 0;
+uint32_t  g_native_data_vaddr = 0;
+
+// DIAG: code-corruption watcher.  A snapshot of the app's read-only image
+// (.text + .rodata) taken right after load; Core 1 scans it against the live
+// image in rotating chunks and reports + repairs any divergence (onset time
+// + data pattern identify whoever is trampling app code in PSRAM).  Both
+// pointers are UNCACHED-alias addresses so the scan neither pollutes the
+// XIP cache nor misses direct-to-PSRAM writes.  Active only while a native
+// app is running and the snapshot allocation succeeded.
+// Cap: Doom's .rodata ends at vaddr 0x58C84; everything below 0x58C00 is
+// read-only at runtime (diagnostic constant — adjust per app if reused).
+#define CODE_WATCH_MAX_SIZE (0x58C00u)
+const uint8_t     *g_code_watch_snap = NULL;   // uncached alias
+const uint8_t     *g_code_watch_live = NULL;   // uncached alias
+uint32_t           g_code_watch_size = 0;
+_Atomic(bool)      g_code_watch_active = false;
 
 // Stack canary: the bottom NATIVE_STACK_GUARD_WORDS words are filled with a
 // sentinel before launch and checked afterwards.  If the stack overflows into
 // this guard zone the corruption is detected and reported.  The stack grows
-// downward from s_native_stack+NATIVE_STACK_SIZE, so the bottom of the buffer
-// is the last area to be reached by overflow.
+// downward from the top of the buffer, so the bottom is the last area to be
+// reached by overflow.
 #define NATIVE_STACK_CANARY      0xDEADBEEFu
 #define NATIVE_STACK_GUARD_WORDS 8   // 32 bytes
 
@@ -222,9 +257,20 @@ static void launch_on_psp(uint32_t psp_top, picos_app_entry_t fn,
 // =============================================================================
 
 // Declared in main.c — pauses Core 1's Mongoose/WiFi polling loop.
-extern volatile bool g_core1_pause;
-extern volatile bool g_core1_paused;
+extern _Atomic bool g_core1_pause;
+extern _Atomic bool g_core1_paused;
 
+#ifdef PICOS_SIMULATOR
+// Simulator: use Unicorn Engine to emulate the ARM ELF binary
+#include "unicorn_runner.h"
+
+static bool native_run(const app_entry_t *app) {
+  printf("[NATIVE] Loading '%s' via Unicorn Engine\n", app->name);
+  char elf_path[256];
+  snprintf(elf_path, sizeof(elf_path), "%s/main.elf", app->path);
+  return unicorn_run_app(elf_path, app->path, app->id, app->name);
+}
+#else
 static bool native_run(const app_entry_t *app) {
   printf("[NATIVE] Loading '%s'\n", app->name);
 
@@ -236,8 +282,10 @@ static bool native_run(const app_entry_t *app) {
   // Wait for Core 1 to acknowledge the pause (explicit handshake).
   // The old sleep_ms(10) was a race: Core 1 could be mid-umm_malloc()
   // during DNS resolution when the flag is set.
-  while (!g_core1_paused)
+  for (int i = 0; i < 200 && !g_core1_paused; i++)
     sleep_ms(1);
+  if (!g_core1_paused)
+    printf("[NATIVE] Core 1 pause timeout (200ms) — proceeding anyway\n");
 
   // ── 1. Open ELF from SD card ──────────────────────────────────────────────
   char elf_path[160];
@@ -246,6 +294,8 @@ static bool native_run(const app_entry_t *app) {
   bool ok = false;
   uint8_t *load_base = NULL;
   uint8_t *code_buf = NULL;
+  uint8_t *stack_buf = NULL;
+  bool stack_in_sram = false;
   sdfile_t f = NULL;
   Elf32_Phdr *phdr_table = NULL;
 
@@ -346,7 +396,7 @@ static bool native_run(const app_entry_t *app) {
          (unsigned long)mem_min, (unsigned long)mem_max);
 
   if (image_size > NATIVE_MAX_IMAGE_SIZE) {
-    show_error("ELF: image too large (>5MB)", NULL);
+    show_error("ELF: image too large (>7MB)", NULL);
     goto out;
   }
 
@@ -453,6 +503,16 @@ static bool native_run(const app_entry_t *app) {
 
   // ── 6. Apply relocations (dual-bias for split mode) ───────────────────────
   {
+    // Guard against underflow from malformed ELF segment layout
+    if (!split_mode && mem_min > (uint32_t)(uintptr_t)load_base) {
+      show_error("ELF: invalid segment layout", NULL);
+      goto out;
+    }
+    if (split_mode && data_vaddr_start > (uint32_t)(uintptr_t)load_base) {
+      show_error("ELF: invalid segment layout", NULL);
+      goto out;
+    }
+
     uint32_t code_bias = split_mode ? (uint32_t)code_buf - code_vaddr : 0;
     uint32_t data_bias = split_mode ? (uint32_t)load_base - data_vaddr_start
                                     : (uint32_t)load_base - mem_min;
@@ -564,14 +624,35 @@ static bool native_run(const app_entry_t *app) {
     }
   }
 
-  // ── 7. Flush XIP cache and compute entry point ──────────────────────────
-  #ifndef PICOS_SIMULATOR
-  __asm volatile ("dsb sy");
-  #endif
-  xip_cache_invalidate_all();
-  #ifndef PICOS_SIMULATOR
-  __asm volatile ("isb sy");
-  #endif
+  // ── 7. Invalidate XIP cache for the app image, compute entry point ──────
+  // Scoped to the image range only — NOT invalidate_all.  cyw43 RX IRQs keep
+  // enqueuing frames into the Mongoose recv_queue (core1 PSRAM pool) even
+  // while both cores' thread loops are paused, so a whole-cache invalidate
+  // discards those dirty lines mid-load: the queue head (SRAM) keeps its
+  // advance while the queued bytes are lost, and Core 1 hard-faults on a
+  // garbage frame length in mg_queue_next after resume.  The image itself was
+  // written via the uncached alias, so its lines are at worst stale-clean and
+  // a range invalidate is sufficient for fresh instruction/data fetches.
+  if (load_base &&
+      (uintptr_t)load_base >= PSRAM_CS1_CACHED_BASE &&
+      (uintptr_t)load_base <  PSRAM_CS1_CACHED_END) {
+    size_t inv_size = split_mode ? psram_size : image_size;
+    if (inv_size > 0) {
+      uintptr_t start = (uintptr_t)load_base - XIP_BASE;
+      uintptr_t end = start + inv_size;
+      // Maintenance ops encode the operation in the low address bits, so the
+      // range must be cache-line aligned.
+      start &= ~(uintptr_t)(XIP_CACHE_LINE_SIZE - 1);
+      end = (end + XIP_CACHE_LINE_SIZE - 1) & ~(uintptr_t)(XIP_CACHE_LINE_SIZE - 1);
+      #ifndef PICOS_SIMULATOR
+      __asm volatile ("dsb sy");
+      #endif
+      xip_cache_invalidate_range(start, end - start);
+      #ifndef PICOS_SIMULATOR
+      __asm volatile ("isb sy");
+      #endif
+    }
+  }
 
   uintptr_t entry_voff_raw = ehdr.e_entry & ~1u;
   uintptr_t entry_addr;
@@ -592,6 +673,71 @@ static bool native_run(const app_entry_t *app) {
   printf("[NATIVE] Entry %p (thumb%s)\n", (void *)entry_addr,
          split_mode ? ", SRAM" : ", cached PSRAM");
 
+  // Record image placement so the HardFault handler can report crash PC/LR
+  // as ELF-relative offsets (symbolicate with: arm-none-eabi-addr2line -e
+  // <unstripped>.elf <offset>).
+  if (split_mode) {
+    g_native_code_base  = (uintptr_t)code_buf;
+    g_native_code_limit = (uintptr_t)code_buf + code_memsz;
+    g_native_code_vaddr = code_vaddr;
+    g_native_data_base  = (uintptr_t)load_base;
+    g_native_data_limit = (uintptr_t)load_base + psram_size;
+    g_native_data_vaddr = data_vaddr_start;
+  } else {
+    g_native_code_base  = (uintptr_t)load_base;
+    g_native_code_limit = (uintptr_t)load_base + image_size;
+    g_native_code_vaddr = mem_min;
+    g_native_data_base  = 0;
+    g_native_data_limit = 0;
+    g_native_data_vaddr = 0;
+  }
+  printf("[NATIVE] Image base %p = ELF vaddr 0x%08lx\n",
+         (void *)g_native_code_base, (unsigned long)g_native_code_vaddr);
+
+  // DIAG: snapshot region for the Core 1 corruption watcher.
+  //
+  // PERMANENTLY DISARMED (2026-07-19).  The watcher's fixed window
+  // (CODE_WATCH_MAX_SIZE, sized for Doom's read-only layout) covered the GBC
+  // emulator's writable .bss, and its auto-repair path memcpy'd stale snapshot
+  // bytes over the app's live data and invalidated the XIP cache mid-write —
+  // corrupting SD reads into PSRAM buffers and tearing pointer loads (wild
+  // jumps at fs->close, in-game crashes).  If image watching is ever needed
+  // again: derive the watched range from the app's own read-only PT_LOAD
+  // flags, and REPORT ONLY — never write to or cache-invalidate memory the
+  // running app owns.
+  if (0 && !split_mode &&
+      (uintptr_t)load_base >= PSRAM_CS1_CACHED_BASE &&
+      (uintptr_t)load_base <  PSRAM_CS1_CACHED_END) {
+    uint32_t wsize = (uint32_t)(g_native_code_limit - g_native_code_base);
+    if (wsize > CODE_WATCH_MAX_SIZE) wsize = CODE_WATCH_MAX_SIZE;
+    uint8_t *snap = (uint8_t *)umm_malloc(wsize);
+    if (snap) {
+      const uint8_t *live_u =
+          (const uint8_t *)(g_native_code_base + PSRAM_CACHED_TO_UNCACHED);
+      uint8_t *snap_u = snap + PSRAM_CACHED_TO_UNCACHED;
+      memcpy(snap_u, live_u, wsize);
+      // Verify the copy against the CACHED view: the uncached alias has been
+      // seen to misread the image's first word persistently right after
+      // load (returns zeros), while the cached view is correct.  One-time
+      // cache thrash here is fine — the app hasn't started yet.
+      {
+        const uint8_t *live_c = (const uint8_t *)g_native_code_base;
+        for (int pass = 0;
+             pass < 3 && memcmp(snap_u, live_c, wsize) != 0; pass++) {
+          for (uint32_t i = 0; i < wsize; i++)
+            if (snap_u[i] != live_c[i]) snap_u[i] = live_c[i];
+        }
+      }
+      g_code_watch_snap = snap_u;
+      g_code_watch_live = live_u;
+      g_code_watch_size = wsize;
+      __dmb();
+      atomic_store(&g_code_watch_active, true);
+      printf("[CODEWATCH] armed: %lu bytes @ %p (uncached)\n",
+             (unsigned long)wsize, (const void *)live_u);
+    }
+  }
+
   kbd_clear_state();
 
   // ── 8. Launch app ─────────────────────────────────────────────────────────
@@ -600,39 +746,91 @@ static bool native_run(const app_entry_t *app) {
 
   picos_app_entry_t entry_fn = (picos_app_entry_t)entry_addr;
 
-  uint32_t *guard = (uint32_t *)s_native_stack;
+  // Prefer an SRAM stack: PSRAM stacks funnel every call frame, local array
+  // and register spill through the XIP cache, which measurably slows
+  // memory-bound apps (GBC emulator).  16 KB SRAM is double the original
+  // static stack all native apps ran on; fall back to the roomy 64 KB PSRAM
+  // stack when SRAM is unavailable.
+  uint32_t stack_size = 0;
+  for (uint32_t try_size = NATIVE_STACK_SRAM_SIZE; try_size >= 8u * 1024;
+       try_size -= 4u * 1024) {
+    stack_buf = (uint8_t *)malloc(try_size);
+    if (stack_buf) {
+      stack_size = try_size;
+      stack_in_sram = true;
+      break;
+    }
+  }
+  if (!stack_in_sram) {
+    stack_size = NATIVE_STACK_SIZE;
+    stack_buf = (uint8_t *)umm_malloc(NATIVE_STACK_SIZE);
+  }
+  if (!stack_buf) {
+    show_error("Out of memory for app stack", NULL);
+    goto out;
+  }
+  printf("[NATIVE] App stack: %lu KB in %s @ %p\n",
+         (unsigned long)(stack_size / 1024), stack_in_sram ? "SRAM" : "PSRAM",
+         (void *)stack_buf);
+  g_native_stack_base = stack_buf;
+
+  uint32_t *guard = (uint32_t *)stack_buf;
   for (int i = 0; i < NATIVE_STACK_GUARD_WORDS; i++)
     guard[i] = NATIVE_STACK_CANARY;
 
-  uint32_t stack_top = (uint32_t)(s_native_stack + NATIVE_STACK_SIZE);
+  uint32_t stack_top = (uint32_t)(stack_buf + stack_size);
 
   g_core1_pause = false;
 
   launch_on_psp(stack_top, entry_fn,
                 (const PicoCalcAPI *)&g_api, app->path, app->id, app->name);
 
+  ok = true;
   for (int i = 0; i < NATIVE_STACK_GUARD_WORDS; i++) {
     if (guard[i] != NATIVE_STACK_CANARY) {
-      printf("[NATIVE] WARNING: stack overflow detected in '%s' "
+      printf("[NATIVE] ERROR: stack overflow detected in '%s' "
              "(canary[%d] = 0x%08lx)\n",
              app->name, i, (unsigned long)guard[i]);
+      ok = false;
       break;
     }
   }
 
-  printf("[NATIVE] App '%s' returned\n", app->name);
-  ok = true;
+  printf("[NATIVE] App '%s' returned%s\n", app->name,
+         ok ? "" : " (with stack overflow)");
 
 out:
   // ── 9. Cleanup ─────────────────────────────────────────────────────────────
-  g_native_audio_callback = NULL;
+  __dmb(); // ensure all app writes visible before clearing callback
+  atomic_store(&g_native_audio_callback, NULL);
+  atomic_store(&g_code_watch_active, false);
+  g_native_stack_base = NULL;
+  g_native_code_base = g_native_code_limit = 0;
+  g_native_data_base = g_native_data_limit = 0;
+  g_native_code_vaddr = g_native_data_vaddr = 0;
   g_core1_pause = true;
-  while (!g_core1_paused)
+  for (int i = 0; i < 200 && !g_core1_paused; i++)
     sleep_ms(1);
+  if (!g_core1_paused)
+    printf("[NATIVE] Core 1 pause timeout (200ms) at cleanup\n");
   audio_stop_stream();
   audio_stop_tone();
+  // Core 1 is paused (or timed out) — safe to drop the watcher snapshot now.
+  // g_code_watch_snap holds the uncached alias; umm_free wants the original.
+  if (g_code_watch_snap) {
+    umm_free((void *)(g_code_watch_snap - PSRAM_CACHED_TO_UNCACHED));
+    g_code_watch_snap = NULL;
+    g_code_watch_live = NULL;
+    g_code_watch_size = 0;
+  }
   if (code_buf)
     free(code_buf);
+  if (stack_buf) {
+    if (stack_in_sram)
+      free(stack_buf);
+    else
+      umm_free(stack_buf);
+  }
   if (load_base)
     umm_free(load_base);
   if (phdr_table)
@@ -643,6 +841,7 @@ out:
 
   return ok;
 }
+#endif  // !PICOS_SIMULATOR
 
 static bool native_can_handle(const app_entry_t *app) {
   return app->type == APP_TYPE_NATIVE;

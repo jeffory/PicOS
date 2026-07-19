@@ -9,7 +9,11 @@ CFLAGS  = -mcpu=cortex-m33 -mthumb -std=gnu99 \
           -Isrc/doomgeneric \
           -DDOOMGENERIC_RESX=320 \
           -DDOOMGENERIC_RESY=200 \
-          -DOPL_CAPTURE
+          -DFEATURE_SOUND
+# Dev-only flags (add to CFLAGS when needed):
+#   -DOPL_CAPTURE  — dump OPL register writes to SD (SD writes on the Core 1
+#                    audio path; starves the mixer — never ship enabled)
+#   -DMUS_DEBUG    — per-voice/per-render MUS logging (same starvation issue)
 LDFLAGS = -T linker.ld \
           -Wl,--entry=picos_main \
           -Wl,-pie \

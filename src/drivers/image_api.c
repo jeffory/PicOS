@@ -7,6 +7,7 @@
 #include <string.h>
 #include <stdbool.h>
 #include <stdint.h>
+#include <stdio.h>
 
 // RGB565 macro: 5 bits red, 6 bits green, 5 bits blue
 #ifndef RGB565
@@ -17,7 +18,9 @@ pc_image_t *image_load(const char *path) {
     if (!path) return NULL;
 
     sdfile_t f = sdcard_fopen(path, "r");
-    if (!f) return NULL;
+    if (!f) {
+        return NULL;
+    }
 
     uint8_t header[16];
     if (sdcard_fread(f, header, 16) != 16) {

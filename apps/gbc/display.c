@@ -19,10 +19,18 @@ static inline uint16_t rgb555_to_rgb565(uint16_t c) {
 void gbc_display_init(GBCDisplay *ctx) {
     for (int i = 0; i < 3; i++)
         memcpy(ctx->palette[i], default_dmg_palette, sizeof(default_dmg_palette));
+    memset(ctx->cgb_lut, 0, sizeof(ctx->cgb_lut));
     ctx->selected_palette = -1;
     ctx->frame_count = 0;
     ctx->cgb_mode = false;
     ctx->cgb_palette = NULL;
+    ctx->draw_image_nn_fn = NULL;
+}
+
+void gbc_display_update_cgb_lut(GBCDisplay *ctx) {
+    if (!ctx->cgb_palette) return;
+    for (int i = 0; i < 64; i++)
+        ctx->cgb_lut[i] = rgb555_to_rgb565(ctx->cgb_palette[i]);
 }
 
 void gbc_display_set_palette(GBCDisplay *ctx, int palette_idx) {
@@ -51,15 +59,13 @@ void gbc_display_draw_line(GBCDisplay *ctx, const uint8_t pixels[GB_WIDTH], uint
         return;
     }
 
-    uint16_t *row = &ctx->framebuffer[line * GB_WIDTH];
+    uint16_t *row = ctx->linebuf;
 
     if (ctx->cgb_mode && ctx->cgb_palette) {
         // CGB mode: pixel value is an index into fixPalette[0x40]
-        // BG: ((palette & 0x07) << 2) + shade  = 0x00-0x1F
-        // OBJ: ((palette & 0x07) << 2) + shade + 0x20 = 0x20-0x3F
+        // Use pre-computed LUT to avoid per-pixel RGB555->RGB565 conversion
         for (int x = 0; x < GB_WIDTH; x++) {
-            uint8_t idx = pixels[x] & 0x3F;
-            row[x] = rgb555_to_rgb565(ctx->cgb_palette[idx]);
+            row[x] = ctx->cgb_lut[pixels[x] & 0x3F];
         }
     } else {
         // DMG mode: shade in bits 0-1, palette layer in bits 4-5
@@ -71,6 +77,11 @@ void gbc_display_draw_line(GBCDisplay *ctx, const uint8_t pixels[GB_WIDTH], uint
         }
     }
 
+    // Blit this line straight into the OS framebuffer (2x scale → 2 rows).
+    // The 320B linebuf stays cache-hot, so this adds no PSRAM read traffic.
+    if (ctx->draw_image_nn_fn)
+        ctx->draw_image_nn_fn(0, 16 + (int)line * SCALE, row, GB_WIDTH, 1, SCALE);
+
     ctx->frame_count++;
 }
 
@@ -78,19 +89,17 @@ void gbc_display_render(GBCDisplay *ctx,
                         void (*draw_image_nn_fn)(int, int, const uint16_t *, int, int, int),
                         void (*flush_fn)(void),
                         void (*flush_rows_fn)(int, int)) {
+    (void)draw_image_nn_fn;
+    (void)flush_rows_fn;
     if (ctx->frame_count == 0) {
         return;
     }
 
-    draw_image_nn_fn(0, 16, ctx->framebuffer, GB_WIDTH, GB_HEIGHT, SCALE);
-
-    if (flush_rows_fn) {
-        // Flush only the dirty region: FPS bar (row 0) through GBC image bottom
-        // (row 16 + 144*SCALE - 1 = 303 at SCALE 2)
-        flush_rows_fn(0, 16 + GB_HEIGHT * SCALE - 1);
-    } else {
-        flush_fn();
-    }
+    // Full flush (with buffer swap): the DMA then reads the buffer we just
+    // finished while we draw the next frame into the other one.  flushRows
+    // (no swap) had the DMA reading the same buffer the per-line blits write,
+    // stalling the CPU on SRAM contention and tearing the panel.
+    flush_fn();
 
     ctx->frame_count = 0;
 }

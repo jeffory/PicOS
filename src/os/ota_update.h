@@ -3,7 +3,8 @@
 #include <stdbool.h>
 #include <stdint.h>
 
-#define OTA_MAGIC     0x4F544100u  // "OTA\0"
+#define OTA_MAGIC       0x4F544100u  // "OTA\0"
+#define OTA_SCRATCH_IDX 1            // Use scratch[1] — scratch[0] is boot-loop counter
 #define OTA_BIN_PATH  "/system/update.bin"
 #define OTA_HASH_PATH "/system/update.sha256"
 

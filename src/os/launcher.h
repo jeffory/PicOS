@@ -24,6 +24,9 @@ bool launcher_launch_by_name(const char *name);
 // Get the name of the currently running app (NULL if no app running)
 const char* launcher_get_running_app_name(void);
 
+// Get milliseconds since the current app was launched (0 if no app running)
+uint32_t launcher_get_app_uptime_ms(void);
+
 // Change system clock (handles voltage, peripherals, Core 1 pause).
 // khz=0 resets to the default 200 MHz.
 void launcher_apply_clock(uint32_t khz);

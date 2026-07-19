@@ -3,5 +3,8 @@
     "name": "Hello World",
     "description": "A basic drawing demo",
     "version": "1.0",
-    "author": "PicOS"
+    "author": "PicOS",
+    "category": "demos",
+    "repo": "jeffory/picos-apps",
+    "min_firmware": "1.0.0"
 }

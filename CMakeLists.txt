@@ -234,6 +234,7 @@ add_executable(picocalc_os
     src/os/lua_bridge_3d.c
     src/os/lua_bridge_ui.c
     src/os/ui_widgets.c
+    src/os/toast.c
     src/os/text_wrap.c
     src/os/lua_bridge_audio.c
     src/os/lua_bridge_sound.c
@@ -244,6 +245,7 @@ add_executable(picocalc_os
     src/os/lua_bridge_game_scene.c
     src/os/lua_bridge_game_save.c
     src/os/lua_psram_alloc.c
+    src/os/core1_alloc.c
     src/os/system_menu.c
     src/os/screenshot.c
     src/os/terminal.c
@@ -252,6 +254,8 @@ add_executable(picocalc_os
     src/os/lua_bridge_terminal.c
     src/os/crypto.c
     src/os/lua_bridge_crypto.c
+    src/os/lua_bridge_mod.c
+    src/os/lua_bridge_zip.c
     src/os/ota_update.c
     src/fonts/font_6x11.c
     src/fonts/font_scientifica.c
@@ -267,6 +271,7 @@ add_executable(picocalc_os
     src/os/image_decoders.cpp
     src/drivers/display.c
     src/drivers/image_api.c
+    src/drivers/image_preload.c
     src/drivers/audio.c
     src/drivers/sound.c
     src/drivers/fileplayer.c
@@ -277,10 +282,17 @@ add_executable(picocalc_os
     src/drivers/wifi.c
     src/drivers/http.c
     src/drivers/tcp.c
+    src/drivers/mod_player.c
     src/drivers/pio_psram.c
+    src/drivers/qmi_psram.c
     src/drivers/pio_psram_bulk.c
+    src/drivers/pio_psram_qpi.c
     third_party/mongoose/mongoose.c
     third_party/umm_malloc/src/umm_malloc.c
+    third_party/miniz/miniz.c
+    third_party/miniz/miniz_tinfl.c
+    third_party/miniz/miniz_tdef.c
+    third_party/miniz/miniz_zip.c
 )
 
 target_include_directories(picocalc_os PRIVATE
@@ -291,7 +303,9 @@ target_include_directories(picocalc_os PRIVATE
     src/drivers/
     third_party/mongoose/
     third_party/umm_malloc/src/
+    third_party/miniz/
     third_party/libmad/
+    third_party/pocketmod/
     data/
 )
 
@@ -318,10 +332,36 @@ target_link_libraries(picocalc_os
     pio_psram_lib
 )
 
+# ── Generate miniz_export.h stub (miniz's own CMake does this, but we
+#    compile sources directly so we need to create it ourselves) ─────────────
+if(NOT EXISTS "${CMAKE_SOURCE_DIR}/third_party/miniz/miniz_export.h")
+    file(WRITE "${CMAKE_SOURCE_DIR}/third_party/miniz/miniz_export.h"
+        "#ifndef MINIZ_EXPORT_H\n"
+        "#define MINIZ_EXPORT_H\n"
+        "#define MINIZ_EXPORT\n"
+        "#endif\n"
+    )
+endif()
+
+# ── miniz compile options (decompression only, no stdio, PSRAM allocator) ────
+# Redirect miniz heap allocations to umm_malloc (8MB PSRAM) instead of
+# standard malloc (~28KB SRAM) so ZIP extraction can handle real app sizes.
+# Force-include miniz_picos.h which defines MZ_MALLOC/MZ_FREE/MZ_REALLOC
+# before miniz_common.h's #ifndef guards.
+set_source_files_properties(
+    third_party/miniz/miniz.c
+    third_party/miniz/miniz_tinfl.c
+    third_party/miniz/miniz_tdef.c
+    third_party/miniz/miniz_zip.c
+    PROPERTIES COMPILE_FLAGS
+    "-DMINIZ_NO_STDIO -DMINIZ_NO_ARCHIVE_WRITING_APIS -DMINIZ_NO_ZLIB_COMPATIBLE_NAMES -include ${CMAKE_SOURCE_DIR}/third_party/miniz_picos.h"
+)
+
 # ── PIO PSRAM Bulk Transfer (improved driver with 16-bit counters) ─────────────
 # Supports up to 8187 bytes per transaction (vs 27 bytes in polpo library).
 # Uses a custom PIO program in src/drivers/pio_psram_bulk.pio.
 pico_generate_pio_header(picocalc_os ${CMAKE_SOURCE_DIR}/src/drivers/pio_psram_bulk.pio)
+pico_generate_pio_header(picocalc_os ${CMAKE_SOURCE_DIR}/src/drivers/pio_psram_qpi.pio)
 
 # Rename .text sections in libmad_ram objects to .time_critical.libmad
 # so the SDK linker script places them in SRAM (the default RP2350 linker

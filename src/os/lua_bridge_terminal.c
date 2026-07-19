@@ -478,6 +478,76 @@ static int l_terminal_getVisualRowCount(lua_State* L) {
     return 1;
 }
 
+// Cell access (for syntax highlighting)
+static int l_terminal_setCell(lua_State* L) {
+    lua_terminal_t* t = check_terminal(L, 1);
+    int x = (int)luaL_checkinteger(L, 2);
+    int y = (int)luaL_checkinteger(L, 3);
+    const char* ch = luaL_checkstring(L, 4);
+    if (x < 0 || x >= t->term->cols || y < 0 || y >= t->term->rows)
+        return 0;
+    terminal_setCell(t->term, x, y, (uint16_t)(unsigned char)ch[0]);
+    return 0;
+}
+
+static int l_terminal_getCell(lua_State* L) {
+    lua_terminal_t* t = check_terminal(L, 1);
+    int x = (int)luaL_checkinteger(L, 2);
+    int y = (int)luaL_checkinteger(L, 3);
+    if (x < 0 || x >= t->term->cols || y < 0 || y >= t->term->rows) {
+        lua_pushlstring(L, " ", 1);
+        return 1;
+    }
+    uint16_t cell = terminal_getCell(t->term, x, y);
+    char ch = (char)(cell & 0xFF);
+    if (ch == 0) ch = ' ';
+    lua_pushlstring(L, &ch, 1);
+    return 1;
+}
+
+static int l_terminal_setCellColors(lua_State* L) {
+    lua_terminal_t* t = check_terminal(L, 1);
+    int x = (int)luaL_checkinteger(L, 2);
+    int y = (int)luaL_checkinteger(L, 3);
+    uint16_t fg = (uint16_t)luaL_checkinteger(L, 4);
+    uint16_t bg = (uint16_t)luaL_checkinteger(L, 5);
+    if (x < 0 || x >= t->term->cols || y < 0 || y >= t->term->rows)
+        return 0;
+    int idx = y * t->term->cols + x;
+    t->term->fg_colors[idx] = fg;
+    t->term->bg_colors[idx] = bg;
+    t->term->row_dirty[y] = 1;
+    return 0;
+}
+
+static int l_terminal_setRowColors(lua_State* L) {
+    lua_terminal_t* t = check_terminal(L, 1);
+    int y = (int)luaL_checkinteger(L, 2);
+    luaL_checktype(L, 3, LUA_TTABLE);
+    luaL_checktype(L, 4, LUA_TTABLE);
+    int start_x = (int)luaL_optinteger(L, 5, 0);
+    int count = (int)luaL_optinteger(L, 6, t->term->cols);
+
+    if (y < 0 || y >= t->term->rows)
+        return 0;
+    if (start_x < 0) start_x = 0;
+    if (start_x >= t->term->cols)
+        return 0;
+    if (start_x + count > t->term->cols)
+        count = t->term->cols - start_x;
+
+    for (int i = 0; i < count; i++) {
+        int idx = y * t->term->cols + start_x + i;
+        lua_rawgeti(L, 3, i + 1);
+        lua_rawgeti(L, 4, i + 1);
+        t->term->fg_colors[idx] = (uint16_t)lua_tointeger(L, -2);
+        t->term->bg_colors[idx] = (uint16_t)lua_tointeger(L, -1);
+        lua_pop(L, 2);
+    }
+    t->term->row_dirty[y] = 1;
+    return 0;
+}
+
 static const luaL_Reg terminal_methods[] = {
     {"write", l_terminal_write},
     {"clear", l_terminal_clear},
@@ -525,6 +595,11 @@ static const luaL_Reg terminal_methods[] = {
     {"setWrapIndicator", l_terminal_setWrapIndicator},
     {"getWordWrap", l_terminal_getWordWrap},
     {"getVisualRowCount", l_terminal_getVisualRowCount},
+    // Cell access (for syntax highlighting)
+    {"setCell", l_terminal_setCell},
+    {"getCell", l_terminal_getCell},
+    {"setCellColors", l_terminal_setCellColors},
+    {"setRowColors", l_terminal_setRowColors},
     {"__gc", l_terminal_gc},
     {NULL, NULL}
 };

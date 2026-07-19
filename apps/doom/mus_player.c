@@ -20,7 +20,10 @@
 #include "opl_capture.h"
 
 // Debug: enable voice allocation logging
-#define MUS_DEBUG_VOICE
+// Per-voice/per-render debug logging.  printf on the Core 1 audio path goes
+// out over CDC and stalls the mixer for tens of ms per line — enabling this
+// starves audio into constant underruns.  Define only for offline debugging.
+//#define MUS_DEBUG_VOICE
 
 // --- Constants ---
 

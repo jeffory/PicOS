@@ -16,6 +16,9 @@ void set_simulator_exit_flag(volatile int *flag) {
 }
 
 void request_simulator_exit(void) {
+    // Set the global g_running flag so the Lua debug hook sees it
+    extern volatile int g_running;
+    g_running = 0;
     if (g_simulator_running) {
         *g_simulator_running = 0;
     }
@@ -74,9 +77,11 @@ void kbd_poll(void) {
         }
     }
     
-    // Get current button state from HAL
-    uint32_t new_buttons = hal_input_get_buttons();
-    uint32_t new_pressed = hal_input_get_buttons_pressed();
+    // Get current button state from HAL (atomic snapshot: pressed edges are
+    // cleared and injected clicks auto-release as part of the same locked
+    // read, so RPC-injected presses can't be dropped mid-poll)
+    uint32_t new_buttons = 0, new_pressed = 0;
+    hal_input_read_buttons(&new_buttons, &new_pressed);
     
     // Calculate released buttons
     s_buttons_released = s_buttons & ~new_buttons;
@@ -88,6 +93,9 @@ void kbd_poll(void) {
     // Check for menu key (F10 or BTN_MENU)
     if (s_buttons_pressed & BTN_MENU) {
         s_menu_pressed = true;
+        // Hide MENU from apps, matching the hardware driver's intercept
+        s_buttons &= ~BTN_MENU;
+        s_buttons_pressed &= ~BTN_MENU;
     }
     
     // Check for screenshot key (F12 mapped to BTN_F9)
@@ -110,9 +118,6 @@ void kbd_poll(void) {
     } else {
         s_raw_key = 0;
     }
-    
-    // Update HAL for next frame
-    hal_input_update();
 }
 
 char kbd_get_char(void) {
@@ -180,11 +185,16 @@ void kbd_recover_i2c_bus(void) {
 }
 
 void kbd_inject_buttons(uint32_t buttons) {
-    s_buttons |= buttons;
-    s_buttons_pressed |= buttons;
+    // Inject through HAL only — the next kbd_poll picks them up atomically.
+    // (Writing s_buttons/s_buttons_pressed directly here would double-fire
+    // the pressed edge and race with kbd_poll's assignment.)
+    hal_input_inject_buttons(buttons);
 }
 
 void kbd_inject_char(char c) {
-    s_last_char = c;
-    s_raw_key = (uint8_t)c;
+    // Route through the HAL char ring so kbd_poll picks it up on the next
+    // frame. Writing s_last_char directly raced with kbd_poll, which
+    // overwrites s_last_char from hal_input_get_char() every frame — injected
+    // chars were wiped before any app could read them.
+    hal_input_inject_char(c);
 }

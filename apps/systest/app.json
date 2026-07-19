@@ -3,5 +3,8 @@
     "name": "System Test",
     "description": "Tests exposed system APIs",
     "version": "1.0",
-    "author": "PicOS"
+    "author": "PicOS",
+    "category": "system",
+    "repo": "jeffory/picos-apps",
+    "min_firmware": "1.0.0"
 }

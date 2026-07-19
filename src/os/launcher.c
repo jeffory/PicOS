@@ -5,8 +5,10 @@
 #include "native_loader.h"
 #include "../drivers/audio.h"
 #include "../drivers/display.h"
+#include "../drivers/image_api.h"
 #include "../drivers/keyboard.h"
 #include "../drivers/mp3_player.h"
+#include "../drivers/pio_psram.h"
 #include "../drivers/sdcard.h"
 #include "../drivers/wifi.h"
 
@@ -17,6 +19,8 @@
 #include "system_menu.h"
 #include "ui.h"
 #include "umm_malloc.h"
+
+#include <stdatomic.h>
 
 #include "../dev_commands.h"
 #include "pico/stdlib.h"
@@ -153,6 +157,8 @@ static void on_app_dir(const sdcard_entry_t *entry, void *user) {
     app->has_http            = json_has_requirement(json, "http");
     app->has_audio           = json_has_requirement(json, "audio");
     json_get_int(json, "system_clock_khz", &app->system_clock_khz);
+    if (!json_get_string(json, "category", app->category, sizeof(app->category)))
+      app->category[0] = '\0';
 
     umm_free(json);
   } else {
@@ -161,6 +167,17 @@ static void on_app_dir(const sdcard_entry_t *entry, void *user) {
     strncpy(app->name, entry->name, sizeof(app->name));
     app->description[0] = '\0';
     strncpy(app->version, "?", sizeof(app->version));
+    app->category[0] = '\0';
+  }
+
+  // Try to load app icon (PNG first, then BMP)
+  app->icon = NULL;
+  char icon_path[160];
+  snprintf(icon_path, sizeof(icon_path), "/apps/%s/icon.png", entry->name);
+  app->icon = image_load(icon_path);
+  if (!app->icon) {
+    snprintf(icon_path, sizeof(icon_path), "/apps/%s/icon.bmp", entry->name);
+    app->icon = image_load(icon_path);
   }
 
   s_app_count++;
@@ -172,6 +189,14 @@ static int compare_app_name(const void *a, const void *b) {
 }
 
 static void scan_apps(void) {
+  // Free previously loaded icons before rescan
+  for (int i = 0; i < s_app_count; i++) {
+    if (s_apps[i].icon) {
+      image_free((pc_image_t *)s_apps[i].icon);
+      s_apps[i].icon = NULL;
+    }
+  }
+
   s_app_count = 0;
   memset(s_apps, 0, sizeof(app_entry_t) * MAX_APPS);
   printf("[LAUNCHER] Scanning /apps directory...\n");
@@ -183,14 +208,80 @@ static void scan_apps(void) {
   fflush(stdout);
 }
 
-// ── Launcher rendering
-// ────────────────────────────────────────────────────────
+// ── Category system ──────────────────────────────────────────────────────────
+
+typedef enum {
+  CAT_GAMES = 0,
+  CAT_TOOLS,
+  CAT_SYSTEM,
+  CAT_DEMOS,
+  CAT_EMULATORS,
+  CAT_NETWORK,
+  CAT_COUNT,
+  CAT_ALL  // virtual: unfiltered
+} category_t;
+
+static const char *s_cat_names[CAT_COUNT] = {
+    "Games", "Tools", "System", "Demos", "Emulators", "Network"};
+
+static const uint16_t s_cat_colors[CAT_COUNT] = {
+    RGB565(255, 100, 50),   // Games: orange
+    RGB565(100, 180, 255),  // Tools: blue
+    RGB565(160, 160, 160),  // System: gray
+    RGB565(255, 200, 50),   // Demos: yellow
+    RGB565(150, 100, 255),  // Emulators: purple
+    RGB565(50, 200, 150),   // Network: teal
+};
+
+// Per-category app indices into s_apps[]
+static int s_cat_indices[CAT_COUNT][MAX_APPS];
+static int s_cat_counts[CAT_COUNT];
+
+static category_t parse_category(const char *cat_str) {
+  if (!cat_str || !cat_str[0]) return CAT_DEMOS;  // default
+  if (strcasecmp(cat_str, "games") == 0) return CAT_GAMES;
+  if (strcasecmp(cat_str, "tools") == 0) return CAT_TOOLS;
+  if (strcasecmp(cat_str, "system") == 0) return CAT_SYSTEM;
+  if (strcasecmp(cat_str, "demos") == 0) return CAT_DEMOS;
+  if (strcasecmp(cat_str, "emulators") == 0) return CAT_EMULATORS;
+  if (strcasecmp(cat_str, "network") == 0) return CAT_NETWORK;
+  return CAT_DEMOS;
+}
+
+static void build_category_indices(void) {
+  memset(s_cat_counts, 0, sizeof(s_cat_counts));
+  for (int i = 0; i < s_app_count; i++) {
+    category_t cat = parse_category(s_apps[i].category);
+    if (cat < CAT_COUNT)
+      s_cat_indices[cat][s_cat_counts[cat]++] = i;
+  }
+}
+
+// ── Launcher rendering ──────────────────────────────────────────────────────
 
 #define ITEM_H 28
 #define LIST_X 8
-#define LIST_Y 32
+#define LIST_Y 48          // below header (28) + tab bar (18) + border (1) + 1
 #define LIST_VISIBLE 9
-#define DESC_SCROLL_RESET_PAUSE 40  // frames to pause at start before re-scrolling
+#define DESC_SCROLL_RESET_PAUSE 40
+#define ICON_SIZE   20     // app icon size in list view
+
+#define TAB_COUNT   (CAT_COUNT + 1)  // "All" + 6 categories
+
+static const char *s_tab_names[TAB_COUNT] = {
+    "All", "Games", "Tools", "System", "Demos", "Emulators", "Network"};
+
+static const uint16_t s_tab_colors[TAB_COUNT] = {
+    RGB565(140, 160, 255),  // All: light blue
+    RGB565(255, 100, 50),   // Games: orange
+    RGB565(100, 180, 255),  // Tools: blue
+    RGB565(160, 160, 160),  // System: gray
+    RGB565(255, 200, 50),   // Demos: yellow
+    RGB565(150, 100, 255),  // Emulators: purple
+    RGB565(50, 200, 150),   // Network: teal
+};
+
+static int s_active_tab = 0;  // 0 = All, 1..6 = categories
 
 static int s_selected = 0;
 static int s_scroll = 0;
@@ -199,6 +290,7 @@ static int s_desc_scroll_timer = 0;
 
 void launcher_refresh_apps(void) {
   scan_apps();
+  build_category_indices();
   s_selected = 0;
   s_scroll = 0;
 }
@@ -212,61 +304,169 @@ void launcher_refresh_apps(void) {
 #define C_BATTERY_LO COLOR_RED
 #define C_BORDER RGB565(60, 60, 100)
 
-static void draw_header(void) { ui_draw_header("PicOS"); }
+// ── Tab bar (horizontal category tabs) ──────────────────────────────────────
 
-static void draw_footer(void) {
-  ui_draw_footer("Enter:Launch  Esc:Exit app  F10:Menu", NULL);
+#define TAB_BAR_Y    29    // below header border
+#define TAB_BAR_H    18
+#define TAB_DOT_W    14    // width of an unselected tab (colored dot)
+#define TAB_DOT_R    3     // dot radius
+#define TAB_GAP      2
+#define TAB_OUTER_PAD 6
+#define TAB_LABEL_PAD 6    // horizontal padding around selected label text
+#define TAB_SEL_BG   RGB565(40, 60, 120)
+
+static void draw_tab_bar(void) {
+  display_fill_rect(0, TAB_BAR_Y, FB_WIDTH, TAB_BAR_H, C_HEADER_BG);
+  display_fill_rect(0, TAB_BAR_Y + TAB_BAR_H, FB_WIDTH, 1, C_BORDER);
+
+  // Calculate selected tab width
+  const char *sel_label = s_tab_names[s_active_tab];
+  int sel_label_w = display_text_width(sel_label);
+  int sel_w = sel_label_w + TAB_LABEL_PAD * 2;
+
+  // Calculate total width to center the tab bar
+  int total_w = sel_w + (TAB_COUNT - 1) * TAB_DOT_W + (TAB_COUNT - 1) * TAB_GAP;
+  int x = (FB_WIDTH - total_w) / 2;
+
+  for (int i = 0; i < TAB_COUNT; i++) {
+    if (i == s_active_tab) {
+      // Selected: highlight bg + text label + bottom accent line
+      uint16_t accent = s_tab_colors[i];
+      display_fill_rect(x, TAB_BAR_Y + 1, sel_w, TAB_BAR_H - 2, TAB_SEL_BG);
+      display_fill_rect(x, TAB_BAR_Y + TAB_BAR_H - 3, sel_w, 3, accent);
+      int tx = x + (sel_w - sel_label_w) / 2;
+      display_draw_text(tx, TAB_BAR_Y + (TAB_BAR_H - 8) / 2, sel_label,
+                        C_TEXT, TAB_SEL_BG);
+      x += sel_w + TAB_GAP;
+    } else {
+      // Unselected: colored dot
+      int cx = x + TAB_DOT_W / 2;
+      int cy = TAB_BAR_Y + TAB_BAR_H / 2;
+      display_fill_circle(cx, cy, TAB_DOT_R, s_tab_colors[i]);
+      x += TAB_DOT_W + TAB_GAP;
+    }
+  }
 }
 
-static void draw_launcher(void) {
-  display_clear(C_BG);
-  draw_header();
-  draw_footer();
+// ── Fallback app icon (colored square with first letter) ────────────────────
 
-  if (s_app_count == 0) {
-    display_draw_text(8, LIST_Y + 8, "No apps found.", C_TEXT_DIM, C_BG);
-    display_draw_text(8, LIST_Y + 20, "Copy apps to /apps/ on SD card.",
+static void draw_fallback_icon(int x, int y, int size, const char *name,
+                               const char *category) {
+  category_t cat = parse_category(category);
+  uint16_t color = (cat < CAT_COUNT) ? s_cat_colors[cat] : COLOR_GRAY;
+  display_fill_rect(x, y, size, size, color);
+  if (name && name[0]) {
+    char letter[2] = {name[0], '\0'};
+    int tx = x + (size - 6) / 2;
+    int ty = y + (size - 8) / 2;
+    display_draw_text(tx, ty, letter, COLOR_WHITE, color);
+  }
+}
+
+// ── Draw app icon (image or fallback) ───────────────────────────────────────
+
+static void draw_app_icon(int x, int y, int size, const app_entry_t *app) {
+  if (app->icon) {
+    image_draw_scaled((pc_image_t *)app->icon, x, y, size, size);
+  } else {
+    draw_fallback_icon(x, y, size, app->name, app->category);
+  }
+}
+
+// ── App list helpers ────────────────────────────────────────────────────────
+
+static int list_count(void) {
+  if (s_active_tab == 0) return s_app_count;  // "All"
+  int cat = s_active_tab - 1;
+  if (cat < CAT_COUNT) return s_cat_counts[cat];
+  return 0;
+}
+
+static int list_app_idx(int list_idx) {
+  if (s_active_tab == 0) return list_idx;  // "All"
+  int cat = s_active_tab - 1;
+  if (cat < CAT_COUNT && list_idx < s_cat_counts[cat])
+    return s_cat_indices[cat][list_idx];
+  return 0;
+}
+
+static void draw_app_list(void) {
+  display_clear(C_BG);
+  ui_draw_header("PicOS");
+  draw_tab_bar();
+
+  int count = list_count();
+
+  if (count == 0) {
+    display_draw_text(8, LIST_Y + 20, "No apps in this category.",
                       C_TEXT_DIM, C_BG);
+    ui_draw_footer("L/R:Category  F10:Menu", NULL);
     display_flush();
     return;
   }
 
-  for (int i = 0; i < LIST_VISIBLE && (i + s_scroll) < s_app_count; i++) {
-    int idx  = i + s_scroll;
-    int y    = LIST_Y + i * ITEM_H;
-    bool sel = (idx == s_selected);
+  int text_x = LIST_X + ICON_SIZE + 4;  // shifted right for icon
+
+  for (int i = 0; i < LIST_VISIBLE && (i + s_scroll) < count; i++) {
+    int list_idx = i + s_scroll;
+    int app_idx = list_app_idx(list_idx);
+    int y = LIST_Y + i * ITEM_H;
+    bool sel = (list_idx == s_selected);
 
     uint16_t bg = sel ? C_SEL_BG : C_BG;
     display_fill_rect(LIST_X - 4, y, FB_WIDTH - LIST_X * 2 + 8, ITEM_H - 2, bg);
 
-    display_draw_text(LIST_X, y + 4, s_apps[idx].name, C_TEXT, bg);
-    if (s_apps[idx].description[0]) {
-      int max_w = FB_WIDTH - LIST_X * 2 - 4;
-      int tw = display_text_width(s_apps[idx].description);
-      if (tw > max_w) {
-        const char *p = s_apps[idx].description + (sel ? s_desc_scroll : 0);
+    // App icon
+    draw_app_icon(LIST_X, y + 4, ICON_SIZE, &s_apps[app_idx]);
+
+    // App name
+    display_draw_text(text_x, y + 4, s_apps[app_idx].name, C_TEXT, bg);
+
+    // Version (right-aligned)
+    if (s_apps[app_idx].version[0]) {
+      int vw = display_text_width(s_apps[app_idx].version);
+      display_draw_text(FB_WIDTH - 8 - vw, y + 4, s_apps[app_idx].version,
+                        C_TEXT_DIM, bg);
+    }
+
+    // Description
+    if (s_apps[app_idx].description[0]) {
+      int max_w = FB_WIDTH - text_x - 8;
+      int tw = display_text_width(s_apps[app_idx].description);
+      if (tw > max_w && sel) {
+        const char *p = s_apps[app_idx].description + s_desc_scroll;
         int avail = strlen(p);
         char buf[64];
-        int out_len = (avail * 6 > max_w * 6) ? (max_w / 6 + 1) : avail;
+        int out_len = (max_w / 6 + 1);
+        if (out_len > avail) out_len = avail;
         if (out_len > 63) out_len = 63;
         strncpy(buf, p, out_len);
         buf[out_len] = '\0';
-        display_draw_text(LIST_X, y + 15, buf, C_TEXT_DIM, bg);
+        display_draw_text(text_x, y + 15, buf, C_TEXT_DIM, bg);
       } else {
-        display_draw_text(LIST_X, y + 15, s_apps[idx].description, C_TEXT_DIM, bg);
+        display_draw_text(text_x, y + 15, s_apps[app_idx].description,
+                          C_TEXT_DIM, bg);
       }
     }
   }
 
   // Scrollbar
-  if (s_app_count > LIST_VISIBLE) {
-    int bar_h = (LIST_VISIBLE * ITEM_H) * LIST_VISIBLE / s_app_count;
-    int bar_y = LIST_Y + (LIST_VISIBLE * ITEM_H) * s_scroll / s_app_count;
+  if (count > LIST_VISIBLE) {
+    int bar_h = (LIST_VISIBLE * ITEM_H) * LIST_VISIBLE / count;
+    if (bar_h < 4) bar_h = 4;
+    int bar_y = LIST_Y + (LIST_VISIBLE * ITEM_H) * s_scroll / count;
     display_fill_rect(FB_WIDTH - 6, LIST_Y, 4, LIST_VISIBLE * ITEM_H, C_BORDER);
     display_fill_rect(FB_WIDTH - 6, bar_y, 4, bar_h, C_TEXT);
   }
 
+  ui_draw_footer("L/R:Category  Enter:Launch  F10:Menu", NULL);
   display_flush();
+}
+
+// ── Unified draw dispatch ───────────────────────────────────────────────────
+
+static void draw_current_view(void) {
+  draw_app_list();
 }
 
 // ── Runner dispatch table ─────────────────────────────────────────────────────
@@ -280,7 +480,45 @@ static const AppRunner *s_runners[] = {
 // ── App launcher
 // ──────────────────────────────────────────────────────────────
 
-extern volatile bool g_core1_pause;
+extern _Atomic bool g_core1_pause;
+extern _Atomic bool g_core1_paused;
+
+// Retime the QMI CS1 (PSRAM) interface whenever clk_sys changes.  A bare
+// sysclk change silently scales the PSRAM SCK with it and reads start
+// glitching (verified live: Doom died in 3-22 s at 300 MHz on the old serial
+// mode).  In quad mode (drivers/qmi_psram.c) the full timing (CLKDIV,
+// MAX_SELECT, MIN_DESELECT — all in sysclk units) is recomputed; if the boot
+// quad init fell back to serial mode, rescale CLKDIV to keep SCK ≤50 MHz as
+// before.
+#define PSRAM_QMI_SERIAL_MAX_SCK_KHZ 50000u
+#if defined(PICO_RP2350) && !defined(PICOS_SIMULATOR)
+#include "hardware/structs/qmi.h"
+#include "hardware/sync.h"
+#include "drivers/qmi_psram.h"
+static void psram_qmi_apply_timing(uint32_t sys_khz) {
+  if (qmi_psram_is_quad()) {
+    qmi_psram_update_timing();
+    return;
+  }
+  uint32_t clkdiv = (sys_khz + PSRAM_QMI_SERIAL_MAX_SCK_KHZ - 1)
+                  / PSRAM_QMI_SERIAL_MAX_SCK_KHZ;
+  if (clkdiv < 1) clkdiv = 1;
+  if (clkdiv > QMI_M1_TIMING_CLKDIV_BITS >> QMI_M1_TIMING_CLKDIV_LSB)
+    clkdiv = QMI_M1_TIMING_CLKDIV_BITS >> QMI_M1_TIMING_CLKDIV_LSB;
+  uint32_t save = save_and_disable_interrupts();
+  uint32_t timing = qmi_hw->m[1].timing;
+  timing = (timing & ~QMI_M1_TIMING_CLKDIV_BITS)
+         | (clkdiv << QMI_M1_TIMING_CLKDIV_LSB);
+  qmi_hw->m[1].timing = timing;
+  __asm volatile ("dsb sy" ::: "memory");
+  restore_interrupts(save);
+  printf("[LAUNCHER] QMI PSRAM (serial) clkdiv=%lu (%lu kHz SCK at %lu kHz sysclk)\n",
+         (unsigned long)clkdiv, (unsigned long)(sys_khz / clkdiv),
+         (unsigned long)sys_khz);
+}
+#else
+static void psram_qmi_apply_timing(uint32_t sys_khz) { (void)sys_khz; }
+#endif
 
 void launcher_apply_clock(uint32_t khz) {
   if (khz == 0) khz = 200000; // Default OS clock
@@ -292,7 +530,10 @@ void launcher_apply_clock(uint32_t khz) {
 
   // 1. Pause Core 1 background tasks (WiFi/Audio) to avoid bus corruption
   g_core1_pause = true;
-  sleep_ms(2); // Give Core 1 a moment to notice and hit its sleep_ms(1)
+  for (int i = 0; i < 200 && !g_core1_paused; i++)
+    sleep_ms(1);
+  if (!g_core1_paused)
+    printf("[LAUNCHER] Core 1 pause timeout (200ms) during clock change\n");
 
   // 2. Up-clocking: Raise voltage BEFORE increasing frequency
   if (khz > current_khz) {
@@ -313,15 +554,26 @@ void launcher_apply_clock(uint32_t khz) {
   // 3. Ensure display DMA is finished before changing clock source
   display_apply_clock(); // This now waits for DMA internally
 
+  // 3b. Pre-scale the QMI PSRAM divider for the worst of both clocks so the
+  // PSRAM SCK never exceeds its validated rate, even mid-transition.
+  psram_qmi_apply_timing(khz > current_khz ? khz : current_khz);
+  pio_psram_set_sysclk(khz > current_khz ? khz : current_khz);
+
   // 4. Apply the new system clock
   bool ok = set_sys_clock_khz(khz, false);
 
   if (!ok) {
     printf("[LAUNCHER] Clock change to %lu MHz failed (PLL cannot produce this frequency)\n",
            (unsigned long)(khz / 1000));
+    psram_qmi_apply_timing(current_khz);
+    pio_psram_set_sysclk(current_khz);
     g_core1_pause = false;
     return;
   }
+
+  // 4b. Retune the QMI PSRAM divider exactly for the new sysclk.
+  psram_qmi_apply_timing(khz);
+  pio_psram_set_sysclk(khz);
 
   // 5. Re-configure peripheral clock so SPI/I2C/UART/PWM stay stable.
   clock_configure(
@@ -363,11 +615,16 @@ void launcher_apply_clock(uint32_t khz) {
   g_core1_pause = false;
 }
 
+static volatile const char *s_running_app_name = NULL;
+static volatile uint32_t s_app_launch_time_ms = 0;
+
 static bool run_app(int idx) {
   if (idx < 0 || idx >= s_app_count)
     return false;
 
   app_entry_t *app = &s_apps[idx];
+  s_running_app_name = app->name;
+  s_app_launch_time_ms = to_ms_since_boot(get_absolute_time());
 
   // Free any PSRAM used by the MP3 player (from a previous Lua app)
   // so we have maximum memory for the next app.
@@ -386,7 +643,8 @@ static bool run_app(int idx) {
   // causes SPI timing failures ("hdr mismatch" errors) that stall Core 1.
   if (app->system_clock_khz > 0 && !app->has_http && wifi_is_available()) {
     wifi_status_t wst = wifi_get_status();
-    if (wst == WIFI_STATUS_CONNECTED || wst == WIFI_STATUS_CONNECTING) {
+    if (wst == WIFI_STATUS_CONNECTED || wst == WIFI_STATUS_CONNECTING ||
+        wst == WIFI_STATUS_ONLINE) {
       wifi_disconnect();
       // Wait for Core 1 to process the disconnect request before pausing it
       // for the clock change. wifi_disconnect() queues via IPC ring buffer.
@@ -401,7 +659,8 @@ static bool run_app(int idx) {
   wifi_set_http_required(app->has_http);
 
   if (app->has_http && wifi_is_available()) {
-    if (wifi_get_status() != WIFI_STATUS_CONNECTED) {
+    wifi_status_t wst2 = wifi_get_status();
+    if (wst2 != WIFI_STATUS_CONNECTED && wst2 != WIFI_STATUS_ONLINE) {
       const char *ssid = config_get("wifi_ssid");
       const char *pass = config_get("wifi_pass");
       if (ssid && ssid[0])
@@ -425,6 +684,9 @@ static bool run_app(int idx) {
 
   system_menu_clear_items();
 
+  s_running_app_name = NULL;
+  s_app_launch_time_ms = 0;
+
   printf("[LAUNCHER] App '%s' exited (ok=%d), PSRAM free: %zu\n",
          app->name, ok, lua_psram_alloc_free_size());
 
@@ -433,6 +695,117 @@ static bool run_app(int idx) {
 
 // ── Public interface
 // ──────────────────────────────────────────────────────────
+
+// ── Input: unified navigation ───────────────────────────────────────────────
+
+static void handle_input(uint32_t pressed, bool *dirty) {
+  int count = list_count();
+
+  // LEFT/RIGHT: switch tabs
+  if (pressed & BTN_LEFT) {
+    if (s_active_tab > 0) s_active_tab--;
+    else s_active_tab = TAB_COUNT - 1;
+    s_selected = 0;
+    s_scroll = 0;
+    s_desc_scroll = 0;
+    s_desc_scroll_timer = 0;
+    *dirty = true;
+  }
+  if (pressed & BTN_RIGHT) {
+    if (s_active_tab < TAB_COUNT - 1) s_active_tab++;
+    else s_active_tab = 0;
+    s_selected = 0;
+    s_scroll = 0;
+    s_desc_scroll = 0;
+    s_desc_scroll_timer = 0;
+    *dirty = true;
+  }
+
+  // UP/DOWN: navigate app list
+  if (pressed & BTN_UP) {
+    if (count > 0) {
+      if (s_selected > 0) s_selected--;
+      else s_selected = count - 1;
+      if (s_selected < s_scroll) s_scroll = s_selected;
+      if (s_selected >= s_scroll + LIST_VISIBLE)
+        s_scroll = s_selected - LIST_VISIBLE + 1;
+      s_desc_scroll = 0;
+      s_desc_scroll_timer = 0;
+      *dirty = true;
+    }
+  }
+  if (pressed & BTN_DOWN) {
+    if (count > 0) {
+      if (s_selected < count - 1) s_selected++;
+      else s_selected = 0;
+      if (s_selected >= s_scroll + LIST_VISIBLE)
+        s_scroll = s_selected - LIST_VISIBLE + 1;
+      if (s_selected < s_scroll) s_scroll = s_selected;
+      s_desc_scroll = 0;
+      s_desc_scroll_timer = 0;
+      *dirty = true;
+    }
+  }
+
+  // ENTER: launch app
+  if (pressed & BTN_ENTER) {
+    if (count > 0 && s_selected < count) {
+      int app_idx = list_app_idx(s_selected);
+      size_t free_mem = lua_psram_alloc_free_size();
+      printf("[LAUNCHER] PSRAM free before launch: %zu bytes\n", free_mem);
+
+      int saved_tab = s_active_tab;
+
+      run_app(app_idx);
+      kbd_clear_state();
+      scan_apps();
+      build_category_indices();
+
+      s_active_tab = saved_tab;
+      s_desc_scroll = 0;
+      s_desc_scroll_timer = 0;
+
+      // Clamp selection if app count changed
+      int new_count = list_count();
+      if (s_selected >= new_count) s_selected = new_count > 0 ? new_count - 1 : 0;
+      if (s_scroll > s_selected) s_scroll = s_selected;
+
+      *dirty = true;
+    }
+  }
+}
+
+// ── Description scroll update (for list views) ─────────────────────────────
+
+static void update_desc_scroll(bool *dirty) {
+  int count = list_count();
+  s_desc_scroll_timer++;
+  if (s_desc_scroll_timer >= 10) {
+    s_desc_scroll_timer = 0;
+    if (s_selected < count) {
+      int app_idx = list_app_idx(s_selected);
+      if (s_apps[app_idx].description[0]) {
+        int text_x = LIST_X + ICON_SIZE + 4;
+        int max_w = FB_WIDTH - text_x - 8;
+        int tw = display_text_width(s_apps[app_idx].description);
+        int desc_len = strlen(s_apps[app_idx].description);
+        int max_scroll = desc_len - (max_w / 6);
+        if (tw > max_w) {
+          if (s_desc_scroll < max_scroll) {
+            s_desc_scroll++;
+            *dirty = true;
+          } else {
+            s_desc_scroll = 0;
+            s_desc_scroll_timer = -DESC_SCROLL_RESET_PAUSE;
+            *dirty = true;
+          }
+        }
+      }
+    }
+  }
+}
+
+// ── Main entry point ────────────────────────────────────────────────────────
 
 void launcher_run(void) {
   if (!s_apps) {
@@ -444,7 +817,8 @@ void launcher_run(void) {
     memset(s_apps, 0, sizeof(app_entry_t) * MAX_APPS);
   }
   scan_apps();
-  
+  build_category_indices();
+
   // Check for simulator auto-launch
 #ifdef PICOS_SIMULATOR
   extern const char* simulator_get_auto_launch_app(void);
@@ -453,7 +827,6 @@ void launcher_run(void) {
     printf("[LAUNCHER] Auto-launching: %s\n", auto_launch);
     fflush(stdout);
     if (launcher_launch_by_name(auto_launch)) {
-      // App launched successfully, it will return here when done
       printf("[LAUNCHER] Auto-launched app exited, returning to launcher\n");
       fflush(stdout);
     } else {
@@ -462,45 +835,43 @@ void launcher_run(void) {
     }
   }
 #else
-  (void)0; // simulator_get_auto_launch_app stub
+  (void)0;
 #endif
-  
-  draw_launcher();
+
+  draw_current_view();
 
   while (true) {
     kbd_poll();
-    watchdog_update(); // kick watchdog every frame
-    // wifi_poll() is now driven by Core 1 — do not call from Core 0
+    watchdog_update();
 
-    // Poll serial dev commands (ping, screenshot, exit, launch, etc.)
     dev_commands_poll();
     dev_commands_process();
 
-    // Socket server poll — JSON-RPC interface for MCP/automation
 #ifdef PICOS_SIMULATOR
-    extern void sim_socket_poll(void);
-    extern void sim_handler_check_launch(void);
-    sim_socket_poll();
-    sim_handler_check_launch();
+    extern bool sim_handler_check_launch(void);
+    bool sim_launched = sim_handler_check_launch();
 #else
-    // Stubs for bare-metal build (no simulator)
+    bool sim_launched = false;
 #endif
 
-    // Handle pending launch FIRST (before exit check)
-    // This ensures "launch" command works (which sets both pending_launch and exit flags)
-    bool dirty = false;
+    bool dirty = sim_launched;
     if (dev_commands_get_pending_launch()) {
-      // Clear exit flag since we're launching, not exiting
       dev_commands_clear_exit();
       if (launcher_launch_by_name(dev_commands_get_pending_launch())) {
         kbd_clear_state();
         scan_apps();
+        build_category_indices();
         dirty = true;
       }
       dev_commands_clear_pending_launch();
     }
 
-    // Check for exit request (window close, dev command, etc.)
+#ifdef PICOS_SIMULATOR
+    {
+      extern volatile int g_running;
+      if (!g_running) dev_commands_set_exit();
+    }
+#endif
     if (dev_commands_wants_exit()) {
       printf("[LAUNCHER] Exit requested, shutting down...\n");
       fflush(stdout);
@@ -508,7 +879,6 @@ void launcher_run(void) {
       break;
     }
 
-    // Handle dev command flags
     if (dev_commands_wants_list()) {
       launcher_list_apps();
       dev_commands_clear_list();
@@ -537,104 +907,17 @@ void launcher_run(void) {
 
     uint32_t pressed = kbd_get_buttons_pressed();
 
-    if (pressed & BTN_UP) {
-      if (s_app_count > 0) {
-        if (s_selected > 0)
-          s_selected--;
-        else
-          s_selected = s_app_count - 1;  // wrap to bottom
-        if (s_selected < s_scroll)
-          s_scroll = s_selected;
-        if (s_selected >= s_scroll + LIST_VISIBLE)
-          s_scroll = s_selected - LIST_VISIBLE + 1;
-        s_desc_scroll = 0;
-        s_desc_scroll_timer = 0;
-        dirty = true;
-      }
-    }
-    if (pressed & BTN_DOWN) {
-      if (s_app_count > 0) {
-        if (s_selected < s_app_count - 1)
-          s_selected++;
-        else
-          s_selected = 0;  // wrap to top
-        if (s_selected >= s_scroll + LIST_VISIBLE)
-          s_scroll = s_selected - LIST_VISIBLE + 1;
-        if (s_selected < s_scroll)
-          s_scroll = s_selected;
-        s_desc_scroll = 0;
-        s_desc_scroll_timer = 0;
-        dirty = true;
-      }
-    }
-
-    if (pressed & BTN_LEFT) {
-      if (s_app_count > 0) {
-        int new_sel = s_selected - LIST_VISIBLE;
-        if (new_sel < 0) new_sel = 0;
-        if (new_sel != s_selected) {
-          s_selected = new_sel;
-          if (s_selected < s_scroll)
-            s_scroll = s_selected;
-          s_desc_scroll = 0;
-          s_desc_scroll_timer = 0;
-          dirty = true;
-        }
-      }
-    }
-    if (pressed & BTN_RIGHT) {
-      if (s_app_count > 0) {
-        int new_sel = s_selected + LIST_VISIBLE;
-        if (new_sel >= s_app_count) new_sel = s_app_count - 1;
-        if (new_sel != s_selected) {
-          s_selected = new_sel;
-          if (s_selected >= s_scroll + LIST_VISIBLE)
-            s_scroll = s_selected - LIST_VISIBLE + 1;
-          s_desc_scroll = 0;
-          s_desc_scroll_timer = 0;
-          dirty = true;
-        }
-      }
-    }
-
-    if (pressed & BTN_ENTER) {
-      size_t free_mem = lua_psram_alloc_free_size();
-      printf("[LAUNCHER] PSRAM free before launch: %zu bytes\n", free_mem);
-      run_app(s_selected);
-      kbd_clear_state();
-      scan_apps();
-      s_desc_scroll = 0;
-      s_desc_scroll_timer = 0;
-      dirty      = true;
-    }
+    if (pressed)
+      handle_input(pressed, &dirty);
 
     if (ui_needs_header_redraw())
       dirty = true;
 
-    s_desc_scroll_timer++;
-    if (s_desc_scroll_timer >= 10) {
-      s_desc_scroll_timer = 0;
-      if (s_selected < s_app_count && s_apps[s_selected].description[0]) {
-        int tw = display_text_width(s_apps[s_selected].description);
-        int max_w = FB_WIDTH - LIST_X * 2 - 4;
-        int desc_len = strlen(s_apps[s_selected].description);
-        int max_scroll = desc_len - (max_w / 6);
-        if (tw > max_w) {
-          if (s_desc_scroll < max_scroll) {
-            s_desc_scroll++;
-            dirty = true;
-          } else {
-            // Reached end — reset and pause before cycling
-            s_desc_scroll = 0;
-            s_desc_scroll_timer = -DESC_SCROLL_RESET_PAUSE;
-            dirty = true;
-          }
-        }
-      }
-    }
+    // Description scrolling (list views only)
+    update_desc_scroll(&dirty);
 
     if (dirty)
-      draw_launcher();
+      draw_current_view();
 
     sleep_ms(16); // ~60 Hz polling
   }
@@ -679,10 +962,22 @@ bool launcher_launch_by_name(const char *name) {
     return true;
   }
 
-  // Fall back to name match
+  // Fall back to display name match (case-insensitive)
   for (int i = 0; i < s_app_count; i++) {
-    if (strcmp(s_apps[i].name, name) == 0) {
+    if (strcasecmp(s_apps[i].name, name) == 0) {
       printf("[DEV] Launching app: %s\n", name);
+      stdio_flush();
+      run_app(i);
+      return true;
+    }
+  }
+
+  // Fall back to directory name match (e.g. "doom" matches "/apps/doom")
+  for (int i = 0; i < s_app_count; i++) {
+    const char *slash = strrchr(s_apps[i].path, '/');
+    const char *dirname = slash ? slash + 1 : s_apps[i].path;
+    if (strcasecmp(dirname, name) == 0) {
+      printf("[DEV] Launching app by dir: %s (%s)\n", name, s_apps[i].name);
       stdio_flush();
       run_app(i);
       return true;
@@ -694,6 +989,11 @@ bool launcher_launch_by_name(const char *name) {
 }
 
 const char* launcher_get_running_app_name(void) {
-  // This would need to be tracked - for now return NULL
-  return NULL;
+  return (const char*)s_running_app_name;
+}
+
+uint32_t launcher_get_app_uptime_ms(void) {
+  uint32_t t = s_app_launch_time_ms;
+  if (t == 0) return 0;
+  return to_ms_since_boot(get_absolute_time()) - t;
 }

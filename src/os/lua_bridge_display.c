@@ -1,4 +1,5 @@
 #include "lua_bridge_internal.h"
+#include "toast.h"
 
 // ── picocalc.display.* ───────────────────────────────────────────────────────
 
@@ -79,6 +80,7 @@ bool s_screenshot_pending = false;
 
 static int l_display_flush(lua_State *L) {
   (void)L;
+  toast_draw();
   display_flush();
   if (s_screenshot_pending) {
     s_screenshot_pending = false;
@@ -201,6 +203,37 @@ static int l_display_applyEffect(lua_State *L) {
   return 0;
 }
 
+static int l_display_fillVLine(lua_State *L) {
+  display_fill_vline((int)luaL_checknumber(L, 1), (int)luaL_checknumber(L, 2),
+                     (int)luaL_checknumber(L, 3),
+                     (uint16_t)luaL_checkinteger(L, 4));
+  return 0;
+}
+
+static int l_display_drawTexturedColumn(lua_State *L) {
+  int x = (int)luaL_checknumber(L, 1);
+  int y0 = (int)luaL_checknumber(L, 2);
+  int y1 = (int)luaL_checknumber(L, 3);
+  lua_image_t *img =
+      (lua_image_t *)luaL_checkudata(L, 4, GRAPHICS_IMAGE_MT);
+  if (!img->data)
+    return luaL_error(L, "invalid image");
+  int tex_x = (int)luaL_checknumber(L, 5);
+  int tex_y0 = (int)luaL_checknumber(L, 6);
+  int tex_y1 = (int)luaL_checknumber(L, 7);
+  display_draw_textured_column(x, y0, y1, img->data, img->w, img->h, tex_x,
+                               tex_y0, tex_y1);
+  return 0;
+}
+
+static int l_display_fillVLineGradient(lua_State *L) {
+  display_fill_vline_gradient(
+      (int)luaL_checknumber(L, 1), (int)luaL_checknumber(L, 2),
+      (int)luaL_checknumber(L, 3), (uint16_t)luaL_checkinteger(L, 4),
+      (uint16_t)luaL_checkinteger(L, 5));
+  return 0;
+}
+
 static const luaL_Reg l_display_lib[] = {
     {"clear", l_display_clear},
     {"setPixel", l_display_setPixel},
@@ -223,6 +256,9 @@ static const luaL_Reg l_display_lib[] = {
     {"getFontHeight", l_display_getFontHeight},
     {"rgb", l_display_rgb},
     {"applyEffect", l_display_applyEffect},
+    {"fillVLine", l_display_fillVLine},
+    {"drawTexturedColumn", l_display_drawTexturedColumn},
+    {"fillVLineGradient", l_display_fillVLineGradient},
     {NULL, NULL}};
 
 

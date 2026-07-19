@@ -104,8 +104,12 @@ void screenshot_save(void) {
   for (int y = 0; y < BMP_HEIGHT; y++) {
     for (int x = 0; x < BMP_WIDTH; x++) {
       uint16_t raw = fb[y * BMP_WIDTH + x];
+#ifdef PICOS_SIMULATOR
+      uint16_t px = raw; // simulator stores native byte order
+#else
       // Un-byte-swap: display stores pixels big-endian
       uint16_t px = (uint16_t)((raw >> 8) | (raw << 8));
+#endif
       // Extract RGB565 channels
       uint8_t r5 = (px >> 11) & 0x1F;
       uint8_t g6 = (px >> 5) & 0x3F;

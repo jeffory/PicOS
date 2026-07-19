@@ -69,18 +69,18 @@ Hardware: PWM on GP26 (left) and GP27 (right) — defined in `hardware.h`
 - [x] sound.sampleplayer:playAt(when, [vol], [rightvol], [rate])
 - [x] sound.sampleplayer:setVolume(left, [right])
 - [x] sound.sampleplayer:getVolume()
-- [ ] sound.sampleplayer:setLoopCallback(callback, [arg])
+- [x] sound.sampleplayer:setLoopCallback(callback, [arg]) — cross-core pending flag pattern
 - [x] sound.sampleplayer:setPlayRange(start, end)
 - [x] sound.sampleplayer:setPaused(flag)
 - [x] sound.sampleplayer:isPlaying()
 - [x] sound.sampleplayer:stop()
-- [ ] sound.sampleplayer:setFinishCallback(func, [arg])
+- [x] sound.sampleplayer:setFinishCallback(func, [arg]) — cross-core pending flag pattern
 - [x] sound.sampleplayer:setSample(sample)
 - [x] sound.sampleplayer:getSample()
 - [x] sound.sampleplayer:getLength()
 - [x] sound.sampleplayer:setRate(rate)
 - [x] sound.sampleplayer:getRate()
-- [ ] sound.sampleplayer:setRateMod(signal)
+- [dropped] ~~sound.sampleplayer:setRateMod(signal)~~ — requires signal subsystem; apps can call `setRate()` per frame instead
 - [x] sound.sampleplayer:setOffset(seconds)
 - [x] sound.sampleplayer:getOffset()
  - [x] sound.fileplayer.new([buffersize]) - For music
@@ -95,11 +95,11 @@ Hardware: PWM on GP26 (left) and GP27 (right) — defined in `hardware.h`
  - [x] sound.fileplayer:didUnderrun()
  - [x] sound.fileplayer:setStopOnUnderrun(flag)
  - [x] sound.fileplayer:setLoopRange(start, [end, [loopCallback, [arg]]])
- - [ ] sound.fileplayer:setLoopCallback(callback, [arg])
- - [ ] sound.fileplayer:setBufferSize(seconds)
- - [ ] sound.fileplayer:setRate(rate)
- - [ ] sound.fileplayer:getRate()
- - [ ] sound.fileplayer:setRateMod(signal)
+ - [x] sound.fileplayer:setLoopCallback(callback, [arg]) — cross-core pending flag pattern
+ - [ ] sound.fileplayer:setBufferSize(seconds) — deferred: shared buffer reallocation during streaming is risky; hardcoded 8192 works fine
+ - [x] sound.fileplayer:setRate(rate) — nearest-neighbor resampling in fileplayer_update
+ - [x] sound.fileplayer:getRate()
+ - [dropped] ~~sound.fileplayer:setRateMod(signal)~~ — requires signal subsystem; apps can call `setRate()` per frame instead
  - [x] sound.fileplayer:setVolume(left, [right, [fadeSeconds, [fadeCallback, [arg]]]])
  - [x] sound.fileplayer:getVolume()
  - [x] sound.fileplayer:setOffset(seconds)
@@ -112,25 +112,11 @@ Hardware: PWM on GP26 (left) and GP27 (right) — defined in `hardware.h`
 - [x] sound.sample:getSampleRate()
 - [x] sound.sample:getFormat()
 - [x] sound.sample:getLength()
-- [ ] sound.sample:play([repeatCount], [rate])
-- [ ] sound.sample:playAt(when, [vol], [rightvol], [rate])
-- [ ] sound.sample:save(filename)
-- [ ] sound.signal:setOffset(offset)
-- [ ] sound.signal:setScale(scale)
-- [ ] sound.signal:getValue()
-- [ ] sound.channel.new()
-- [ ] sound.channel:remove()
-- [ ] sound.channel:addEffect(effect)
-- [ ] sound.channel:removeEffect(effect)
-- [ ] sound.channel:addSource(source)
-- [ ] sound.channel:removeSource(source)
-- [ ] sound.channel:setVolume(volume)
-- [ ] sound.channel:getVolume()
-- [ ] sound.channel:setPan(pan)
-- [ ] sound.channel:setPanMod(signal)
-- [ ] sound.channel:setVolumeMod(signal)
-- [ ] sound.channel:getDryLevelSignal()
-- [ ] sound.channel:getWetLevelSignal()
+- [x] sound.sample:play([repeatCount], [rate]) — creates temp sampleplayer
+- [x] sound.sample:playAt(when, [vol], [rightvol], [rate]) — creates temp sampleplayer (when is ignored on this hardware)
+- [x] sound.sample:save(filename) — writes WAV file to SD card
+- [dropped] ~~sound.signal~~ — LFO/envelope abstraction impractical on embedded; apps can modulate parameters per frame in Lua
+- [dropped] ~~sound.channel~~ — full DSP mixing/routing/effects chain impractical on PWM audio with 28.8KB SRAM; per-player volume is sufficient
 - [x] sound.playingSources() - Returns count of currently playing sources
 - [x] sound.getCurrentTime() - Returns the current time, in seconds, as measured by the audio device
 - [x] sound.resetTime() - Resets the audio output device time counter.
@@ -183,13 +169,13 @@ The Menu/Sym key (`BTN_MENU`) pauses the running app and shows an OS-level overl
 - [x] Wire `g_api.sys.addMenuItem` and `clearMenuItems` in `main.c`
 - [x] Expose `picocalc.sys.addMenuItem(label, fn)` and `clearMenuItems()` to Lua
 - [x] Menu button also works during `sys.sleep()` (10ms polling loop)
-- [ ] Implement the system menu overlay working on the main menu
+- [x] Implement the system menu overlay working on the main menu — `launcher.c:850` calls `system_menu_show(NULL)` in main loop
 
 ---
 
 ## Display — missing features
 
-- [ ] `display.drawBitmap(x, y, path)` — load a raw RGB565 or BMP file from SD card and blit it
+- [x] ~~`display.drawBitmap(x, y, path)`~~ — superseded by `picocalc.graphics.image.load()` + `image:draw()`
 - [x] Larger/alternative font support — 8×12 font added; `display.setFont(0|1)`, `getFont()`, `getFontWidth()`, `getFontHeight()`
 - [x] `display.drawCircle(x, y, r, color)` — midpoint circle algorithm + `fillCircle` bonus
 - [x] `display.scroll(dy)` — hardware-assisted vertical scroll via `setScrollArea`/`setScrollOffset`
@@ -198,7 +184,7 @@ The Menu/Sym key (`BTN_MENU`) pauses the running app and shows an OS-level overl
 
 ## System — miscellaneous
 
-- [ ] **Core 1 background tasks** — `core1_entry()` in `main.c` is an idle spin loop; candidates: audio mixing, WiFi polling, display DMA coordination
+- [x] **Core 1 background tasks** — `core1_entry()` runs wifi_poll, http, audio_stream, mp3, fileplayer, mod_player, image_preload on 1ms timer (`main.c:1272-1287`)
 - [x] **Shared config** — `src/os/config.h` / `config.c`; reads/writes `/system/config.json`; flat key/value JSON; exposed as `picocalc.config.{get,set,save,load}()`
 - [x] **`sys.isUSBPowered()` implementation** — reads GP24 VBUS sense pin
 - [x] **SD card hot-swap** — `sdcard_remount()` exists; launcher rescans on app exit; manual "Remount SD" added to system menu.
@@ -250,14 +236,14 @@ The Menu/Sym key (`BTN_MENU`) pauses the running app and shows an OS-level overl
 
 ## Optimisations
 
-- [ ] Route direct hardware calls in `lua_bridge.c` through g_api for environment portability (Medium effort)
-- [ ] Consider storing framebuffer in native endian, byte-swap only during DMA	
+- [dropped] ~~Route direct hardware calls in `lua_bridge.c` through g_api~~ — intentional two-tier design: Lua bridge calls C directly (fast), native apps use g_api (ABI-stable)
+- [dropped] ~~Consider storing framebuffer in native endian, byte-swap only during DMA~~ — current byte-swap-on-write optimizes 8-bit DMA throughput; uncertain benefit, significant refactoring
 - [x] Skip wifi_poll() in lua hook when WiFi is disabled (wifi_poll removed from hook; Core 1 handles it)
 
 ## Sprites
 
 - [x] graphics.sprite.new([image_or_tilemap])
-- [ ] graphics.sprite.spriteWithText(text, maxWidth, maxHeight, [backgroundColor, [leadingAdjustment, [truncationString, [alignment, [font]]]]])
+- [x] graphics.sprite.spriteWithText(text, maxWidth, maxHeight, [bgColor], [font]) — renders text to PSRAM image, creates sprite
 - [x] graphics.sprite.update()
 - [x] graphics.sprite:setImage(image, [flip, [scale, [yscale]]])
 - [x] graphics.sprite:getImage()
@@ -302,7 +288,7 @@ The Menu/Sym key (`BTN_MENU`) pauses the running app and shows an OS-level overl
 - [x] graphics.sprite:isOpaque()
 - [x] graphics.sprite.setBackgroundDrawingCallback(drawCallback)
 - [x] graphics.sprite.redrawBackground()
-- [ ] graphics.sprite:setTilemap(tilemap)
+- [x] graphics.sprite:setTilemap(tilemap) — sprite renders tilemap instead of image
 - [x] graphics.sprite:setClipRect(x, y, width, height)
 - [x] graphics.sprite:setClipRect(rect)
 - [x] graphics.sprite:clearClipRect()
@@ -359,39 +345,23 @@ The Menu/Sym key (`BTN_MENU`) pauses the running app and shows an OS-level overl
 - [x] graphics.sprite.querySpriteInfoAlongLine(lineSegment)
 - [x] graphics.sprite.addEmptyCollisionSprite(r)
 - [x] graphics.sprite.addEmptyCollisionSprite(x, y, w, h)
-- [ ] graphics.sprite.addWallSprites(tilemap, emptyIDs, [xOffset, yOffset])
-- [ ] graphics.font.new(path)
-- [ ] graphics.font.newFamily(fontPaths)
-- [ ] graphics.setFont(font, [variant])
-- [ ] graphics.getFont([variant])
-- [ ] graphics.setFontFamily(fontFamily)
-- [ ] graphics.setFontTracking(pixels)
-- [ ] graphics.getFontTracking()
-- [ ] graphics.getSystemFont([variant])
-- [ ] graphics.font:drawText(text, x, y, [width, height], [leadingAdjustment], [wrapMode], [alignment])
-- [ ] graphics.font:drawText(text, rect, [leadingAdjustment], [wrapMode], [alignment])
-- [ ] graphics.font:drawTextAligned(text, x, y, alignment, [leadingAdjustment])
-- [ ] graphics.font:getHeight()
-- [ ] graphics.font:getTextWidth(text)
-- [ ] graphics.font:setTracking(pixels)
-- [ ] graphics.font:getTracking()
-- [ ] graphics.font:setLeading(pixels)
-- [ ] graphics.font:getLeading()
-- [ ] graphics.font:getGlyph(character)
-- [ ] graphics.drawText(text, x, y, [width, height], [fontFamily], [leadingAdjustment], [wrapMode], [alignment])
-- [ ] graphics.drawText(text, rect, [fontFamily], [leadingAdjustment], [wrapMode], [alignment])
-- [ ] graphics.drawLocalizedText(key, x, y, [width, height], [language], [leadingAdjustment], [wrapMode], [alignment])
-- [ ] graphics.drawLocalizedText(key, rect, [language], [leadingAdjustment])
-- [ ] graphics.getLocalizedText(key, [language])
-- [ ] graphics.getTextSize(str, [fontFamily, [leadingAdjustment]])
-- [ ] graphics.drawTextAligned(text, x, y, alignment, [leadingAdjustment])
-- [ ] graphics.drawTextInRect(text, x, y, width, height, [leadingAdjustment, [truncationString, [alignment, [font]]]])
-- [ ] graphics.drawTextInRect(text, rect, [leadingAdjustment, [truncationString, [alignment, [font]]]])
-- [ ] graphics.drawLocalizedTextAligned(text, x, y, alignment, [language, [leadingAdjustment]])
-- [ ] graphics.drawLocalizedTextInRect(text, x, y, width, height, [leadingAdjustment, [truncationString, [alignment, [font, [language]]]]])
-- [ ] graphics.drawLocalizedTextInRect(text, rect, [leadingAdjustment, [truncationString, [alignment, [font, [language]]]]])
-- [ ] graphics.getTextSizeForMaxWidth(text, maxWidth, [leadingAdjustment, [font]]])
-- [ ] graphics.imageWithText(text, maxWidth, maxHeight, [backgroundColor, [leadingAdjustment, [truncationString, [alignment, [font]]]]])
+- [x] graphics.sprite.addWallSprites(tilemap, wallIDs, [xOffset, yOffset]) — creates invisible collision sprites for wall tiles
+- [dropped] ~~graphics.font.new(path)~~ — custom font file loading deferred; 4 built-in bitmap fonts cover practical needs on 320x320
+- [dropped] ~~graphics.font.newFamily / setFontFamily / setFontTracking / getFontTracking / getSystemFont~~ — font family/tracking system deferred
+- [dropped] ~~graphics.font:setTracking / getTracking / setLeading / getLeading / getGlyph~~ — advanced font metrics deferred
+- [x] graphics.font:drawText(text, x, y, [width, height], [wrapMode], [alignment])
+- [x] graphics.font:drawTextAligned(text, x, y, alignment, fg, [bg])
+- [x] graphics.font:drawTextInRect(x, y, w, h, text, [alignment], [fg], [bg])
+- [x] graphics.font:getHeight() — already implemented
+- [x] graphics.font:getTextWidth(text) — already implemented
+- [x] graphics.drawText(text, x, y, [font]) — uses graphics color state
+- [x] graphics.drawTextAligned(text, x, y, alignment, [font])
+- [x] graphics.drawTextInRect(text, x, y, width, height, [alignment], [font]) — word-wrapping monospace
+- [x] graphics.getTextSize(str, [font]) → width, height
+- [x] graphics.getTextSizeForMaxWidth(text, maxWidth, [font]) → width, height
+- [x] graphics.imageWithText(text, maxWidth, maxHeight, [bgColor], [font]) — renders text to PSRAM image
+- [dropped] ~~graphics.drawLocalizedText* / getLocalizedText~~ — localization impractical on this hardware
+- [dropped] ~~graphics.setFont/getFont (global state)~~ — use font objects directly instead
 
 
 - [x] graphics.animation.loop.new([interval], imageTable, [shouldLoop])
@@ -430,30 +400,6 @@ The Menu/Sym key (`BTN_MENU`) pauses the running app and shows an OS-level overl
 
 # Pathfinding
 
-- [ ] pathfinder.graph.new([nodeCount, [coordinates]])
-- [ ] pathfinder.graph.new2DGrid(width, height, [allowDiagonals, [includedNodes]])
-- [ ] pathfinder.graph:addNewNode(id, [x, y, [connectedNodes, weights, addReciprocalConnections]])
-- [ ] pathfinder.graph:addNewNodes(count)
-- [ ] pathfinder.graph:addNode(node, [connectedNodes, weights, addReciprocalConnections])
-- [ ] pathfinder.graph:addNodes(nodes)
-- [ ] pathfinder.graph:allNodes()
-- [ ] pathfinder.graph:removeNode(node)
-- [ ] pathfinder.graph:removeNodeWithXY(x, y)
-- [ ] pathfinder.graph:removeNodeWithID(id)
-- [ ] pathfinder.graph:nodeWithID(id)
-- [ ] pathfinder.graph:nodeWithXY(x, y)
-- [ ] pathfinder.graph:addConnections(connections)
-- [ ] pathfinder.graph:addConnectionToNodeWithID(fromNodeID, toNodeID, weight, addReciprocalConnection)
-- [ ] pathfinder.graph:removeAllConnections()
-- [ ] pathfinder.graph:removeAllConnectionsFromNodeWithID(id, [removeIncoming])
-- [ ] pathfinder.graph:findPath(startNode, goalNode, [heuristicFunction, [findPathToGoalAdjacentNodes]])
-- [ ] pathfinder.graph:findPathWithIDs(startNodeID, goalNodeID, [heuristicFunction, [findPathToGoalAdjacentNodes]])
-- [ ] pathfinder.graph:setXYForNodeWithID(id, x, y)
-- [ ] pathfinder.node:addConnection(node, weight, addReciprocalConnection)
-- [ ] pathfinder.node:addConnections(nodes, weights, addReciprocalConnections)
-- [ ] pathfinder.node:addConnectionToNodeWithXY(x, y, weight, addReciprocalConnection)
-- [ ] pathfinder.node:connectedNodes()
-- [ ] pathfinder.node:removeConnection(node, [removeReciprocal])
-- [ ] pathfinder.node:removeAllConnections([removeIncoming])
-- [ ] pathfinder.node:setXY(x, y)
+[dropped] — A* pathfinding is trivially implemented in ~50 lines of Lua. Not worth a C subsystem for this hardware. May provide a Lua library example in the SDK instead.
+
 - [x] getPowerStatus() — `picocalc.sys.getPowerStatus()` returns `{charging=bool, percent=int}`

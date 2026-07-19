@@ -1,0 +1,11 @@
+{
+    "id": "com.picos.c64",
+    "name": "C64 Emulator",
+    "description": "Commodore 64 emulator - SID audio, full keyboard",
+    "version": "0.1",
+    "author": "PicOS",
+    "system_clock_khz": 300000,
+    "requirements": ["filesystem", "audio"],
+    "category": "emulators",
+    "min_firmware": "1.0.0"
+}

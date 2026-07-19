@@ -1,22 +1,31 @@
 #!/usr/bin/env python3
-"""PicOS MCP Server — exposes PicOS simulator to coding agents via JSON-RPC 2.0.
+"""PicOS MCP Server — exposes PicOS simulator and hardware to coding agents.
 
-Supports both PicOS Simulator (default, via UNIX/TCP socket) and hardware devices
-via USB serial: ping, screenshot, list_apps, launch_app, exit_app, reboot,
-send_command, and more.
+Transports: PicOS Simulator (JSON-RPC over TCP) and hardware devices over
+serial (USB CDC /dev/ttyACM* or UART adapters /dev/ttyUSB*).  By default the
+server auto-selects: simulator when reachable, otherwise a detected serial
+device; a per-call device= argument always forces that serial port.
+
+File transfer and screenshots on hardware use the firmware's base64 dev
+commands (getb64/putb64/screenshot64) which work over any transport; flash()
+uploads firmware via the SD-staged OTA path — no BOOTSEL/USB required.
 
 Usage:
     Registered in .mcp.json as an MCP server.
-    Run with simulator (default): python3 tools/picos_mcp.py
-    Run with hardware device: python3 tools/picos_mcp.py --hardware
+    Auto mode (default):   python3 tools/picos_mcp.py
+    Hardware only:         python3 tools/picos_mcp.py --hardware
+    Simulator only:        python3 tools/picos_mcp.py --simulator
 """
 
 import argparse
 import asyncio
 import base64
+import hashlib
 import json
 import os
 import platform
+import re
+import signal
 import shutil
 import socket
 import struct
@@ -25,10 +34,7 @@ import sys
 import tempfile
 import threading
 import time
-from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
-import io
-import tempfile
 from typing import TYPE_CHECKING, Any, Optional
 
 try:
@@ -38,16 +44,17 @@ except ImportError:
     HAS_SERIAL = False
 if TYPE_CHECKING:
     import serial
-    import tempfile
 
 from mcp.server.fastmcp import FastMCP
 
 mcp = FastMCP("picos")
 
 DEFAULT_TIMEOUT = 5
-DEFAULT_SIMULATOR_SOCK = "./picos_control"
-TCP_PORT = 7878
-HARDWARE_MODE = False
+DEFAULT_TCP_PORT = 7878
+HARDWARE_MODE = False   # --hardware: hardware only, never simulator
+SIMULATOR_ONLY = False  # --simulator: simulator only, never hardware
+# Default (neither flag): AUTO — use the simulator when reachable, otherwise
+# fall back to a detected serial device.
 
 SCRN_MAGIC = b"SCRN"
 SCRN_HEADER_SIZE = 12
@@ -64,69 +71,91 @@ class JRpcError(Exception):
 
 
 class SimulatorConnection:
-    """Manages a connection to the PicOS simulator via JSON-RPC 2.0 over socket."""
+    """Manages a connection to the PicOS simulator via JSON-RPC 2.0 over TCP.
 
-    def __init__(self, sock_path: str | None = None, tcp_port: int | None = None):
-        self.sock_path = sock_path or DEFAULT_SIMULATOR_SOCK
-        self.tcp_port = tcp_port or TCP_PORT
+    Uses a single reader thread that routes ALL incoming messages:
+    - Messages with an "id" → delivered to the corresponding pending call via Event
+    - Messages without "id" → appended to notifications list
+    This eliminates the race condition between call() and notification reading.
+    """
+
+    def __init__(self, tcp_port: int | None = None):
+        self.tcp_port = tcp_port or DEFAULT_TCP_PORT
         self._sock: socket.socket | None = None
-        self._lock = threading.Lock()
+        self._lock = threading.Lock()  # protects _sock writes
+        self._reader_thread: threading.Thread | None = None
         self._reader_done = threading.Event()
         self._notifications: list[dict] = []
         self._notif_lock = threading.Lock()
         self._id_counter = 1
-        self._pending: dict[int, asyncio.Future] = {}
+        # Pending responses: id → {"event": Event, "result": dict|None}
+        self._pending: dict[int, dict] = {}
+        self._pending_lock = threading.Lock()
+        self._connected = False
 
     def connect(self) -> None:
-        if self._sock:
+        if self._connected:
             return
 
-        # Try TCP directly
-        sock = None
-        path_tried = [f"127.0.0.1:{self.tcp_port}"]
-        try:
-            sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-            sock.settimeout(DEFAULT_TIMEOUT)
-            sock.connect(("127.0.0.1", self.tcp_port))
-        except (socket.error, ConnectionRefusedError) as e:
-            if sock:
-                sock.close()
+        # Retry with exponential backoff
+        delays = [0.1, 0.2, 0.4, 0.8, 1.6]
+        last_error = None
+        for attempt, delay in enumerate(delays):
+            try:
+                sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+                sock.settimeout(DEFAULT_TIMEOUT)
+                sock.connect(("127.0.0.1", self.tcp_port))
+                self._sock = sock
+                self._connected = True
+                break
+            except (socket.error, ConnectionRefusedError) as e:
+                last_error = e
+                if sock:
+                    sock.close()
+                if attempt < len(delays) - 1:
+                    time.sleep(delay)
+
+        if not self._connected:
             raise RuntimeError(
-                f"Cannot connect to simulator. Tried: {path_tried}. "
-                f"Is the simulator running? Error: {e}"
-            ) from e
+                f"Cannot connect to simulator on port {self.tcp_port} "
+                f"after {len(delays)} attempts. Is the simulator running? "
+                f"Error: {last_error}"
+            )
 
-        self._sock = sock
-        assert self._sock is not None
-        self._sock.settimeout(0.1)  # Short timeout for non-blocking reads
-
-        # Start notification reader thread
+        # Start single reader thread
         self._reader_done.clear()
-        self._reader_thread = threading.Thread(target=self._read_notifications, daemon=True)
+        self._reader_thread = threading.Thread(target=self._reader_loop, daemon=True)
         self._reader_thread.start()
 
     def close(self) -> None:
+        self._connected = False
         self._reader_done.set()
-        if self._reader_thread.is_alive():
-            self._reader_thread.join(timeout=1.0)
+        if self._reader_thread and self._reader_thread.is_alive():
+            self._reader_thread.join(timeout=2.0)
         if self._sock:
             try:
                 self._sock.close()
             except OSError:
                 pass
             self._sock = None
+        # Wake any pending calls
+        with self._pending_lock:
+            for entry in self._pending.values():
+                entry["event"].set()
+            self._pending.clear()
 
-    def _read_notifications(self) -> None:
-        """Background thread: reads JSON-RPC notifications from the socket."""
+    def _reader_loop(self) -> None:
+        """Single reader thread: routes ALL incoming JSON messages."""
         buf = ""
         while not self._reader_done.is_set():
             if not self._sock:
                 break
             try:
-                chunk = self._sock.recv(4096).decode("utf-8", errors="replace")
+                self._sock.settimeout(0.2)
+                chunk = self._sock.recv(65536)
                 if not chunk:
                     break
-                buf += chunk
+                buf += chunk.decode("utf-8", errors="replace")
                 while "\n" in buf:
                     line, buf = buf.split("\n", 1)
                     line = line.strip()
@@ -134,28 +163,45 @@ class SimulatorConnection:
                         continue
                     try:
                         obj = json.loads(line)
-                        if "id" not in obj:  # notification
-                            with self._notif_lock:
-                                self._notifications.append(obj)
                     except json.JSONDecodeError:
-                        pass
+                        continue
+
+                    if "id" in obj:
+                        # Response to a call — route to pending future
+                        msg_id = obj["id"]
+                        with self._pending_lock:
+                            entry = self._pending.get(msg_id)
+                            if entry:
+                                entry["result"] = obj
+                                entry["event"].set()
+                    else:
+                        # Notification
+                        with self._notif_lock:
+                            self._notifications.append(obj)
             except socket.timeout:
-                pass
+                continue
             except OSError:
                 break
 
+        self._connected = False
+
     def _send_raw(self, data: str) -> None:
-        if not self._sock:
-            raise RuntimeError("Not connected to simulator")
-        self._sock.sendall((data + "\n").encode("utf-8"))
+        with self._lock:
+            if not self._sock:
+                raise RuntimeError("Not connected to simulator")
+            self._sock.sendall((data + "\n").encode("utf-8"))
 
     def call(self, method: str, params: dict | None = None, timeout: float = DEFAULT_TIMEOUT) -> dict:
         """Send a JSON-RPC 2.0 request and return the result."""
-        if not self._sock:
+        if not self._connected:
             self.connect()
 
         jid = self._id_counter
         self._id_counter += 1
+
+        event = threading.Event()
+        with self._pending_lock:
+            self._pending[jid] = {"event": event, "result": None}
 
         request = {
             "jsonrpc": "2.0",
@@ -163,55 +209,38 @@ class SimulatorConnection:
             "method": method,
             "params": params or {},
         }
-        self._send_raw(json.dumps(request))
+        try:
+            self._send_raw(json.dumps(request))
+        except RuntimeError:
+            with self._pending_lock:
+                self._pending.pop(jid, None)
+            raise
 
-        deadline = time.monotonic() + timeout
-        while time.monotonic() < deadline:
-            with self._notif_lock:
-                for i, n in enumerate(self._notifications):
-                    if n.get("id") == jid:
-                        del self._notifications[i]
-                        break
-                else:
-                    # Check pending futures
-                    pass
+        if not event.wait(timeout):
+            with self._pending_lock:
+                self._pending.pop(jid, None)
+            raise JRpcError(-32000, f"Timeout calling {method} after {timeout}s")
 
-            # Read responses synchronously
-            if not self._sock:
-                raise RuntimeError("Connection closed")
-            try:
-                self._sock.settimeout(max(0.1, deadline - time.monotonic()))
-                chunk = self._sock.recv(4096).decode("utf-8", errors="replace")
-                if chunk:
-                    buf = ""
-                    buf += chunk
-                    while "\n" in buf:
-                        line, buf = buf.split("\n", 1)
-                        line = line.strip()
-                        if not line:
-                            continue
-                        try:
-                            obj = json.loads(line)
-                            if obj.get("id") == jid:
-                                if "error" in obj:
-                                    err = obj["error"]
-                                    raise JRpcError(
-                                        err.get("code", -32603),
-                                        err.get("message", "Unknown error"),
-                                        err.get("data"),
-                                    )
-                                return obj.get("result", {})
-                        except json.JSONDecodeError:
-                            pass
-            except socket.timeout:
-                continue
+        with self._pending_lock:
+            entry = self._pending.pop(jid, None)
 
-        raise JRpcError(-32000, f"Timeout calling {method} after {timeout}s")
+        if not entry or not entry["result"]:
+            raise JRpcError(-32000, f"Connection lost while calling {method}")
+
+        result = entry["result"]
+        if "error" in result:
+            err = result["error"]
+            raise JRpcError(
+                err.get("code", -32603),
+                err.get("message", "Unknown error"),
+                err.get("data"),
+            )
+        return result.get("result", {})
 
     def get_notifications(self) -> list[dict]:
         with self._notif_lock:
-            notes = list(self._retained_notifications if hasattr(self, "_retained_notifications") else [])
-            self._retained_notifications = []
+            notes = list(self._notifications)
+            self._notifications.clear()
         return notes
 
     def wait_for_notification(self, method: str | None = None, timeout: float = 30.0) -> dict | None:
@@ -238,21 +267,200 @@ class SimulatorConnection:
 
 _conn: SimulatorConnection | None = None
 _conn_lock = threading.Lock()
+_configured_port = DEFAULT_TCP_PORT
 
 
 def get_connection() -> SimulatorConnection:
     global _conn
     with _conn_lock:
         if _conn is None:
-            _conn = SimulatorConnection()
+            _conn = SimulatorConnection(tcp_port=_configured_port)
+        # Try to reconnect if connection was lost
+        if not _conn._connected:
+            try:
+                _conn.close()
+            except Exception:
+                pass
+            _conn = SimulatorConnection(tcp_port=_configured_port)
         return _conn
+
+
+# ── Simulator Lifecycle Management ────────────────────────────────────────────
+
+class SimulatorManager:
+    """Manages simulator process lifecycle."""
+
+    def __init__(self):
+        self.process: subprocess.Popen | None = None
+        self.port: int = 0
+        self.project_root = Path(__file__).parent.parent
+
+    def ensure_running(self, port: int = 0, sd_card_path: str | None = None,
+                       headless: bool = False) -> int:
+        """Ensure a simulator is running. Returns the TCP port.
+
+        If port=0, auto-assigns a port.
+        """
+        # Check if already running on requested port
+        if port > 0 and self._probe_port(port):
+            self.port = port
+            return port
+
+        # Check if our managed process is still alive
+        if self.process and self.process.poll() is None and self.port > 0:
+            if self._probe_port(self.port):
+                return self.port
+
+        # Build if needed (missing binary, or sources newer than the binary —
+        # a stale simulator silently running old source cost real debugging time)
+        binary = self.project_root / "build_sim" / "picos_simulator"
+        if not binary.exists():
+            self._build()
+        elif self._sources_newer_than(binary):
+            print("[picos] simulator binary is stale (source changed) — rebuilding…")
+            self._build()
+
+        # Start simulator
+        cmd = [str(binary)]
+        if port >= 0:
+            cmd += ["--port", str(port)]
+        if sd_card_path:
+            cmd += ["--sd-card", sd_card_path]
+        else:
+            cmd += ["--sd-card", str(self.project_root)]
+
+        env = os.environ.copy()
+        if headless:
+            env["SDL_VIDEODRIVER"] = "dummy"
+            env["SDL_AUDIODRIVER"] = "dummy"
+
+        self.process = subprocess.Popen(
+            cmd, stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE, env=env,
+            text=True,
+        )
+        with _tracked_pids_lock:
+            _tracked_pids.add(self.process.pid)
+
+        # Read stdout to find the assigned port
+        actual_port = port if port > 0 else 0
+        deadline = time.monotonic() + 10.0
+        while time.monotonic() < deadline:
+            if self.process.poll() is not None:
+                stdout = self.process.stdout.read() if self.process.stdout else ""
+                stderr = self.process.stderr.read() if self.process.stderr else ""
+                raise RuntimeError(
+                    f"Simulator exited early (code {self.process.returncode})\n"
+                    f"stdout: {stdout}\nstderr: {stderr}"
+                )
+            line = self.process.stdout.readline() if self.process.stdout else ""
+            if "[Socket] TCP port:" in line:
+                actual_port = int(line.split(":")[-1].strip())
+                break
+            if actual_port > 0 and self._probe_port(actual_port):
+                break
+            time.sleep(0.1)
+
+        if actual_port <= 0:
+            raise RuntimeError("Failed to determine simulator TCP port")
+
+        # Wait for port to be connectable
+        start = time.monotonic()
+        while time.monotonic() - start < 5.0:
+            if self._probe_port(actual_port):
+                break
+            time.sleep(0.1)
+
+        self.port = actual_port
+        return actual_port
+
+    def stop(self):
+        """Stop managed simulator."""
+        if self.process:
+            # Try graceful shutdown via RPC
+            if self.port > 0:
+                try:
+                    conn = SimulatorConnection(tcp_port=self.port)
+                    conn.connect()
+                    conn.call("shutdown", timeout=2)
+                    conn.close()
+                except Exception:
+                    pass
+
+            # Wait briefly, then terminate
+            try:
+                self.process.wait(timeout=3)
+            except subprocess.TimeoutExpired:
+                self.process.terminate()
+                try:
+                    self.process.wait(timeout=2)
+                except subprocess.TimeoutExpired:
+                    self.process.kill()
+                    self.process.wait()
+            with _tracked_pids_lock:
+                _tracked_pids.discard(self.process.pid)
+            self.process = None
+            self.port = 0
+
+    def _sources_newer_than(self, binary: Path) -> bool:
+        """True if any simulator/OS/driver source is newer than the binary."""
+        try:
+            bin_mtime = binary.stat().st_mtime
+        except OSError:
+            return True
+        roots = (self.project_root / "simulator", self.project_root / "src")
+        exts = {".c", ".h", ".cpp", ".pio", ".txt"}
+        for root in roots:
+            for dirpath, dirnames, filenames in os.walk(root):
+                dirnames[:] = [d for d in dirnames if d not in ("build", ".git")]
+                for name in filenames:
+                    if os.path.splitext(name)[1] not in exts:
+                        continue
+                    try:
+                        if os.path.getmtime(os.path.join(dirpath, name)) > bin_mtime:
+                            return True
+                    except OSError:
+                        continue
+        return False
+
+    def _build(self):
+        """Build the simulator."""
+        build_dir = self.project_root / "build_sim"
+        sim_dir = self.project_root / "simulator"
+        subprocess.run(
+            ["cmake", "-B", str(build_dir), str(sim_dir)],
+            check=True, capture_output=True,
+        )
+        subprocess.run(
+            ["make", "-C", str(build_dir), "-j4"],
+            check=True, capture_output=True,
+        )
+
+    @staticmethod
+    def _probe_port(port: int) -> bool:
+        """Check if a TCP port is accepting connections."""
+        try:
+            s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            s.settimeout(0.3)
+            s.connect(("127.0.0.1", port))
+            s.close()
+            return True
+        except (ConnectionRefusedError, socket.timeout, OSError):
+            return False
+
+
+_sim_manager: SimulatorManager | None = None
+_tracked_pids: set[int] = set()
+_tracked_pids_lock = threading.Lock()
 
 
 # ── Hardware connection helpers ─────────────────────────────────────────────────
 
 def find_usb_device() -> str | None:
     import glob
-    for pattern in ["/dev/ttyACM*", "/dev/tty.usbmodem*"]:
+    # CDC ACM (USB data port) first, then plain USB-serial adapters (UART).
+    for pattern in ["/dev/ttyACM*", "/dev/tty.usbmodem*",
+                    "/dev/ttyUSB*", "/dev/tty.usbserial*"]:
         matches = sorted(glob.glob(pattern))
         if matches:
             return matches[0]
@@ -263,22 +471,156 @@ def open_serial(port: str, timeout: float = DEFAULT_TIMEOUT):
     if not HAS_SERIAL:
         raise RuntimeError("pyserial not installed. Run: pip install pyserial")
     ser = serial.Serial(port, baudrate=115200, timeout=timeout)
+    # UART adapters (CH340 etc.) garble the first bytes after open while the
+    # control lines settle — flush a newline through and discard everything
+    # before sending the real command.
+    time.sleep(0.35)
     ser.reset_input_buffer()
-    time.sleep(0.05)
+    ser.write(b"\n")
+    ser.flush()
+    time.sleep(0.15)
     ser.reset_input_buffer()
     return ser
 
 
-# ── Simulator helpers ────────────────────────────────────────────────────────────
+def _fnv1a(data: bytes, h: int = 2166136261) -> int:
+    for b in data:
+        h = ((h ^ b) * 16777619) & 0xFFFFFFFF
+    return h
 
-def do_command_simulator(cmd: str, timeout: float = DEFAULT_TIMEOUT) -> list[str]:
-    conn = get_connection()
+
+class LineReader:
+    """Line-splitter over a serial port that survives across wait calls —
+    a partial line buffered between reads must not be dropped when the
+    caller switches from streaming to marker-waiting (or per-chunk ACKs)."""
+
+    def __init__(self, ser):
+        self.ser = ser
+        self.buf = b""
+
+    def lines(self, idle_timeout: float):
+        """Yield stripped lines; return when no data arrives for idle_timeout."""
+        last_data = time.monotonic()
+        while time.monotonic() - last_data < idle_timeout:
+            chunk = self.ser.read(max(1, self.ser.in_waiting))
+            if chunk:
+                last_data = time.monotonic()
+                self.buf += chunk
+            while b"\n" in self.buf:
+                line, self.buf = self.buf.split(b"\n", 1)
+                yield line.strip()
+
+    def wait_marker(self, ok_markers, err_markers, timeout: float) -> bytes:
+        """Wait for a line containing any ok marker; raise on error markers."""
+        for line in self.lines(timeout):
+            for m in err_markers:
+                if m in line:
+                    raise RuntimeError(f"device: {line.decode(errors='replace')}")
+            for m in ok_markers:
+                if m in line:
+                    return line
+        raise TimeoutError(f"no response matching {ok_markers} within {timeout}s")
+
+
+# ── Base64 file transfer (works on UART and CDC — stdio-based) ────────────────
+
+def do_get_file_b64(port: str, remote_path: str) -> bytes:
+    """Fetch a file via the firmware's getb64 command with integrity check."""
+    ser = open_serial(port, timeout=0.2)
     try:
-        result = conn.call("read_file", {"path": "/system/.dev_command"}, timeout=timeout)
-        return [f"[Simulator] Command '{cmd}' sent (JSON-RPC mode)"]
-    except JRpcError as e:
-        return [f"[Error] {e}"]
+        ser.write(f"getb64 {remote_path}\n".encode())
+        ser.flush()
+        raw = bytearray()
+        size = None
+        for line in LineReader(ser).lines(idle_timeout=10.0):
+            if line.startswith(b"~"):
+                try:
+                    raw += base64.b64decode(line[1:], validate=True)
+                except Exception:
+                    raise RuntimeError(
+                        "corrupted base64 line (a device log line may have "
+                        "interleaved mid-transfer) — retry the transfer")
+            elif b"B64 size=" in line:
+                size = int(line.split(b"size=")[1].split()[0])
+            elif b"Failed to open" in line:
+                raise FileNotFoundError(f"device: no such file: {remote_path}")
+            elif b"Unknown command" in line:
+                raise RuntimeError(
+                    "device firmware lacks getb64 — flash the current build")
+            elif b"B64_END" in line:
+                fnv = int(line.split(b"fnv1a=")[1].split()[0], 16)
+                if size is not None and size >= 0 and len(raw) != size:
+                    raise RuntimeError(
+                        f"size mismatch: got {len(raw)}, expected {size}")
+                if _fnv1a(bytes(raw)) != fnv:
+                    raise RuntimeError("integrity check failed (fnv1a mismatch)")
+                return bytes(raw)
+        raise TimeoutError(f"getb64 stalled after {len(raw)} bytes")
+    finally:
+        ser.close()
 
+
+def do_put_file_b64(port: str, data: bytes, remote_path: str) -> str:
+    """Send bytes via the firmware's putb64 command (chunk + ACK pacing)."""
+    b64 = base64.b64encode(data)
+    CHUNK = 512  # b64 chars per line → 384 raw bytes ≤ device write buffer
+    ser = open_serial(port, timeout=0.2)
+    try:
+        reader = LineReader(ser)
+        ser.write(f"putb64 {remote_path} {len(data)}\n".encode())
+        ser.flush()
+        reader.wait_marker([b"Ready B64"],
+                           [b"Failed to open", b"Usage:", b"Unknown command"], 5.0)
+        final = None
+        for off in range(0, len(b64), CHUNK):
+            ser.write(b64[off:off + CHUNK] + b"\n")
+            ser.flush()
+            line = reader.wait_marker([b"ACK ", b"File received"],
+                                      [b"Error"], 15.0)
+            if b"File received" in line:
+                final = line
+        if final is None:
+            final = reader.wait_marker([b"File received"], [b"Error"], 15.0)
+        fnv = int(final.split(b"fnv1a=")[1].split()[0], 16)
+        if _fnv1a(data) != fnv:
+            raise RuntimeError("integrity check failed after upload "
+                               "(device wrote different bytes) — retry")
+        return f"Uploaded {len(data)} bytes to {remote_path} (fnv1a verified)"
+    finally:
+        ser.close()
+
+
+def do_screenshot_b64(port: str) -> bytes:
+    """Capture the framebuffer via screenshot64 (slow on UART: ~25s)."""
+    ser = open_serial(port, timeout=0.2)
+    try:
+        ser.write(b"screenshot64\n")
+        ser.flush()
+        raw = bytearray()
+        w = h = 320
+        for line in LineReader(ser).lines(idle_timeout=10.0):
+            if line.startswith(b"~"):
+                raw += base64.b64decode(line[1:], validate=True)
+            elif b"SCRN64 " in line:
+                for tok in line.split():
+                    if tok.startswith(b"w="):
+                        w = int(tok[2:])
+                    elif tok.startswith(b"h="):
+                        h = int(tok[2:])
+            elif b"Unknown command" in line:
+                raise RuntimeError(
+                    "device firmware lacks screenshot64 — flash the current build")
+            elif b"SCRN64_END" in line:
+                fnv = int(line.split(b"fnv1a=")[1].split()[0], 16)
+                if _fnv1a(bytes(raw)) != fnv:
+                    raise RuntimeError("integrity check failed (fnv1a mismatch)")
+                return rgb565be_to_png(bytes(raw), w, h)
+        raise TimeoutError(f"screenshot64 stalled after {len(raw)} bytes")
+    finally:
+        ser.close()
+
+
+# ── Simulator helpers ────────────────────────────────────────────────────────────
 
 def do_screenshot_simulator(timeout: float = DEFAULT_TIMEOUT) -> bytes:
     conn = get_connection()
@@ -288,6 +630,7 @@ def do_screenshot_simulator(timeout: float = DEFAULT_TIMEOUT) -> bytes:
 
 
 def rgb565be_to_png(data: bytes, width: int, height: int) -> bytes:
+    import io
     from PIL import Image
     pixels = bytearray(width * height * 3)
     for i in range(width * height):
@@ -369,17 +712,41 @@ def do_screenshot_hardware(port: str, timeout: float = DEFAULT_TIMEOUT) -> bytes
 
 # ── Unified dispatch ───────────────────────────────────────────────────────────
 
+_sim_probe_cache = {"t": 0.0, "ok": False}
+
+
+def _sim_reachable() -> bool:
+    now = time.monotonic()
+    if now - _sim_probe_cache["t"] < 3.0:
+        return _sim_probe_cache["ok"]
+    ok = SimulatorManager._probe_port(_configured_port)
+    _sim_probe_cache["t"] = now
+    _sim_probe_cache["ok"] = ok
+    return ok
+
+
 def resolve_port(device: str | None = None) -> str | None:
+    """Pick the transport: a serial port path for hardware, None for simulator.
+
+    An explicit device argument always selects hardware.  Otherwise:
+    --hardware → detected serial device (error if none); --simulator → always
+    simulator; default (auto) → simulator when reachable, else a detected
+    serial device, else simulator (whose error path reports the connect
+    failure)."""
+    if device:
+        return device
     if HARDWARE_MODE:
-        if device:
-            return device
         port = find_usb_device()
         if not port:
             raise RuntimeError(
                 "No PicOS hardware device found. Connect via USB or use --simulator flag."
             )
         return port
-    return None
+    if SIMULATOR_ONLY:
+        return None
+    if _sim_reachable():
+        return None
+    return find_usb_device()  # may be None → simulator error path
 
 
 # ── MCP Tools ──────────────────────────────────────────────────────────────────
@@ -409,11 +776,18 @@ async def ping(device: str | None = None) -> str:
 
 @mcp.tool()
 async def screenshot(device: str | None = None) -> list:
-    """Take a screenshot of the PicOS display. Returns PNG image."""
+    """Take a screenshot of the PicOS display. Returns PNG image.
+
+    Works on simulator and hardware (UART hardware uses a base64 transfer,
+    ~25 seconds at 115200 baud)."""
     port = resolve_port(device)
     if port:
         try:
-            png_bytes = await asyncio.to_thread(do_screenshot_hardware, port)
+            # The binary SCRN path needs a CDC host; base64 works everywhere.
+            if "ttyACM" in port or "usbmodem" in port:
+                png_bytes = await asyncio.to_thread(do_screenshot_hardware, port)
+            else:
+                png_bytes = await asyncio.to_thread(do_screenshot_b64, port)
         except ImportError:
             return [{"type": "text", "text": "Pillow not installed: pip install Pillow"}]
         except Exception as e:
@@ -421,8 +795,6 @@ async def screenshot(device: str | None = None) -> list:
     else:
         try:
             png_bytes = await asyncio.to_thread(do_screenshot_simulator)
-        except ImportError:
-            return [{"type": "text", "text": "Pillow not installed: pip install Pillow"}]
         except Exception as e:
             return [{"type": "text", "text": f"Error: {e}"}]
 
@@ -472,7 +844,7 @@ async def list_apps(device: str | None = None) -> str:
 @mcp.tool()
 async def launch_app(app_name: str, device: str | None = None) -> str:
     """Launch an app by name on the simulator. Non-blocking — returns immediately.
-    
+
     Use wait_for_exit() to wait for the app to finish.
     """
     port = resolve_port(device)
@@ -534,34 +906,144 @@ async def exit_app(device: str | None = None) -> str:
             return f"Error: {e}"
 
 
-@mcp.tool()
-async def keypress(key: str, device: str | None = None) -> str:
-    """Inject a keypress on the PicOS simulator.
+# ── Keypress helpers ──────────────────────────────────────────────────────────
 
-    Valid keys: up, down, left, right, enter, esc, menu, f1-f10,
-    backspace, tab, del, shift, a-z, A-Z, 0-9.
+# Named keys valid on both transports (aliases normalized before sending).
+_KEY_ALIASES = {"escape": "esc", "delete": "del", "bkspc": "backspace", "fn": "sym"}
+
+
+def _expand_key_sequence(spec: str, count: int) -> list[str]:
+    """Expand a key spec into the ordered list of keys to press.
+
+    Accepted forms: "down" | "down,down,enter" | "down down enter" |
+    "down 5x" (repeat previous key N times) | "downx5". A bare "5x" repeats
+    the preceding key. `count` repeats the whole expanded sequence.
     """
+    tokens = [t for t in re.split(r"[\s,]+", spec.strip()) if t]
+    keys: list[str] = []
+    for tok in tokens:
+        m = re.fullmatch(r"(\d+)[xX]", tok)
+        if m:
+            if not keys:
+                raise ValueError(f"repeat token '{tok}' has no preceding key")
+            keys.extend([keys[-1]] * (int(m.group(1)) - 1))
+            continue
+        m = re.fullmatch(r"(.+?)[xX](\d+)", tok)
+        if m:
+            base = m.group(1)
+            if len(base) == 1 or base.lower() in _NAMED_KEYS or base.lower() in _KEY_ALIASES:
+                keys.extend([base] * int(m.group(2)))
+                continue
+        keys.append(tok)
+    if not keys:
+        raise ValueError("empty key spec")
+    return keys * max(1, count)
+
+
+# Named keys accepted by the simulator's inject_button (after alias
+# normalization). Anything else of length 1 is typed via inject_char.
+_NAMED_KEYS = {
+    "up", "down", "left", "right", "enter", "esc", "menu", "tab",
+    "backspace", "del", "shift", "ctrl", "sym",
+    "f1", "f2", "f3", "f4", "f5", "f6", "f7", "f8", "f9", "f10",
+}
+
+
+def _normalize_key(key: str) -> str:
+    k = key.lower()
+    return _KEY_ALIASES.get(k, k) if len(k) > 1 else key
+
+
+def _is_char_key(key: str) -> bool:
+    return len(key) == 1 and key.lower() not in _NAMED_KEYS
+
+
+def do_keysequence_hardware(keys: list[str], port: str, delay_ms: int,
+                            timeout: float = DEFAULT_TIMEOUT) -> list[str]:
+    """Send a sequence of `keypress <key>` commands over one serial session."""
+    ser = open_serial(port, timeout)
+    try:
+        results = []
+        for i, key in enumerate(keys):
+            ser.write(f"keypress {_normalize_key(key)}\n".encode())
+            ser.flush()
+            status = "no ack"
+            deadline = time.monotonic() + timeout
+            while time.monotonic() < deadline:
+                raw = ser.readline()
+                if not raw:
+                    break
+                line = raw.decode("utf-8", errors="replace").rstrip("\r\n")
+                if "Key injected" in line:
+                    status = "ok"
+                    break
+                if "Unknown key" in line:
+                    status = "unknown key"
+                    break
+            results.append(f"{key}: {status}")
+            if i < len(keys) - 1:
+                time.sleep(max(0, delay_ms) / 1000.0)
+        return results
+    finally:
+        ser.close()
+
+
+@mcp.tool()
+async def keypress(key: str, count: int = 1, delay_ms: int = 100,
+                   device: str | None = None) -> str:
+    """Inject keypress(es) on the PicOS simulator or hardware.
+
+    Valid named keys: up, down, left, right, enter, esc, menu, f1-f10,
+    backspace, tab, del, shift, ctrl, sym. Single characters (a-z, A-Z,
+    0-9, punctuation) are typed as character input.
+
+    Sequences: "down,down,enter" or "down down enter" presses keys in
+    order; "down 5x" repeats the previous key 5 times ("downx5" also
+    works). `count` repeats the whole sequence; `delay_ms` is the gap
+    between presses (default 100ms).
+    """
+    try:
+        keys = _expand_key_sequence(key, count)
+    except ValueError as e:
+        return f"Error: {e}"
+
     port = resolve_port(device)
     if port:
         try:
-            lines = await asyncio.to_thread(do_command_hardware, f"keypress {key}", port)
-            for line in lines:
-                if "injected" in line.lower():
-                    return f"Key '{key}' injected."
-            return "\n".join(lines)
-        except Exception as e:
-            return f"Error: {e}"
-    else:
-        try:
-            conn = get_connection()
-            result = await asyncio.to_thread(
-                conn.call, "inject_button", {"button": key, "action": "click"}, timeout=5
+            results = await asyncio.to_thread(
+                do_keysequence_hardware, keys, port, delay_ms
             )
-            return f"Key '{key}' injected: {result}"
-        except JRpcError as e:
-            return f"Unknown key '{key}': {e.message}" if e.code == -32602 else str(e)
+            bad = [r for r in results if not r.endswith(": ok")]
+            summary = f"{len(keys)} key(s) injected: " + ", ".join(results)
+            return summary if not bad else f"PARTIAL FAILURE — {summary}"
         except Exception as e:
             return f"Error: {e}"
+
+    # Simulator: route single chars to inject_char, named keys to inject_button
+    sent = []
+    try:
+        conn = get_connection()
+        for i, k in enumerate(keys):
+            name = _normalize_key(k)
+            if _is_char_key(k):
+                method, params = "inject_char", {"char": k}
+            else:
+                method, params = "inject_button", {"button": name, "action": "click"}
+            try:
+                await asyncio.to_thread(conn.call, method, params, timeout=5)
+                sent.append(f"{k}: ok")
+            except JRpcError as e:
+                if e.code == -32602:
+                    sent.append(f"{k}: unknown key")
+                else:
+                    sent.append(f"{k}: {e.message}")
+            if i < len(keys) - 1:
+                await asyncio.sleep(max(0, delay_ms) / 1000.0)
+    except Exception as e:
+        return f"Error: {e}"
+    bad = [s for s in sent if not s.endswith(": ok")]
+    summary = f"{len(keys)} key(s) injected: " + ", ".join(sent)
+    return summary if not bad else f"PARTIAL FAILURE — {summary}"
 
 
 @mcp.tool()
@@ -580,7 +1062,6 @@ async def send_command(command: str, timeout: float = 5.0, device: str | None = 
             method = parts[0]
             params = {}
             if len(parts) > 1:
-                # Try to parse as JSON
                 try:
                     params = json.loads(parts[1])
                 except json.JSONDecodeError:
@@ -635,12 +1116,25 @@ async def get_log_buffer(lines: int = 100, device: str | None = None) -> str:
         result = await asyncio.to_thread(conn.call, "get_log_buffer", timeout=5)
         log_lines = result.get("lines", [])
         if isinstance(log_lines, str) and log_lines:
-            # Split by newlines if it's a string
             log_lines = log_lines.strip().split("\n")
         if not log_lines:
             return "(no log lines)"
         shown = log_lines[-lines:] if len(log_lines) > lines else log_lines
         return "\n".join(shown)
+    except Exception as e:
+        return f"Error: {e}"
+
+
+@mcp.tool()
+async def clear_log_buffer(device: str | None = None) -> str:
+    """Clear the simulator log buffer."""
+    port = resolve_port(device)
+    if port:
+        return "(not available in hardware mode)"
+    try:
+        conn = get_connection()
+        await asyncio.to_thread(conn.call, "clear_log_buffer", timeout=5)
+        return "Log buffer cleared."
     except Exception as e:
         return f"Error: {e}"
 
@@ -723,19 +1217,260 @@ async def get_heap_info(device: str | None = None) -> str:
         return f"Error: {e}"
 
 
+@mcp.tool()
+async def get_crash_log(device: str | None = None) -> str:
+    """Get the crash log. Simulator: sim crash file. Hardware: the persisted
+    hard-fault log at /system/crashlog.txt (via the crashlog dev command)."""
+    port = resolve_port(device)
+    if port:
+        def _hw_crashlog() -> str:
+            ser = open_serial(port, timeout=0.2)
+            try:
+                ser.write(b"crashlog\n")
+                ser.flush()
+                collecting = False
+                out: list[str] = []
+                for line in LineReader(ser).lines(idle_timeout=5.0):
+                    text = line.decode("utf-8", errors="replace")
+                    if "CRASHLOG BEGIN" in text:
+                        collecting = True
+                    elif "CRASHLOG END" in text:
+                        return "\n".join(out) if out else "(crash log empty)"
+                    elif "No crash log" in text:
+                        return "No crash log on device."
+                    elif "Unknown command" in text:
+                        return ("Device firmware lacks the crashlog command — "
+                                "flash the current build first.")
+                    elif collecting:
+                        out.append(text)
+                if out:
+                    return "\n".join(out) + "\n(warning: END marker not seen)"
+                return "No response to crashlog command."
+            finally:
+                ser.close()
+        try:
+            return await asyncio.to_thread(_hw_crashlog)
+        except Exception as e:
+            return f"Error: {e}"
+
+    # Try reading via RPC first
+    try:
+        conn = get_connection()
+        result = await asyncio.to_thread(conn.call, "get_crash_log", timeout=5)
+        crash = result.get("crash_log")
+        if crash:
+            return f"Crash log:\n{crash}"
+        return "No crash log found."
+    except Exception:
+        pass
+
+    # If simulator is unreachable, try reading the file directly
+    crash_log_path = Path("/tmp/picos_sim_crash.log")
+    if crash_log_path.exists():
+        try:
+            return f"Crash log (from file):\n{crash_log_path.read_text()}"
+        except Exception as e:
+            return f"Error reading crash log: {e}"
+    return "No crash log found and simulator is unreachable."
+
+
+@mcp.tool()
+async def shutdown_simulator(device: str | None = None) -> str:
+    """Gracefully shut down the PicOS simulator."""
+    port = resolve_port(device)
+    if port:
+        return "(shutdown not available in hardware mode)"
+    try:
+        conn = get_connection()
+        await asyncio.to_thread(conn.call, "shutdown", timeout=3)
+        return "Shutdown signal sent."
+    except Exception as e:
+        return f"Error (simulator may already be stopped): {e}"
+
+
+@mcp.tool()
+async def start_simulator(
+    port: int = 0,
+    sd_card_path: str = "",
+    headless: bool = True,
+) -> str:
+    """Build (if needed) and start a PicOS simulator instance.
+
+    Args:
+        port: TCP port (0=auto-assign)
+        sd_card_path: Path to SD card directory (empty=default)
+        headless: Run without display (for CI/testing)
+
+    Returns the TCP port of the started simulator.
+    """
+    global _sim_manager, _configured_port, _conn
+    if _sim_manager is None:
+        _sim_manager = SimulatorManager()
+    try:
+        actual_port = await asyncio.to_thread(
+            _sim_manager.ensure_running,
+            port=port,
+            sd_card_path=sd_card_path or None,
+            headless=headless,
+        )
+        # Reset connection to use new port (atomic update under lock)
+        with _conn_lock:
+            _configured_port = actual_port
+            if _conn:
+                try:
+                    _conn.close()
+                except Exception:
+                    pass
+                _conn = None
+        return f"Simulator running on port {actual_port}"
+    except Exception as e:
+        return f"Error starting simulator: {e}"
+
+
+# ── Simulator Process Management ──────────────────────────────────────────────
+
+
+def _find_simulator_pids() -> set[int]:
+    """Find all picos_simulator processes on the system via pgrep."""
+    try:
+        result = subprocess.run(
+            ["pgrep", "-f", "picos_simulator"],
+            capture_output=True, text=True, timeout=5,
+        )
+        if result.returncode == 0:
+            return {int(line) for line in result.stdout.strip().split("\n") if line.strip()}
+    except (FileNotFoundError, subprocess.TimeoutExpired, ValueError):
+        pass
+    return set()
+
+
+def _is_pid_alive(pid: int) -> bool:
+    """Check if a process is still alive."""
+    try:
+        os.kill(pid, 0)
+        return True
+    except (ProcessLookupError, PermissionError):
+        return False
+
+
+@mcp.tool()
+async def list_simulators() -> str:
+    """List all tracked simulator PIDs and any picos_simulator processes on the system."""
+    with _tracked_pids_lock:
+        tracked = set(_tracked_pids)
+
+    system_pids = await asyncio.to_thread(_find_simulator_pids)
+
+    lines = []
+    if tracked:
+        lines.append("Tracked PIDs:")
+        for pid in sorted(tracked):
+            alive = _is_pid_alive(pid)
+            lines.append(f"  PID {pid}: {'alive' if alive else 'dead'}")
+    else:
+        lines.append("No tracked PIDs.")
+
+    orphans = system_pids - tracked
+    if orphans:
+        lines.append("System picos_simulator processes (not tracked):")
+        for pid in sorted(orphans):
+            lines.append(f"  PID {pid}")
+
+    if not tracked and not system_pids:
+        lines.append("No simulator processes found.")
+
+    return "\n".join(lines)
+
+
+@mcp.tool()
+async def kill_simulators(include_orphans: bool = True) -> str:
+    """Force-kill all tracked simulator processes.
+
+    Args:
+        include_orphans: Also kill any picos_simulator processes found on the
+                         system that weren't launched by this MCP session.
+    """
+    global _sim_manager, _conn
+
+    with _tracked_pids_lock:
+        tracked = set(_tracked_pids)
+
+    pids_to_kill = set(tracked)
+    if include_orphans:
+        system_pids = await asyncio.to_thread(_find_simulator_pids)
+        pids_to_kill |= system_pids
+
+    killed = []
+    failed = []
+    already_dead = []
+
+    for pid in sorted(pids_to_kill):
+        if not _is_pid_alive(pid):
+            already_dead.append(pid)
+            continue
+        try:
+            os.kill(pid, signal.SIGKILL)
+            killed.append(pid)
+        except ProcessLookupError:
+            already_dead.append(pid)
+        except PermissionError:
+            failed.append(pid)
+
+    # Reap child processes to avoid zombies in pgrep
+    for pid in killed:
+        try:
+            os.waitpid(pid, os.WNOHANG)
+        except ChildProcessError:
+            pass
+
+    # Clean up tracked set
+    with _tracked_pids_lock:
+        _tracked_pids.clear()
+
+    # Reset manager and connection state
+    if _sim_manager:
+        if _sim_manager.process:
+            try:
+                _sim_manager.process.wait(timeout=1)
+            except Exception:
+                pass
+        _sim_manager.process = None
+        _sim_manager.port = 0
+
+    with _conn_lock:
+        if _conn:
+            try:
+                _conn.close()
+            except Exception:
+                pass
+            _conn = None
+
+    lines = []
+    if killed:
+        lines.append(f"Killed: {', '.join(str(p) for p in killed)}")
+    if already_dead:
+        lines.append(f"Already dead: {', '.join(str(p) for p in already_dead)}")
+    if failed:
+        lines.append(f"Permission denied: {', '.join(str(p) for p in failed)}")
+    if not pids_to_kill:
+        lines.append("No simulator processes to kill.")
+
+    return "\n".join(lines)
+
+
 # ── Hardware-only Tools ────────────────────────────────────────────────────────
 
 
 @mcp.tool()
 async def reboot(mode: str = "normal", device: str | None = None) -> str:
     """Reboot the PicOS hardware device (not available in simulator)."""
-    if not HARDWARE_MODE:
-        return "Reboot is only available in hardware mode. Start MCP with --hardware flag."
     if mode not in ("normal", "flash"):
         return f"Unknown mode '{mode}'. Use 'normal' or 'flash'."
     try:
         port = resolve_port(device)
-        assert port is not None
+        if port is None:
+            return ("Reboot targets hardware. No serial device detected "
+                    "(simulator is active); pass device= to force one.")
         cmd = "reboot-flash" if mode == "flash" else "reboot"
         ser = open_serial(port, timeout=1)
         ser.write(f"{cmd}\n".encode())
@@ -751,20 +1486,54 @@ async def reboot(mode: str = "normal", device: str | None = None) -> str:
 
 @mcp.tool()
 async def flash(file: str, device: str | None = None) -> str:
-    """Flash a UF2 file to the PicOS hardware device (not available in simulator)."""
-    if not HARDWARE_MODE:
-        return "Flash is only available in hardware mode."
+    """Flash firmware over the SD-staged OTA path.  Safe for cross-version
+    updates as of 2026-07-18: ota_write_and_reboot now masks interrupts for
+    the entire flash write (IRQ handlers are flash-resident; the old
+    per-sector re-enable windows bricked cross-version updates — verified
+    fixed by an end-to-end cross-version OTA on hardware).  Requires the
+    on-device firmware to include that fix; older firmware may brick on a
+    cross-version flash (recovery: BOOTSEL + copy build/picocalc_os.uf2)."""
     if not HAS_SERIAL:
         return "pyserial not installed: pip install pyserial"
-    return "Flash not yet implemented in this version."
+    try:
+        port = resolve_port(device)
+        if port is None:
+            return "Flash targets hardware; no serial device detected."
+        data = Path(file).read_bytes()
+        if data[:4] == b"UF2\n" or data[:4] == b"UF2\x0a":
+            return ("This is a UF2 file — the OTA path needs the raw .bin "
+                    "(build/picocalc_os.bin).")
+        if len(data) < 256:
+            return "File too small to be firmware."
+        sha = hashlib.sha256(data).hexdigest()
+
+        def _do_flash() -> str:
+            do_put_file_b64(port, (sha + "\n").encode(), "/system/update.sha256")
+            do_put_file_b64(port, data, "/system/update.bin")
+            ser = open_serial(port, timeout=1)
+            ser.write(b"reboot\n")
+            ser.flush()
+            time.sleep(0.1)
+            ser.close()
+            return (f"Uploaded {len(data)} bytes (sha256 {sha[:12]}…) and "
+                    "rebooted. The device verifies the hash and programs "
+                    "flash on boot — watch its screen; do not power off.")
+        return await asyncio.to_thread(_do_flash)
+    except Exception as e:
+        return f"Error: {e}"
 
 
 @mcp.tool()
 async def put_file(local_path: str, remote_path: str, device: str | None = None) -> str:
-    """Upload a file to the PicOS SD card (simulator: copies to host filesystem)."""
-    if not HARDWARE_MODE:
+    """Upload a file to the PicOS SD card (hardware: base64 over serial;
+    simulator: copies into the simulated SD directory)."""
+    try:
+        port = resolve_port(device)
+    except Exception as e:
+        return f"Error: {e}"
+    if port is None:
         try:
-            sim_apps = os.environ.get("PICOS_SIMULATOR_SD", "./assets/sd_card")
+            sim_apps = os.environ.get("PICOS_SIMULATOR_SD", ".")
             dest = Path(sim_apps) / remote_path.lstrip("/")
             dest.parent.mkdir(parents=True, exist_ok=True)
             shutil.copy(local_path, dest)
@@ -773,15 +1542,24 @@ async def put_file(local_path: str, remote_path: str, device: str | None = None)
             return f"Error: {e}"
     if not HAS_SERIAL:
         return "pyserial not installed: pip install pyserial"
-    return "Hardware put_file not yet implemented."
+    try:
+        data = Path(local_path).read_bytes()
+        return await asyncio.to_thread(do_put_file_b64, port, data, remote_path)
+    except Exception as e:
+        return f"Error: {e}"
 
 
 @mcp.tool()
 async def get_file(remote_path: str, local_path: str, device: str | None = None) -> str:
-    """Download a file from the PicOS SD card (simulator: copies from host filesystem)."""
-    if not HARDWARE_MODE:
+    """Download a file from the PicOS SD card (hardware: base64 over serial;
+    simulator: copies from the simulated SD directory)."""
+    try:
+        port = resolve_port(device)
+    except Exception as e:
+        return f"Error: {e}"
+    if port is None:
         try:
-            sim_apps = os.environ.get("PICOS_SIMULATOR_SD", "./assets/sd_card")
+            sim_apps = os.environ.get("PICOS_SIMULATOR_SD", ".")
             src = Path(sim_apps) / remote_path.lstrip("/")
             shutil.copy(src, local_path)
             return f"Copied from simulator: {src} -> {local_path}"
@@ -789,20 +1567,158 @@ async def get_file(remote_path: str, local_path: str, device: str | None = None)
             return f"Error: {e}"
     if not HAS_SERIAL:
         return "pyserial not installed: pip install pyserial"
-    return "Hardware get_file not yet implemented."
+    try:
+        data = await asyncio.to_thread(do_get_file_b64, port, remote_path)
+        Path(local_path).write_bytes(data)
+        return f"Downloaded {len(data)} bytes: {remote_path} -> {local_path}"
+    except Exception as e:
+        return f"Error: {e}"
+
+
+# ── Display Diagnostics (simulator only) ─────────────────────────────────────
+
+
+@mcp.tool()
+async def display_stats(
+    x: int | None = None,
+    y: int | None = None,
+    device: str | None = None,
+) -> str:
+    """Get framebuffer statistics: non-zero pixel count, unique colors, first non-zero pixel.
+    Optionally inspect a specific pixel by providing x,y coordinates."""
+    if HARDWARE_MODE:
+        return "display_stats is only available in simulator mode."
+    try:
+        conn = get_connection()
+        params = {}
+        if x is not None:
+            params["x"] = x
+        if y is not None:
+            params["y"] = y
+        result = await asyncio.to_thread(conn.call, "display_stats", params, timeout=5)
+        total = result.get("total_pixels", 102400)
+        nz = result.get("nonzero_pixels", 0)
+        pct = (nz * 100.0 / total) if total else 0
+        unique = result.get("unique_colors", 0)
+        first = result.get("first_nonzero")
+
+        lines = [
+            f"Non-zero pixels: {nz}/{total} ({pct:.1f}%)",
+            f"Unique colors: {unique}",
+        ]
+        if first and isinstance(first, dict):
+            fx, fy = first.get("x", 0), first.get("y", 0)
+            fv = first.get("rgb565", 0)
+            r = ((fv >> 11) & 0x1F) << 3
+            g = ((fv >> 5) & 0x3F) << 2
+            b = (fv & 0x1F) << 3
+            lines.append(f"First non-zero: ({fx}, {fy}) = 0x{fv:04X} → RGB({r}, {g}, {b}) [#{r:02X}{g:02X}{b:02X}]")
+        else:
+            lines.append("First non-zero: none (all black)")
+
+        pixel_at = result.get("pixel_at")
+        if pixel_at and isinstance(pixel_at, dict):
+            px, py = pixel_at["x"], pixel_at["y"]
+            pv = pixel_at["rgb565"]
+            pr, pg, pb = pixel_at["r"], pixel_at["g"], pixel_at["b"]
+            lines.append(f"Pixel ({px}, {py}): 0x{pv:04X} → RGB({pr}, {pg}, {pb}) [#{pr:02X}{pg:02X}{pb:02X}]")
+
+        return "\n".join(lines)
+    except Exception as e:
+        return f"Error: {e}"
+
+
+@mcp.tool()
+async def display_diff(
+    action: str,
+    device: str | None = None,
+) -> str:
+    """Capture or compare framebuffer snapshots for pixel-level diff.
+    action='capture' saves the current framebuffer as reference.
+    action='compare' compares current framebuffer against the saved reference."""
+    if HARDWARE_MODE:
+        return "display_diff is only available in simulator mode."
+    try:
+        conn = get_connection()
+        result = await asyncio.to_thread(conn.call, "display_diff", {"action": action}, timeout=5)
+
+        if action == "capture":
+            return "Reference framebuffer captured. Use action='compare' after a change to see the diff."
+
+        if action == "compare":
+            changed = result.get("changed_pixels", 0)
+            total = result.get("total_pixels", 102400)
+            pct = result.get("change_pct", 0.0)
+            bbox = result.get("bbox")
+
+            lines = [f"Changed pixels: {changed}/{total} ({pct:.2f}%)"]
+            if bbox and isinstance(bbox, dict):
+                lines.append(f"Bounding box: x={bbox['x']} y={bbox['y']} w={bbox['w']} h={bbox['h']}")
+            else:
+                lines.append("No changes detected.")
+            return "\n".join(lines)
+
+        return f"Unknown action '{action}'. Use 'capture' or 'compare'."
+    except Exception as e:
+        return f"Error: {e}"
+
+
+@mcp.tool()
+async def get_pixel(
+    x: int,
+    y: int,
+    w: int = 1,
+    h: int = 1,
+    device: str | None = None,
+) -> str:
+    """Read pixel value(s) from the framebuffer. Returns RGB565 and decoded RGB.
+    Single pixel: provide x,y. Region: provide x,y,w,h (max 16x16)."""
+    if HARDWARE_MODE:
+        return "get_pixel is only available in simulator mode."
+    try:
+        conn = get_connection()
+        params: dict[str, Any] = {"x": x, "y": y}
+        if w > 1:
+            params["w"] = w
+        if h > 1:
+            params["h"] = h
+        result = await asyncio.to_thread(conn.call, "get_pixel", params, timeout=5)
+
+        if "pixels" in result:
+            # Region mode
+            pixels = result["pixels"]
+            rw, rh = result.get("w", w), result.get("h", h)
+            lines = [f"Region ({x},{y}) {rw}x{rh}:"]
+            idx = 0
+            for row in range(rh):
+                row_vals = []
+                for col in range(rw):
+                    if idx < len(pixels):
+                        row_vals.append(f"0x{pixels[idx]:04X}")
+                    idx += 1
+                lines.append(f"  y={y+row}: {' '.join(row_vals)}")
+            return "\n".join(lines)
+        else:
+            # Single pixel
+            px = result.get("rgb565", 0)
+            r, g, b = result.get("r", 0), result.get("g", 0), result.get("b", 0)
+            return f"Pixel ({x}, {y}): 0x{px:04X} → RGB({r}, {g}, {b}) [#{r:02X}{g:02X}{b:02X}]"
+    except Exception as e:
+        return f"Error: {e}"
 
 
 # ── Main Entry Point ──────────────────────────────────────────────────────────
 
 
 def main():
-    global HARDWARE_MODE
+    global HARDWARE_MODE, SIMULATOR_ONLY, _configured_port
 
     parser = argparse.ArgumentParser(
-        description="PicOS MCP Server - Control PicOS simulator (default) or hardware device"
+        description="PicOS MCP Server - Control PicOS simulator and/or hardware device"
     )
-    parser.add_argument("--hardware", action="store_true", help="Use hardware device via USB serial")
-    parser.add_argument("--simulator", action="store_true", help="Use simulator (default)")
+    parser.add_argument("--hardware", action="store_true", help="Hardware only (USB serial)")
+    parser.add_argument("--simulator", action="store_true", help="Simulator only")
+    parser.add_argument("--port", type=int, default=DEFAULT_TCP_PORT, help="Simulator TCP port (default: 7878)")
     parser.add_argument("--device", help="Device endpoint (serial port or socket path)")
     parser.add_argument(
         "--transport", choices=["stdio", "sse"], default="stdio",
@@ -814,9 +1730,15 @@ def main():
         HARDWARE_MODE = True
         if not HAS_SERIAL:
             print("Warning: pyserial not installed. Hardware mode requires: pip install pyserial", file=sys.stderr)
+    elif args.simulator:
+        SIMULATOR_ONLY = True
 
-    mode_str = "hardware" if HARDWARE_MODE else "simulator"
-    print(f"PicOS MCP Server starting in {mode_str} mode...", file=sys.stderr)
+    _configured_port = args.port
+
+    mode_str = ("hardware" if HARDWARE_MODE
+                else "simulator" if SIMULATOR_ONLY
+                else "auto (simulator if reachable, else serial hardware)")
+    print(f"PicOS MCP Server starting in {mode_str} mode (port {_configured_port})...", file=sys.stderr)
     mcp.run(transport=args.transport)
 
 

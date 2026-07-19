@@ -1,0 +1,10 @@
+{
+    "id": "com.picos.terminal_example",
+    "name": "Terminal Example",
+    "description": "Demonstrates the terminal emulator SDK with VT100 escape sequences",
+    "version": "1.0",
+    "author": "PicOS",
+    "category": "demos",
+    "repo": "jeffory/picos-apps",
+    "min_firmware": "1.0.0"
+}

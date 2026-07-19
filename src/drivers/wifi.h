@@ -9,9 +9,8 @@
 // =============================================================================
 // WiFi Driver — CYW43 on Pimoroni Pico Plus 2W
 //
-// SPI1 is shared between the LCD and the CYW43 WiFi chip. All CYW43
-// operations are serialised behind display_spi_lock() / display_spi_unlock()
-// to prevent bus conflicts with LCD DMA transfers.
+// CYW43 WiFi chip on SPI1. LCD uses PIO0 SPI (separate bus, no contention).
+// Core 1 exclusively owns all Mongoose/CYW43 operations.
 //
 // Connection is non-blocking: call wifi_connect(), then poll wifi_get_status()
 // or let the OS Lua hook drive wifi_poll() automatically in the background.
@@ -59,6 +58,16 @@ void wifi_poll(void);
 // not automatically disconnect after SNTP time sync.
 void wifi_set_http_required(bool required);
 bool wifi_get_http_required(void);
+
+// Returns true if internet connectivity has been verified (TCP to 8.8.8.8:53).
+// This goes beyond wifi_get_status() == CONNECTED which only means DHCP is done.
+bool wifi_has_internet(void);
+
+// Returns true once the CYW43 hardware disconnect has actually completed on
+// Core 1. wifi_disconnect() is async (queue-based); this flag lets callers
+// wait for the radio to power down before performing voltage-sensitive
+// operations like SD flash programming.
+bool wifi_hw_disconnected(void);
 
 // ── Core 0 → Core 1 request queue ────────────────────────────────────────────
 //

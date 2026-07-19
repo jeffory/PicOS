@@ -9,7 +9,7 @@
 CC      = arm-none-eabi-gcc
 CFLAGS  = -mcpu=cortex-m33 -mthumb \
           -fpie -fno-plt -ffunction-sections -fdata-sections \
-          -O3 -flto -Wall -Wextra -Wno-unused-parameter \
+          -O2 -flto -Wall -Wextra -Wno-unused-parameter \
           -I. \
           -I../../sdk/native \
           -IRP2350-GBC/inc \
@@ -30,7 +30,7 @@ LDFLAGS = -T linker.ld \
           -nostartfiles -nodefaultlibs -lc -lm
 
 # Test with display.c only
-SRCS    = main.c display.c fs.c input.c RP2350-GBC/ext/minigb_apu/minigb_apu.c
+SRCS    = main.c display.c fs.c input.c state.c RP2350-GBC/ext/minigb_apu/minigb_apu.c
 
 TARGET  = main.elf
 
@@ -38,7 +38,7 @@ TARGET  = main.elf
 
 all: $(TARGET)
 
-$(TARGET): $(SRCS) linker.ld RP2350-GBC/inc/peanut_gb.h RP2350-GBC/ext/minigb_apu/minigb_apu.h ../../sdk/native/os.h ../../sdk/native/app_abi.h
+$(TARGET): $(SRCS) linker.ld state.h RP2350-GBC/inc/peanut_gb.h RP2350-GBC/ext/minigb_apu/minigb_apu.h ../../sdk/native/os.h ../../sdk/native/app_abi.h
 	$(CC) $(CFLAGS) $(SRCS) $(LDFLAGS) -o $@
 	arm-none-eabi-size $@
 

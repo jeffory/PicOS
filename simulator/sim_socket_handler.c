@@ -34,6 +34,11 @@
 #include <SDL2/SDL_image.h>
 #include <pthread.h>
 
+// Software PNG encoder fallback for headless mode where SDL_image may not work
+#define STB_IMAGE_WRITE_IMPLEMENTATION
+#define STBI_WRITE_NO_STDIO
+#include "stb_image_write.h"
+
 // ── Circular log buffer ───────────────────────────────────────────────────────
 
 #define LOG_LINE_MAX 256
@@ -63,9 +68,8 @@ char *sim_get_log_buffer(void) {
     static char buf[65536];
     buf[0] = '\0';
     pthread_mutex_lock(&s_log_mutex);
-    int start = (s_log_head + LOG_BUFFER_LINES - s_log_count) % LOG_BUFFER_LINES;
     for (int i = 0; i < s_log_count; i++) {
-        int idx = (start + i) % LOG_BUFFER_LINES;
+        int idx = (s_log_head + i) % LOG_BUFFER_LINES;
         size_t len = strlen(buf);
         size_t line_len = strlen(s_log_lines[idx]);
         if (len + line_len + 2 < sizeof(buf)) {
@@ -116,7 +120,7 @@ void sim_handler_clear_pending_launch_state(void) {
     s_exit_requested = false;
 }
 
-void sim_handler_check_launch(void) {
+bool sim_handler_check_launch(void) {
     if (s_exit_requested) {
         s_exit_requested = false;
         kbd_inject_buttons(BTN_ESC);
@@ -124,14 +128,19 @@ void sim_handler_check_launch(void) {
     if (s_pending_launch) {
         const char *name = s_pending_launch;
         s_pending_launch = NULL;
-        sim_socket_notify("app.started", "{\"name\":\"pending\"}");
+        char started_params[256];
+        snprintf(started_params, sizeof(started_params),
+                 "{\"name\":\"%s\"}", name);
+        sim_socket_notify("app.started", started_params);
         bool ok = launcher_launch_by_name(name);
         char params[256];
         snprintf(params, sizeof(params),
                  "{\"name\":\"%s\",\"ok\":%s}", name, ok ? "true" : "false");
         sim_socket_notify("app.exited", params);
         free((void *)name);
+        return true;
     }
+    return false;
 }
 
 // ── WiFi error injection ──────────────────────────────────────────────────────
@@ -169,17 +178,48 @@ const char *sim_wifi_get_error(void) {
 
 // ── Path sandboxing ───────────────────────────────────────────────────────────
 
+// NOTE ON BUFFER SIZES: every realpath() destination below must be at least
+// PATH_MAX bytes. glibc's _FORTIFY_SOURCE wrapper __realpath_chk() aborts the
+// process when it can see at compile time that the destination is smaller —
+// unconditionally, regardless of how short the actual path is. These buffers
+// were 1024 bytes, which aborted every sandboxed request on distros that
+// fortify by default (Ubuntu/CI) while working fine on those that do not
+// (Fedora). Never realpath() into a buffer of unknown or sub-PATH_MAX size.
 static bool sandbox_path(const char *path, char *out_resolved, size_t max) {
     extern char g_base_path[512];
-    char full[1024];
+    // Resolve base path to absolute for consistent comparison with realpath output
+    char abs_base[PATH_MAX];
+    if (!realpath(g_base_path, abs_base)) return false;
+    size_t base_len = strlen(abs_base);
+
+    char full[PATH_MAX];
     if (path[0] == '/') {
-        snprintf(full, sizeof(full), "%s%s", g_base_path, path);
+        snprintf(full, sizeof(full), "%s%s", abs_base, path);
     } else {
-        snprintf(full, sizeof(full), "%s/%s", g_base_path, path);
+        snprintf(full, sizeof(full), "%s/%s", abs_base, path);
     }
-    if (!realpath(full, out_resolved)) return false;
-    size_t base_len = strlen(g_base_path);
-    if (strncmp(out_resolved, g_base_path, base_len) != 0) return false;
+    // Try realpath first (works for existing files). Resolve into a local
+    // PATH_MAX buffer rather than the caller's, whose size we only know as
+    // `max` — which may legitimately be smaller than PATH_MAX.
+    char tmp[PATH_MAX];
+    if (realpath(full, tmp)) {
+        if (strncmp(tmp, abs_base, base_len) != 0) return false;
+        if (strlen(tmp) >= max) return false;  // refuse to truncate a sandboxed path
+        memcpy(out_resolved, tmp, strlen(tmp) + 1);
+        return true;
+    }
+    // For new files: resolve the parent directory and append the filename.
+    // `full` is no longer needed, so reuse it as the parent scratch buffer.
+    char *slash = strrchr(full, '/');
+    if (!slash) return false;
+    char filename[256];
+    snprintf(filename, sizeof(filename), "%s", slash + 1);
+    *slash = '\0';
+    char resolved_parent[PATH_MAX];
+    if (!realpath(full, resolved_parent)) return false;
+    if (strncmp(resolved_parent, abs_base, base_len) != 0) return false;
+    int n = snprintf(out_resolved, max, "%s/%s", resolved_parent, filename);
+    if (n < 0 || (size_t)n >= max) return false;  // truncated — reject
     return true;
 }
 
@@ -266,13 +306,14 @@ static const char s_b64[] =
 static int b64_encode(const uint8_t *src, size_t len, char *out) {
     size_t i = 0, j = 0;
     while (i < len) {
+        size_t remain = len - i;
         uint32_t b = (uint32_t)src[i++] << 16;
-        if (i < len) b |= (uint32_t)src[i++] << 8;
-        if (i < len) b |= (uint32_t)src[i++] << 0;
+        if (remain > 1) b |= (uint32_t)src[i++] << 8;
+        if (remain > 2) b |= (uint32_t)src[i++] << 0;
         out[j++] = s_b64[(b >> 18) & 0x3F];
         out[j++] = s_b64[(b >> 12) & 0x3F];
-        out[j++] = i > len   ? '=' : s_b64[(b >>  6) & 0x3F];
-        out[j++] = i > len-1 ? '=' : s_b64[(b >>  0) & 0x3F];
+        out[j++] = remain > 1 ? s_b64[(b >>  6) & 0x3F] : '=';
+        out[j++] = remain > 2 ? s_b64[(b >>  0) & 0x3F] : '=';
     }
     out[j] = '\0';
     return (int)j;
@@ -284,38 +325,60 @@ static int b64_enc_size(size_t len) {
 
 // ── Screenshot to PNG base64 ──────────────────────────────────────────────────
 
+// stb_image_write callback: appends to a growable buffer
+typedef struct {
+    uint8_t *data;
+    size_t   size;
+    size_t   capacity;
+} stb_png_buf_t;
+
+static void stb_png_write_func(void *context, void *data, int size) {
+    stb_png_buf_t *buf = (stb_png_buf_t *)context;
+    if (buf->size + (size_t)size > buf->capacity) {
+        size_t new_cap = buf->capacity * 2;
+        if (new_cap < buf->size + (size_t)size) new_cap = buf->size + (size_t)size;
+        uint8_t *tmp = realloc(buf->data, new_cap);
+        if (!tmp) return;
+        buf->data = tmp;
+        buf->capacity = new_cap;
+    }
+    memcpy(buf->data + buf->size, data, (size_t)size);
+    buf->size += (size_t)size;
+}
+
+// Convert RGB565 framebuffer to RGB888
+static uint8_t *rgb565_to_rgb888(const uint16_t *fb, int w, int h) {
+    uint8_t *rgb = malloc((size_t)(w * h * 3));
+    if (!rgb) return NULL;
+    for (int i = 0; i < w * h; i++) {
+        uint16_t p = fb[i];
+        rgb[i * 3 + 0] = (uint8_t)(((p >> 11) & 0x1F) * 255 / 31);
+        rgb[i * 3 + 1] = (uint8_t)(((p >> 5)  & 0x3F) * 255 / 63);
+        rgb[i * 3 + 2] = (uint8_t)((p & 0x1F) * 255 / 31);
+    }
+    return rgb;
+}
+
 static char *take_screenshot_png(int *out_len) {
     uint16_t *fb = hal_display_get_framebuffer();
     if (!fb) { *out_len = 0; return NULL; }
 
-    SDL_Surface *surf = SDL_CreateRGBSurfaceFrom(
-        fb, 320, 320, 16, 320 * 2,
-        0xF800, 0x07E0, 0x001F, 0x0000);
-    if (!surf) { *out_len = 0; return NULL; }
-
-    SDL_Surface *rgb = SDL_ConvertSurfaceFormat(surf, SDL_PIXELFORMAT_RGB24, 0);
-    SDL_FreeSurface(surf);
+    // Always use stb_image_write — the SDL_image path produces corrupt PNGs
+    // when the simulator runs headless or with the dummy video driver.
+    uint8_t *rgb = rgb565_to_rgb888(fb, 320, 320);
     if (!rgb) { *out_len = 0; return NULL; }
 
-    size_t buf_size = 256 * 1024;
-    uint8_t *png_buf = (uint8_t *)malloc(buf_size);
-    if (!png_buf) { SDL_FreeSurface(rgb); *out_len = 0; return NULL; }
+    stb_png_buf_t png = { .data = malloc(256 * 1024), .size = 0, .capacity = 256 * 1024 };
+    if (!png.data) { free(rgb); *out_len = 0; return NULL; }
 
-    SDL_RWops *rw = SDL_RWFromMem(png_buf, (int)buf_size);
-    if (!rw) { free(png_buf); SDL_FreeSurface(rgb); *out_len = 0; return NULL; }
+    int ok = stbi_write_png_to_func(stb_png_write_func, &png, 320, 320, 3, rgb, 320 * 3);
+    free(rgb);
+    if (!ok || png.size == 0) { free(png.data); *out_len = 0; return NULL; }
 
-    int saved = IMG_SavePNG_RW(rgb, rw, 1);
-    SDL_FreeSurface(rgb);
-
-    if (saved < 0) { free(png_buf); *out_len = 0; return NULL; }
-
-    Sint64 size = SDL_RWsize(rw);
-    if (size <= 0 || (size_t)size >= buf_size) { free(png_buf); *out_len = 0; return NULL; }
-
-    char *b64 = malloc(b64_enc_size((size_t)size) + 1);
-    if (!b64) { free(png_buf); *out_len = 0; return NULL; }
-    b64_encode(png_buf, (size_t)size, b64);
-    free(png_buf);
+    char *b64 = malloc(b64_enc_size(png.size) + 1);
+    if (!b64) { free(png.data); *out_len = 0; return NULL; }
+    b64_encode(png.data, png.size, b64);
+    free(png.data);
     *out_len = (int)strlen(b64);
     return b64;
 }
@@ -350,14 +413,19 @@ static char *h_launch_app(const char *params) {
         return strdup("{\"jsonrpc\":\"2.0\",\"error\":{\"code\":-32602,\"message\":\"name required\"}}");
     }
     s_pending_launch = strdup(name);
-    sim_socket_notify("app.started", "{\"name\":\"pending\"}");
-    return strdup("{\"jsonrpc\":\"2.0\",\"result\":{\"ok\":true,\"app_name\":\"pending\"}}");
+    static char buf[256];
+    snprintf(buf, sizeof(buf),
+             "{\"jsonrpc\":\"2.0\",\"result\":{\"ok\":true,\"app_name\":\"%s\"}}", name);
+    return strdup(buf);
 }
 
 static char *h_exit_app(const char *params) {
     (void)params;
+    extern void dev_commands_set_exit(void);
+    dev_commands_set_exit();
+    // Also inject ESC key so native apps with input-based exit loops
+    // (checking getButtonsPressed/getChar instead of shouldExit) will exit.
     kbd_inject_buttons(BTN_ESC);
-    s_exit_requested = true;
     return strdup("{\"jsonrpc\":\"2.0\",\"result\":{\"ok\":true}}");
 }
 
@@ -384,9 +452,14 @@ static uint32_t button_name_to_mask(const char *button) {
     if (strcmp(button, "tab") == 0) return BTN_TAB;
     if (strcmp(button, "backspace") == 0 || strcmp(button, "bkspc") == 0) return BTN_BACKSPACE;
     if (strcmp(button, "del") == 0 || strcmp(button, "delete") == 0) return BTN_DEL;
-    if (strncmp(button, "f", 1) == 0 && strlen(button) <= 4) {
+    if (strcmp(button, "shift") == 0) return BTN_SHIFT;
+    if (strcmp(button, "ctrl") == 0) return BTN_CTRL;
+    if (strcmp(button, "sym") == 0 || strcmp(button, "fn") == 0) return BTN_FN;
+    // F10 is the hardware Menu key; there are no BTN_F10+ constants.
+    if (strcmp(button, "f10") == 0) return BTN_MENU;
+    if (strncmp(button, "f", 1) == 0 && strlen(button) <= 3) {
         int f = atoi(button + 1);
-        if (f >= 1 && f <= 12) return (uint32_t)(BTN_F1 << (f - 1));
+        if (f >= 1 && f <= 9) return (uint32_t)(BTN_F1 << (f - 1));
     }
     return 0;
 }
@@ -405,6 +478,7 @@ static char *h_inject_button(const char *params) {
     }
 
     if (strcmp(action, "release") == 0) {
+        hal_input_release_buttons(btn_mask);
         return strdup("{\"jsonrpc\":\"2.0\",\"result\":{\"ok\":true}}");
     }
     kbd_inject_buttons(btn_mask);
@@ -492,30 +566,42 @@ static char *h_read_file(const char *params) {
 }
 
 static size_t b64_decode_inplace(char *b64, size_t len) {
-    size_t out_len = 0;
-    size_t i = 0, j = 0;
+    static const unsigned char LUT[256] = {
+        ['A']=0+1,['B']=1+1,['C']=2+1,['D']=3+1,['E']=4+1,['F']=5+1,['G']=6+1,['H']=7+1,
+        ['I']=8+1,['J']=9+1,['K']=10+1,['L']=11+1,['M']=12+1,['N']=13+1,['O']=14+1,['P']=15+1,
+        ['Q']=16+1,['R']=17+1,['S']=18+1,['T']=19+1,['U']=20+1,['V']=21+1,['W']=22+1,['X']=23+1,
+        ['Y']=24+1,['Z']=25+1,['a']=26+1,['b']=27+1,['c']=28+1,['d']=29+1,['e']=30+1,['f']=31+1,
+        ['g']=32+1,['h']=33+1,['i']=34+1,['j']=35+1,['k']=36+1,['l']=37+1,['m']=38+1,['n']=39+1,
+        ['o']=40+1,['p']=41+1,['q']=42+1,['r']=43+1,['s']=44+1,['t']=45+1,['u']=46+1,['v']=47+1,
+        ['w']=48+1,['x']=49+1,['y']=50+1,['z']=51+1,['0']=52+1,['1']=53+1,['2']=54+1,['3']=55+1,
+        ['4']=56+1,['5']=57+1,['6']=58+1,['7']=59+1,['8']=60+1,['9']=61+1,['+']=62+1,['/']=63+1,
+    };
+    // Standard base64: process 4 chars at a time into 3 bytes
+    size_t j = 0;
+    size_t i = 0;
     while (i < len) {
-        int v = 0; int clen = 0;
-        for (int k = 0; k < 4 && i < len; k++) {
-            char c = b64[i++];
-            if (c == '=' || c == 0) break;
-            int cv = -1;
-            if (c >= 'A' && c <= 'Z') cv = c - 'A' + 0;
-            else if (c >= 'a' && c <= 'z') cv = c - 'a' + 26;
-            else if (c >= '0' && c <= '9') cv = c - '0' + 52;
-            else if (c == '+') cv = 62;
-            else if (c == '/') cv = 63;
-            else continue;
-            v = (v << 6) | cv;
-            clen++;
+        uint32_t sextet[4] = {0};
+        int valid = 0;
+        for (int k = 0; k < 4 && i < len; ) {
+            unsigned char c = (unsigned char)b64[i++];
+            if (c == '=' || c == '\0') { i = len; break; }  // padding = end
+            if (c == ' ' || c == '\n' || c == '\r' || c == '\t') continue;
+            unsigned char v = LUT[c];
+            if (v == 0) continue;  // invalid char
+            sextet[k] = v - 1;
+            valid++;
+            k++;
         }
-        for (int k = clen - 2; k >= 0; k--) {
-            b64[j++] = (char)((v >> (k * 8)) & 0xFF);
-            out_len++;
+        if (valid >= 2) {
+            uint32_t triple = (sextet[0] << 18) | (sextet[1] << 12) |
+                              (sextet[2] << 6)  |  sextet[3];
+            b64[j++] = (char)((triple >> 16) & 0xFF);
+            if (valid >= 3) b64[j++] = (char)((triple >> 8) & 0xFF);
+            if (valid >= 4) b64[j++] = (char)(triple & 0xFF);
         }
     }
     b64[j] = '\0';
-    return out_len;
+    return j;
 }
 
 static char *h_write_file(const char *params) {
@@ -722,8 +808,23 @@ static char *h_get_wifi_state(const char *params) {
     const char *ssid = wifi_get_ssid();
     const char *ip = wifi_get_ip();
     const char *status_str = "disconnected";
-    if (st == WIFI_STATUS_CONNECTED) status_str = "connected";
+    if (st == WIFI_STATUS_ONLINE) status_str = "online";
+    else if (st == WIFI_STATUS_CONNECTED) status_str = "connected";
     else if (st == WIFI_STATUS_CONNECTING) status_str = "connecting";
+    else if (st == WIFI_STATUS_FAILED) status_str = "failed";
+
+    // Injected state (set_wifi_state) overrides the real status. Without this
+    // the injection was write-only: sim_wifi_is_available()/sim_network_blocked()
+    // honoured it, but this getter reported the underlying status, so a
+    // set→get roundtrip never observed what was injected.
+    if (s_wifi_error.enabled) {
+        switch (s_wifi_error.mode) {
+            case WIFI_DISCONNECTED:   status_str = "disconnected";   break;
+            case WIFI_NOT_AVAILABLE:  status_str = "not_available";  break;
+            case WIFI_ERROR:          status_str = "error";          break;
+            case WIFI_NORMAL:         break;  // report the real status
+        }
+    }
     static char buf[256];
     snprintf(buf, sizeof(buf),
              "{\"jsonrpc\":\"2.0\",\"result\":{\"status\":\"%s\",\"ssid\":\"%s\",\"ip\":\"%s\"}}",
@@ -740,7 +841,7 @@ static char *h_set_wifi_state(const char *params) {
     json_get_int(params, "error_code", &error_code);
 
     s_wifi_error.enabled = true;
-    if (strcmp(status, "connected") == 0) {
+    if (strcmp(status, "connected") == 0 || strcmp(status, "online") == 0) {
         s_wifi_error.mode = WIFI_NORMAL;
         s_wifi_error.enabled = false;
     } else if (strcmp(status, "disconnected") == 0) {
@@ -766,14 +867,43 @@ static char *h_get_log_buffer(const char *params) {
     (void)params;
     char *log = sim_get_log_buffer();
     int count = sim_get_log_buffer_count();
-    static char buf[65536];
-    char escaped[32768];
-    json_escape(log, escaped, sizeof(escaped));
-    int n = snprintf(buf, sizeof(buf),
-                    "{\"jsonrpc\":\"2.0\",\"result\":{\"count\":%d,\"lines\":%s}}",
-                    count, escaped);
-    if ((size_t)n >= sizeof(buf)) buf[sizeof(buf) - 1] = '\0';
-    return strdup(buf);
+
+    // Build a JSON array of lines from the newline-separated log text
+    // Estimate: each line needs escaping + quotes + comma
+    size_t buf_size = 65536;
+    char *buf = malloc(buf_size);
+    if (!buf) return strdup("{\"jsonrpc\":\"2.0\",\"error\":{\"code\":-32603,\"message\":\"out of memory\"}}");
+
+    int off = snprintf(buf, buf_size,
+                       "{\"jsonrpc\":\"2.0\",\"result\":{\"count\":%d,\"lines\":[", count);
+
+    if (log && log[0]) {
+        char escaped_line[1024];
+        const char *p = log;
+        int first = 1;
+        while (*p) {
+            const char *nl = strchr(p, '\n');
+            size_t len = nl ? (size_t)(nl - p) : strlen(p);
+            // Temporarily null-terminate this line for json_escape
+            char saved = p[len];
+            ((char *)p)[len] = '\0';
+            json_escape(p, escaped_line, sizeof(escaped_line));
+            ((char *)p)[len] = saved;
+
+            int wrote = snprintf(buf + off, buf_size - (size_t)off,
+                                 "%s\"%s\"", first ? "" : ",", escaped_line);
+            if (wrote > 0) off += wrote;
+            first = 0;
+
+            if (!nl) break;
+            p = nl + 1;
+        }
+    }
+
+    snprintf(buf + off, buf_size - (size_t)off, "]}}");
+    char *result = strdup(buf);
+    free(buf);
+    return result;
 }
 
 static char *h_set_time_multiplier(const char *params) {
@@ -837,6 +967,261 @@ static char *h_get_terminal_buffer(const char *params) {
     return buf;
 }
 
+// ── Shutdown ─────────────────────────────────────────────────────────────────
+
+static char *h_shutdown(const char *params) {
+    (void)params;
+    extern volatile int g_running;
+    g_running = 0;
+    extern void dev_commands_set_exit(void);
+    dev_commands_set_exit();
+    return strdup("{\"jsonrpc\":\"2.0\",\"result\":{\"ok\":true}}");
+}
+
+// ── Clear log buffer ─────────────────────────────────────────────────────────
+
+static char *h_clear_log_buffer(const char *params) {
+    (void)params;
+    pthread_mutex_lock(&s_log_mutex);
+    s_log_head = 0;
+    s_log_count = 0;
+    pthread_mutex_unlock(&s_log_mutex);
+    return strdup("{\"jsonrpc\":\"2.0\",\"result\":{\"ok\":true}}");
+}
+
+// ── Crash log ────────────────────────────────────────────────────────────────
+
+static char *h_get_crash_log(const char *params) {
+    (void)params;
+    extern char g_crash_log_path[512];
+    FILE *f = fopen(g_crash_log_path, "r");
+    if (!f) {
+        return strdup("{\"jsonrpc\":\"2.0\",\"result\":{\"crash_log\":null}}");
+    }
+    fseek(f, 0, SEEK_END);
+    long fsize = ftell(f);
+    fseek(f, 0, SEEK_SET);
+    if (fsize <= 0 || fsize > 65536) {
+        fclose(f);
+        return strdup("{\"jsonrpc\":\"2.0\",\"result\":{\"crash_log\":null}}");
+    }
+    char *content = malloc((size_t)fsize + 1);
+    if (!content) { fclose(f); return strdup("{\"jsonrpc\":\"2.0\",\"error\":{\"code\":-32603,\"message\":\"oom\"}}"); }
+    fread(content, 1, (size_t)fsize, f);
+    content[fsize] = '\0';
+    fclose(f);
+
+    // JSON-escape the content
+    char *escaped = malloc((size_t)fsize * 2 + 128);
+    if (!escaped) { free(content); return strdup("{\"jsonrpc\":\"2.0\",\"error\":{\"code\":-32603,\"message\":\"oom\"}}"); }
+    json_escape(content, escaped, (size_t)fsize * 2 + 64);
+    free(content);
+
+    size_t resp_size = strlen(escaped) + 128;
+    char *resp = malloc(resp_size);
+    if (!resp) { free(escaped); return strdup("{\"jsonrpc\":\"2.0\",\"error\":{\"code\":-32603,\"message\":\"oom\"}}"); }
+    snprintf(resp, resp_size, "{\"jsonrpc\":\"2.0\",\"result\":{\"crash_log\":\"%s\"}}", escaped);
+    free(escaped);
+    return resp;
+}
+
+// ── Wait for idle (no app running) ──────────────────────────────────────────
+
+static char *h_wait_for_idle(const char *params) {
+    (void)params;
+    const char *name = launcher_get_running_app_name();
+    if (!name || !name[0]) {
+        return strdup("{\"jsonrpc\":\"2.0\",\"result\":{\"idle\":true}}");
+    }
+    return strdup("{\"jsonrpc\":\"2.0\",\"result\":{\"idle\":false}}");
+}
+
+// ── Display diagnostics ─────────────────────────────────────────────────────
+
+static uint16_t s_diff_reference[320 * 320];
+static bool s_diff_has_reference = false;
+
+static char *h_display_stats(const char *params) {
+    uint16_t *fb = hal_display_get_framebuffer();
+    if (!fb) {
+        return strdup("{\"jsonrpc\":\"2.0\",\"error\":{\"code\":-32603,\"message\":\"no framebuffer\"}}");
+    }
+
+    const int total = 320 * 320;
+    int nonzero = 0;
+    int first_nz_x = -1, first_nz_y = -1;
+    uint16_t first_nz_val = 0;
+
+    // 8KB bitset for counting unique RGB565 values (65536 bits = 8192 bytes)
+    uint8_t seen[8192];
+    memset(seen, 0, sizeof(seen));
+
+    for (int i = 0; i < total; i++) {
+        uint16_t px = fb[i];
+        if (px != 0) {
+            nonzero++;
+            if (first_nz_x < 0) {
+                first_nz_x = i % 320;
+                first_nz_y = i / 320;
+                first_nz_val = px;
+            }
+        }
+        seen[px >> 3] |= (1 << (px & 7));
+    }
+
+    int unique = 0;
+    for (int i = 0; i < 8192; i++) {
+        uint8_t b = seen[i];
+        while (b) { unique += b & 1; b >>= 1; }
+    }
+
+    // Optional pixel_at query
+    int qx = -1, qy = -1;
+    json_get_int(params, "x", &qx);
+    json_get_int(params, "y", &qy);
+
+    char pixel_at[128] = "";
+    if (qx >= 0 && qx < 320 && qy >= 0 && qy < 320) {
+        uint16_t px = fb[qy * 320 + qx];
+        int r = ((px >> 11) & 0x1F) << 3;
+        int g = ((px >> 5) & 0x3F) << 2;
+        int b = (px & 0x1F) << 3;
+        snprintf(pixel_at, sizeof(pixel_at),
+            ",\"pixel_at\":{\"x\":%d,\"y\":%d,\"rgb565\":%u,\"r\":%d,\"g\":%d,\"b\":%d}",
+            qx, qy, px, r, g, b);
+    }
+
+    char first_nz[128] = "null";
+    if (first_nz_x >= 0) {
+        snprintf(first_nz, sizeof(first_nz),
+            "{\"x\":%d,\"y\":%d,\"rgb565\":%u}", first_nz_x, first_nz_y, first_nz_val);
+    }
+
+    char *resp = malloc(512);
+    if (!resp) return strdup("{\"jsonrpc\":\"2.0\",\"error\":{\"code\":-32603,\"message\":\"oom\"}}");
+    snprintf(resp, 512,
+        "{\"jsonrpc\":\"2.0\",\"result\":{\"nonzero_pixels\":%d,\"total_pixels\":%d,"
+        "\"unique_colors\":%d,\"first_nonzero\":%s%s}}",
+        nonzero, total, unique, first_nz, pixel_at);
+    return resp;
+}
+
+static char *h_display_diff(const char *params) {
+    uint16_t *fb = hal_display_get_framebuffer();
+    if (!fb) {
+        return strdup("{\"jsonrpc\":\"2.0\",\"error\":{\"code\":-32603,\"message\":\"no framebuffer\"}}");
+    }
+
+    char action[16] = "";
+    json_get_str(params, "action", action, sizeof(action));
+
+    if (strcmp(action, "capture") == 0) {
+        memcpy(s_diff_reference, fb, 320 * 320 * sizeof(uint16_t));
+        s_diff_has_reference = true;
+        return strdup("{\"jsonrpc\":\"2.0\",\"result\":{\"captured\":true}}");
+    }
+
+    if (strcmp(action, "compare") == 0) {
+        if (!s_diff_has_reference) {
+            return strdup("{\"jsonrpc\":\"2.0\",\"error\":{\"code\":-32602,\"message\":\"no reference captured\"}}");
+        }
+
+        const int total = 320 * 320;
+        int changed = 0;
+        int min_x = 320, min_y = 320, max_x = -1, max_y = -1;
+
+        for (int i = 0; i < total; i++) {
+            if (fb[i] != s_diff_reference[i]) {
+                changed++;
+                int x = i % 320;
+                int y = i / 320;
+                if (x < min_x) min_x = x;
+                if (x > max_x) max_x = x;
+                if (y < min_y) min_y = y;
+                if (y > max_y) max_y = y;
+            }
+        }
+
+        double pct = (changed * 100.0) / total;
+        char bbox[128] = "null";
+        if (changed > 0) {
+            snprintf(bbox, sizeof(bbox), "{\"x\":%d,\"y\":%d,\"w\":%d,\"h\":%d}",
+                min_x, min_y, max_x - min_x + 1, max_y - min_y + 1);
+        }
+
+        char *resp = malloc(256);
+        if (!resp) return strdup("{\"jsonrpc\":\"2.0\",\"error\":{\"code\":-32603,\"message\":\"oom\"}}");
+        snprintf(resp, 256,
+            "{\"jsonrpc\":\"2.0\",\"result\":{\"changed_pixels\":%d,\"total_pixels\":%d,"
+            "\"change_pct\":%.2f,\"bbox\":%s}}",
+            changed, total, pct, bbox);
+        return resp;
+    }
+
+    return strdup("{\"jsonrpc\":\"2.0\",\"error\":{\"code\":-32602,\"message\":\"action must be capture or compare\"}}");
+}
+
+static char *h_get_pixel(const char *params) {
+    uint16_t *fb = hal_display_get_framebuffer();
+    if (!fb) {
+        return strdup("{\"jsonrpc\":\"2.0\",\"error\":{\"code\":-32603,\"message\":\"no framebuffer\"}}");
+    }
+
+    int x = -1, y = -1, w = 1, h = 1;
+    json_get_int(params, "x", &x);
+    json_get_int(params, "y", &y);
+    json_get_int(params, "w", &w);
+    json_get_int(params, "h", &h);
+
+    if (x < 0 || y < 0 || x >= 320 || y >= 320) {
+        return strdup("{\"jsonrpc\":\"2.0\",\"error\":{\"code\":-32602,\"message\":\"x,y required and must be 0-319\"}}");
+    }
+    if (w < 1) w = 1;
+    if (h < 1) h = 1;
+    if (w > 16) w = 16;
+    if (h > 16) h = 16;
+    if (x + w > 320) w = 320 - x;
+    if (y + h > 320) h = 320 - y;
+
+    if (w == 1 && h == 1) {
+        uint16_t px = fb[y * 320 + x];
+        int r = ((px >> 11) & 0x1F) << 3;
+        int g = ((px >> 5) & 0x3F) << 2;
+        int b = (px & 0x1F) << 3;
+
+        char *resp = malloc(256);
+        if (!resp) return strdup("{\"jsonrpc\":\"2.0\",\"error\":{\"code\":-32603,\"message\":\"oom\"}}");
+        snprintf(resp, 256,
+            "{\"jsonrpc\":\"2.0\",\"result\":{\"x\":%d,\"y\":%d,\"rgb565\":%u,\"r\":%d,\"g\":%d,\"b\":%d}}",
+            x, y, px, r, g, b);
+        return resp;
+    }
+
+    // Region mode — return array of pixels
+    size_t buf_size = 64 + (size_t)(w * h) * 8;
+    char *pixels = malloc(buf_size);
+    if (!pixels) return strdup("{\"jsonrpc\":\"2.0\",\"error\":{\"code\":-32603,\"message\":\"oom\"}}");
+    pixels[0] = '\0';
+    size_t off = 0;
+
+    for (int row = y; row < y + h; row++) {
+        for (int col = x; col < x + w; col++) {
+            uint16_t px = fb[row * 320 + col];
+            off += (size_t)snprintf(pixels + off, buf_size - off, "%s%u",
+                off > 0 ? "," : "", px);
+        }
+    }
+
+    size_t resp_size = off + 256;
+    char *resp = malloc(resp_size);
+    if (!resp) { free(pixels); return strdup("{\"jsonrpc\":\"2.0\",\"error\":{\"code\":-32603,\"message\":\"oom\"}}"); }
+    snprintf(resp, resp_size,
+        "{\"jsonrpc\":\"2.0\",\"result\":{\"x\":%d,\"y\":%d,\"w\":%d,\"h\":%d,\"pixels\":[%s]}}",
+        x, y, w, h, pixels);
+    free(pixels);
+    return resp;
+}
+
 // ── Dispatch ─────────────────────────────────────────────────────────────────
 
 typedef char *(*handler_fn)(const char *params);
@@ -868,6 +1253,13 @@ static struct {
     { "get_log_buffer",     h_get_log_buffer },
     { "set_time_multiplier",h_set_time_multiplier },
     { "get_terminal_buffer", h_get_terminal_buffer },
+    { "shutdown",           h_shutdown },
+    { "clear_log_buffer",   h_clear_log_buffer },
+    { "get_crash_log",      h_get_crash_log },
+    { "wait_for_idle",      h_wait_for_idle },
+    { "display_stats",      h_display_stats },
+    { "display_diff",       h_display_diff },
+    { "get_pixel",          h_get_pixel },
     { NULL, NULL },
 };
 
@@ -875,7 +1267,23 @@ static void wrap_response(int id, const char *result, char *out, size_t max) {
     snprintf(out, max, "{\"jsonrpc\":\"2.0\",\"id\":%d,", id);
     size_t base = strlen(out);
     if (result && result[0] == '{') {
-        strncpy(out + base, result + 1, max - base - 1);
+        // Handler returns full JSON-RPC envelope like {"jsonrpc":"2.0","result":...}
+        // Skip past the handler's "jsonrpc":"2.0", to avoid duplicate key
+        const char *inner = result + 1;  // skip opening '{'
+        const char *skip = strstr(inner, "\"jsonrpc\"");
+        if (skip) {
+            // Find the comma after the jsonrpc value
+            const char *after = strchr(skip, ',');
+            if (after) {
+                after++;  // skip the comma
+                while (*after == ' ' || *after == '\t') after++;
+                strncpy(out + base, after, max - base - 1);
+            } else {
+                strncpy(out + base, inner, max - base - 1);
+            }
+        } else {
+            strncpy(out + base, inner, max - base - 1);
+        }
     } else if (result) {
         snprintf(out + base, max - base, "\"result\":%s}", result);
     } else {
@@ -888,7 +1296,7 @@ static void wrap_response(int id, const char *result, char *out, size_t max) {
 char *sim_handler_dispatch(const char *request, const char *end) {
     int id = 0;
     char method[128] = {0};
-    static char params[8192];
+    char *params = NULL;
 
     if ((size_t)(end - request) < 9 || strncmp(request, "{\"jsonrpc\"", 9) != 0) {
         return strdup("{\"jsonrpc\":\"2.0\",\"error\":{\"code\":-32600,\"message\":\"Invalid request\"}}");
@@ -921,7 +1329,6 @@ char *sim_handler_dispatch(const char *request, const char *end) {
     while (*m && *m != '"' && mi < sizeof(method) - 1) method[mi++] = *m++;
     method[mi] = '\0';
 
-    params[0] = '\0';
     const char *params_start = strstr(request, "\"params\"");
     if (params_start && params_start < end) {
         const char *colon = strchr(params_start, ':');
@@ -937,25 +1344,37 @@ char *sim_handler_dispatch(const char *request, const char *end) {
                     end_brace++;
                 }
                 size_t len = (size_t)(end_brace - p);
-                if (len < sizeof(params)) {
+                params = malloc(len + 1);
+                if (params) {
                     memcpy(params, p, len);
                     params[len] = '\0';
                 }
             }
         }
     }
+    if (!params) {
+        params = malloc(4);
+        if (params) { params[0] = '\0'; }
+    }
 
+    char *ret = NULL;
     for (int i = 0; s_handlers[i].name; i++) {
         if (strcmp(s_handlers[i].name, method) == 0) {
-            char *result = s_handlers[i].fn(params);
-            if (!result) return strdup("{\"jsonrpc\":\"2.0\",\"error\":{\"code\":-32603,\"message\":\"handler returned null\"}}");
-            static char resp_buf[1024 * 1024];
-            wrap_response(id, result, resp_buf, sizeof(resp_buf));
-            free(result);
-            return strdup(resp_buf);
+            char *result = s_handlers[i].fn(params ? params : "");
+            if (!result) {
+                ret = strdup("{\"jsonrpc\":\"2.0\",\"error\":{\"code\":-32603,\"message\":\"handler returned null\"}}");
+            } else {
+                static char resp_buf[1024 * 1024];
+                wrap_response(id, result, resp_buf, sizeof(resp_buf));
+                free(result);
+                ret = strdup(resp_buf);
+            }
+            free(params);
+            return ret;
         }
     }
 
+    free(params);
     static char err[256];
     snprintf(err, sizeof(err),
              "{\"jsonrpc\":\"2.0\",\"id\":%d,\"error\":{\"code\":-32601,\"message\":\"method not found: %s\"}}",

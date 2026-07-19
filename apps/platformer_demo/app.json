@@ -1,0 +1,11 @@
+{
+  "id": "com.picos.platformer",
+  "name": "Platformer Demo",
+  "description": "Demonstrates game framework: camera, scenes, save/load",
+  "version": "1.0.0",
+  "author": "PicOS Team",
+  "requirements": [],
+  "category": "demos",
+  "repo": "jeffory/picos-apps",
+  "min_firmware": "1.0.0"
+}

@@ -11,6 +11,8 @@
 #include "../os/os.h"
 #include "../os/ui.h"
 
+#include <stdatomic.h>
+
 // Define BYTE/LBA_t and other FatFs types manually before diskio.h
 // just in case they are missing from diskio.h inclusion order
 #include <stdint.h>
@@ -32,13 +34,15 @@ static volatile bool s_msc_ejected = false;  // Set by tud_msc_start_stop_cb whe
 static volatile bool s_media_changed = false; // Signals UNIT ATTENTION on next TUR
 static uint32_t s_cached_sector_count = 0;   // Cached at MSC entry, avoids SPI per query
 
+bool usb_msc_is_active(void) { return s_msc_active; }
+
 // --------------------------------------------------------------------
 // USB MSC Entry point
 // --------------------------------------------------------------------
 
 // Declared in main.c - pauses Core 1's background tasks (WiFi, HTTP, audio)
-extern volatile bool g_core1_pause;
-extern volatile bool g_core1_paused;
+extern _Atomic bool g_core1_pause;
+extern _Atomic bool g_core1_paused;
 
 void usb_msc_enter_mode(void) {
   printf("[USB MSC] Entering USB Mass Storage mode\n");
@@ -46,7 +50,8 @@ void usb_msc_enter_mode(void) {
   // 1. Disconnect WiFi and pause Core 1 to prevent SPI/I2C contention
   //    Core 1 runs WiFi/HTTP/audio tasks every 5ms which can interfere
   //    with USB MSC operations and cause keyboard I2C timeouts.
-  bool was_connected = (wifi_get_status() == WIFI_STATUS_CONNECTED);
+  wifi_status_t wst = wifi_get_status();
+  bool was_connected = (wst == WIFI_STATUS_CONNECTED || wst == WIFI_STATUS_ONLINE);
   if (was_connected) {
     printf("[USB MSC] Disconnecting WiFi...\n");
     wifi_disconnect();
@@ -54,9 +59,10 @@ void usb_msc_enter_mode(void) {
   
   // Pause Core 1 completely - wait for acknowledgment to ensure it's stopped
   g_core1_pause = true;
-  while (!g_core1_paused) {
+  for (int i = 0; i < 500 && !g_core1_paused; i++)
     sleep_ms(1);
-  }
+  if (!g_core1_paused)
+    printf("[USB_MSC] Core 1 pause timeout (500ms)\n");
   printf("[USB MSC] Core 1 paused (WiFi/HTTP/audio halted)\n");
 
   // 2. Ensure FS Info has valid free cluster count, then unmount FatFS.
@@ -113,7 +119,12 @@ void usb_msc_enter_mode(void) {
 
     // Check ESC key with rate limiting to avoid I2C bus congestion
     if (now - last_kbd_poll_ms >= KBD_POLL_INTERVAL_MS) {
+      // Disable USB IRQ during I2C keyboard poll — USB MSC callbacks
+      // (read10/write10) run in USBCTRL_IRQ and do multi-ms SPI transfers
+      // that preempt the I2C transaction past its 5ms timeout.
+      irq_set_enabled(USBCTRL_IRQ, false);
       kbd_poll();
+      irq_set_enabled(USBCTRL_IRQ, true);
       last_kbd_poll_ms = now;
       if (kbd_get_buttons_pressed() & BTN_ESC) {
         printf("[USB MSC] ESC key pressed, exiting\n");
@@ -202,10 +213,11 @@ void usb_msc_enter_mode(void) {
 // --------------------------------------------------------------------
 
 // Invoked when device is mounted by the host
-void tud_mount_cb(void) { printf("[USB MSC] Device mounted by host\n"); }
+// No printf — runs in USBCTRL_IRQ; CDC serial deadlocks here.
+void tud_mount_cb(void) { }
 
 // Invoked when device is unmounted by the host
-void tud_umount_cb(void) { printf("[USB MSC] Device unmounted by host\n"); }
+void tud_umount_cb(void) { }
 
 // Invoked to determine max LUN
 uint8_t tud_msc_get_maxlun_cb(void) { return 0; }
@@ -242,7 +254,7 @@ bool tud_msc_start_stop_cb(uint8_t lun, uint8_t power_condition, bool start,
   (void)power_condition;
   (void)start;
   if (load_eject) {
-    printf("[USB MSC] Host ejected device\n");
+    // No printf — runs in USBCTRL_IRQ; CDC serial deadlocks here.
     s_msc_ejected = true;
   }
   return true;
@@ -256,8 +268,11 @@ int32_t tud_msc_read10_cb(uint8_t lun, uint32_t lba, uint32_t offset,
   if (!s_msc_active)
     return -1;
 
-  // No mutex — Core 1 is paused during MSC mode, nothing else uses SPI0
+  // Defense-in-depth: Core 1 is paused during MSC mode so the mutex is
+  // uncontended, but acquire it anyway to guard against future changes.
+  recursive_mutex_enter_blocking(&g_sdcard_mutex);
   DRESULT res = disk_read(0, (BYTE *)buffer, lba, bufsize / msc_block_size);
+  recursive_mutex_exit(&g_sdcard_mutex);
   if (res != RES_OK)
     return -1;
 
@@ -277,8 +292,11 @@ int32_t tud_msc_write10_cb(uint8_t lun, uint32_t lba, uint32_t offset,
   if (!s_msc_active)
     return -1;
 
-  // No mutex — Core 1 is paused during MSC mode, nothing else uses SPI0
+  // Defense-in-depth: Core 1 is paused during MSC mode so the mutex is
+  // uncontended, but acquire it anyway to guard against future changes.
+  recursive_mutex_enter_blocking(&g_sdcard_mutex);
   DRESULT res = disk_write(0, (const BYTE *)buffer, lba, bufsize / msc_block_size);
+  recursive_mutex_exit(&g_sdcard_mutex);
   if (res != RES_OK)
     return -1;
 
@@ -314,6 +332,13 @@ int32_t tud_msc_scsi_cb(uint8_t lun, uint8_t const scsi_cmd[16], void *buffer,
   (void)bufsize;
 
   switch (scsi_cmd[0]) {
+  case 0x35: /* SYNCHRONIZE CACHE (10) — host sends before eject to flush
+              * its write-back cache.  Returning ILLEGAL REQUEST here caused
+              * the host to skip the final sync → unflushed FAT/bitmap sectors
+              * → filesystem corruption (clusters marked as free). */
+    disk_ioctl(0, CTRL_SYNC, NULL);
+    return 0;
+
   default:
     tud_msc_set_sense(lun, SCSI_SENSE_ILLEGAL_REQUEST, 0x20, 0x00);
     return -1;

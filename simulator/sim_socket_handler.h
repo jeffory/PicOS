@@ -8,7 +8,7 @@ void sim_handler_clear_pending_launch(void);
 void sim_handler_request_exit(void);
 const char *sim_handler_get_pending_launch(void);
 void sim_handler_clear_pending_launch_state(void);
-void sim_handler_check_launch(void);
+bool sim_handler_check_launch(void);
 
 void sim_log_append(const char *line);
 char *sim_get_log_buffer(void);

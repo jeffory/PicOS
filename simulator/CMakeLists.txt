@@ -192,6 +192,32 @@ target_include_directories(sim_network PUBLIC
 target_link_libraries(sim_network PUBLIC CURL::libcurl Threads::Threads)
 target_compile_definitions(sim_network PUBLIC PICOS_SIMULATOR=1 WIFI_ENABLED=1)
 
+# ── Unicorn Engine (ARM emulation for native apps) ─────────────────────────
+include(FetchContent)
+FetchContent_Declare(
+    unicorn
+    GIT_REPOSITORY https://github.com/unicorn-engine/unicorn.git
+    GIT_TAG        2.1.1
+    GIT_SHALLOW    TRUE
+)
+# Build Unicorn as static library, disable unneeded architectures
+set(UNICORN_BUILD_SHARED OFF CACHE BOOL "" FORCE)
+set(UNICORN_ARCH "arm" CACHE STRING "" FORCE)
+set(UNICORN_INSTALL OFF CACHE BOOL "" FORCE)
+set(BUILD_SHARED_LIBS OFF CACHE BOOL "" FORCE)
+FetchContent_MakeAvailable(unicorn)
+
+# ── Generate miniz_export.h stub (miniz's own CMake does this, but we
+#    compile sources directly so we need to create it ourselves) ─────────────
+if(NOT EXISTS "${PICOS_ROOT}/third_party/miniz/miniz_export.h")
+    file(WRITE "${PICOS_ROOT}/third_party/miniz/miniz_export.h"
+        "#ifndef MINIZ_EXPORT_H\n"
+        "#define MINIZ_EXPORT_H\n"
+        "#define MINIZ_EXPORT\n"
+        "#endif\n"
+    )
+endif()
+
 # ── Main Simulator Executable ───────────────────────────────────────────────
 set(PICOS_CORE_SOURCES
     ${PICOS_ROOT}/src/os/launcher.c
@@ -210,6 +236,7 @@ set(PICOS_CORE_SOURCES
     ${PICOS_ROOT}/src/os/lua_bridge_graphics.c
     ${PICOS_ROOT}/src/os/lua_bridge_3d.c
     ${PICOS_ROOT}/src/os/lua_bridge_ui.c
+    ${PICOS_ROOT}/src/os/toast.c
     ${PICOS_ROOT}/src/os/lua_bridge_audio.c
     ${PICOS_ROOT}/src/os/lua_bridge_sound.c
     ${PICOS_ROOT}/src/os/lua_bridge_repl.c
@@ -228,16 +255,28 @@ set(PICOS_CORE_SOURCES
     ${PICOS_ROOT}/src/os/terminal_render.c
     ${PICOS_ROOT}/src/os/lua_bridge_terminal.c
     ${PICOS_ROOT}/src/os/lua_bridge_crypto.c
+    ${PICOS_ROOT}/src/os/lua_bridge_mod.c
+    ${PICOS_ROOT}/src/os/lua_bridge_zip.c
+    ${PICOS_ROOT}/src/drivers/mod_player.c
+    ${PICOS_ROOT}/third_party/miniz/miniz.c
+    ${PICOS_ROOT}/third_party/miniz/miniz_tinfl.c
+    ${PICOS_ROOT}/third_party/miniz/miniz_tdef.c
+    ${PICOS_ROOT}/third_party/miniz/miniz_zip.c
     ${PICOS_ROOT}/src/os/text_input.c
     ${PICOS_ROOT}/src/os/file_browser.c
     ${PICOS_ROOT}/src/os/config.c
     ${PICOS_ROOT}/src/os/clock.c
     ${PICOS_ROOT}/src/os/tz_picker.c
     ${PICOS_ROOT}/src/os/ui.c
+    ${PICOS_ROOT}/src/os/ui_widgets.c
+    ${PICOS_ROOT}/src/os/text_wrap.c
     ${CMAKE_CURRENT_SOURCE_DIR}/stubs/dev_commands_stub.c
     ${PICOS_ROOT}/src/fonts/font_6x11.c
     ${PICOS_ROOT}/src/fonts/font_scientifica.c
     ${PICOS_ROOT}/src/os/image_decoders.cpp
+    ${PICOS_ROOT}/src/drivers/image_api.c
+    ${PICOS_ROOT}/src/os/text_wrap.c
+    ${PICOS_ROOT}/src/os/ui_widgets.c
 )
 
 # Filter out crypto (not yet implemented in simulator)
@@ -250,10 +289,13 @@ add_executable(picos_simulator
     main.c
     sim_socket.c
     sim_socket_handler.c
+    unicorn_runner.c
+    unicorn_trampolines.c
     ${PICOS_CORE_SOURCES}
 )
 
 target_include_directories(picos_simulator PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}
     ${CMAKE_CURRENT_SOURCE_DIR}/stubs
     ${PICOS_ROOT}/src
     ${PICOS_ROOT}/src/os
@@ -261,6 +303,10 @@ target_include_directories(picos_simulator PRIVATE
     ${PICOS_ROOT}/src/drivers
     ${PICOS_ROOT}/src/usb
     ${PICOS_ROOT}/third_party/umm_malloc/src
+    ${PICOS_ROOT}/third_party/miniz
+    ${PICOS_ROOT}/third_party/stb
+    ${PICOS_ROOT}/third_party/pocketmod
+    ${unicorn_SOURCE_DIR}/include
 )
 
 target_link_libraries(picos_simulator PRIVATE
@@ -268,6 +314,7 @@ target_link_libraries(picos_simulator PRIVATE
     sim_network
     lua_sim
     image_decoders_sim
+    unicorn
     SDL2::SDL2
     SDL2_image::SDL2_image
     Threads::Threads
@@ -280,6 +327,7 @@ target_compile_definitions(picos_simulator PRIVATE
     DISPLAY_SCALE=3
     SIMULATOR_BUILD=1
     WIFI_ENABLED=1
+    PICOS_PROJECT_ROOT="${PICOS_ROOT}"
 )
 
 target_compile_options(picos_simulator PRIVATE
@@ -288,6 +336,20 @@ target_compile_options(picos_simulator PRIVATE
     -O2
     -g
 )
+
+# miniz: decompression only, no stdio, use standard malloc on simulator (no umm_malloc)
+set_source_files_properties(
+    ${PICOS_ROOT}/third_party/miniz/miniz.c
+    ${PICOS_ROOT}/third_party/miniz/miniz_tinfl.c
+    ${PICOS_ROOT}/third_party/miniz/miniz_tdef.c
+    ${PICOS_ROOT}/third_party/miniz/miniz_zip.c
+    PROPERTIES COMPILE_DEFINITIONS
+    "MINIZ_NO_STDIO;MINIZ_NO_ARCHIVE_WRITING_APIS;MINIZ_NO_ZLIB_COMPATIBLE_NAMES"
+)
+
+# Unicorn Engine's crc32c.c and PNGdec's crc32.c both define crc32 —
+# they are unrelated implementations; allow the linker to pick the first one.
+target_link_options(picos_simulator PRIVATE -Wl,--allow-multiple-definition)
 
 # ── Install / Run ───────────────────────────────────────────────────────────
 set_target_properties(picos_simulator PROPERTIES

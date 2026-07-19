@@ -30,7 +30,15 @@ bool hal_display_init(const char* title) {
     // Create renderer with vsync for 60fps cap
     g_renderer = SDL_CreateRenderer(g_window, -1,
         SDL_RENDERER_ACCELERATED | SDL_RENDERER_PRESENTVSYNC);
-    
+
+    // Headless environments (SDL_VIDEODRIVER=dummy in CI) register no
+    // accelerated render driver, and SDL only matches drivers whose flags are a
+    // superset of those requested — so SDL_RENDERER_ACCELERATED excludes the
+    // software renderer outright. Fall back to it rather than failing to start.
+    if (!g_renderer) {
+        g_renderer = SDL_CreateRenderer(g_window, -1, SDL_RENDERER_SOFTWARE);
+    }
+
     if (!g_renderer) {
         fprintf(stderr, "Failed to create renderer: %s\n", SDL_GetError());
         SDL_DestroyWindow(g_window);

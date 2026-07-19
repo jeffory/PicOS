@@ -1,0 +1,7 @@
+{
+    "id": "com.picos.color_test",
+    "name": "Color Test",
+    "description": "Display color verification for E2E testing",
+    "version": "1.0",
+    "author": "PicOS E2E"
+}

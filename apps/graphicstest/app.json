@@ -2,5 +2,8 @@
   "name": "Graphics Test",
   "version": "1.0",
   "author": "PicOS",
-  "icon": ""
+  "icon": "",
+  "category": "demos",
+  "repo": "jeffory/picos-apps",
+  "min_firmware": "1.0.0"
 }

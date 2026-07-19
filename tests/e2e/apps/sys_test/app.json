@@ -1,0 +1,7 @@
+{
+    "id": "com.picos.sys_test",
+    "name": "Sys Test",
+    "description": "System functions test fixture",
+    "version": "1.0",
+    "author": "PicOS"
+}

@@ -56,7 +56,7 @@ static int l_graphics_draw3DWireframeEx(lua_State *L) {
     }
 
     // Light direction (normalized): upper-right, toward camera
-    static const float lx = 0.267f, ly = -0.535f, lz = 0.802f;
+    static const float lx = 0.267f, ly = -0.535f, lz = -0.802f;
     static const float ambient = 0.15f;
 
     // Fill triangles from faces table with per-face Lambert shading
@@ -81,11 +81,11 @@ static int l_graphics_draw3DWireframeEx(lua_State *L) {
             float ny = ez1*ex2 - ex1*ez2;
             float nz = ex1*ey2 - ey1*ex2;
 
-            // Back-face cull using TGX approach (Renderer3D.inl:689-692):
-            // dot(faceNormal, cameraToVertex) — cull when face points toward camera
+            // Back-face cull: dot(faceNormal, cameraToVertex)
             // Camera is at (0, 0, -fov), so view vector = (rvx, rvy, rvz + fov)
+            // dot > 0 means normal faces away from camera (back face) — skip it
             float cull = nx * rvx[a] + ny * rvy[a] + nz * (rvz[a] + fov);
-            if (cull < 0.0f) continue;
+            if (cull > 0.0f) continue;
 
             // Lambert shading: dot(N, L) / |N|
             float len = sqrtf(nx*nx + ny*ny + nz*nz);

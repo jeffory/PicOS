@@ -236,6 +236,18 @@ void kbd_poll(void) {
     // Bus is struggling — skip this frame entirely to keep display responsive
     goto done_polling;
   }
+
+  // Rate-limit the I2C transaction: at 10 kHz each FIFO read costs ~5-6 ms,
+  // so polling every frame would eat a third of a 60 fps frame budget.
+  // 20 Hz sampling is still fine for human input (the STM32 queues events in
+  // its FIFO between polls); skipped calls still refresh edge-detection state
+  // above.
+  {
+    static uint32_t s_next_i2c_ms = 0;
+    if (now_ms < s_next_i2c_ms)
+      goto done_polling;
+    s_next_i2c_ms = now_ms + 50;
+  }
   for (int i = 0; i < 8; i++) {
     uint8_t event[2] = {0, 0};
     if (!i2c_read_reg(KBD_REG_FIF, event, 2, KBD_REG_DELAY_MS))
@@ -464,6 +476,15 @@ void kbd_clear_state(void) {
 }
 
 void kbd_inject_buttons(uint32_t buttons) {
+  // Mirror the physical-key intercepts: BTN_MENU is an OS-level trigger that
+  // must set the menu flag and stay hidden from apps (physical MENU is
+  // intercepted in kbd_poll and stripped from s_buttons_curr). Without this,
+  // an injected MENU reached apps as a plain button and never opened the
+  // system menu.
+  if (buttons & BTN_MENU) {
+    s_menu_pressed = true;
+    buttons &= ~BTN_MENU;
+  }
   s_injected_buttons = buttons;
 }
 

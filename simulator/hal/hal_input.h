@@ -49,10 +49,26 @@ void hal_input_update(void);
 uint32_t hal_input_get_buttons(void);
 uint32_t hal_input_get_buttons_pressed(void);
 
+// Atomically snapshot held+pressed buttons and clear edge state.
+// Injected buttons auto-release here, so one inject = press edge + one
+// frame of held + release edge on the following frame. Taking the mutex
+// once for the whole read+clear closes the race where an RPC inject
+// landing between the old separate read/clear calls was dropped.
+void hal_input_read_buttons(uint32_t* out_buttons, uint32_t* out_pressed);
+
 // Get character input (for text entry)
 char hal_input_get_char(void);
 
 // Poll for character (non-blocking)
 bool hal_input_poll_char(char* out_char);
+
+// Inject button press (for RPC control)
+void hal_input_inject_buttons(uint32_t buttons);
+
+// Release (possibly injected) buttons immediately (for RPC control)
+void hal_input_release_buttons(uint32_t buttons);
+
+// Inject a typed character into the char ring buffer (for RPC control)
+void hal_input_inject_char(char c);
 
 #endif // HAL_INPUT_H

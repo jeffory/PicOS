@@ -120,6 +120,12 @@ void DG_DrawFrame() {
         const unsigned char *src = I_VideoBuffer;
         const uint16_t *pal = rgb565_be_palette;
 
+        // PHASE-0 DIAG: breadcrumbs around the render + flush steps so we can
+        // pinpoint which stage hangs on the first frame.
+        static int s_diag_calls = 0;
+        bool diag = (s_diag_calls < 3);
+        if (diag) s_api->sys->log("DOOM: render begin");
+
         for (int y = 0; y < 200; y++) {
             uint16_t *dst = &fb[(y + DOOM_Y_OFFSET) * 320];
             const unsigned char *row = &src[y * 320];
@@ -131,24 +137,41 @@ void DG_DrawFrame() {
             }
         }
 
+        if (diag) s_api->sys->log("DOOM: render done");
+
         if (s_show_fps) {
             s_api->perf->drawFPS(250, 8);
         }
 
         // Flush only the active region (rows 59-260 with margin) instead of full 320x320.
         // This reduces DMA transfer by ~38% (64K pixels vs 102K pixels).
+        if (diag) s_api->sys->log("DOOM: flush begin");
         s_api->display->flushRegion(DOOM_Y_OFFSET - 1, DOOM_Y_OFFSET + 200);
+        if (diag) s_api->sys->log("DOOM: flush done");
 
         s_api->perf->endFrame();
+
+        if (diag) { s_diag_calls++; s_api->sys->log("DOOM: frame done"); }
     }
 }
 
 void DG_SleepMs(uint32_t ms) {
-    // No-op for now
+    // Feed the watchdog during any spin-wait (e.g. TryRunTics).
+    s_api->sys->poll();
 }
 
 uint32_t DG_GetTicksMs() {
-    return s_api->sys->getTimeMs();
+    uint32_t now = s_api->sys->getTimeMs();
+    // Feed the watchdog during the long init phase (WAD loading, hash tables,
+    // subsystem init) which runs entirely inside doomgeneric_Create() before
+    // the main loop gets a chance to call poll(). Throttled to once per 500ms
+    // to avoid hammering kbd_poll() on every timing query.
+    static uint32_t s_last_poll_ms = 0;
+    if (now - s_last_poll_ms >= 500) {
+        s_last_poll_ms = now;
+        s_api->sys->poll();
+    }
+    return now;
 }
 
 int DG_GetKey(int* pressed, unsigned char* key) {
@@ -218,11 +241,21 @@ void picos_main(const PicoCalcAPI *api,
         return;
     }
 
-    // Pass -gfxmode rgb565 to i_video.c
-    char* argv[] = {"doom", "-gfxmode", "rgb565", NULL};
+    // Build path to doom1.wad in app directory
+    static char wad_path[256];
+    snprintf(wad_path, sizeof(wad_path), "%s/doom1.wad", app_dir);
+
+    // Pass -gfxmode rgb565 and -iwad pointing to the app directory.
+    // -nomusic: the Nuked-OPL3 synth sustains only ~6.5k samples/s from
+    // 50 MHz serial-mode PSRAM (11025 needed) — music playback starves the
+    // Core 1 mixer into constant underruns and drags SFX down with it.
+    // Re-enable once the QMI runs the PSRAM in quad mode (~4x bandwidth)
+    // or a lighter OPL core is used.  SFX mixes at full rate without it.
+    char* argv[] = {"doom", "-gfxmode", "rgb565", "-nomusic",
+                    "-iwad", wad_path, NULL};
 
     // Initialize DOOM (runs one tick internally, then returns)
-    doomgeneric_Create(3, argv);
+    doomgeneric_Create(5, argv);
 
     // Main game loop — doomgeneric expects the platform to drive ticks
     while (!api->sys->shouldExit()) {

@@ -48,9 +48,9 @@ extern "C" {
 #define CFG_TUD_CDC_RX_BUFSIZE 256
 #define CFG_TUD_CDC_TX_BUFSIZE 256
 
-// MSC Buffer size of Device Mass storage
-// Limited by SRAM — 4KB is the largest that fits with current BSS usage
-#define CFG_TUD_MSC_EP_BUFSIZE 4096
+// MSC Buffer size — 512 = single-sector CMD24 writes only (no partial
+// multi-block failures).  Matches uf2loader reference.  Saves 3.5KB SRAM.
+#define CFG_TUD_MSC_EP_BUFSIZE 512
 
 #ifdef __cplusplus
 }

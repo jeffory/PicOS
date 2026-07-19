@@ -1,0 +1,11 @@
+{
+    "id": "com.picos.ssh",
+    "name": "SSH",
+    "description": "SSH terminal client",
+    "version": "0.1.0",
+    "author": "PicOS",
+    "requirements": ["http", "root-filesystem"],
+    "category": "network",
+    "repo": "jeffory/picos-apps",
+    "min_firmware": "1.0.0"
+}

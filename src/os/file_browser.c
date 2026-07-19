@@ -2,6 +2,7 @@
 #include "../drivers/display.h"
 #include "../drivers/keyboard.h"
 #include "../drivers/sdcard.h"
+#include "../dev_commands.h"
 #include "os.h"
 
 #include "hardware/watchdog.h"
@@ -195,6 +196,10 @@ bool file_browser_show(const char *start_path, const char *root_path,
     }
 
     kbd_poll();
+    // Pump dev commands (keypress/screenshot/exit) so they don't stall
+    // for the entire time this modal is open.
+    dev_commands_poll();
+    dev_commands_process();
     uint32_t pressed = kbd_get_buttons_pressed();
 
     if (pressed & BTN_UP) {
@@ -231,6 +236,10 @@ bool file_browser_show(const char *start_path, const char *root_path,
         } else {
           // File selected — return the full path
           snprintf(out_path, out_len, "%s/%s", cur_path, s_entries[sel].name);
+          // Clear the button edge-latch before returning (matches
+          // system_menu.c) so the caller's own button checks don't see a
+          // stale Enter/Esc edge from this modal's input handling.
+          kbd_clear_state();
           return true;
         }
       }
@@ -239,6 +248,10 @@ bool file_browser_show(const char *start_path, const char *root_path,
     if (pressed & BTN_ESC) {
       // Go up one directory; cancel if already at (or above) root_path
       if (strcmp(cur_path, root_path) == 0) {
+        // Clear the button edge-latch before returning (matches
+        // system_menu.c) so the caller's own button checks don't see a
+        // stale Esc edge from this modal's input handling.
+        kbd_clear_state();
         return false; // already at the sandbox root — cancel
       }
       char *last_slash = strrchr(cur_path, '/');
@@ -252,6 +265,10 @@ bool file_browser_show(const char *start_path, const char *root_path,
         scroll = 0;
         need_redraw = true;
       } else {
+        // Clear the button edge-latch before returning (matches
+        // system_menu.c) so the caller's own button checks don't see a
+        // stale Esc edge from this modal's input handling.
+        kbd_clear_state();
         return false;
       }
     }

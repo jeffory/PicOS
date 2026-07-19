@@ -50,19 +50,41 @@ static const char *fresult_name(FRESULT res) {
 // Appends one line to /system/filesystem.log and mirrors it to UART.
 // op:   short name of the sdcard_* function that failed (e.g. "sdcard_fopen")
 // path: file/dir path involved, or NULL for mount-level errors
+//
+// Rate-limited: during sustained failures (e.g. SD card reset during download),
+// disk_write fails on every chunk, producing hundreds of identical messages.
+// After 3 errors, UART output is throttled to once per second and filesystem
+// log writes are skipped entirely (the card is likely still broken).
 static bool s_log_busy = false; // recursion guard
+static uint32_t s_corruption_count = 0;
+static uint32_t s_last_corruption_log_ms = 0;
+
 static void sdcard_log_corruption(FRESULT res, const char *op, const char *path) {
+    s_corruption_count++;
+    uint32_t now_ms = (uint32_t)(time_us_64() / 1000);
+
+    // Rate-limit UART output during sustained failures
+    if (s_corruption_count > 3 && (now_ms - s_last_corruption_log_ms) < 1000)
+        return;
+    s_last_corruption_log_ms = now_ms;
+
     char buf[256];
     if (path)
         snprintf(buf, sizeof(buf), "[%8lums] %s(%d) on %s: %s\n",
-                 (unsigned long)time_us_64() / 1000,
+                 (unsigned long)now_ms,
                  fresult_name(res), (int)res, op, path);
     else
         snprintf(buf, sizeof(buf), "[%8lums] %s(%d) on %s\n",
-                 (unsigned long)time_us_64() / 1000,
+                 (unsigned long)now_ms,
                  fresult_name(res), (int)res, op);
 
-    printf("[SD] corruption: %s", buf);
+    if (s_corruption_count > 3)
+        printf("[SD] corruption (x%lu): %s", (unsigned long)s_corruption_count, buf);
+    else
+        printf("[SD] corruption: %s", buf);
+
+    // Skip filesystem log write during sustained failures — card is likely broken
+    if (s_corruption_count > 3) return;
 
     if (!s_mounted) return;
 
@@ -85,6 +107,11 @@ static void sdcard_log_corruption(FRESULT res, const char *op, const char *path)
         recursive_mutex_exit(&g_sdcard_mutex);
         umm_free(f);
     }
+}
+
+// Reset corruption counter — call after successful SD operation to re-enable logging
+void sdcard_reset_corruption_count(void) {
+    s_corruption_count = 0;
 }
 
 // ── SPI SD card low-level (bit-bang layer for FatFS diskio) ──────────────────
@@ -137,6 +164,39 @@ bool sdcard_is_mounted(void) {
     return s_mounted;
 }
 
+bool sdcard_ensure_ready(void) {
+    if (!s_mounted) return false;
+
+    recursive_mutex_enter_blocking(&g_sdcard_mutex);
+
+    /* Probe the card with a lightweight operation (stat the root).
+     * If this fails, the card went unresponsive — remount to trigger
+     * the full recovery sequence in disk_initialize(). */
+    FILINFO *fi = (FILINFO *)umm_malloc(sizeof(FILINFO));
+    bool ok = false;
+    if (fi) {
+        ok = (f_stat("/system", fi) == FR_OK);
+        umm_free(fi);
+    }
+
+    if (!ok) {
+        printf("[SD] Card not responding, attempting recovery...\n");
+        f_unmount("");
+        s_mounted = false;
+        sleep_ms(50);
+        if (f_mount(&s_fs, "", 1) == FR_OK) {
+            s_mounted = true;
+            ok = true;
+            printf("[SD] Card recovered via remount\n");
+        } else {
+            printf("[SD] Recovery failed — card may need physical reset\n");
+        }
+    }
+
+    recursive_mutex_exit(&g_sdcard_mutex);
+    return ok;
+}
+
 void sdcard_apply_clock(void) {
     spi_set_baudrate(SD_SPI_PORT, SD_SPI_BAUD);
 }
@@ -180,7 +240,27 @@ sdfile_t sdcard_fopen(const char *path, const char *mode) {
     if (!f) return NULL;
 
     recursive_mutex_enter_blocking(&g_sdcard_mutex);
-    FRESULT res = f_open(f, path, mode_to_fatfs(mode));
+    BYTE flags = mode_to_fatfs(mode);
+    FRESULT res = f_open(f, path, flags);
+
+    /* If the card went unresponsive (e.g., brownout during WiFi activity),
+     * f_open fails with DISK_ERR.  Remount triggers disk_initialize() which
+     * runs the full card recovery sequence, then retry the open once. */
+    if (res == FR_DISK_ERR || res == FR_NOT_READY) {
+        printf("[SD] fopen failed (%d), attempting remount+retry...\n", (int)res);
+        f_unmount("");
+        s_mounted = false;
+        sleep_ms(50);
+        if (f_mount(&s_fs, "", 1) == FR_OK) {
+            s_mounted = true;
+            res = f_open(f, path, flags);
+            if (res == FR_OK)
+                printf("[SD] fopen succeeded after remount\n");
+        } else {
+            printf("[SD] remount failed\n");
+        }
+    }
+
     recursive_mutex_exit(&g_sdcard_mutex);
     if (res != FR_OK) {
         if (is_fs_corruption(res)) sdcard_log_corruption(res, "sdcard_fopen", path);
@@ -207,8 +287,11 @@ int sdcard_fwrite(sdfile_t f, const void *buf, int len) {
     UINT bw = 0;
     FRESULT res = f_write((FIL *)f, buf, (UINT)len, &bw);
     recursive_mutex_exit(&g_sdcard_mutex);
-    if (res != FR_OK && is_fs_corruption(res))
+    if (res == FR_OK) {
+        if (s_corruption_count > 0) s_corruption_count = 0;
+    } else if (is_fs_corruption(res)) {
         sdcard_log_corruption(res, "sdcard_fwrite", NULL);
+    }
     return (res == FR_OK) ? (int)bw : -1;
 }
 
@@ -341,6 +424,35 @@ bool sdcard_delete(const char *path) {
         disk_ioctl(0, CTRL_SYNC, NULL);  // Flush FAT/directory update to SD
     recursive_mutex_exit(&g_sdcard_mutex);
     return ok;
+}
+
+// Recursively delete a directory and all its contents.
+static void delete_recursive_cb(const sdcard_entry_t *entry, void *user) {
+    char *parent = (char *)user;
+    char path[512];
+    snprintf(path, sizeof(path), "%s/%s", parent, entry->name);
+    if (entry->is_dir) {
+        sdcard_delete_recursive(path);
+    } else {
+        sdcard_delete(path);
+    }
+}
+
+bool sdcard_delete_recursive(const char *path) {
+    if (!s_mounted) return false;
+
+    sdcard_stat_t st;
+    if (!sdcard_stat(path, &st)) return false;
+
+    if (!st.is_dir) {
+        return sdcard_delete(path);
+    }
+
+    // Delete contents first, then the empty directory
+    char path_copy[512];
+    snprintf(path_copy, sizeof(path_copy), "%s", path);
+    sdcard_list_dir(path, delete_recursive_cb, path_copy);
+    return sdcard_delete(path);
 }
 
 bool sdcard_rename(const char *src, const char *dst) {

@@ -31,3 +31,11 @@ void audio_push_samples(const int16_t *samples, int count);
 // Must be called periodically from Core 1 to handle deferred DMA start.
 // This ensures the stream DMA ISR fires on Core 1, not Core 0.
 void audio_stream_poll(void);
+
+// Debug: get DMA ISR count, underrun count, and ring buffer fill level.
+void audio_stream_debug(uint32_t *isr_count, uint32_t *underruns, uint32_t *ring_used);
+
+// Returns number of free sample slots in the ring buffer.
+// Callers should check this before rendering audio to avoid overflow
+// (overflow drops samples, causing severe audio corruption).
+uint32_t audio_ring_free(void);

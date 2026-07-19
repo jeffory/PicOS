@@ -33,6 +33,9 @@ static bool parse_wav_header(sound_sample_t *sample, uint8_t *data, uint32_t siz
         uint32_t chunk_id = *(uint32_t *)(data + pos);
         uint32_t chunk_size = *(uint32_t *)(data + pos + 4);
 
+        if (chunk_size > size - pos - 8)
+            break; // malformed chunk — would read past buffer
+
         if (chunk_id == *(uint32_t *)"fmt ") {
             sample->channels = *(uint16_t *)(data + pos + 10);
             sample->sample_rate = *(uint32_t *)(data + pos + 12);
@@ -113,8 +116,12 @@ void sound_update(void) {
             if (player->repeat_count > 0 && player->repeats_played >= player->repeat_count) {
                 player->playing = false;
                 player->position = effective_start;
+                if (player->finish_callback)
+                    player->finish_callback(player->finish_callback_arg);
                 continue;
             }
+            if (player->loop_callback)
+                player->loop_callback(player->loop_callback_arg);
             player->position = effective_start;
             pos = effective_start;
         }
@@ -364,6 +371,18 @@ void sound_player_set_rate(sound_player_t *player, float rate) {
 
 float sound_player_get_rate(const sound_player_t *player) {
     return player ? player->rate : 1.0f;
+}
+
+void sound_player_set_finish_callback(sound_player_t *player, int (*cb)(void *), void *arg) {
+    if (!player) return;
+    player->finish_callback = cb;
+    player->finish_callback_arg = arg;
+}
+
+void sound_player_set_loop_callback(sound_player_t *player, int (*cb)(void *), void *arg) {
+    if (!player) return;
+    player->loop_callback = cb;
+    player->loop_callback_arg = arg;
 }
 
 sound_sample_t *sound_sample_new_blank(float seconds, uint32_t sample_rate, uint8_t bits_per_sample, uint8_t channels) {

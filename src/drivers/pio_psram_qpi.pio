@@ -1,0 +1,88 @@
+; PIO PSRAM QPI (quad) transfer program
+;
+; Based on polpo/rp2040-psram qspi_psram with the RP2350 read-timing fixes
+; from polpo/rp2040-psram PR #15 (tested on PicoCalc + Pico 2):
+;   - CS asserted one cycle before the first data clock
+;   - read phase: pindirs released with SCK LOW (no turnaround clock), entry
+;     at readloop_mid, sample mid-high-phase. Two deviations from PR #15,
+;     both found by on-hardware diagnostics on this PicoCalc:
+;       1. PR #15 released pindirs with SCK HIGH — the extra clock edge made
+;          a 7th wait cycle and every read arrived one nibble late.
+;       2. Read sampling is mid-high-phase (3 SM cycles per read clock:
+;          rise, sample, fall). Falling-edge sampling raced the chip's
+;          next-nibble transition; rising-edge sampling gave the slowest
+;          data line (SIO2) only a half period to settle — page-boundary
+;          forensics showed its previous value bleeding into reads. The
+;          mid-phase point gets both a full extra SM cycle of settle and
+;          a full SM cycle of guard. Read clock = sysclk/(div*3); the
+;          write phase still runs at sysclk/(div*2).
+;
+; Header protocol per transaction (bytes via TX FIFO, autopull 8):
+;   [x = total write nibbles] [y = read nibbles] [cmd/addr/dummy/data bytes...]
+; x counts cmd+addr+dummy+data nibbles (2 per byte); y = 0 for write-only.
+; Read dummy cycles are driven as zero nibbles inside the write phase.
+; SIO0-3 are released (pindirs=0) for the read phase and re-driven at the end.
+
+.pio_version 0
+
+.program psram_qpi
+.side_set 2                        ; bit 1 = SCK, bit 0 = CS
+
+begin:
+    out x, 8            side 0b01 [7] ; x = write nibbles. CS held high for
+                                      ; >=8 SM cycles after each transaction:
+                                      ; guarantees the chip's minimum CS-high
+                                      ; time (tCPH ~18ns) even when the next
+                                      ; chunk is already queued in the FIFO
+    out y, 8            side 0b01  ; y = read nibbles (0 = write-only)
+    jmp x--, writeloop  side 0b00  ; Assert CS one cycle early (CS setup)
+
+writeloop:
+    out pins, 4         side 0b00  ; Drive nibble on SIO0-3, SCK low
+    jmp x--, writeloop  side 0b10  ; Rising edge: PSRAM samples. Loop.
+
+    jmp !y, begin       side 0b00  ; Write-only: CS rises at next 'out x'
+    set pindirs, 0      side 0b00  ; Release SIO0-3, SCK stays low (no extra clock)
+    jmp readloop_mid    side 0b00
+
+readloop:
+    nop                 side 0b10  ; Rising edge; data has been settling
+                                   ; since the previous falling edge
+    in pins, 4          side 0b10  ; Sample mid-high-phase: a full SM cycle
+                                   ; of extra settle, and a full SM cycle of
+                                   ; guard before the chip's next transition
+readloop_mid:
+    jmp y--, readloop   side 0b00  ; Falling edge: chip drives next nibble
+    set pindirs, 0xF    side 0b01  ; Re-drive SIO0-3; CS deasserts. Wraps.
+
+% c-sdk {
+#include "hardware/gpio.h"
+
+static inline void psram_qpi_cs_init(PIO pio, uint sm, uint prog_offs,
+                                     float clkdiv,
+                                     uint pin_cs, uint pin_sio0) {
+    pio_sm_config c = psram_qpi_program_get_default_config(prog_offs);
+
+    sm_config_set_out_pins(&c, pin_sio0, 4);
+    sm_config_set_in_pins(&c, pin_sio0);
+    sm_config_set_set_pins(&c, pin_sio0, 4);
+    sm_config_set_sideset_pins(&c, pin_cs);
+    sm_config_set_out_shift(&c, false, true, 8);   // shift left, autopull 8
+    sm_config_set_in_shift(&c, false, true, 8);    // shift left, autopush 8
+    sm_config_set_clkdiv(&c, clkdiv);
+
+    pio_sm_set_consecutive_pindirs(pio, sm, pin_cs, 2, true);
+    pio_sm_set_consecutive_pindirs(pio, sm, pin_sio0, 4, true);
+    pio_gpio_init(pio, pin_sio0 + 0);
+    pio_gpio_init(pio, pin_sio0 + 1);
+    pio_gpio_init(pio, pin_sio0 + 2);
+    pio_gpio_init(pio, pin_sio0 + 3);
+    pio_gpio_init(pio, pin_cs);
+    pio_gpio_init(pio, pin_cs + 1);
+
+    hw_set_bits(&pio->input_sync_bypass, 0xfu << pin_sio0);
+
+    pio_sm_init(pio, sm, prog_offs, &c);
+    pio_sm_set_enabled(pio, sm, true);
+}
+%}

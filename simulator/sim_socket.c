@@ -12,18 +12,28 @@
 #include <unistd.h>
 #include <fcntl.h>
 #include <pthread.h>
+#include <time.h>
+#include <stdbool.h>
 
 #define MAX_CLIENTS 8
-#define READ_BUF_SIZE 4096
-#define UNIX_SOCK_PATH "./picos_control"
-#define TCP_PORT 7878
+// Large enough to hold a full base64-encoded screenshot response (PNG or
+// raw RGB565 framebuffer, ~273KB base64) in one shot — queue_response()
+// aborts and silently truncates the message if the socket's kernel send
+// buffer is still full after one flush attempt, so undersizing this
+// caused truncated PNGs on anything but a near-empty screen.
+#define WRITE_BUF_SIZE (512 * 1024)
+#define READ_BUF_INIT 4096
+#define READ_BUF_MAX (256 * 1024)  // 256KB max for large base64 payloads
+#define DEFAULT_UNIX_SOCK_PATH "./picos_control"
+#define DEFAULT_TCP_PORT 7878
 
 typedef struct {
     int fd;
     int write_buf_used;
-    char write_buf[READ_BUF_SIZE];
-    char read_buf[READ_BUF_SIZE];
+    char write_buf[WRITE_BUF_SIZE];
+    char *read_buf;
     int read_buf_used;
+    int read_buf_cap;
 } client_t;
 
 static client_t s_clients[MAX_CLIENTS];
@@ -32,6 +42,13 @@ static int s_tcp_fd = -1;
 static int s_max_fd = -1;
 static fd_set s_read_fds;
 static pthread_mutex_t s_notify_mutex = PTHREAD_MUTEX_INITIALIZER;
+static int s_actual_tcp_port = 0;
+static char s_unix_sock_path[256] = DEFAULT_UNIX_SOCK_PATH;
+
+// Socket server thread — runs independently so MCP commands (screenshot, etc.)
+// remain responsive even when the main thread is blocked by Unicorn emulation.
+static pthread_t s_socket_thread;
+static volatile bool s_socket_running = false;
 
 static void set_nonblocking(int fd) {
     int flags = fcntl(fd, F_GETFL, 0);
@@ -45,6 +62,13 @@ static int add_client(int fd) {
             s_clients[i].fd = fd;
             s_clients[i].write_buf_used = 0;
             s_clients[i].read_buf_used = 0;
+            s_clients[i].read_buf_cap = READ_BUF_INIT;
+            s_clients[i].read_buf = malloc(READ_BUF_INIT);
+            if (!s_clients[i].read_buf) {
+                close(fd);
+                s_clients[i].fd = -1;
+                return -1;
+            }
             return 0;
         }
     }
@@ -57,6 +81,10 @@ static void remove_client(int i) {
         close(s_clients[i].fd);
         s_clients[i].fd = -1;
         s_clients[i].write_buf_used = 0;
+        s_clients[i].read_buf_used = 0;
+        free(s_clients[i].read_buf);
+        s_clients[i].read_buf = NULL;
+        s_clients[i].read_buf_cap = 0;
     }
 }
 
@@ -78,10 +106,10 @@ static int queue_response(client_t *c, const char *json, size_t len) {
     if (c->fd <= 0) return -1;
     if (len == 0) len = strlen(json);
     while (len > 0) {
-        size_t avail = READ_BUF_SIZE - 1 - c->write_buf_used;
+        size_t avail = WRITE_BUF_SIZE - 1 - c->write_buf_used;
         if (avail == 0) {
             if (flush_write_buf(c) < 0) return -1;
-            avail = READ_BUF_SIZE - 1 - c->write_buf_used;
+            avail = WRITE_BUF_SIZE - 1 - c->write_buf_used;
             if (avail == 0) return -1;
         }
         size_t chunk = len < avail ? len : avail;
@@ -107,8 +135,22 @@ static void process_requests(client_t *c) {
     while (c->read_buf_used > 0) {
         char *newline = memchr(c->read_buf, '\n', c->read_buf_used);
         if (!newline) {
-            if (c->read_buf_used >= READ_BUF_SIZE) {
-                c->read_buf_used = 0;
+            // Buffer full but no newline — try to grow
+            if (c->read_buf_used >= c->read_buf_cap - 1) {
+                if (c->read_buf_cap >= READ_BUF_MAX) {
+                    // Hit max — discard
+                    c->read_buf_used = 0;
+                } else {
+                    int new_cap = c->read_buf_cap * 2;
+                    if (new_cap > READ_BUF_MAX) new_cap = READ_BUF_MAX;
+                    char *new_buf = realloc(c->read_buf, new_cap);
+                    if (new_buf) {
+                        c->read_buf = new_buf;
+                        c->read_buf_cap = new_cap;
+                    } else {
+                        c->read_buf_used = 0;
+                    }
+                }
             }
             break;
         }
@@ -129,30 +171,40 @@ static void process_requests(client_t *c) {
     }
 }
 
-void sim_socket_init(void) {
+static void *sim_socket_thread_func(void *arg);
+
+void sim_socket_init(int tcp_port, const char *instance_id) {
     memset(s_clients, 0, sizeof(s_clients));
     for (int i = 0; i < MAX_CLIENTS; i++) s_clients[i].fd = -1;
     FD_ZERO(&s_read_fds);
     s_max_fd = -1;
 
-    unlink(UNIX_SOCK_PATH);
-    // ...
+    // Build UNIX socket path based on instance ID
+    if (instance_id && instance_id[0]) {
+        snprintf(s_unix_sock_path, sizeof(s_unix_sock_path),
+                 "./picos_control_%s", instance_id);
+    } else {
+        strncpy(s_unix_sock_path, DEFAULT_UNIX_SOCK_PATH, sizeof(s_unix_sock_path) - 1);
+    }
+
+    unlink(s_unix_sock_path);
 
     s_unix_fd = socket(AF_UNIX, SOCK_STREAM, 0);
     if (s_unix_fd >= 0) {
         set_nonblocking(s_unix_fd);
         struct sockaddr_un addr = {0};
         addr.sun_family = AF_UNIX;
-        strncpy(addr.sun_path, UNIX_SOCK_PATH, sizeof(addr.sun_path) - 1);
+        strncpy(addr.sun_path, s_unix_sock_path, sizeof(addr.sun_path) - 1);
         if (bind(s_unix_fd, (struct sockaddr *)&addr, sizeof(addr)) == 0 &&
             listen(s_unix_fd, 5) == 0) {
-            printf("[Socket] UNIX domain server listening on %s\n", UNIX_SOCK_PATH);
+            printf("[Socket] UNIX domain server listening on %s\n", s_unix_sock_path);
         } else {
             close(s_unix_fd);
             s_unix_fd = -1;
         }
     }
 
+    int bind_port = (tcp_port >= 0) ? tcp_port : DEFAULT_TCP_PORT;
     s_tcp_fd = socket(AF_INET, SOCK_STREAM, 0);
     if (s_tcp_fd >= 0) {
         int opt = 1;
@@ -161,10 +213,15 @@ void sim_socket_init(void) {
         struct sockaddr_in addr = {0};
         addr.sin_family = AF_INET;
         addr.sin_addr.s_addr = htonl(INADDR_ANY);
-        addr.sin_port = htons(TCP_PORT);
+        addr.sin_port = htons((uint16_t)bind_port);
         if (bind(s_tcp_fd, (struct sockaddr *)&addr, sizeof(addr)) == 0 &&
             listen(s_tcp_fd, 5) == 0) {
-            printf("[Socket] TCP server listening on 0.0.0.0:%d\n", TCP_PORT);
+            // Query the actual port (needed when bind_port=0 for auto-assign)
+            struct sockaddr_in bound = {0};
+            socklen_t len = sizeof(bound);
+            getsockname(s_tcp_fd, (struct sockaddr *)&bound, &len);
+            s_actual_tcp_port = ntohs(bound.sin_port);
+            printf("[Socket] TCP port: %d\n", s_actual_tcp_port);
         } else {
             close(s_tcp_fd);
             s_tcp_fd = -1;
@@ -173,6 +230,26 @@ void sim_socket_init(void) {
 
     if (s_unix_fd < 0 && s_tcp_fd < 0) {
         printf("[Socket] WARNING: Failed to open any socket\n");
+        return;
+    }
+
+    // Start the socket server thread so MCP commands remain responsive
+    // even when the main thread is blocked (e.g., Unicorn emulation).
+    s_socket_running = true;
+    if (pthread_create(&s_socket_thread, NULL, sim_socket_thread_func, NULL) != 0) {
+        fprintf(stderr, "[Socket] WARNING: Failed to create socket thread\n");
+        s_socket_running = false;
+    }
+}
+
+int sim_socket_get_port(void) {
+    return s_actual_tcp_port;
+}
+
+void sim_socket_shutdown(void) {
+    if (s_socket_running) {
+        s_socket_running = false;
+        pthread_join(s_socket_thread, NULL);
     }
 }
 
@@ -192,10 +269,12 @@ void sim_socket_poll(void) {
     }
 
     struct timeval tv = {0, 0};
+    // NOTE: no logging on this path. sim_socket_poll() runs every 10ms on the
+    // socket thread, so anything printed here floods stdout — which deadlocked
+    // the simulator whenever its stdout was an undrained pipe: the write blocks
+    // inside fflush() while holding the stdio lock, and the main thread then
+    // blocks in printf() waiting for it.
     int n = select(max_fd + 1, &read_fds, NULL, NULL, &tv);
-    if (n > 0) {
-        printf("[Socket] select returned %d\n", n); fflush(stdout);
-    }
     if (n <= 0) return;
 
     if (s_unix_fd >= 0 && FD_ISSET(s_unix_fd, &read_fds)) {
@@ -212,8 +291,18 @@ void sim_socket_poll(void) {
         if (c->fd <= 0) continue;
 
         if (FD_ISSET(c->fd, &read_fds)) {
+            // Grow buffer if full
+            if (c->read_buf_used >= c->read_buf_cap - 1 && c->read_buf_cap < READ_BUF_MAX) {
+                int new_cap = c->read_buf_cap * 2;
+                if (new_cap > READ_BUF_MAX) new_cap = READ_BUF_MAX;
+                char *new_buf = realloc(c->read_buf, new_cap);
+                if (new_buf) {
+                    c->read_buf = new_buf;
+                    c->read_buf_cap = new_cap;
+                }
+            }
             ssize_t n = recv(c->fd, c->read_buf + c->read_buf_used,
-                              READ_BUF_SIZE - c->read_buf_used - 1, 0);
+                              c->read_buf_cap - c->read_buf_used - 1, 0);
             if (n <= 0) {
                 remove_client(i);
                 continue;
@@ -232,16 +321,29 @@ void sim_socket_poll(void) {
     }
 }
 
+static void *sim_socket_thread_func(void *arg) {
+    (void)arg;
+    while (s_socket_running) {
+        sim_socket_poll();
+        struct timespec ts = {0, 10000000};  // 10ms
+        nanosleep(&ts, NULL);
+    }
+    return NULL;
+}
+
 void sim_socket_close(void) {
     for (int i = 0; i < MAX_CLIENTS; i++) {
         if (s_clients[i].fd > 0) {
             close(s_clients[i].fd);
             s_clients[i].fd = -1;
         }
+        free(s_clients[i].read_buf);
+        s_clients[i].read_buf = NULL;
+        s_clients[i].read_buf_cap = 0;
     }
     if (s_unix_fd >= 0) { close(s_unix_fd); s_unix_fd = -1; }
     if (s_tcp_fd >= 0)  { close(s_tcp_fd);  s_tcp_fd = -1; }
-    unlink(UNIX_SOCK_PATH);
+    unlink(s_unix_sock_path);
 }
 
 void sim_socket_notify(const char *method, const char *params_json) {
