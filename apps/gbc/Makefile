@@ -9,7 +9,7 @@
 CC      = arm-none-eabi-gcc
 CFLAGS  = -mcpu=cortex-m33 -mthumb \
           -fpie -fno-plt -ffunction-sections -fdata-sections \
-          -O3 -flto -Wall -Wextra -Wno-unused-parameter \
+          -O2 -flto -Wall -Wextra -Wno-unused-parameter \
           -I. \
           -I../../sdk/native \
           -IRP2350-GBC/inc \
