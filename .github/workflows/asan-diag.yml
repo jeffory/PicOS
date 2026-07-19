@@ -68,7 +68,10 @@ jobs:
           # log_path gives one file per process — more reliable than relying on
           # pytest to capture a crashing child's stderr.
           # detect_leaks=0: we are hunting corruption, not leaks (SDL leaks a lot).
-          export ASAN_OPTIONS=log_path=/tmp/asanlogs/asan:detect_leaks=0:print_stacktrace=1:handle_abort=1:disable_coredump=1
+          # detect_odr_violation=0: the duplicate 'g_api' definition
+          # (main.c vs stubs/driver_stubs.c) aborts every process at startup and
+          # masks the corruption we are actually hunting. Tracked separately.
+          export ASAN_OPTIONS=log_path=/tmp/asanlogs/asan:detect_leaks=0:detect_odr_violation=0:print_stacktrace=1:handle_abort=1:disable_coredump=1
           pytest tests/e2e/ -q --no-header -p no:cacheprovider -n auto 2>&1 | tail -60
         timeout-minutes: 25
 
