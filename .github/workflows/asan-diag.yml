@@ -1,0 +1,104 @@
+####################################################################
+# TEMPORARY diagnostic workflow — remove once the E2E teardown
+# heap corruption (simulator SIGABRT at test teardown) is fixed.
+# The crash reproduces only on CI runners, so ASan has to run here.
+####################################################################
+name: ASan Diagnostic
+
+on:
+  push:
+    branches: [develop]
+  workflow_dispatch:
+
+jobs:
+  asan:
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            cmake \
+            build-essential \
+            libsdl2-dev \
+            libsdl2-image-dev \
+            libcurl4-openssl-dev \
+            libpthread-stubs0-dev \
+            python3-pip \
+            python3-venv
+
+      - name: Setup Python
+        run: |
+          python3 -m venv .venv
+          source .venv/bin/activate
+          pip install --upgrade pip
+          pip install -r tests/e2e/requirements.txt
+
+      - name: Fetch Lua
+        run: |
+          mkdir -p third_party/lua-5.4
+          curl -fL https://www.lua.org/ftp/lua-5.4.7.tar.gz \
+            | tar -xz --strip-components=1 -C third_party/lua-5.4/
+
+      # Build into build_sim so the pytest harness finds it at its default path.
+      - name: Build simulator with AddressSanitizer
+        run: |
+          cmake -S simulator -B build_sim \
+            -DCMAKE_BUILD_TYPE=Debug \
+            -DCMAKE_C_FLAGS="-fsanitize=address -fno-omit-frame-pointer -g -O1" \
+            -DCMAKE_CXX_FLAGS="-fsanitize=address -fno-omit-frame-pointer -g -O1" \
+            -DCMAKE_EXE_LINKER_FLAGS="-fsanitize=address"
+          cmake --build build_sim --parallel
+
+      - name: Report SDL version actually in use
+        run: |
+          pkg-config --modversion sdl2 || true
+
+      - name: Run E2E under ASan
+        continue-on-error: true
+        run: |
+          source .venv/bin/activate
+          mkdir -p /tmp/asanlogs
+          export SDL_VIDEODRIVER=dummy
+          # log_path gives one file per process — more reliable than relying on
+          # pytest to capture a crashing child's stderr.
+          # detect_leaks=0: we are hunting corruption, not leaks (SDL leaks a lot).
+          export ASAN_OPTIONS=log_path=/tmp/asanlogs/asan:detect_leaks=0:print_stacktrace=1:handle_abort=1:disable_coredump=1
+          pytest tests/e2e/ -q --no-header -p no:cacheprovider -n auto 2>&1 | tail -60
+        timeout-minutes: 25
+
+      - name: Dump ASan reports
+        if: always()
+        run: |
+          echo "=== ASan report files ==="
+          ls -la /tmp/asanlogs/ 2>/dev/null || echo "(none)"
+          echo
+          # Show the distinct fault signatures first, then full reports.
+          echo "=== Distinct error types ==="
+          grep -h "ERROR: AddressSanitizer" /tmp/asanlogs/* 2>/dev/null \
+            | sed 's/.*ERROR: AddressSanitizer/AddressSanitizer/' | sort | uniq -c || true
+          echo
+          echo "=== Full reports (first 3) ==="
+          n=0
+          for f in /tmp/asanlogs/*; do
+            [ -f "$f" ] || continue
+            grep -q "ERROR: AddressSanitizer" "$f" || continue
+            echo "----- $f -----"
+            head -80 "$f"
+            n=$((n+1))
+            [ "$n" -ge 3 ] && break
+          done
+          [ "$n" = 0 ] && echo "(no AddressSanitizer errors recorded)"
+
+      - name: Upload ASan logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: asan-logs
+          path: /tmp/asanlogs/
+          if-no-files-found: warn
