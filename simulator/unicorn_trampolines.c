@@ -769,7 +769,11 @@ static void tramp_display_draw_image_nn(uc_engine *uc) {
     uint16_t *buf = (uint16_t *)malloc(pixels * 2);
     if (!buf) return;
     uc_mem_read(uc, data_addr, buf, pixels * 2);
-    byteswap_rgb565(buf, pixels);
+    // drawImageNN input is HOST-ORDER RGB565 (see src/drivers/display.c
+    // display_draw_image_nn, which does the be-swap itself before writing
+    // to the panel). The SDL back buffer is also host-order, so no
+    // conversion is needed here — unlike the EMU_FB_BASE paths below,
+    // which read the emulated (big-endian, panel-format) framebuffer.
 
     // Use drawImage with nearest-neighbor scaling
     // The simulator doesn't have display_draw_image_nn, so implement it inline
