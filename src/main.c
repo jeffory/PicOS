@@ -1881,13 +1881,16 @@ int main(void) {
   watchdog_update();
 
   // Idle screen dimming (burn-in protection). Config "dim_timeout_s"
-  // overrides the 60s default; "0" disables dimming entirely.
+  // overrides the 60s default; "0" disables dimming entirely. Backlight
+  // level restores from config "brightness" (floor 16 — see config.h).
   {
     uint32_t dim_timeout_s = 60;
     const char *dt = config_get("dim_timeout_s");
     if (dt)
       dim_timeout_s = (uint32_t)atoi(dt);
-    idle_dim_init(128, dim_timeout_s);
+    uint8_t brightness = config_parse_brightness(config_get("brightness"));
+    kbd_set_backlight(brightness);
+    idle_dim_init(brightness, dim_timeout_s);
   }
 
   // Initialise WiFi hardware (auto-connects if credentials are in config)
