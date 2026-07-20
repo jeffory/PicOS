@@ -614,3 +614,28 @@ def test_textures_borrow_rather_than_duplicate(cdogs_simulator):
         f"data/pics = {bytes_per_pic:.1f} bytes/pic — expected roughly half "
         f"of Task 3's ~320 baseline once the duplicate texture copy is gone"
     )
+
+
+def test_owned_textures_are_16_bit(cdogs_simulator):
+    """Shim-owned whole-screen textures hold 2 bytes per pixel, not 4.
+
+    grafx.c's GraphicsInitialize creates five 320x240 buffers via
+    SDL_CreateTexture (bkgTgt, bkg, screen, hud, brightnessOverlay).
+    At 4 bytes per pixel that is 1_536_000 bytes — 29% of the 5MB app
+    heap spent on fixed window buffers. RGB565 halves each of them.
+
+    Asserted as a ceiling rather than an equality because the count of
+    owning textures is a property of grafx.c, not of the shim, and a
+    second window (Graphics.SecondWindow) would legitimately add more.
+    The ceiling sits below the all-32-bit figure so a regression to
+    4-byte pixels cannot pass.
+    """
+    peak = peak_gfx_total(cdogs_simulator)
+
+    ALL_32BIT_BYTES = 5 * 320 * 240 * 4  # 1_536_000
+    assert peak["tex"] < ALL_32BIT_BYTES, (
+        f"tex holds {peak['tex']} bytes, which is not below the "
+        f"all-ARGB8888 figure of {ALL_32BIT_BYTES} — owned textures do "
+        "not appear to have been converted to RGB565"
+    )
+    assert peak["tex"] > 0, "no owning textures counted; accounting is broken"
