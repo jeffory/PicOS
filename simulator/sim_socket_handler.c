@@ -478,13 +478,18 @@ static char *h_inject_button(const char *params) {
     }
 
     if (strcmp(action, "release") == 0) {
-        hal_input_release_buttons(btn_mask);
+        kbd_release_buttons(btn_mask);
         return strdup("{\"jsonrpc\":\"2.0\",\"result\":{\"ok\":true}}");
     }
-    kbd_inject_buttons(btn_mask);
-    if (strcmp(action, "click") == 0 || strcmp(action, "press") == 0) {
+    if (strcmp(action, "press") == 0) {
+        // Hold until an explicit "release" — for modifier chords (ctrl+s etc.)
+        kbd_hold_buttons(btn_mask);
         SDL_Delay(16);
+        return strdup("{\"jsonrpc\":\"2.0\",\"result\":{\"ok\":true}}");
     }
+    // "click" / default: one-shot press, auto-released after one read
+    kbd_inject_buttons(btn_mask);
+    SDL_Delay(16);
     return strdup("{\"jsonrpc\":\"2.0\",\"result\":{\"ok\":true}}");
 }
 

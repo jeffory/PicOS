@@ -948,6 +948,23 @@ _NAMED_KEYS = {
     "f1", "f2", "f3", "f4", "f5", "f6", "f7", "f8", "f9", "f10",
 }
 
+# Modifier keys that may prefix a combo ("ctrl+s", "shift+left").
+_MODIFIER_KEYS = {"ctrl", "shift", "sym", "alt"}
+
+
+def _parse_combo(key: str) -> tuple[list[str], str]:
+    """Split "ctrl+s" into (["ctrl"], "s"). Returns ([], key) for non-combos."""
+    if "+" not in key or len(key) == 1:
+        return [], key
+    parts = key.split("+")
+    mods, base = parts[:-1], parts[-1]
+    if base == "":  # "ctrl++" — literal '+' as the base key
+        base = "+"
+    norm = [_normalize_key(m) for m in mods]
+    if norm and all(m in _MODIFIER_KEYS for m in norm):
+        return norm, base
+    return [], key
+
 
 def _normalize_key(key: str) -> str:
     k = key.lower()
@@ -960,26 +977,45 @@ def _is_char_key(key: str) -> bool:
 
 def do_keysequence_hardware(keys: list[str], port: str, delay_ms: int,
                             timeout: float = DEFAULT_TIMEOUT) -> list[str]:
-    """Send a sequence of `keypress <key>` commands over one serial session."""
+    """Send a sequence of key commands over one serial session.
+
+    Combos ("ctrl+s") expand to keydown <mod> / keypress <key> / keyup <mod>.
+    """
     ser = open_serial(port, timeout)
+
+    def send(cmd: str) -> str:
+        ser.write(f"{cmd}\n".encode())
+        ser.flush()
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            raw = ser.readline()
+            if not raw:
+                break
+            line = raw.decode("utf-8", errors="replace").rstrip("\r\n")
+            if "Key injected" in line:
+                return "ok"
+            if "Unknown key" in line:
+                return "unknown key"
+        return "no ack"
+
     try:
         results = []
         for i, key in enumerate(keys):
-            ser.write(f"keypress {_normalize_key(key)}\n".encode())
-            ser.flush()
-            status = "no ack"
-            deadline = time.monotonic() + timeout
-            while time.monotonic() < deadline:
-                raw = ser.readline()
-                if not raw:
-                    break
-                line = raw.decode("utf-8", errors="replace").rstrip("\r\n")
-                if "Key injected" in line:
-                    status = "ok"
-                    break
-                if "Unknown key" in line:
-                    status = "unknown key"
-                    break
+            mods, base = _parse_combo(key)
+            status = "ok"
+            for m in mods:
+                st = send(f"keydown {m}")
+                if st != "ok":
+                    status = st
+            if status == "ok":
+                base_name = _normalize_key(base) if len(base) > 1 else base
+                status = send(f"keypress {base_name}")
+            if mods:
+                # Give the app a few frames to observe the chord before the
+                # modifiers are released.
+                time.sleep(max(0.15, delay_ms / 1000.0))
+                for m in reversed(mods):
+                    send(f"keyup {m}")
             results.append(f"{key}: {status}")
             if i < len(keys) - 1:
                 time.sleep(max(0, delay_ms) / 1000.0)
@@ -996,6 +1032,9 @@ async def keypress(key: str, count: int = 1, delay_ms: int = 100,
     Valid named keys: up, down, left, right, enter, esc, menu, f1-f10,
     backspace, tab, del, shift, ctrl, sym. Single characters (a-z, A-Z,
     0-9, punctuation) are typed as character input.
+
+    Modifier combos: "ctrl+s", "shift+left", "ctrl+shift+x" hold the
+    modifier(s), press the base key, then release the modifier(s).
 
     Sequences: "down,down,enter" or "down down enter" presses keys in
     order; "down 5x" repeats the previous key 5 times ("downx5" also
@@ -1024,13 +1063,26 @@ async def keypress(key: str, count: int = 1, delay_ms: int = 100,
     try:
         conn = get_connection()
         for i, k in enumerate(keys):
-            name = _normalize_key(k)
-            if _is_char_key(k):
-                method, params = "inject_char", {"char": k}
-            else:
-                method, params = "inject_button", {"button": name, "action": "click"}
+            mods, base = _parse_combo(k)
             try:
+                for m in mods:
+                    await asyncio.to_thread(
+                        conn.call, "inject_button",
+                        {"button": m, "action": "press"}, timeout=5)
+                if _is_char_key(base):
+                    method, params = "inject_char", {"char": base}
+                else:
+                    method, params = "inject_button", {
+                        "button": _normalize_key(base), "action": "click"}
                 await asyncio.to_thread(conn.call, method, params, timeout=5)
+                if mods:
+                    # Give the app a few frames to observe the chord before
+                    # the modifiers are released.
+                    await asyncio.sleep(max(0.15, delay_ms / 1000.0))
+                    for m in reversed(mods):
+                        await asyncio.to_thread(
+                            conn.call, "inject_button",
+                            {"button": m, "action": "release"}, timeout=5)
                 sent.append(f"{k}: ok")
             except JRpcError as e:
                 if e.code == -32602:

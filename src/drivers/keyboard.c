@@ -1,5 +1,6 @@
 #include "keyboard.h"
 #include "../hardware.h"
+#include "../os/idle_dim.h"
 #include "../os/os.h"
 #include "wifi.h"
 
@@ -39,8 +40,16 @@ static bool s_screenshot_pressed =
 static int s_i2c_fail_count = 0;      // consecutive kbd_poll() I2C failures
 static uint32_t s_i2c_backoff_ms = 0; // when to next attempt recovery
 
-static uint32_t s_injected_buttons = 0; // buttons injected via kbd_inject_buttons()
-static char s_injected_char = 0;         // character injected via kbd_inject_char()
+// Injected input (dev commands). Injection happens asynchronously — the
+// dev-command pump runs from the Lua debug hook, at an arbitrary point in the
+// app's frame — so a one-shot press must stay *pending* until the next
+// kbd_poll() publishes it for one full update→read cycle. (The old scheme
+// cleared the injection at the top of every kbd_poll, so the app's own
+// input.update() usually wiped it before the app read the button state.)
+static uint32_t s_injected_pending = 0; // one-shot press awaiting publication
+static uint32_t s_injected_active = 0;  // one-shot published for this poll cycle
+static uint32_t s_injected_held = 0;    // latched until kbd_release_buttons()
+static char s_injected_char = 0;        // character injected via kbd_inject_char()
 
 // ── Public API
 // ────────────────────────────────────────────────────────────────
@@ -223,7 +232,14 @@ void kbd_poll(void) {
   s_buttons_prev = s_buttons_curr;
   s_last_char = 0;
   s_last_raw_key = 0;
-  s_injected_buttons = 0; // consume after one poll cycle
+
+  // Retire the previous one-shot injection and publish any pending one.
+  // Folding injected buttons into s_buttons_curr (rather than OR-ing them in
+  // the getters) gives them real press AND release edges.
+  s_buttons_curr &= ~s_injected_active;
+  s_injected_active = s_injected_pending;
+  s_injected_pending = 0;
+  s_buttons_curr |= s_injected_active | s_injected_held;
 
   // Poll REG_FIF (0x09) directly — up to 8 events per frame.
   // Each read returns 2 bytes: [state, keycode].
@@ -401,6 +417,18 @@ done_polling:;
   // Intercept KEY_BRK (0xD0): flag for screenshot, never reaches apps.
   if (s_last_raw_key == KEY_BRK)
     s_screenshot_pressed = true;
+
+  // Idle screen dimming: any fresh input counts as activity. If the activity
+  // woke a dimmed screen, swallow the waking event so it doesn't reach the
+  // running app.
+  if ((s_buttons_curr & ~s_buttons_prev) || s_last_char || s_last_raw_key) {
+    if (idle_dim_note_activity()) {
+      s_buttons_curr &= s_buttons_prev; // drop fresh press edges
+      s_last_char = 0;
+      s_last_raw_key = 0;
+    }
+  }
+  idle_dim_poll();
 }
 
 char kbd_get_char(void) {
@@ -411,10 +439,10 @@ char kbd_get_char(void) {
 
 uint8_t kbd_get_raw_key(void) { return s_last_raw_key; }
 
-uint32_t kbd_get_buttons(void) { return s_buttons_curr | s_injected_buttons; }
+uint32_t kbd_get_buttons(void) { return s_buttons_curr; }
 
 uint32_t kbd_get_buttons_pressed(void) {
-  return (s_buttons_curr & ~s_buttons_prev) | s_injected_buttons;
+  return (s_buttons_curr & ~s_buttons_prev);
 }
 
 uint32_t kbd_get_buttons_released(void) {
@@ -485,7 +513,19 @@ void kbd_inject_buttons(uint32_t buttons) {
     s_menu_pressed = true;
     buttons &= ~BTN_MENU;
   }
-  s_injected_buttons = buttons;
+  s_injected_pending |= buttons;
+}
+
+void kbd_hold_buttons(uint32_t buttons) {
+  // Latch buttons held until kbd_release_buttons() — enables modifier chords
+  // (e.g. hold ctrl, type 's', release ctrl). MENU is click-only.
+  buttons &= ~BTN_MENU;
+  s_injected_held |= buttons;
+}
+
+void kbd_release_buttons(uint32_t buttons) {
+  s_injected_held &= ~buttons;
+  s_buttons_curr &= ~buttons;
 }
 
 void kbd_inject_char(char c) {

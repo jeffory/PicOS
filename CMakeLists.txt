@@ -247,6 +247,7 @@ add_executable(picocalc_os
     src/os/lua_psram_alloc.c
     src/os/core1_alloc.c
     src/os/system_menu.c
+    src/os/idle_dim.c
     src/os/screenshot.c
     src/os/terminal.c
     src/os/terminal_parser.c

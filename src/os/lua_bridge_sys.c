@@ -1,5 +1,6 @@
 #include "lua_bridge_internal.h"
 #include "lua_psram_alloc.h"
+#include "idle_dim.h"
 #include "ota_update.h"
 #include "version.h"
 #include "../dev_commands.h"
@@ -372,6 +373,15 @@ static int l_sys_qmi_psram_read(lua_State *L) {
   return 1;
 }
 
+// picocalc.sys.resetIdleTimer() — mark the device as active so the idle
+// screen dimmer doesn't darken the backlight. Call periodically from apps
+// that show moving content without receiving input (video, slideshows).
+static int l_sys_resetIdleTimer(lua_State *L) {
+  (void)L;
+  idle_dim_note_activity();
+  return 0;
+}
+
 static const luaL_Reg l_sys_lib[] = {{"getMemInfo", l_sys_getMemInfo},
                                      {"getTimeMs", l_sys_getTimeMs},
                                      {"getBattery", l_sys_getBattery},
@@ -389,6 +399,7 @@ static const luaL_Reg l_sys_lib[] = {{"getMemInfo", l_sys_getMemInfo},
                                      {"pauseBackground", l_sys_pauseBackground},
                                      {"resumeBackground", l_sys_resumeBackground},
                                      {"triggerFault", l_sys_trigger_fault},
+                                     {"resetIdleTimer", l_sys_resetIdleTimer},
                                      {"loadlib", l_sys_loadlib},
                                      {"pioPsramRead", l_sys_pio_psram_read},
                                      {"pioPsramWrite", l_sys_pio_psram_write},

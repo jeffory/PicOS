@@ -62,6 +62,25 @@ the simulator has already been up 1000ms+ before the scan starts, no
 HEAPSTAT line is ever emitted — confirmed empirically. This fixture
 waits for that headroom before launching so the cadence's first eligible
 tick fires during the scan.
+
+Fixture structure (prereq-6, 2026-07-20)
+------------------------------------------------------------
+cdogs_simulator now boots and stages C-Dogs ONCE for the whole module
+instead of once per test. It is by far the most expensive fixture in this
+file — C-Dogs runs under Unicorn CPU emulation, and staging it means a
+~22MB copytree of the game data tree onto a fresh SD card — and every
+test below only ever *reads* the diagnostics one quick-play drive
+produces; none of them mutate simulator state in a way that would need a
+fresh instance. Repeating that boot/stage/drive per test bought nothing
+but 4x the wall-clock cost and, worse, 4 independent per-run chances to
+hit the navigation flake _drive_quickplay documents below (a keypress
+dropped under host contention). cdogs_quickplay_stats drives quick-play
+exactly once and hands every test the same parsed HEAPSTAT and GFXSTAT
+report lists; each test still applies its own assertions, with its own
+messages and thresholds, against that shared data — a real regression in
+any one of them still fails on its own, legibly. Only the drive itself is
+shared, not the pass/fail verdicts. See .superpowers/sdd/prereq-6-report.md
+for the before/after measurements.
 """
 import re
 import shutil
@@ -79,11 +98,62 @@ HEAPSTAT_RE = re.compile(
     r"HEAPSTAT (\S+) watermark=(\d+) true=(\d+) arena=(\d+) used=(\d+) peak=(\d+)"
 )
 
-# Mirrors IMG_LOAD_HEAP_RESERVE in apps/cdogs/src/src/cdogs/utils.c
-# (2560 * 1024 bytes = 2.5 MiB) — the real reserve guard the peak
-# assertion below exists to prove fired. Keep this in sync if that
-# constant ever changes.
-PEAK_RESERVE_THRESHOLD = 2_621_440
+
+def parse_heapstats(log_text):
+    """Return list of dicts for every HEAPSTAT line in the log."""
+    out = []
+    for m in HEAPSTAT_RE.finditer(log_text):
+        out.append({
+            "tag": m.group(1),
+            "watermark": int(m.group(2)),
+            "true": int(m.group(3)),
+            "arena": int(m.group(4)),
+            "used": int(m.group(5)),
+            "peak": int(m.group(6)),
+        })
+    return out
+
+
+GFXSTAT_RE = re.compile(
+    r"GFXSTAT (\S+) pics=(-?\d+) data=(\d+) tex=(\d+) total=(\d+) peak=(\d+) skipped=(-?\d+)"
+)
+
+
+def parse_gfxstats(log_text):
+    """Return list of dicts for every GFXSTAT line in the log."""
+    out = []
+    for m in GFXSTAT_RE.finditer(log_text):
+        out.append({
+            "tag": m.group(1),
+            "pics": int(m.group(2)),
+            "data": int(m.group(3)),
+            "tex": int(m.group(4)),
+            "total": int(m.group(5)),
+            "peak": int(m.group(6)),
+            "skipped": int(m.group(7)),
+        })
+    return out
+
+
+# Floor proving the peak tracker actually witnessed substantial heap
+# growth during asset loading, not just the boot-time sample. This used
+# to mirror IMG_LOAD_HEAP_RESERVE (utils.c's 2.5 MiB reserve guard) to
+# prove that guard had tripped, but freeing memory elsewhere (the shim's
+# whole-screen textures moving from ARGB8888 to RGB565) relaxed the guard
+# enough that it no longer trips at all — this constant is NOT about that
+# guard anymore, only about proving the instrumentation samples the
+# loaded state and not just boot. Chosen comfortably above the ~488_000-
+# byte boot-time peak (font/early init, before any campaign data loads)
+# and comfortably below the loaded peak actually observed once quick-play
+# loads a campaign (~2.6 MiB as of this writing — see
+# .superpowers/sdd/task-3-report.md for the measured before/after
+# figures), so it still fails loudly if this ever regresses to sampling
+# only the boot-time state.
+LOADED_PEAK_FLOOR_BYTES = 1_500_000
+
+# 5 whole-screen 320x240 window textures at 2 bytes per pixel (RGB565).
+# Fixed in number and size, so this figure is deterministic.
+ALL_16BIT_TEX_BYTES = 5 * 320 * 240 * 2  # 768_000
 
 # Logged once via api->sys->log() in apps/cdogs/cdogs_picos.c, right
 # before the menu's LoopRunnerRun() starts consuming input — the first
@@ -95,9 +165,17 @@ PEAK_RESERVE_THRESHOLD = 2_621_440
 MENU_READY_MARKER = "CDOGS: Entering main menu loop"
 
 
-@pytest.fixture
-def cdogs_simulator(simulator_binary, test_sd_card, request):
+@pytest.fixture(scope="module")
+def cdogs_simulator(simulator_binary, tmp_path_factory, request):
     """Simulator with C-Dogs staged onto the SD card before boot.
+
+    Module-scoped: booted and staged exactly once for every test in this
+    file (see "Fixture structure" in the module docstring for why). Stages
+    its own SD card via the session-scoped tmp_path_factory rather than
+    conftest.py's function-scoped `test_sd_card` fixture, which a
+    module-scoped fixture cannot depend on (pytest scope mismatch) —
+    otherwise this mirrors test_sd_card's construction exactly (default SD
+    card contents + tests/e2e/apps/* fixture apps), plus C-Dogs on top.
 
     See the module docstring for why this doesn't reuse the shared
     `simulator` fixture and doesn't rely on get_log_buffer()/wait_for_log().
@@ -107,7 +185,24 @@ def cdogs_simulator(simulator_binary, test_sd_card, request):
     if not (CDOGS_SRC / "data" / "graphics").exists():
         pytest.skip("apps/cdogs/data not prepared — run ./prepare_data.sh")
 
-    dest = Path(test_sd_card) / "apps" / "cdogs"
+    sd_path = tmp_path_factory.mktemp("cdogs_sd_card")
+
+    default_sd = Path(request.config.getoption("--sd-card-path"))
+    if default_sd.exists():
+        shutil.copytree(default_sd, sd_path, dirs_exist_ok=True)
+    (sd_path / "apps").mkdir(exist_ok=True)
+    (sd_path / "data").mkdir(exist_ok=True)
+    (sd_path / "system").mkdir(exist_ok=True)
+
+    fixture_apps = Path(__file__).parent / "apps"
+    if fixture_apps.exists():
+        for app_dir in fixture_apps.iterdir():
+            if app_dir.is_dir():
+                dest = sd_path / "apps" / app_dir.name
+                if not dest.exists():
+                    shutil.copytree(app_dir, dest)
+
+    dest = sd_path / "apps" / "cdogs"
     dest.mkdir(parents=True, exist_ok=True)
     for name in ("main.elf", "app.json"):
         shutil.copy2(CDOGS_SRC / name, dest / name)
@@ -117,7 +212,7 @@ def cdogs_simulator(simulator_binary, test_sd_card, request):
     port = request.config.getoption("--port")
     sim = PicosSimulator(
         binary_path=str(simulator_binary),
-        sd_card_path=str(test_sd_card),
+        sd_card_path=str(sd_path),
         headless=headless,
         tcp_port=port,
     )
@@ -141,32 +236,25 @@ def cdogs_simulator(simulator_binary, test_sd_card, request):
 
     # The autouse _check_crash_log fixture in conftest.py depends on the
     # shared `simulator` fixture, not this one — every test in this module
-    # uses cdogs_simulator instead, so that autouse check silently inspects
-    # a second, unused simulator instance and never looks at this one. This
-    # is the only native ELF app under e2e test, in exactly the
-    # memory-fragile regime this test module exists to cover, so check here
-    # explicitly before tearing down. try/finally so a crash (or a failed
-    # get_crash_log call) still lets sim.stop() run and reap the process.
+    # uses cdogs_simulator (via cdogs_quickplay_stats) instead, so that
+    # autouse check silently inspects a second, unused simulator instance
+    # and never looks at this one. This is the only native ELF app under
+    # e2e test, in exactly the memory-fragile regime this test module
+    # exists to cover, so check here explicitly before tearing down.
+    # try/finally so a crash (or a failed get_crash_log call) still lets
+    # sim.stop() run and reap the process. Module-scoped now means this
+    # runs once, after the last test in the module that needed this
+    # fixture, rather than once per test — a crash occurring after the
+    # single shared drive (during one test's own assertions, which only
+    # read already-collected data and touch nothing on the simulator) is
+    # exceedingly unlikely to surface only there and not already have
+    # broken the drive itself, but see prereq-6-report.md for the
+    # reasoning in full.
     try:
         crash = sim.call("get_crash_log", timeout=2.0).get("crash_log")
         assert not crash, f"C-Dogs simulator crashed during test:\n{crash}"
     finally:
         sim.stop()
-
-
-def parse_heapstats(log_text):
-    """Return list of dicts for every HEAPSTAT line in the log."""
-    out = []
-    for m in HEAPSTAT_RE.finditer(log_text):
-        out.append({
-            "tag": m.group(1),
-            "watermark": int(m.group(2)),
-            "true": int(m.group(3)),
-            "arena": int(m.group(4)),
-            "used": int(m.group(5)),
-            "peak": int(m.group(6)),
-        })
-    return out
 
 
 def _combined_output(simulator):
@@ -181,33 +269,29 @@ def _combined_output(simulator):
     return out["stdout"] + "\n" + out["stderr"]
 
 
-def _poll_and_accumulate(simulator, parse_fn, seen, stats):
-    """One poll of the simulator's output, merging any not-yet-seen
-    matching lines into `stats` (in first-seen order), and returning the
-    raw combined text polled.
+def _accumulate(text, parse_fn, seen, stats):
+    """Merge any not-yet-seen parse_fn(text) matches into `stats` (in
+    first-seen order). `seen` is a set of hashable field-tuples already
+    recorded, so a report still present in both this poll's window and an
+    earlier one isn't double-counted.
 
-    get_output()'s stdout/stderr tails are each bounded at 2000 lines
-    (see module docstring), and C-Dogs' asset scan can emit thousands of
+    get_output()'s stdout/stderr tails are each bounded at 2000 lines (see
+    module docstring), and C-Dogs' asset scan can emit thousands of
     "[TRAMP] fs_*" lines between two HEAPSTAT/GFXSTAT reports — easily
     enough to evict an earlier report (especially the very first,
     boot-time one) from the tail before anything ever reads it.
     Accumulating on every poll instead of parsing one snapshot at the end
     means a report is only ever lost if it's evicted before the very
-    first poll to observe it, never merely before a later one. `seen` is
-    a set of hashable field-tuples already recorded, so a report still
-    present in both this poll's window and an earlier one isn't
-    double-counted.
+    first poll to observe it, never merely before a later one.
     """
-    text = _combined_output(simulator)
     for stat in parse_fn(text):
         key = tuple(sorted(stat.items()))
         if key not in seen:
             seen.add(key)
             stats.append(stat)
-    return text
 
 
-# How often _sleep_and_accumulate re-polls while waiting. Deliberately
+# How often the drive re-polls get_output() while waiting. Deliberately
 # tight: campaign/map/sprite loading after the third Enter can emit a
 # dense burst of "[TRAMP] fs_*" lines (see module docstring), and the
 # whole point of polling throughout the drive instead of once at the end
@@ -219,32 +303,161 @@ def _poll_and_accumulate(simulator, parse_fn, seen, stats):
 # poll-only-at-the-edges variant of this same drive.
 _POLL_INTERVAL_S = 0.05
 
+# Throttle for the display_stats RPC calls _screen_signature makes below.
+# Separate from _POLL_INTERVAL_S because, unlike a local deque read for
+# get_output(), display_stats is a network round trip to the simulator
+# (albeit a cheap one — a single framebuffer scan server-side, no PNG
+# encode/decode the way screenshot_pil() would need; see
+# simulator/sim_socket_handler.c's h_display_stats). Menu redraws don't
+# happen faster than this, so polling it every _POLL_INTERVAL_S (50ms)
+# would just multiply RPC traffic for no extra sensitivity.
+_SCREEN_POLL_INTERVAL_S = 0.15
 
-def _sleep_and_accumulate(simulator, parse_fn, seen, stats, duration):
-    """Sleep ~duration seconds, polling and accumulating every
-    _POLL_INTERVAL_S throughout instead of once at the end or start.
 
-    Used in place of a blind time.sleep() anywhere in the drive below
-    that waits on the app doing work (e.g. between keypresses) — see
-    _POLL_INTERVAL_S for why an unpolled sleep is unsafe here.
+def _screen_signature(simulator):
+    """Cheap fingerprint of the current framebuffer, used as evidence of
+    what's currently on screen.
+
+    Uses the display_stats RPC (the same one test_display_colors.py
+    exercises) rather than screenshot_pil(): it's a single framebuffer
+    scan on the simulator side with no PNG encode/decode round trip, so
+    it's cheap enough to poll repeatedly during a wait. Combines
+    unique_colors, nonzero_pixels, and the first non-zero pixel's
+    position/value into one tuple — main-menu-family screens in this app
+    reportedly hold ~24 distinct colours (including a magenta accent,
+    0xB817) while the post-load mission briefing is a sparse white-on-
+    black screen with only ~4, but this drive doesn't need to know which
+    specific screen it's looking at: any two visually different screens
+    are highly likely to differ in at least one of these fields.
+
+    NOT safe to compare directly against a single prior sample as "did
+    the screen change": C-Dogs' menu screens animate a blinking selection
+    cursor at roughly 15-30Hz even with no input at all (confirmed
+    empirically — see .superpowers/sdd/prereq-5-report.md), so two
+    consecutive samples of the very same idle screen routinely differ.
+    Callers need _learn_screen_baseline's idle-set comparison, not a
+    naive prev-vs-current diff, to tell a real transition apart from that
+    animation.
+
+    Returns None if the RPC call fails for any reason (e.g. a transient
+    hiccup, or the app briefly not rendering between frames). Callers
+    must treat None as inconclusive — neither "matches the baseline" nor
+    "differs from it".
     """
-    deadline = time.time() + duration
-    while True:
-        _poll_and_accumulate(simulator, parse_fn, seen, stats)
-        remaining = deadline - time.time()
-        if remaining <= 0:
-            return
-        time.sleep(min(_POLL_INTERVAL_S, remaining))
+    try:
+        stats = simulator.call("display_stats", timeout=3.0)
+    except Exception:
+        return None
+    first_nonzero = stats.get("first_nonzero") or {}
+    return (
+        stats.get("unique_colors"),
+        stats.get("nonzero_pixels"),
+        first_nonzero.get("rgb565"),
+        first_nonzero.get("x"),
+        first_nonzero.get("y"),
+    )
 
 
-def _drive_quickplay(simulator, boot_marker, parse_fn, settle_s=12, done=None):
-    """Launch C-Dogs, drive the quick-play menu flow, and return the parsed
-    reports once navigation has demonstrably worked.
+# _learn_screen_baseline stops once the observed signature set has gone
+# this many consecutive samples without gaining a new value ("stale") —
+# not after a fixed clock duration. A fixed duration (this drive's first
+# attempt at this) undersamples under host load: display_stats round trips
+# get slower, so fewer samples fit in any fixed window, and a screen whose
+# idle blink has (say) 2 states can easily get caught with only 1 of them
+# characterized — the nudge loop then mistakes the screen's OWN other
+# blink phase for a real transition the moment it shows up, firing an
+# extra Enter mid-load, which is a genuinely unsafe moment for one (unlike
+# a menu at rest, "extra Enters are harmless" does not obviously hold
+# while a campaign is actively loading) — reproduced directly under
+# deliberate host load (`yes > /dev/null`) while developing this drive;
+# see .superpowers/sdd/prereq-5-report.md. Requiring the set to actually
+# stop growing for a streak of samples, however long that takes in wall
+# time, removes the guesswork: it costs a little more time on a slow
+# system and almost none on a fast one, rather than being wrong on a slow
+# one. _BASELINE_MAX_DURATION_S is still a hard backstop in case a screen
+# never truly settles (e.g. baseline-learning starts mid-transition and
+# the screen keeps changing) so this can't wait forever.
+_BASELINE_STABLE_STREAK = 6
+_BASELINE_MAX_DURATION_S = 2.5
+_BASELINE_POLL_INTERVAL_S = 0.05
 
-    Shared by test_heapstat_is_emitted_and_truthful and peak_gfx_total
-    (issue #14) — both need the exact same launch / wait-for-boot-report /
-    navigate / poll-until-settled sequence, only the report tag and parser
-    differ.
+
+def _learn_screen_baseline(simulator, poll_fn,
+                            stable_streak=_BASELINE_STABLE_STREAK,
+                            max_duration=_BASELINE_MAX_DURATION_S,
+                            poll_interval=_BASELINE_POLL_INTERVAL_S):
+    """Return the set of _screen_signature values seen on the CURRENT
+    screen while idling (no keypress sent) — sampled until the set stops
+    growing, not for a fixed duration. See _BASELINE_STABLE_STREAK for why.
+
+    This is what makes the nudge loop's screen-based evidence reliable
+    despite C-Dogs' menus animating at rest: instead of trusting a single
+    before/after sample (which would trip on the very next blink frame
+    with no keypress involved at all), the loop first characterizes every
+    value this screen's own idle animation cycles through, then treats
+    only a signature OUTSIDE that known set as real evidence of a
+    transition.
+
+    Also calls poll_fn() on every iteration, exactly like every other wait
+    in this drive — this window is not a spectator to the log output
+    despite being focused on the screen: skipping that poll here would
+    silently reopen the eviction race this drive exists to close (see
+    _accumulate's and _POLL_INTERVAL_S's docstrings). poll_fn is threaded
+    through for exactly that purpose, not because this function otherwise
+    needs to know about HEAPSTAT/GFXSTAT — it's the caller's own
+    accumulate-everything poll closure (see _drive_quickplay), so every
+    stream the caller cares about keeps accumulating here too.
+    """
+    baseline = set()
+    stale_streak = 0
+    deadline = time.time() + max_duration
+    while time.time() < deadline and stale_streak < stable_streak:
+        poll_fn()
+        sig = _screen_signature(simulator)
+        if sig is not None:
+            if sig in baseline:
+                stale_streak += 1
+            else:
+                baseline.add(sig)
+                stale_streak = 0
+        time.sleep(poll_interval)
+    if not baseline:
+        # A live simulator should always yield at least one sample; only
+        # hit if display_stats failed on every single attempt above
+        # (e.g. a transient RPC hiccup for the whole window). One last
+        # try so callers get a real (possibly singleton) set rather than
+        # an empty one that would make everything look like a transition.
+        sig = _screen_signature(simulator)
+        if sig is not None:
+            baseline.add(sig)
+    return baseline
+
+
+def _drive_quickplay(simulator, streams, settle_s=45, done=None):
+    """Launch C-Dogs, drive the quick-play menu flow, and return every
+    requested diagnostic stream once navigation has demonstrably worked.
+
+    `streams` is a list of (name, parse_fn) pairs, e.g.
+    [("HEAPSTAT", parse_heapstats), ("GFXSTAT", parse_gfxstats)]. Every
+    poll of the simulator's output is parsed with EVERY parse_fn from a
+    single get_output() call and accumulated into that stream's own
+    running list (see _accumulate). Returns {name: [stats...]}.
+
+    Used to be called once per report kind — once for HEAPSTAT (from
+    test_heapstat_is_emitted_and_truthful) and once for GFXSTAT (from
+    peak_gfx_total, itself called from three separate tests) — each
+    paying for its own boot, ~22MB data copytree, and navigation drive
+    (issue #14 originally shared just the drive logic between those two
+    call sites; prereq-6 went further and merged the call sites
+    themselves). HEAPSTAT and GFXSTAT are always emitted as a pair from
+    the same picos_asset_load_tick() report (apps/cdogs/stubs.c calls
+    picos_heap_report() immediately followed by picos_gfx_report(), same
+    tag, same tick) — one regex matches "HEAPSTAT ...", the other
+    "GFXSTAT ...", against identical polls of the same text — so driving
+    them separately was always redoing the same boot/stage/navigate work
+    twice for zero additional coverage. This is now called exactly once,
+    by the cdogs_quickplay_stats fixture, requesting both streams
+    together; see .superpowers/sdd/prereq-6-report.md.
 
     Real main menu structure (verified empirically by driving the
     simulator manually and screenshotting each step — see
@@ -268,46 +481,72 @@ def _drive_quickplay(simulator, boot_marker, parse_fn, settle_s=12, done=None):
     message below, which names this exact dependency rather than failing
     silently.
 
-    Sends the 3-Enter sequence up to twice: if the first attempt's report
-    count never proves navigation worked, it retries once rather than
-    failing immediately (self-healing, not a fixed-delay guess — see the
-    retry loop's own comment for why resending 3 Enters is safe from any
-    of the three levels this drive can get stuck at).
+    Drives with an adaptive nudge-and-check loop rather than a fixed
+    3-Enter sequence on a timer: send one Enter, then poll for direct
+    evidence it actually registered (a completion signal, or the screen
+    itself changing — see _screen_signature) before sending the next,
+    with a generous per-nudge timeout rather than a fixed sleep. A fixed
+    0.8s-per-keypress delay (this drive's previous approach) assumes the
+    simulator always processes a keypress and redraws within that window;
+    under host contention it sometimes doesn't, so the next Enter would
+    land before the previous one had taken effect and get eaten by
+    whatever menu level the drive was actually still on. Nudging on
+    observed evidence instead removes that race: no keypress is sent
+    "blind". Extra nudges beyond the 3 actually needed are harmless — see
+    the nudge loop's own comment for why resending Enter is safe from any
+    of the three levels this drive can get stuck at — so this converges
+    reliably even when several presses in a row don't land.
 
-    done: optional predicate(stats) -> bool checked every poll of the
-    settle loop; polling stops as soon as it returns True (or settle_s
-    elapses, whichever first). Defaults to "at least two reports have
-    arrived" — the signal that quick-play's post-navigation report
-    actually landed, not just the boot-time one. Callers with a more
-    specific completion signal (e.g. "peak has cleared a threshold") can
-    supply their own so the loop breaks the moment that particular
-    condition is satisfied rather than always waiting on report count.
+    done: optional predicate(state) -> bool, where state is the same
+    {name: [stats...]} dict this function returns, checked every poll of
+    the settle loop; polling stops as soon as it returns True (or
+    settle_s elapses, whichever first). Defaults to "every requested
+    stream has collected more than one report" — the signal that
+    quick-play's post-navigation report actually landed for every stream,
+    not just the boot-time one. Callers with a more specific completion
+    signal (e.g. "the heap peak has cleared a threshold") can supply
+    their own so the loop breaks the moment that particular condition is
+    satisfied rather than always waiting on report count.
     """
     if done is None:
-        done = lambda stats: len(stats) > 1  # noqa: E731
+        done = lambda state: all(len(v) > 1 for v in state.values())  # noqa: E731
 
-    # Accumulated across every poll for the rest of this drive — see
-    # _poll_and_accumulate's docstring for why a single end-of-drive read
-    # of get_output() isn't safe against its bounded tails.
-    seen = set()
-    stats = []
+    # Accumulated across every poll for the rest of this drive, one set
+    # of state per requested stream — see _accumulate's docstring for why
+    # a single end-of-drive read of get_output() isn't safe against its
+    # bounded tails.
+    seen = {name: set() for name, _ in streams}
+    stats = {name: [] for name, _ in streams}
+
+    def poll():
+        text = _combined_output(simulator)
+        for name, parse_fn in streams:
+            _accumulate(text, parse_fn, seen[name], stats[name])
+        return text
+
+    def missing_streams():
+        return [name for name, _ in streams if not stats[name]]
 
     simulator.launch_app("cdogs")
 
-    # Wait for the first report: a fast, reliable signal that the
-    # instrumentation is wired up and C-Dogs has started booting. NOT a
-    # signal that the main menu is ready for input — empirically this
-    # fires during early graphics/font init (picos_asset_load_tick's very
-    # first call always clears its tick gate), well before the campaign
-    # manifest scan that follows it finishes.
+    # Wait for the first report on every requested stream: a fast,
+    # reliable signal that the instrumentation is wired up and C-Dogs has
+    # started booting. NOT a signal that the main menu is ready for input
+    # — empirically this fires during early graphics/font init
+    # (picos_asset_load_tick's very first call always clears its tick
+    # gate), well before the campaign manifest scan that follows it
+    # finishes.
     deadline = time.time() + 60
     text = ""
     while time.time() < deadline:
-        text = _poll_and_accumulate(simulator, parse_fn, seen, stats)
-        if stats:
+        text = poll()
+        if not missing_streams():
             break
         time.sleep(_POLL_INTERVAL_S)
-    assert stats, f"no {boot_marker} lines found in log:\n{text[-2000:]}"
+    missing = missing_streams()
+    assert not missing, (
+        f"no {'/'.join(missing)} lines found in log:\n{text[-2000:]}"
+    )
 
     # The real "ready for input" signal: cdogs_picos.c logs this literal
     # line via api->sys->log() (routed to real stdout the same way
@@ -315,16 +554,17 @@ def _drive_quickplay(simulator, boot_marker, parse_fn, settle_s=12, done=None):
     # entering the menu's LoopRunnerRun(), i.e. the first point input is
     # actually consumed. Sending Enters before this landed is the failure
     # mode that broke this drive previously: the campaign manifest scan
-    # after the boot_marker tick can still be in flight, so an early Enter
+    # after the boot-time report can still be in flight, so an early Enter
     # is silently dropped (the app isn't polling input yet), leaving one
     # too few keypresses actually registered and the flow stuck one menu
     # level short of loading anything. Waiting for this line explicitly
     # replaces what used to be an assumption baked into fixed sleeps.
-    # Keeps accumulating stats each poll too — the campaign manifest scan
-    # (and any reports it produces) can still be in flight here.
+    # Keeps polling every stream each iteration too — the campaign
+    # manifest scan (and any reports it produces) can still be in flight
+    # here.
     deadline = time.time() + 60
     while time.time() < deadline:
-        text = _poll_and_accumulate(simulator, parse_fn, seen, stats)
+        text = poll()
         if MENU_READY_MARKER in text:
             break
         time.sleep(_POLL_INTERVAL_S)
@@ -333,88 +573,242 @@ def _drive_quickplay(simulator, boot_marker, parse_fn, settle_s=12, done=None):
         f"reach an input-ready main menu:\n{text[-2000:]}"
     )
 
-    # Two attempts: send Start > Campaign > first campaign, then poll for
-    # the completion signal; if it never arrives, send the same 3 Enters
-    # again before giving up. This is a genuine self-healing retry, not a
-    # blind resend: from any of the three menu levels this drive can get
-    # stuck at (main menu, "Start:" submenu, or the campaign list — e.g.
-    # if the very first Enter races LoopRunnerRun's first input poll and
-    # gets dropped, observed directly under host CPU contention from other
-    # concurrent processes), 3 fresh Enters from wherever navigation
-    # actually stalled always reaches a loaded campaign. A real menu-layout
-    # drift, by contrast, reproduces identically on the retry and still
-    # fails below with the same diagnostic.
-    for attempt in range(2):
-        for _ in range(3):
-            simulator.keypress("enter")
-            # Not a blind time.sleep(0.8): the third Enter (loading a
-            # campaign) is exactly when the dense "[TRAMP] fs_*" burst
-            # from campaign/map/sprite I/O happens, so this window must
-            # keep polling throughout rather than only checking once
-            # after the fact — see _POLL_INTERVAL_S.
-            _sleep_and_accumulate(simulator, parse_fn, seen, stats, 0.8)
+    # Adaptive nudge-and-check: send one Enter, then poll (both the log
+    # output and a screen fingerprint) for direct evidence it registered
+    # before sending the next, instead of trusting a fixed sleep to have
+    # been long enough. Resending Enter is safe from any of the three menu
+    # levels this drive can get stuck at (main menu, "Start:" submenu, or
+    # the campaign list — e.g. if an Enter races LoopRunnerRun's input
+    # poll and gets dropped, observed directly under host CPU contention
+    # from other concurrent processes) because each of those levels'
+    # default-selected item leads deeper into quick-play. A real
+    # menu-layout drift, by contrast, still never produces a second
+    # report no matter how many Enters are sent, and still fails below
+    # with the same diagnostic.
+    #
+    # _EXPECTED_TRANSITIONS caps how many CONFIRMED transitions this loop
+    # will chase with fresh Enters — exactly the 3 real levels (Start >
+    # Campaign > first campaign in the list), not an arbitrarily larger
+    # number. Earlier development of this drive sent Enters far more
+    # liberally (nudging again on every timeout, uncapped) on the
+    # assumption from the task brief that extra Enters are harmless once
+    # the campaign has loaded; that held under light load, but under
+    # sustained host contention a nudge's Enter can land *while the app is
+    # already busy loading* rather than idle at the briefing screen — and
+    # this simulator's ARM code runs under Unicorn CPU emulation (not
+    # natively), so "busy loading" can legitimately last many seconds,
+    # widening that unsafe window considerably. A keypress landing there
+    # is not obviously safe: reproduced directly while developing this
+    # drive, a run that sent dozens of extra Enters past the third real
+    # transition went on to observe a screen that never changed again for
+    # 400+ seconds and no second report — consistent with extra input
+    # having been queued and then fired once the app became responsive,
+    # overshooting past the state this drive needs to observe. Capping at
+    # exactly the expected count removes that risk: once 3 transitions are
+    # confirmed, this loop stops sending input entirely and only waits
+    # (see the settle loop below) — see .superpowers/sdd/prereq-5-report.md.
+    _EXPECTED_TRANSITIONS = 3
+    _MAX_NUDGES = 15  # headroom for dropped presses before any of the 3 land
+    _NUDGE_TIMEOUT_S = 5.0  # ceiling on one nudge's wait for evidence
+    _NAV_TIMEOUT_S = 60.0  # backstop on the whole nudge phase
 
-        # Poll for the completion signal, breaking out as soon as it's met
-        # instead of sleeping the full window unconditionally — quick-play's
-        # post-navigation report typically lands well under the settle_s
-        # backstop.
-        settle_deadline = time.time() + settle_s
-        text = _poll_and_accumulate(simulator, parse_fn, seen, stats)
-        while time.time() < settle_deadline and not done(stats):
-            time.sleep(_POLL_INTERVAL_S)
-            text = _poll_and_accumulate(simulator, parse_fn, seen, stats)
-
-        if len(stats) > 1:
+    nav_deadline = time.time() + _NAV_TIMEOUT_S
+    baseline = _learn_screen_baseline(simulator, poll)
+    confirmed_transitions = 0
+    for _ in range(_MAX_NUDGES):
+        if (done(stats) or confirmed_transitions >= _EXPECTED_TRANSITIONS
+                or time.time() >= nav_deadline):
             break
 
-    assert stats, f"no {boot_marker} lines found in log:\n{text[-2000:]}"
+        simulator.keypress("enter")
 
-    # Navigation sanity check. The caller's own substantive assertions are
-    # the only gate between "quick-play loaded" and a pass, and on their
-    # own a failure there just says the expected data never showed up —
-    # which points straight at the instrumentation (stubs.c / pic.c /
-    # picos_heap.h). But the far more likely real cause is that the three
-    # `enter` presses above no longer land on Start > Campaign > first
-    # campaign (e.g. the main menu or a submenu gained/lost/reordered an
-    # item and the default selection shifted): C-Dogs would then stay idle
-    # after the first, boot-scan-only report and never produce a second
-    # one, since quick-play is what drives the extra campaign/map/sprite
-    # file I/O that triggers it. Catch that case here with a message that
-    # names the actual suspect.
-    assert len(stats) > 1, (
-        f"only one {boot_marker} line observed after driving quick-play "
-        "(3 Enters: Start > Campaign > first campaign in the list) — the "
-        "main menu layout likely drifted from what this drive expects "
-        "(main menu Start/Options/Quit -> \"Start:\" submenu "
-        "Campaign/Dogfight/Deathmatch/Join game/Back -> \"Select a "
-        "campaign:\" list; every Enter here relies on landing on an "
-        "already-default-selected top item at that level) rather than a "
-        f"{'heap' if boot_marker == 'HEAPSTAT' else 'graphics'}-instrumentation bug"
+        step_deadline = min(time.time() + _NUDGE_TIMEOUT_S, nav_deadline)
+        last_screen_check = 0.0
+        transitioned = False
+        while time.time() < step_deadline:
+            # Keep polling every stream regardless of which evidence is
+            # being waited on: the third Enter (loading a campaign) is
+            # exactly when the dense "[TRAMP] fs_*" burst from
+            # campaign/map/sprite I/O happens, and the whole point of
+            # polling throughout instead of only at the edges is that a
+            # burst entirely between two checks can still evict a report
+            # no poll ever saw — see _POLL_INTERVAL_S.
+            poll()
+            if done(stats):
+                break
+
+            now = time.time()
+            if now - last_screen_check >= _SCREEN_POLL_INTERVAL_S:
+                last_screen_check = now
+                sig = _screen_signature(simulator)
+                # A signature outside this screen's own known idle-blink
+                # set is direct evidence this Enter registered and the app
+                # rendered something new (a menu transitioned, or a load
+                # screen appeared) — move on rather than continuing to
+                # wait out the rest of this nudge's timeout for no reason.
+                if sig is not None and sig not in baseline:
+                    transitioned = True
+                    break
+
+            time.sleep(_POLL_INTERVAL_S)
+
+        if done(stats):
+            break
+        if transitioned:
+            confirmed_transitions += 1
+            if confirmed_transitions >= _EXPECTED_TRANSITIONS:
+                # The third confirmed transition is the load-triggering
+                # Enter itself — stop sending input and drop straight to
+                # the settle loop below, which just watches for the
+                # completion signal without touching the keyboard again.
+                break
+            # Learn the new screen's own idle-blink set before the next
+            # nudge, so that comparison is against what *this* screen does
+            # at rest, not the previous one's.
+            baseline = _learn_screen_baseline(simulator, poll)
+        # else: no out-of-baseline signature turned up within this nudge's
+        # timeout — most likely this Enter was dropped (e.g. it raced the
+        # app's own input poll under host contention) rather than the menu
+        # genuinely not responding, so the baseline is still valid and the
+        # next loop iteration just tries again.
+
+    # One more generous poll window for the completion signal — no more
+    # Enters sent here even if confirmed_transitions never reached
+    # _EXPECTED_TRANSITIONS (e.g. nav_deadline or _MAX_NUDGES ran out
+    # first): past this point, sending more input is exactly the
+    # "extra Enter mid-load" risk _EXPECTED_TRANSITIONS exists to avoid,
+    # and the caller's own assertions below already produce a clear
+    # diagnostic if navigation genuinely never got this far. If
+    # done(stats) is already true this is a no-op single poll, not an
+    # unconditional wait.
+    settle_deadline = time.time() + settle_s
+    text = poll()
+    while time.time() < settle_deadline and not done(stats):
+        time.sleep(_POLL_INTERVAL_S)
+        text = poll()
+
+    missing = missing_streams()
+    assert not missing, (
+        f"no {'/'.join(missing)} lines found in log:\n{text[-2000:]}"
     )
+
+    # Navigation sanity check, once per stream. Each downstream test's own
+    # substantive assertions are the only gate between "quick-play loaded"
+    # and a pass, and on their own a failure there just says the expected
+    # data never showed up — which points straight at the instrumentation
+    # (stubs.c / pic.c / picos_heap.h). But the far more likely real cause
+    # is that the three `enter` presses above no longer land on Start >
+    # Campaign > first campaign (e.g. the main menu or a submenu
+    # gained/lost/reordered an item and the default selection shifted):
+    # C-Dogs would then stay idle after the first, boot-scan-only report
+    # and never produce a second one, since quick-play is what drives the
+    # extra campaign/map/sprite file I/O that triggers it. Catch that case
+    # here with a message that names the actual suspect.
+    for name, _ in streams:
+        assert len(stats[name]) > 1, (
+            f"only one {name} line observed after adaptively driving "
+            f"quick-play (up to {_MAX_NUDGES} Enters: Start > Campaign > first "
+            "campaign in the list, each sent only after evidence the previous "
+            "one registered) — the main menu layout likely drifted from what "
+            "this drive expects (main menu Start/Options/Quit -> \"Start:\" "
+            "submenu Campaign/Dogfight/Deathmatch/Join game/Back -> \"Select a "
+            "campaign:\" list; every Enter here relies on landing on an "
+            "already-default-selected top item at that level) rather than a "
+            f"{'heap' if name == 'HEAPSTAT' else 'graphics'}-instrumentation bug"
+        )
 
     return stats
 
 
-def test_heapstat_is_emitted_and_truthful(cdogs_simulator):
+def _quickplay_settled(state):
+    """Completion predicate for the merged HEAPSTAT+GFXSTAT drive: true once
+    every stream has more than the lone boot-time report AND the heap
+    tracker's peak has cleared LOADED_PEAK_FLOOR_BYTES.
+
+    This is the union of what the two drives needed separately before they
+    were merged (prereq-6): test_heapstat_is_emitted_and_truthful used to
+    pass _drive_quickplay a done= that stopped as soon as peak cleared the
+    floor, while every GFXSTAT-consuming test relied on the plain default
+    of "more than one report". Requiring both here means the settle loop
+    only stops early once every condition any downstream test needs is
+    already satisfied — never earlier, so no consuming test can observe a
+    state that wouldn't already have made its own old solo drive stop.
+    Falling short of this by the settle timeout is not fatal on its own:
+    _drive_quickplay's own navigation-sanity assertions (len > 1 per
+    stream) and each test's substantive assertions below still catch a
+    real regression either way.
+    """
+    heap = state.get("HEAPSTAT", [])
+    gfx = state.get("GFXSTAT", [])
+    return (
+        len(heap) > 1
+        and len(gfx) > 1
+        and any(s["peak"] > LOADED_PEAK_FLOOR_BYTES for s in heap)
+    )
+
+
+@pytest.fixture(scope="module")
+def cdogs_quickplay_stats(cdogs_simulator):
+    """Drive C-Dogs quick-play exactly ONCE for the whole module and
+    return both diagnostic streams it produces.
+
+    Only ~100 of 1683 PNGs are even attempted at the idle main menu (2
+    succeed, the rest are skipped by the reserve guard before a campaign
+    is loaded) — the real sprite (and heap) load happens on campaign
+    entry, so a plain launch-and-wait would see almost nothing on either
+    stream. See _drive_quickplay for the full navigation rationale.
+
+    Returns {"HEAPSTAT": [...], "GFXSTAT": [...]} — see parse_heapstats /
+    parse_gfxstats for the shape of each entry. All four stats-consuming
+    tests below read from this dict; none of them re-drive the simulator.
+    """
+    return _drive_quickplay(
+        cdogs_simulator,
+        [("HEAPSTAT", parse_heapstats), ("GFXSTAT", parse_gfxstats)],
+        done=_quickplay_settled,
+    )
+
+
+def _peak_gfx_entry(gfx_stats):
+    """Return the GFXSTAT line whose peak= field equals the overall
+    observed high-water mark, from an already-collected list of
+    parse_gfxstats dicts.
+
+    peak= is a running high-water mark of (data+tex) sampled every time
+    either byte counter grows (see picos_gfx_bytes_peak_sample in
+    picos_heap.h) — not just at report time — so unlike a plain instant
+    sample it cannot land between two ticks and miss the load entirely.
+
+    Because peak= is monotonically non-decreasing, max(stats, key=...)
+    returns the FIRST line that reached the final peak value, not
+    necessarily the last one — any later line sharing that same peak value
+    is skipped over. Only the returned dict's peak field should be treated
+    as meaningful: it genuinely is the high-water mark. Its pics/data/tex/
+    total/skipped fields are just that one tick's own snapshot (recomputed
+    at report time), not the state at the instant the peak was actually
+    set — e.g. data/tex can shrink afterward (PicShrink) while peak holds
+    still. Callers that need the settled end-state should look at the last
+    element of gfx_stats instead of this function's return value.
+    """
+    return max(gfx_stats, key=lambda s: s["peak"])
+
+
+def test_heapstat_is_emitted_and_truthful(cdogs_quickplay_stats):
     """The heap gauge reports both readings, and true >= watermark.
 
     Guards against regressing to the watermark-only gauge, which silently
     under-reported free memory and mis-tuned the reserve guard.
 
-    Drives the "Start" quick-play flow (see _drive_quickplay), which opens
-    campaign/map/sprite data and reliably produces at least one more
-    report after the heap has grown past the reserve threshold (verified
-    directly: the resulting peak is consistently well above
-    PEAK_RESERVE_THRESHOLD). This is the same instrumentation exercising
-    the same code path the reserve guard itself exercises — not a separate
-    scenario. The idle main menu alone never re-triggers file I/O, so
-    without this drive only the single boot-time report would ever arrive
-    and the peak field would go unexercised.
+    Reads the HEAPSTAT stream from the module's single shared quick-play
+    drive (see cdogs_quickplay_stats), which opens campaign/map/sprite
+    data and reliably produces at least one more report after the heap
+    has grown well past the boot-time sample (verified directly: the
+    resulting peak is consistently well above LOADED_PEAK_FLOOR_BYTES).
+    The idle main menu alone never re-triggers file I/O, so without that
+    drive only the single boot-time report would ever arrive and the peak
+    field would go unexercised.
     """
-    stats = _drive_quickplay(
-        cdogs_simulator, "HEAPSTAT", parse_heapstats,
-        done=lambda s: any(x["peak"] > PEAK_RESERVE_THRESHOLD for x in s),
-    )
+    stats = cdogs_quickplay_stats["HEAPSTAT"]
 
     for s in stats:
         assert s["true"] >= s["watermark"], (
@@ -442,75 +836,24 @@ def test_heapstat_is_emitted_and_truthful(cdogs_simulator):
 
     # The real regression gate: the old watermark-on-a-5s-cadence gauge
     # could (and did) sample exactly once, before loading even started,
-    # and never witness the heap growing past the 2.5 MiB LoadImgToSurface
-    # reserve threshold. The peak tracker is sampled on every _sbrk()
-    # growth, not just at report time, so it must have observed the heap
-    # actually filling up regardless of sampling cadence.
+    # and never witness the heap growing past a boot-time-only sample. The
+    # peak tracker is sampled on every _sbrk() growth, not just at report
+    # time, so it must have observed the heap actually filling up during
+    # asset loading, well beyond the ~488_000-byte boot-time figure,
+    # regardless of sampling cadence. (This used to compare against the
+    # utils.c IMG_LOAD_HEAP_RESERVE guard's 2.5 MiB trip point instead;
+    # freeing memory elsewhere means the guard no longer trips at all, so
+    # that comparison is gone — see LOADED_PEAK_FLOOR_BYTES above.)
     max_peak = max(s["peak"] for s in stats)
-    assert max_peak > PEAK_RESERVE_THRESHOLD, (
-        f"max observed peak ({max_peak}) never exceeded the 2.5 MiB reserve "
-        f"threshold ({PEAK_RESERVE_THRESHOLD}) — instrumentation did not "
-        f"witness the heap filling"
+    assert max_peak > LOADED_PEAK_FLOOR_BYTES, (
+        f"max observed peak ({max_peak}) never exceeded the loaded-state "
+        f"floor ({LOADED_PEAK_FLOOR_BYTES}) — instrumentation did not "
+        "witness the heap filling during asset loading (it may be "
+        "sampling only the boot-time state)"
     )
 
 
-GFXSTAT_RE = re.compile(
-    r"GFXSTAT (\S+) pics=(-?\d+) data=(\d+) tex=(\d+) total=(\d+) peak=(\d+) skipped=(-?\d+)"
-)
-
-
-def parse_gfxstats(log_text):
-    """Return list of dicts for every GFXSTAT line in the log."""
-    out = []
-    for m in GFXSTAT_RE.finditer(log_text):
-        out.append({
-            "tag": m.group(1),
-            "pics": int(m.group(2)),
-            "data": int(m.group(3)),
-            "tex": int(m.group(4)),
-            "total": int(m.group(5)),
-            "peak": int(m.group(6)),
-            "skipped": int(m.group(7)),
-        })
-    return out
-
-
-def peak_gfx_total(simulator, settle_s=12):
-    """Launch cdogs, drive quick-play, and return the GFXSTAT line whose
-    peak= field equals the overall observed high-water mark.
-
-    Uses _drive_quickplay for the shared launch / wait-for-boot-report /
-    navigate / poll-until-settled sequence (issue #14 — this used to carry
-    its own near-identical copy of that logic) for the same reason
-    test_heapstat_is_emitted_and_truthful does: only ~100 of 1683 PNGs are
-    even attempted at the idle main menu (2 succeed, the rest are skipped
-    by the reserve guard before a campaign is loaded) — the real sprite
-    load happens on campaign entry. A plain launch-and-wait would see
-    almost nothing.
-
-    peak= is a running high-water mark of (data+tex) sampled every time
-    either byte counter grows (see picos_gfx_bytes_peak_sample in
-    picos_heap.h) — not just at report time — so unlike a plain instant
-    sample it cannot land between two ticks and miss the load entirely.
-
-    Because peak= is monotonically non-decreasing, max(stats, key=...)
-    returns the FIRST line that reached the final peak value, not
-    necessarily the last one — any later line sharing that same peak value
-    is skipped over. Only the returned dict's peak field should be treated
-    as meaningful: it genuinely is the high-water mark. Its pics/data/tex/
-    total/skipped fields are just that one tick's own snapshot (recomputed
-    at report time), not the state at the instant the peak was actually
-    set — e.g. data/tex can shrink afterward (PicShrink) while peak holds
-    still. Callers that need the settled end-state should look at the last
-    element of the parsed stats list instead of this function's return
-    value.
-    """
-    stats = _drive_quickplay(simulator, "GFXSTAT", parse_gfxstats, settle_s=settle_s)
-
-    return max(stats, key=lambda s: s["peak"])
-
-
-def test_gfxstat_reports_resident_graphics(cdogs_simulator):
+def test_gfxstat_reports_resident_graphics(cdogs_quickplay_stats):
     """Resident graphics accounting is emitted and internally consistent.
 
     Originally established the Stage 1 baseline for Task 4 (collapsing the
@@ -523,7 +866,7 @@ def test_gfxstat_reports_resident_graphics(cdogs_simulator):
     any specific byte figure — the point of this test is to measure the
     current footprint, not pin it.
     """
-    peak = peak_gfx_total(cdogs_simulator)
+    peak = _peak_gfx_entry(cdogs_quickplay_stats["GFXSTAT"])
 
     assert peak["total"] == peak["data"] + peak["tex"], (
         f"total {peak['total']} != data {peak['data']} + tex {peak['tex']}"
@@ -557,7 +900,7 @@ def test_sd_payload_excludes_non_runtime_sources():
     )
 
 
-def test_textures_borrow_rather_than_duplicate(cdogs_simulator):
+def test_textures_borrow_rather_than_duplicate(cdogs_quickplay_stats):
     """Textures alias Pic->Data instead of holding a second copy.
 
     With no GPU a texture is plain heap, so duplicating every image
@@ -572,45 +915,139 @@ def test_textures_borrow_rather_than_duplicate(cdogs_simulator):
     none of which are per-pic sprite copies. See TEX_CEILING_BYTES below
     for the measured legitimate baseline and how the ceiling was chosen.
     """
-    peak = peak_gfx_total(cdogs_simulator)
+    peak = _peak_gfx_entry(cdogs_quickplay_stats["GFXSTAT"])
 
     # Measured on this simulator (deterministic across repeated runs — these
-    # are fixed 320x240 ARGB8888 window buffers created once during
+    # are fixed 320x240 window buffers created once during
     # GraphicsInitialize, independent of how many sprites load):
-    #   5 owning textures * 320 * 240 * 4 bytes = 1_536_000
-    # If a per-pic duplication path were reintroduced (i.e. Task 3's
-    # regression), tex would additionally gain roughly one more copy of
-    # `data` per pic — using this run's own data=81824 as the estimate,
-    # that's ~1_536_000 + 81_824 ~= 1_617_824. The ceiling below sits
-    # roughly halfway between the measured legitimate baseline and that
-    # regression estimate: generous headroom over what's actually observed,
-    # but comfortably below the point a reintroduced duplication path would
-    # reach.
-    TEX_CEILING_BYTES = 1_580_000
+    #   5 owning textures * 320 * 240 * 2 bytes = 768_000
+    # (Sub-project 2A converted these from ARGB8888 to RGB565; they were
+    # 1_536_000 before.) These five buffers are window-sized and fixed in
+    # number, so this figure is deterministic — it does NOT grow with the
+    # number of sprites loaded. That is what lets the ceiling sit tight.
+    # If a per-pic duplication path were reintroduced, tex would gain
+    # roughly one more copy of `data` per pic; at the current data=310_376
+    # that lands near 768_000 + 310_376 ~= 1_078_376. The ceiling below
+    # leaves a small margin over the deterministic baseline and sits far
+    # below that regression estimate.
+    TEX_CEILING_BYTES = 810_000
     assert peak["tex"] < TEX_CEILING_BYTES, (
         f"tex holds {peak['tex']} bytes, expected under {TEX_CEILING_BYTES} "
         "— legitimate owning textures (grafx.c's window-sized render "
-        "buffers) measured at 1_536_000 on this simulator; a figure "
+        "buffers) measured at 768_000 on this simulator; a figure "
         "meaningfully above that suggests a per-pic texture-duplication "
         "path was reintroduced somewhere"
     )
     assert peak["data"] > 0, "no pic data counted; accounting is broken"
 
-    # Secondary, heap-pressure-immune gate. Freeing the duplicate texture
-    # copy relaxes the reserve guard (utils.c's IMG_LOAD_HEAP_RESERVE), so
-    # it now skips fewer images than Task 3's run did — pics rises, and raw
-    # data/peak can hold steady or even grow instead of halving. Bytes per
-    # pic is not sensitive to how many images got past the guard: Task 3's
-    # baseline was ~320 bytes/pic (163648/512, tex==data duplication in
-    # full); with textures borrowed there is only one copy per pic, so this
-    # should roughly halve to ~160. Uses `data` rather than `total` here
-    # deliberately: `total` now includes the fixed, non-per-pic window-
-    # buffer bytes accounted for above, which would swamp this ratio and
-    # defeat its purpose. Assert a generous ceiling rather than pin an
-    # exact figure.
+    # Secondary gate testing what this test is actually named for: tex
+    # does not duplicate per-pic data. bytes-per-pic (data/pics) used to
+    # stand in for this, but it assumed a resident set dominated by tiny
+    # font glyphs; freeing the duplicate texture copy relaxed the reserve
+    # guard (utils.c's IMG_LOAD_HEAP_RESERVE) so real sprites now load too
+    # (pics: 512 -> 705 measured here), which legitimately raises the
+    # average — that ratio isn't comparable across a change that alters
+    # which assets load, so it's gone rather than re-tuned.
+    #
+    # The invariant that actually matters has nothing to do with pics at
+    # all: grafx.c's GraphicsInitialize creates exactly 5 owning buffers,
+    # each 320x240 px, each either RGB565 (2 bytes/px) or ARGB8888 (4
+    # bytes/px) depending on how many of them have been converted so far —
+    # bounding tex to 768_000..1_536_000 bytes regardless of how many pics
+    # are resident. A reintroduced per-pic duplication path would instead
+    # grow tex roughly in step with `data`, which TEX_CEILING_BYTES above
+    # already catches. FIXED_WINDOW_TEX_FLOOR_BYTES guards the other
+    # direction: a collapse in the accounting (tex reading near 0) instead
+    # of merely shrinking.
+    #
+    # Measured today: tex=921_600 (4 of the 5 buffers already RGB565,
+    # 1 still ARGB8888). A follow-on change converts the framebuffer and
+    # that last remaining buffer, taking tex to the exact floor, 768_000 —
+    # a later task can tighten this assertion to that exact figure once
+    # that lands; until then the floor sits with headroom below it so both
+    # states pass.
     assert peak["pics"] > 0, "no pics counted; accounting is broken"
-    bytes_per_pic = peak["data"] / peak["pics"]
-    assert bytes_per_pic < 240, (
-        f"data/pics = {bytes_per_pic:.1f} bytes/pic — expected roughly half "
-        f"of Task 3's ~320 baseline once the duplicate texture copy is gone"
+    FIXED_WINDOW_TEX_FLOOR_BYTES = 700_000
+    assert peak["tex"] >= FIXED_WINDOW_TEX_FLOOR_BYTES, (
+        f"tex holds only {peak['tex']} bytes, below the fixed-window-buffer "
+        f"floor of {FIXED_WINDOW_TEX_FLOOR_BYTES} — that floor is derived "
+        "purely from grafx.c's 5 fixed 320x240 buffers, independent of "
+        "pics/data, so a figure below it means texture accounting "
+        "collapsed rather than merely shrank"
+    )
+
+
+def test_owned_textures_are_16_bit(cdogs_quickplay_stats):
+    """Shim-owned whole-screen textures hold 2 bytes per pixel, not 4.
+
+    grafx.c's GraphicsInitialize creates five 320x240 buffers via
+    SDL_CreateTexture (bkgTgt, bkg, screen, hud, brightnessOverlay).
+    At 4 bytes per pixel that is 1_536_000 bytes — 29% of the 5MB app
+    heap spent on fixed window buffers. RGB565 halves each of them.
+
+    Asserted as a ceiling rather than an equality because the count of
+    owning textures is a property of grafx.c, not of the shim, and a
+    second window (Graphics.SecondWindow) would legitimately add more.
+    The ceiling sits below the all-32-bit figure so a regression to
+    4-byte pixels cannot pass.
+    """
+    peak = _peak_gfx_entry(cdogs_quickplay_stats["GFXSTAT"])
+
+    ALL_32BIT_BYTES = 5 * 320 * 240 * 4  # 1_536_000
+    assert peak["tex"] < ALL_32BIT_BYTES, (
+        f"tex holds {peak['tex']} bytes, which is not below the "
+        f"all-ARGB8888 figure of {ALL_32BIT_BYTES} — owned textures do "
+        "not appear to have been converted to RGB565"
+    )
+    assert peak["tex"] > 0, "no owning textures counted; accounting is broken"
+
+
+def test_render_targets_are_16_bit(cdogs_quickplay_stats):
+    """Every shim-owned texture is RGB565, including the render target.
+
+    Task 3 left bkgTgt (SDL_TEXTUREACCESS_TARGET) at ARGB8888 so
+    get_target() could keep one pointer type while the framebuffer was
+    still 32-bit. Once the framebuffer is RGB565 that exception is gone,
+    and tex should sit at the all-16-bit figure rather than 153_600
+    above it.
+    """
+    peak = _peak_gfx_entry(cdogs_quickplay_stats["GFXSTAT"])
+
+    # 5 whole-screen 320x240 textures at 2 bytes per pixel. bkgTgt, the one
+    # SDL_TEXTUREACCESS_TARGET texture, is the last to convert (Task 4).
+    TASK3_INTERIM_BYTES = ALL_16BIT_TEX_BYTES + 320 * 240 * 2  # 921_600
+    assert peak["tex"] < TASK3_INTERIM_BYTES, (
+        f"tex holds {peak['tex']} bytes, at or above the Task 3 interim "
+        f"figure of {TASK3_INTERIM_BYTES} — the render target (bkgTgt) "
+        "still looks like ARGB8888"
+    )
+    assert peak["tex"] > 0, "no owning textures counted; accounting is broken"
+
+
+def test_render_pipeline_saving(cdogs_quickplay_stats):
+    """The five window textures sit at the RGB565 figure, from both sides.
+
+    Bounded above and below on purpose. The ceiling catches `tex` growing —
+    a revert to 4-byte pixels (~1_536_000) or a reintroduced per-pic
+    duplication path (~1_078_376). The floor catches `tex` shrinking —
+    buffers not allocated, allocated undersized, or dropped from the
+    accounting. The floor matters because this is a memory-reduction
+    change: an undercount would look like a further saving rather than a
+    defect, so the figure has to be pinned from both sides to be
+    trustworthy.
+
+    Not covered here, because g_picos_pic_tex_bytes only counts textures
+    created through SDL_CreateTexture: PicosRenderer.framebuf (307_200 ->
+    153_600) and the deleted s_rgb565_buf staging buffer (153_600). Those
+    307_200 further bytes are verified statically in the same-named task
+    step, by reading the two calloc sites in picos_sdl_impl.c.
+    """
+    peak = _peak_gfx_entry(cdogs_quickplay_stats["GFXSTAT"])
+
+    EXPECTED = ALL_16BIT_TEX_BYTES  # 768_000
+    assert EXPECTED * 0.9 < peak["tex"] < EXPECTED * 1.1, (
+        f"tex holds {peak['tex']} bytes; expected ~{EXPECTED} "
+        f"(5 x 320 x 240 x 2). Roughly {EXPECTED * 2} would mean the "
+        "buffers reverted to ARGB8888; a much larger figure would mean a "
+        "per-pic texture-duplication path came back."
     )

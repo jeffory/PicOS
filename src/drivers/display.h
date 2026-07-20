@@ -138,6 +138,8 @@ extern bool g_display_flush_blocking;
 // only transfers the specified row range.  Useful for video playback where the
 // content occupies a sub-region of the 320×320 screen.
 void display_flush_region(int y0, int y1);
+void display_flush_region_nocopy(int y0, int y1);
+void display_sync_back_region(int y0, int y1);
 
 // Flush only rows y0..y1 (inclusive, full width) from the back buffer to the
 // LCD. Does NOT swap buffers — call display_flush() for that.  Useful for
