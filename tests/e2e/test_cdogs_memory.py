@@ -79,11 +79,21 @@ HEAPSTAT_RE = re.compile(
     r"HEAPSTAT (\S+) watermark=(\d+) true=(\d+) arena=(\d+) used=(\d+) peak=(\d+)"
 )
 
-# Mirrors IMG_LOAD_HEAP_RESERVE in apps/cdogs/src/src/cdogs/utils.c
-# (2560 * 1024 bytes = 2.5 MiB) — the real reserve guard the peak
-# assertion below exists to prove fired. Keep this in sync if that
-# constant ever changes.
-PEAK_RESERVE_THRESHOLD = 2_621_440
+# Floor proving the peak tracker actually witnessed substantial heap
+# growth during asset loading, not just the boot-time sample. This used
+# to mirror IMG_LOAD_HEAP_RESERVE (utils.c's 2.5 MiB reserve guard) to
+# prove that guard had tripped, but freeing memory elsewhere (the shim's
+# whole-screen textures moving from ARGB8888 to RGB565) relaxed the guard
+# enough that it no longer trips at all — this constant is NOT about that
+# guard anymore, only about proving the instrumentation samples the
+# loaded state and not just boot. Chosen comfortably above the ~488_000-
+# byte boot-time peak (font/early init, before any campaign data loads)
+# and comfortably below the loaded peak actually observed once quick-play
+# loads a campaign (~2.6 MiB as of this writing — see
+# .superpowers/sdd/task-3-report.md for the measured before/after
+# figures), so it still fails loudly if this ever regresses to sampling
+# only the boot-time state.
+LOADED_PEAK_FLOOR_BYTES = 1_500_000
 
 # Logged once via api->sys->log() in apps/cdogs/cdogs_picos.c, right
 # before the menu's LoopRunnerRun() starts consuming input — the first
@@ -403,17 +413,15 @@ def test_heapstat_is_emitted_and_truthful(cdogs_simulator):
 
     Drives the "Start" quick-play flow (see _drive_quickplay), which opens
     campaign/map/sprite data and reliably produces at least one more
-    report after the heap has grown past the reserve threshold (verified
-    directly: the resulting peak is consistently well above
-    PEAK_RESERVE_THRESHOLD). This is the same instrumentation exercising
-    the same code path the reserve guard itself exercises — not a separate
-    scenario. The idle main menu alone never re-triggers file I/O, so
-    without this drive only the single boot-time report would ever arrive
-    and the peak field would go unexercised.
+    report after the heap has grown well past the boot-time sample
+    (verified directly: the resulting peak is consistently well above
+    LOADED_PEAK_FLOOR_BYTES). The idle main menu alone never re-triggers
+    file I/O, so without this drive only the single boot-time report would
+    ever arrive and the peak field would go unexercised.
     """
     stats = _drive_quickplay(
         cdogs_simulator, "HEAPSTAT", parse_heapstats,
-        done=lambda s: any(x["peak"] > PEAK_RESERVE_THRESHOLD for x in s),
+        done=lambda s: any(x["peak"] > LOADED_PEAK_FLOOR_BYTES for x in s),
     )
 
     for s in stats:
@@ -442,15 +450,20 @@ def test_heapstat_is_emitted_and_truthful(cdogs_simulator):
 
     # The real regression gate: the old watermark-on-a-5s-cadence gauge
     # could (and did) sample exactly once, before loading even started,
-    # and never witness the heap growing past the 2.5 MiB LoadImgToSurface
-    # reserve threshold. The peak tracker is sampled on every _sbrk()
-    # growth, not just at report time, so it must have observed the heap
-    # actually filling up regardless of sampling cadence.
+    # and never witness the heap growing past a boot-time-only sample. The
+    # peak tracker is sampled on every _sbrk() growth, not just at report
+    # time, so it must have observed the heap actually filling up during
+    # asset loading, well beyond the ~488_000-byte boot-time figure,
+    # regardless of sampling cadence. (This used to compare against the
+    # utils.c IMG_LOAD_HEAP_RESERVE guard's 2.5 MiB trip point instead;
+    # freeing memory elsewhere means the guard no longer trips at all, so
+    # that comparison is gone — see LOADED_PEAK_FLOOR_BYTES above.)
     max_peak = max(s["peak"] for s in stats)
-    assert max_peak > PEAK_RESERVE_THRESHOLD, (
-        f"max observed peak ({max_peak}) never exceeded the 2.5 MiB reserve "
-        f"threshold ({PEAK_RESERVE_THRESHOLD}) — instrumentation did not "
-        f"witness the heap filling"
+    assert max_peak > LOADED_PEAK_FLOOR_BYTES, (
+        f"max observed peak ({max_peak}) never exceeded the loaded-state "
+        f"floor ({LOADED_PEAK_FLOOR_BYTES}) — instrumentation did not "
+        "witness the heap filling during asset loading (it may be "
+        "sampling only the boot-time state)"
     )
 
 
@@ -596,23 +609,40 @@ def test_textures_borrow_rather_than_duplicate(cdogs_simulator):
     )
     assert peak["data"] > 0, "no pic data counted; accounting is broken"
 
-    # Secondary, heap-pressure-immune gate. Freeing the duplicate texture
-    # copy relaxes the reserve guard (utils.c's IMG_LOAD_HEAP_RESERVE), so
-    # it now skips fewer images than Task 3's run did — pics rises, and raw
-    # data/peak can hold steady or even grow instead of halving. Bytes per
-    # pic is not sensitive to how many images got past the guard: Task 3's
-    # baseline was ~320 bytes/pic (163648/512, tex==data duplication in
-    # full); with textures borrowed there is only one copy per pic, so this
-    # should roughly halve to ~160. Uses `data` rather than `total` here
-    # deliberately: `total` now includes the fixed, non-per-pic window-
-    # buffer bytes accounted for above, which would swamp this ratio and
-    # defeat its purpose. Assert a generous ceiling rather than pin an
-    # exact figure.
+    # Secondary gate testing what this test is actually named for: tex
+    # does not duplicate per-pic data. bytes-per-pic (data/pics) used to
+    # stand in for this, but it assumed a resident set dominated by tiny
+    # font glyphs; freeing the duplicate texture copy relaxed the reserve
+    # guard (utils.c's IMG_LOAD_HEAP_RESERVE) so real sprites now load too
+    # (pics: 512 -> 705 measured here), which legitimately raises the
+    # average — that ratio isn't comparable across a change that alters
+    # which assets load, so it's gone rather than re-tuned.
+    #
+    # The invariant that actually matters has nothing to do with pics at
+    # all: grafx.c's GraphicsInitialize creates exactly 5 owning buffers,
+    # each 320x240 px, each either RGB565 (2 bytes/px) or ARGB8888 (4
+    # bytes/px) depending on how many of them have been converted so far —
+    # bounding tex to 768_000..1_536_000 bytes regardless of how many pics
+    # are resident. A reintroduced per-pic duplication path would instead
+    # grow tex roughly in step with `data`, which TEX_CEILING_BYTES above
+    # already catches. FIXED_WINDOW_TEX_FLOOR_BYTES guards the other
+    # direction: a collapse in the accounting (tex reading near 0) instead
+    # of merely shrinking.
+    #
+    # Measured today: tex=921_600 (4 of the 5 buffers already RGB565,
+    # 1 still ARGB8888). A follow-on change converts the framebuffer and
+    # that last remaining buffer, taking tex to the exact floor, 768_000 —
+    # a later task can tighten this assertion to that exact figure once
+    # that lands; until then the floor sits with headroom below it so both
+    # states pass.
     assert peak["pics"] > 0, "no pics counted; accounting is broken"
-    bytes_per_pic = peak["data"] / peak["pics"]
-    assert bytes_per_pic < 240, (
-        f"data/pics = {bytes_per_pic:.1f} bytes/pic — expected roughly half "
-        f"of Task 3's ~320 baseline once the duplicate texture copy is gone"
+    FIXED_WINDOW_TEX_FLOOR_BYTES = 700_000
+    assert peak["tex"] >= FIXED_WINDOW_TEX_FLOOR_BYTES, (
+        f"tex holds only {peak['tex']} bytes, below the fixed-window-buffer "
+        f"floor of {FIXED_WINDOW_TEX_FLOOR_BYTES} — that floor is derived "
+        "purely from grafx.c's 5 fixed 320x240 buffers, independent of "
+        "pics/data, so a figure below it means texture accounting "
+        "collapsed rather than merely shrank"
     )
 
 
