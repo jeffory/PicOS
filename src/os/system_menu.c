@@ -8,6 +8,7 @@
 #include "../drivers/wifi.h"
 #include "../usb/usb_msc.h"
 #include "config.h"
+#include "idle_dim.h"
 #include "launcher.h"
 #include "os.h"
 #include "screenshot.h"
@@ -412,6 +413,11 @@ static bool menu_loop(lua_State *L, int context) {
     // for the entire time this modal is open.
     dev_commands_poll();
     dev_commands_process();
+    // Let a dev "exit" unwind this modal (close; the Lua hook handles exit).
+    if (dev_commands_wants_exit()) {
+      running = false;
+      continue;
+    }
     uint32_t pressed = kbd_get_buttons_pressed();
 
     if (pressed & BTN_UP) {
@@ -427,11 +433,13 @@ static bool menu_loop(lua_State *L, int context) {
     if ((pressed & BTN_LEFT) && items[sel].type == ITEM_BRIGHTNESS) {
       s_brightness = (s_brightness >= 16) ? s_brightness - 16 : 0;
       kbd_set_backlight(s_brightness);
+      idle_dim_set_brightness(s_brightness);
       need_redraw = true;
     }
     if ((pressed & BTN_RIGHT) && items[sel].type == ITEM_BRIGHTNESS) {
       s_brightness = (s_brightness <= 239) ? s_brightness + 16 : 255;
       kbd_set_backlight(s_brightness);
+      idle_dim_set_brightness(s_brightness);
       need_redraw = true;
     }
 
@@ -445,6 +453,7 @@ static bool menu_loop(lua_State *L, int context) {
       case ITEM_BRIGHTNESS:
         s_brightness = (s_brightness <= 239) ? s_brightness + 16 : 0;
         kbd_set_backlight(s_brightness);
+        idle_dim_set_brightness(s_brightness);
         need_redraw = true;
         break;
       case ITEM_BATTERY:

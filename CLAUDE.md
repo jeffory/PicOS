@@ -174,7 +174,7 @@ A debug hook fires every 256 opcodes (`lua_sethook` with `LUA_MASKCOUNT`). The h
 - Flat JSON key/value store persisted at `/system/config.json`
 - `config_load()` at boot; `config_save()` writes back to SD
 - Exposed to Lua as `picocalc.config.get(key)`, `.set(key, value)`, `.save()`, `.load()`
-- Well-known keys: `"wifi_ssid"`, `"wifi_pass"`, `"brightness"`
+- Well-known keys: `"wifi_ssid"`, `"wifi_pass"`, `"brightness"`, `"dim_timeout_s"` (idle screen-dim timeout in seconds; `"0"` disables; default 60)
 
 ### UI Widgets (`src/os/ui.c`, `text_input.c`)
 - `ui_draw_header()` — titlebar with battery/WiFi/clock

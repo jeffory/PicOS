@@ -343,6 +343,7 @@ void __attribute__((naked)) isr_hardfault(void) {
 #include "os/core1_alloc.h"
 #include "os/crypto.h"
 #include "os/file_browser.h"
+#include "os/idle_dim.h"
 #include "os/launcher.h"
 #include "os/lua_psram_alloc.h"
 #include "os/os.h"
@@ -1878,6 +1879,16 @@ int main(void) {
   // Load persisted settings from /system/config.json
   config_load();
   watchdog_update();
+
+  // Idle screen dimming (burn-in protection). Config "dim_timeout_s"
+  // overrides the 60s default; "0" disables dimming entirely.
+  {
+    uint32_t dim_timeout_s = 60;
+    const char *dt = config_get("dim_timeout_s");
+    if (dt)
+      dim_timeout_s = (uint32_t)atoi(dt);
+    idle_dim_init(128, dim_timeout_s);
+  }
 
   // Initialise WiFi hardware (auto-connects if credentials are in config)
   ui_draw_splash("Initialising WiFi...", NULL);

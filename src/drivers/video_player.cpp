@@ -9,6 +9,7 @@ extern "C" {
 #include "pio_psram.h"
 #include "../os/launcher.h"
 #include "../os/config.h"
+#include "../os/idle_dim.h"
 }
 
 #include <stdio.h>
@@ -418,6 +419,9 @@ static void flush_pending_nocopy(video_priv_t *priv) {
     if (priv->pending_flush) {
         display_flush_region_nocopy(priv->flush_y0, priv->flush_y1);
         priv->pending_flush = false;
+        // Active playback counts as activity — don't let the idle dimmer
+        // darken the screen mid-video.
+        idle_dim_note_activity();
     }
 }
 

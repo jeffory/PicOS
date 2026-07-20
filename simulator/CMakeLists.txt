@@ -249,6 +249,7 @@ set(PICOS_CORE_SOURCES
     ${PICOS_ROOT}/src/os/lua_bridge_game_save.c
     ${PICOS_ROOT}/src/os/lua_psram_alloc.c
     ${PICOS_ROOT}/src/os/system_menu.c
+    ${PICOS_ROOT}/src/os/idle_dim.c
     ${PICOS_ROOT}/src/os/screenshot.c
     ${PICOS_ROOT}/src/os/terminal.c
     ${PICOS_ROOT}/src/os/terminal_parser.c
