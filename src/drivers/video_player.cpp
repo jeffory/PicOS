@@ -14,7 +14,9 @@ extern "C" {
 #include <stdio.h>
 #include <string.h>
 #include <stdlib.h>
+#include <atomic>
 #include <pico/time.h>
+#include <pico/multicore.h>
 #include <hardware/watchdog.h>
 
 #include <JPEGDEC.h>
@@ -95,6 +97,10 @@ typedef struct {
     uint32_t audio_feed_cursor;    // Next audio chunk to feed
     bool     audio_muted;
     bool     audio_active;         // True if fed mode is currently running
+
+    // Diagnostics: Core-1 prefetch hits/misses
+    uint32_t pf_hits;
+    uint32_t pf_misses;
 } video_priv_t;
 
 // JPEGDEC in static SRAM BSS: Huffman tables (10KB), MCU buffers, VLC staging,
@@ -174,6 +180,122 @@ static void buffer_pool_cleanup(video_priv_t *priv) {
             priv->buffer_pool[i].capacity = 0;
             priv->buffer_pool[i].in_use = false;
         }
+    }
+}
+
+// --- Core-1 next-frame prefetch ---------------------------------------------
+// While Core 0 decodes frame N (~22ms), Core 1 reads frame N+1 from SD into a
+// pool buffer (~9ms), hiding the SD read entirely.  Modeled on image_preload:
+// atomic state machine + doorbell wake.  The SD driver's cross-core recursive
+// mutex serializes FatFS access; a dedicated read-only file handle avoids
+// fseek/fread interleaving with Core 0's audio-feed reads on the main handle
+// (FF_FS_LOCK permits duplicate read-mode opens).
+//
+// Ownership rules:
+//  - Pool buffers are acquired/released ONLY on Core 0 (post/consume/cancel).
+//  - Core 1 only writes into the buffer while state is VPF_READING.
+//  - Cancel is synchronous: it waits for Core 1 to leave VPF_READING before
+//    the buffer is released, so Core 1 can never write freed memory.
+
+typedef enum {
+    VPF_IDLE = 0,
+    VPF_REQUESTED,   // Core 0 posted a request; Core 1 hasn't picked it up
+    VPF_READING,     // Core 1 is reading from SD into s_vpf_buf
+    VPF_DONE,        // Frame data ready for Core 0
+    VPF_FAILED,      // Read failed; Core 0 falls back to a direct SD read
+    VPF_CANCELLED    // Core 0 cancelled mid-read; Core 1 settles to IDLE
+} vpf_state_t;
+
+static std::atomic<int> s_vpf_state{VPF_IDLE};
+static sdfile_t s_vpf_file = NULL;   // Core 1's dedicated read handle
+static uint8_t *s_vpf_buf = NULL;    // destination pool buffer (Core 0 owns pool)
+static uint32_t s_vpf_offset;        // absolute file offset of JPEG payload
+static uint32_t s_vpf_size;          // payload size
+static uint32_t s_vpf_frame;         // frame number being prefetched
+
+// Core 0: post a prefetch request for `frame` if the slot is free.
+static void video_prefetch_post(video_priv_t *priv, uint32_t frame) {
+    if (!s_vpf_file || !priv->frame_index) return;
+    if (frame >= priv->frame_index_count) return;
+
+    // Startup window: the read-ahead ring already holds this frame.
+    if (priv->ra_buffer && priv->ra_frame_count > 0 &&
+        frame >= priv->ra_first_frame &&
+        frame < priv->ra_first_frame + priv->ra_frame_count) return;
+
+    if (s_vpf_state.load() != VPF_IDLE) return;  // busy or unclaimed result
+
+    uint32_t size = priv->frame_index[frame].chunk_size;
+    if (size == 0) return;
+
+    uint8_t *buf = buffer_pool_acquire(priv, size);
+    if (!buf) return;
+
+    s_vpf_buf = buf;
+    s_vpf_size = size;
+    s_vpf_frame = frame;
+    s_vpf_offset = priv->frame_index[frame].file_offset + 8;  // skip chunk header
+
+    int expected = VPF_IDLE;
+    if (!s_vpf_state.compare_exchange_strong(expected, VPF_REQUESTED)) {
+        buffer_pool_release(priv, buf);
+        return;
+    }
+    multicore_doorbell_set_other_core(WIFI_IPC_DOORBELL);  // wake Core 1 now
+}
+
+// Core 0: settle the state machine and reclaim the pool buffer.  Blocks for
+// at most one chunked read (~10ms) if Core 1 is mid-read.
+static void video_prefetch_cancel(video_priv_t *priv) {
+    while (true) {
+        int cur = s_vpf_state.load();
+        if (cur == VPF_IDLE) return;
+
+        if (cur == VPF_REQUESTED || cur == VPF_DONE || cur == VPF_FAILED) {
+            if (s_vpf_state.compare_exchange_strong(cur, VPF_IDLE)) {
+                if (priv && s_vpf_buf) buffer_pool_release(priv, s_vpf_buf);
+                s_vpf_buf = NULL;
+                return;
+            }
+            continue;  // lost a race with Core 1 — re-read state
+        }
+        if (cur == VPF_READING) {
+            s_vpf_state.compare_exchange_strong(cur, VPF_CANCELLED);
+            continue;  // wait for Core 1 to settle
+        }
+        // VPF_CANCELLED: Core 1 will store IDLE when its read finishes.
+        tight_loop_contents();
+    }
+}
+
+// Core 1 (called from the core1 tick loop): service a pending request.
+extern "C" void video_prefetch_update(void) {
+    int expected = VPF_REQUESTED;
+    if (!s_vpf_state.compare_exchange_strong(expected, VPF_READING)) return;
+
+    sdfile_t f = s_vpf_file;
+    bool ok = (f != NULL) && sdcard_fseek(f, s_vpf_offset);
+
+    // Chunked read with an mp3 poll between chunks so the fed-mode audio
+    // decoder (also on Core 1) never starves behind a long SD transfer.
+    uint32_t done = 0;
+    while (ok && done < s_vpf_size) {
+        uint32_t n = s_vpf_size - done;
+        if (n > 16384) n = 16384;
+        if (sdcard_fread(f, s_vpf_buf + done, (int)n) != (int)n) {
+            ok = false;
+            break;
+        }
+        done += n;
+        if (done < s_vpf_size) mp3_player_update();
+    }
+
+    expected = VPF_READING;
+    if (!s_vpf_state.compare_exchange_strong(expected,
+                                             ok ? VPF_DONE : VPF_FAILED)) {
+        // Cancelled mid-read: Core 0 is spinning in cancel and reclaims the
+        // buffer once we settle.
+        s_vpf_state.store(VPF_IDLE);
     }
 }
 
@@ -284,6 +406,21 @@ static void ra_fill_from(video_priv_t *priv, uint32_t start_frame, uint32_t max_
 }
 
 // Flush any deferred frame to the display.
+//
+// In the steady-state decode loop (video_player_update) the very next decode
+// repaints the full flushed region, so the front→back sync memcpy
+// (~200KB/frame) done by display_flush_region() is wasted — use the no-copy
+// variant there.  Terminal paths (pause/stop/seek/destroy) are followed by
+// overlay drawing + full display_flush() from Lua, which alternates buffers:
+// without the sync the two buffers hold different video frames and the
+// paused screen flickers — so those paths must keep the copy.
+static void flush_pending_nocopy(video_priv_t *priv) {
+    if (priv->pending_flush) {
+        display_flush_region_nocopy(priv->flush_y0, priv->flush_y1);
+        priv->pending_flush = false;
+    }
+}
+
 static void flush_pending(video_priv_t *priv) {
     if (priv->pending_flush) {
         display_flush_region(priv->flush_y0, priv->flush_y1);
@@ -356,6 +493,13 @@ void video_player_destroy(video_player_t *player) {
     if (!player) return;
     video_priv_t *priv = (video_priv_t *)player->priv;
     if (priv) {
+        // Must settle Core-1 prefetch BEFORE closing files or freeing the
+        // buffer pool it writes into.
+        video_prefetch_cancel(priv);
+        if (s_vpf_file) {
+            sdcard_fclose(s_vpf_file);
+            s_vpf_file = NULL;
+        }
         if (priv->audio_active) {
             mp3_player_stop_fed();
             priv->audio_active = false;
@@ -376,6 +520,13 @@ void video_player_destroy(video_player_t *player) {
 
 bool video_player_load(video_player_t *player, const char *path) {
     video_priv_t *priv = (video_priv_t *)player->priv;
+
+    // Settle any in-flight Core-1 prefetch before touching files/indices.
+    video_prefetch_cancel(priv);
+    if (s_vpf_file) {
+        sdcard_fclose(s_vpf_file);
+        s_vpf_file = NULL;
+    }
 
     if (priv->file) {
         sdcard_fclose(priv->file);
@@ -542,6 +693,16 @@ bool video_player_load(video_player_t *player, const char *path) {
         printf("[VIDEO] Read-ahead: allocation failed, continuing without cache\n");
     }
 
+    // Dedicated read handle for the Core-1 prefetcher.  FF_FS_LOCK allows
+    // duplicate read-mode opens; a separate FIL means Core 1's fseek/fread
+    // never interleaves with Core 0's audio-feed reads on the main handle.
+    priv->pf_hits = 0;
+    priv->pf_misses = 0;
+    s_vpf_file = sdcard_fopen(path, "rb");
+    if (!s_vpf_file) {
+        printf("[VIDEO] Prefetch: second file handle unavailable, SD reads stay on Core 0\n");
+    }
+
     printf("[VIDEO] Loaded %s: %lux%lu, %u frames, %u fps, %u index entries\n",
            path, player->width, player->height, (unsigned)player->frame_count,
            (unsigned)(player->fps_num / player->fps_den),
@@ -618,6 +779,7 @@ void video_player_play(video_player_t *player) {
 
 void video_player_stop(video_player_t *player) {
     video_priv_t *priv = (video_priv_t *)player->priv;
+    video_prefetch_cancel(priv);
     flush_pending(priv);
     if (priv->audio_active) {
         mp3_player_stop_fed();
@@ -630,6 +792,11 @@ void video_player_stop(video_player_t *player) {
 void video_player_pause(video_player_t *player) {
     video_priv_t *priv = (video_priv_t *)player->priv;
     flush_pending(priv);
+    // The no-copy steady-state flushes leave frame N in the front buffer and
+    // frame N-1 in the back.  While paused, Lua alternates full flushes of
+    // both buffers, so sync them once here or the freeze-frame flickers.
+    display_sync_back_region(player->y_offset,
+                             player->y_offset + player->visible_height - 1);
     player->paused = true;
     if (priv->audio_active) {
         mp3_player_pause(mp3_player_create());
@@ -659,7 +826,8 @@ void video_player_resume(video_player_t *player) {
 static bool decode_frame_at(video_player_t *player, video_priv_t *priv,
                             uint32_t target_frame, uint32_t chunk_pos, uint32_t size) {
     uint8_t *jpeg_buf = NULL;
-    bool from_cache = false;
+    bool from_cache = false;      // read-ahead ring (no pool buffer held)
+    bool from_prefetch = false;   // Core-1 prefetch (pool buffer, release after)
 
     // Check read-ahead buffer
     if (priv->ra_buffer && priv->ra_frame_count > 0
@@ -674,9 +842,32 @@ static bool decode_frame_at(video_player_t *player, video_priv_t *priv,
         }
     }
 
-    // Fallback: read from SD
+    // Check Core-1 prefetch slot (claim any settled result; use it only if
+    // it is exactly the frame we need, otherwise discard it)
     if (!from_cache) {
+        int cur = s_vpf_state.load();
+        if (cur == VPF_DONE || cur == VPF_FAILED) {
+            uint8_t *pbuf = s_vpf_buf;
+            uint32_t pframe = s_vpf_frame;
+            uint32_t psize = s_vpf_size;
+            if (s_vpf_state.compare_exchange_strong(cur, VPF_IDLE)) {
+                s_vpf_buf = NULL;
+                if (cur == VPF_DONE && pframe == target_frame) {
+                    jpeg_buf = pbuf;
+                    size = psize;
+                    from_prefetch = true;
+                    priv->pf_hits++;
+                } else if (pbuf) {
+                    buffer_pool_release(priv, pbuf);
+                }
+            }
+        }
+    }
+
+    // Fallback: read from SD
+    if (!from_cache && !from_prefetch) {
         priv->ra_misses++;
+        priv->pf_misses++;
         jpeg_buf = buffer_pool_acquire(priv, size);
         if (!jpeg_buf) {
             return false;
@@ -686,7 +877,7 @@ static bool decode_frame_at(video_player_t *player, video_priv_t *priv,
     uint64_t t_sd_start = time_us_64();
     uint64_t t_sd_end = t_sd_start;
 
-    if (!from_cache) {
+    if (!from_cache && !from_prefetch) {
         // Read JPEG data from SD (SPI0).
         // Previous frame's flush was already issued at the top of video_player_update(),
         // and DMA (PIO0) likely finished during the target-frame calculation + SD seek.
@@ -695,8 +886,19 @@ static bool decode_frame_at(video_player_t *player, video_priv_t *priv,
         t_sd_end = time_us_64();
     }
 
-    // Wait for any in-flight DMA to finish before writing to the back buffer.
-    display_wait_for_flush();
+    // Kick off the Core-1 prefetch for the next frame now, so it overlaps
+    // with the JPEG decode below.  Core 0 makes no further SD calls until
+    // the next update's audio feed, so the SD bus is free for Core 1.
+    video_prefetch_post(priv, target_frame + 1);
+
+    // No DMA wait needed: the display is double-buffered — the in-flight DMA
+    // (started by flush_pending at the top of update) reads the *front*
+    // buffer while every decode path below writes the *back* buffer
+    // (setFramebuffer/display_blit_be/jpeg_draw_cb_2x all target
+    // display_get_back_buffer()/s_framebuffer).  display_flush_region()
+    // itself waits for the previous transfer before swapping, so buffers can
+    // never alias.  Removing the wait here overlaps decode (~22ms) with the
+    // panel DMA (~21ms at 75MHz SPI) instead of serializing them.
     uint64_t t_flush_wait = time_us_64();
 
     bool success = false;
@@ -758,7 +960,7 @@ static bool decode_frame_at(video_player_t *player, video_priv_t *priv,
         // Print timing every 30 frames — split decode into open (header/Huffman parse)
         // vs decode (IDCT + pixel conversion) to identify the hot spot.
         if (player->current_frame % 30 == 0) {
-            printf("[VIDEO] f=%u sd=%ums flush=%ums open=%ums dec=%ums close=%ums total=%ums stride=%u src=%s ra=%u/%u\n",
+            printf("[VIDEO] f=%u sd=%ums flush=%ums open=%ums dec=%ums close=%ums total=%ums stride=%u src=%s pf=%u/%u cfps=%u\n",
                    (unsigned)player->current_frame,
                    (unsigned)((t_sd_end - t_sd_start) / 1000),
                    (unsigned)((t_flush_wait - t_sd_end) / 1000),
@@ -767,9 +969,10 @@ static bool decode_frame_at(video_player_t *player, video_priv_t *priv,
                    (unsigned)((t_close - t_dec_end) / 1000),
                    (unsigned)((t_close - t_sd_start) / 1000),
                    (unsigned)priv->adaptive_stride,
-                   from_cache ? "cache" : "sd",
-                   (unsigned)priv->ra_hits,
-                   (unsigned)(priv->ra_hits + priv->ra_misses));
+                   from_cache ? "cache" : (from_prefetch ? "pf" : "sd"),
+                   (unsigned)priv->pf_hits,
+                   (unsigned)(priv->pf_hits + priv->pf_misses),
+                   (unsigned)(priv->frame_duration_us ? 1000000u / priv->frame_duration_us : 0));
         }
 
         // Defer the flush — it will be issued at the start of the next
@@ -785,6 +988,7 @@ static bool decode_frame_at(video_player_t *player, video_priv_t *priv,
     }
 
     if (!from_cache) {
+        // Covers both the direct-SD pool buffer and a consumed prefetch buffer.
         buffer_pool_release(priv, jpeg_buf);
     }
     return success;
@@ -798,7 +1002,8 @@ bool video_player_update(video_player_t *player) {
     // Flush any deferred frame from the previous update.
     // This fires early so DMA runs during target-frame calculation,
     // and prevents double-swap jitter if Lua also called disp.flush().
-    flush_pending(priv);
+    // No-copy: the decode below repaints the entire region.
+    flush_pending_nocopy(priv);
 
     uint64_t now = time_us_64();
     uint32_t target_frame = (uint32_t)((now - priv->start_time_us) / priv->frame_duration_us);
@@ -916,6 +1121,7 @@ bool video_player_update(video_player_t *player) {
 
 void video_player_seek(video_player_t *player, uint32_t frame) {
     video_priv_t *priv = (video_priv_t *)player->priv;
+    video_prefetch_cancel(priv);  // in-flight frame is stale after a seek
     flush_pending(priv);
 
     if (frame >= player->frame_count) frame = player->frame_count - 1;

@@ -1410,6 +1410,7 @@ static void core1_entry(void) {
         audio_cb();
 
       image_preload_update();
+      video_prefetch_update();
 
       // DIAG: code-corruption watcher — scan the native app's read-only
       // image against the load-time snapshot in rotating 32KB chunks (both

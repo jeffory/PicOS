@@ -1340,7 +1340,7 @@ void display_wait_for_flush(void) {
   }
 }
 
-void display_flush_region(int y0, int y1) {
+static void flush_region_impl(int y0, int y1, bool sync_back) {
   // Clamp to valid range
   if (y0 < 0) y0 = 0;
   if (y1 >= FB_HEIGHT) y1 = FB_HEIGHT - 1;
@@ -1373,12 +1373,44 @@ void display_flush_region(int y0, int y1) {
                               row_count * FB_WIDTH * sizeof(uint16_t), true);
   s_dma_active = true;
 
+  if (!sync_back) return;
+
   // Copy the flushed region to the new back buffer so both buffers stay in
   // sync.  Without this, the back buffer has stale content from 2 frames ago,
   // causing visible flickering when overlays (header, FPS) are drawn after
   // the flush, or when the next iteration does a full display_flush().
   // DMA reads the front buffer via AHB; this memcpy also reads it — no
   // conflict (both are reads from SRAM).
+  memcpy(&s_framebuffers[s_back_buffer_idx][y0 * FB_WIDTH],
+         &s_framebuffers[front_buffer_idx][y0 * FB_WIDTH],
+         row_count * FB_WIDTH * sizeof(uint16_t));
+}
+
+void display_flush_region(int y0, int y1) {
+  flush_region_impl(y0, y1, true);
+}
+
+// Same as display_flush_region but skips the front→back sync memcpy.
+// Only correct when the caller repaints the ENTIRE region into the back
+// buffer before the next flush (the video player decodes every pixel of
+// the region each frame, so the ~200KB/frame copy is pure waste there).
+void display_flush_region_nocopy(int y0, int y1) {
+  flush_region_impl(y0, y1, false);
+}
+
+// One-shot front→back sync of a row band.  Callers that used
+// display_flush_region_nocopy() during an animation must call this when the
+// animation stops (e.g. video pause), otherwise the two buffers hold
+// different frames and subsequent full display_flush() calls flicker.
+void display_sync_back_region(int y0, int y1) {
+  if (y0 < 0) y0 = 0;
+  if (y1 >= FB_HEIGHT) y1 = FB_HEIGHT - 1;
+  if (y0 > y1) return;
+
+  display_wait_for_flush();  // front buffer must be stable before copying
+
+  int front_buffer_idx = 1 - s_back_buffer_idx;
+  int row_count = y1 - y0 + 1;
   memcpy(&s_framebuffers[s_back_buffer_idx][y0 * FB_WIDTH],
          &s_framebuffers[front_buffer_idx][y0 * FB_WIDTH],
          row_count * FB_WIDTH * sizeof(uint16_t));
