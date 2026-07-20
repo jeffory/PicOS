@@ -1761,6 +1761,8 @@ int main(void) {
   bool kbd_ok = kbd_init();
   watchdog_update();
   if (kbd_ok) {
+    // Bootstrap level only — SD/config aren't up yet; the user's saved
+    // brightness is restored after config_load() later in boot.
     kbd_set_backlight(128);
   } else {
     // Keyboard failed - STM32 didn't respond
