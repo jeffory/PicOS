@@ -37,9 +37,11 @@ local lines        = {""}   -- text buffer (array of strings, 1-indexed)
 local cursor_x     = 1      -- column (1-indexed)
 local cursor_y     = 1      -- line   (1-indexed)
 local scroll_y     = 0      -- top visible line (0-indexed)
+local scroll_seg   = 1      -- first visible wrap segment of the top line (1-based; >1 only with word wrap)
 local scroll_x     = 0      -- leftmost visible column (0-indexed)
 local filename     = nil    -- current file path (nil = untitled)
 local modified     = false  -- dirty flag
+local trailing_newline = true  -- file ends with '\n' (preserved on save; POSIX default for new files)
 local message      = ""
 local message_time = 0
 
@@ -183,6 +185,105 @@ local function prev_word_boundary(line, col)
     return col
 end
 
+-- ── Word wrap layout (mirrors src/os/text_wrap.c) ─────────────────────────────
+-- Word wrap is done entirely editor-side: the terminal's own word wrap must
+-- stay OFF. Writing 24 full-length logical lines with terminal wrap on
+-- overflows the 24-row cell buffer (putChar auto-wraps long lines onto extra
+-- rows and scrolls the top of the buffer into scrollback).
+
+local WRAP_BREAK = { [" "]=true, ["\t"]=true, ["-"]=true, [","]=true, ["."]=true,
+                     [";"]=true, [":"]=true, ["!"]=true, ["?"]=true, [")"]=true,
+                     ["]"]=true, ["}"]=true }
+
+-- Returns array of 0-based char offsets where each visual row of `line` starts.
+local function wrap_segments(line, max_cols)
+    local len = #line
+    if len <= max_cols then return { 0 } end
+    local segs = {}
+    local pos = 0
+    while pos < len do
+        segs[#segs + 1] = pos
+        local remaining = len - pos
+        if remaining <= max_cols then break end
+        -- Prefer breaking after space/punctuation within the last 20 columns
+        local brk = max_cols
+        local search_end = max_cols - 20
+        if search_end < 1 then search_end = 1 end
+        for i = max_cols, search_end, -1 do
+            if WRAP_BREAK[line:sub(pos + i, pos + i)] then brk = i; break end
+        end
+        pos = pos + brk
+    end
+    return segs
+end
+
+local function line_seg_starts(idx, content_cols)
+    if not word_wrap then return { 0 } end
+    return wrap_segments(get_line(idx), content_cols)
+end
+
+-- Returns the 1-based segment index and 0-based column of the cursor within
+-- its line's segments.
+local function cursor_segment(segs, line_len, max_cols)
+    local c = cursor_x - 1  -- 0-based; may equal line_len (end of line)
+    for s = 1, #segs do
+        local seg_end = (s < #segs) and segs[s + 1] or line_len
+        if c < seg_end or s == #segs then
+            local col = c - segs[s]
+            -- Cursor exactly past the end of a full segment: keep it on the
+            -- last cell rather than spilling onto a phantom row.
+            if col >= max_cols then col = max_cols - 1 end
+            return s, col
+        end
+    end
+    return 1, 0
+end
+
+-- Keep the cursor inside the window, scrolling by visual rows.
+-- Maintains the (scroll_y, scroll_seg) anchor. Word-wrap mode only.
+local function scroll_to_cursor_wrapped(content_cols)
+    local cline = get_line(cursor_y)
+    local csegs = wrap_segments(cline, content_cols)
+    local cseg = cursor_segment(csegs, #cline, content_cols)
+
+    -- Clamp anchor to a valid position
+    if scroll_y > total_lines() - 1 then scroll_y = total_lines() - 1 end
+    if scroll_y < 0 then scroll_y = 0 end
+    local asegs = line_seg_starts(scroll_y + 1, content_cols)
+    if scroll_seg > #asegs then scroll_seg = #asegs end
+    if scroll_seg < 1 then scroll_seg = 1 end
+
+    -- Cursor above the anchor: snap the anchor up to the cursor
+    if (cursor_y - 1 < scroll_y) or
+       (cursor_y - 1 == scroll_y and cseg < scroll_seg) then
+        scroll_y = cursor_y - 1
+        scroll_seg = cseg
+        if large_file then update_view_cache() end
+        return
+    end
+
+    -- Count visual rows from the anchor to the cursor (inclusive)
+    local rows = 0
+    for l = scroll_y + 1, cursor_y do
+        local from_seg = (l == scroll_y + 1) and scroll_seg or 1
+        local to_seg = (l == cursor_y) and cseg or #line_seg_starts(l, content_cols)
+        rows = rows + (to_seg - from_seg + 1)
+    end
+
+    -- Advance the anchor one visual row at a time until the cursor fits
+    while rows > TEXT_ROWS do
+        local nsegs = #line_seg_starts(scroll_y + 1, content_cols)
+        if scroll_seg < nsegs then
+            scroll_seg = scroll_seg + 1
+        else
+            scroll_y = scroll_y + 1
+            scroll_seg = 1
+            if large_file then update_view_cache() end
+        end
+        rows = rows - 1
+    end
+end
+
 -- ── File operations ───────────────────────────────────────────────────────────
 local function reset_large_file_state()
     large_file        = false
@@ -190,6 +291,16 @@ local function reset_large_file_state()
     line_index        = {}
     view_cache        = {}
     view_cache_scroll = -1
+end
+
+local function new_buffer()
+    reset_large_file_state()
+    lines = {""}
+    cursor_x = 1; cursor_y = 1; scroll_y = 0; scroll_seg = 1; scroll_x = 0
+    filename = nil; modified = false
+    trailing_newline = true
+    message = "[New File]  Ctrl+S to save"
+    message_time = sys.getTimeMs()
 end
 
 local function load_large_file(path)
@@ -234,7 +345,7 @@ local function load_large_file(path)
     large_total_lines = line_count + 1
     large_file        = true
     lines             = {""}
-    cursor_x = 1; cursor_y = 1; scroll_y = 0; scroll_x = 0
+    cursor_x = 1; cursor_y = 1; scroll_y = 0; scroll_seg = 1; scroll_x = 0
     filename = path
     modified = false
     view_cache        = {}
@@ -250,7 +361,7 @@ local function load_file(path)
 
     if not fs.exists(path) then
         lines = {""}
-        cursor_x = 1; cursor_y = 1; scroll_y = 0; scroll_x = 0
+        cursor_x = 1; cursor_y = 1; scroll_y = 0; scroll_seg = 1; scroll_x = 0
         filename = path
         modified = false
         message = "[New File]"
@@ -271,32 +382,34 @@ local function load_file(path)
     end
 
     lines = {}
+    local pending = ""  -- partial line carried across chunk boundaries
     while true do
         local chunk = fs.read(handle, 512)
         if not chunk or #chunk == 0 then break end
         sys.sleep(0)
 
+        chunk = pending .. chunk
         local start = 1
-        for i = 1, #chunk do
-            if chunk:sub(i, i) == '\n' then
-                table.insert(lines, sanitize_text(chunk:sub(start, i - 1)))
-                start = i + 1
-            end
+        while true do
+            local nl = chunk:find('\n', start, true)
+            if not nl then break end
+            lines[#lines + 1] = sanitize_text(chunk:sub(start, nl - 1))
+            start = nl + 1
         end
-        if start <= #chunk then
-            local rest = sanitize_text(chunk:sub(start))
-            if #lines == 0 then
-                table.insert(lines, rest)
-            else
-                lines[#lines] = lines[#lines] .. rest
-            end
-        end
+        pending = chunk:sub(start)
     end
 
     fs.close(handle)
+
+    if pending ~= "" then
+        lines[#lines + 1] = sanitize_text(pending)
+        trailing_newline = false
+    else
+        trailing_newline = #lines > 0
+    end
     if #lines == 0 then lines = {""} end
 
-    cursor_x = 1; cursor_y = 1; scroll_y = 0; scroll_x = 0
+    cursor_x = 1; cursor_y = 1; scroll_y = 0; scroll_seg = 1; scroll_x = 0
     filename = path
     modified = false
     message = "Loaded " .. path
@@ -328,10 +441,12 @@ local function save_file()
         return false
     end
 
+    local empty_buffer = (#lines == 1 and lines[1] == "")
     for i = 1, #lines do
-        local line = lines[i]
-        if i < #lines then line = line .. '\n' end
-        fs.write(handle, line)
+        fs.write(handle, lines[i])
+        if i < #lines or (trailing_newline and not empty_buffer) then
+            fs.write(handle, '\n')
+        end
     end
 
     fs.close(handle)
@@ -347,12 +462,19 @@ local function clamp_cursor()
     if cursor_y < 1  then cursor_y = 1  end
     if cursor_y > tl then cursor_y = tl end
 
-    if large_file then
-        local line = get_line(cursor_y)
-        local line_len = line and #line or 0
-        if cursor_x < 1 then cursor_x = 1 end
-        if cursor_x > line_len + 1 then cursor_x = line_len + 1 end
+    local line_len = #get_line(cursor_y)
+    if cursor_x < 1            then cursor_x = 1 end
+    if cursor_x > line_len + 1 then cursor_x = line_len + 1 end
 
+    local content_cols = term:getContentCols()
+
+    if word_wrap then
+        scroll_x = 0
+        scroll_to_cursor_wrapped(content_cols)
+    else
+        scroll_seg = 1
+
+        -- Vertical: line-based window
         if cursor_y - 1 < scroll_y then
             scroll_y = cursor_y - 1
         end
@@ -361,44 +483,13 @@ local function clamp_cursor()
         end
         if scroll_y < 0 then scroll_y = 0 end
 
-        -- Horizontal scrolling (large file, word wrap off)
-        if not word_wrap then
-            local content_cols = term:getContentCols()
-            if cursor_x - 1 >= scroll_x + content_cols then
-                scroll_x = cursor_x - content_cols
-            end
-            if cursor_x - 1 < scroll_x then
-                scroll_x = cursor_x - 1
-            end
-        else
-            scroll_x = 0
-        end
-        return
-    end
-
-    local line_len = #lines[cursor_y]
-    if cursor_x < 1            then cursor_x = 1 end
-    if cursor_x > line_len + 1 then cursor_x = line_len + 1 end
-
-    if cursor_y - 1 < scroll_y then
-        scroll_y = cursor_y - 1
-    end
-    if cursor_y - 1 >= scroll_y + TEXT_ROWS then
-        scroll_y = cursor_y - TEXT_ROWS
-    end
-    if scroll_y < 0 then scroll_y = 0 end
-
-    -- Horizontal scrolling (only when word wrap is off)
-    if not word_wrap then
-        local content_cols = term:getContentCols()
+        -- Horizontal scrolling
         if cursor_x - 1 >= scroll_x + content_cols then
             scroll_x = cursor_x - content_cols
         end
         if cursor_x - 1 < scroll_x then
             scroll_x = cursor_x - 1
         end
-    else
-        scroll_x = 0
     end
 end
 
@@ -406,10 +497,6 @@ local function move_cursor(dx, dy)
     if dy ~= 0 then
         cursor_y = cursor_y + dy
         clamp_cursor()
-        if not large_file then
-            local line_len = #lines[cursor_y]
-            if cursor_x > line_len + 1 then cursor_x = line_len + 1 end
-        end
     elseif dx ~= 0 then
         cursor_x = cursor_x + dx
         
@@ -493,34 +580,82 @@ end
 -- ── Rendering ─────────────────────────────────────────────────────────────────
 local function redraw_screen()
     term:clear()
-    
+
     local tl = total_lines()
     local content_cols = term:getContentCols()
-    
-    -- Write visible lines to terminal
-    for i = 1, TEXT_ROWS do
-        local line_idx = scroll_y + i
-        if line_idx <= tl then
-            local line = get_line(line_idx)
-            -- Show horizontal window when word wrap is disabled
-            if not word_wrap then
-                line = line:sub(scroll_x + 1, scroll_x + content_cols)
-            end
-            term:write(line)
-        end
-        if i < TEXT_ROWS then
-            term:write("\n")
-        end
+
+    if show_line_numbers then
+        term:setLineNumberStart(scroll_y + 1)
     end
-    
-    -- Set cursor position (terminal uses 0-based coordinates, offset by scroll_x)
-    term:setCursor(cursor_x - 1 - scroll_x, cursor_y - scroll_y - 1)
-    
+
+    if word_wrap then
+        -- Editor-side word wrap: write exactly one wrap segment per terminal
+        -- row so the 24-row cell buffer can never overflow. A row that
+        -- continues on the next row is padded to the full terminal width so
+        -- the next write auto-wraps via putChar, which marks the terminal's
+        -- continuation flag (keeps the line-number gutter blank on
+        -- continuation rows).
+        local row = 0
+        local l = scroll_y + 1
+        local seg_i = scroll_seg
+        local cursor_row, cursor_col = nil, 0
+
+        while row < TEXT_ROWS and l <= tl do
+            local line = get_line(l)
+            local segs = wrap_segments(line, content_cols)
+            if seg_i > #segs then seg_i = #segs end
+
+            local seg_start = segs[seg_i]
+            local seg_end = (seg_i < #segs) and segs[seg_i + 1] or #line
+            local text = line:sub(seg_start + 1, seg_end)
+            term:write(text)
+
+            if l == cursor_y then
+                local cseg, ccol = cursor_segment(segs, #line, content_cols)
+                if cseg == seg_i then
+                    cursor_row, cursor_col = row, ccol
+                end
+            end
+
+            local more_segs = seg_i < #segs
+            if row < TEXT_ROWS - 1 then
+                if more_segs then
+                    term:write(string.rep(" ", TERM_COLS - #text))
+                else
+                    term:write("\n")
+                end
+            end
+
+            if more_segs then
+                seg_i = seg_i + 1
+            else
+                l = l + 1
+                seg_i = 1
+            end
+            row = row + 1
+        end
+
+        term:setCursor(cursor_col, cursor_row or 0)
+    else
+        -- Horizontal window, one logical line per row
+        for i = 1, TEXT_ROWS do
+            local line_idx = scroll_y + i
+            if line_idx <= tl then
+                local line = get_line(line_idx)
+                term:write(line:sub(scroll_x + 1, scroll_x + content_cols))
+            end
+            if i < TEXT_ROWS then
+                term:write("\n")
+            end
+        end
+        term:setCursor(cursor_x - 1 - scroll_x, cursor_y - scroll_y - 1)
+    end
+
     -- Update scrollbar position
-    if show_line_numbers or total_lines() > TEXT_ROWS then
+    if show_line_numbers or tl > TEXT_ROWS then
         term:setScrollInfo(tl, scroll_y)
     end
-    
+
     -- Render to display
     term:render()
 end
@@ -603,19 +738,16 @@ local function main()
     term:setScrollbarColors(SCROLLBAR_BG, SCROLLBAR_THUMB)
     term:setCursorVisible(true)
     term:setCursorBlink(true)
-    term:setWordWrap(word_wrap)
-    term:setWordWrapColumn(0)  -- Auto
+    -- Word wrap is implemented editor-side (see wrap_segments); the terminal's
+    -- own wrap must stay off or long lines overflow the cell buffer.
+    term:setWordWrap(false)
 
     -- On startup, browse for a file
     local startup_file = fs.browse()
     if startup_file then
         load_file(startup_file)
     else
-        lines = {""}
-        cursor_x = 1; cursor_y = 1; scroll_y = 0; scroll_x = 0
-        filename = nil; modified = false
-        message = "[New File]  Ctrl+S to save"
-        message_time = sys.getTimeMs()
+        new_buffer()
     end
 
     -- System menu items
@@ -649,13 +781,11 @@ local function main()
             show_help = not show_help
         end
 
-        -- F2 = Toggle word wrap (uses Terminal SDK)
+        -- F2 = Toggle word wrap (editor-side layout)
         if pressed & input.BTN_F2 ~= 0 then
             word_wrap = not word_wrap
             scroll_x = 0
-            term:setWordWrap(word_wrap)
-            term:setWordWrapColumn(0)  -- Auto
-            term:markAllDirty()
+            scroll_seg = 1
             message = "Word wrap " .. (word_wrap and "enabled" or "disabled")
             message_time = sys.getTimeMs()
         end
@@ -701,6 +831,12 @@ local function main()
         -- Ctrl+<letter> shortcuts
         if held & input.BTN_CTRL ~= 0 and char then
             local lower = char:lower()
+            -- Physical Ctrl+letter arrives as a control byte (0x01-0x1A);
+            -- normalize it back to the letter so both forms work.
+            local b = string.byte(char)
+            if b >= 1 and b <= 26 then
+                lower = string.char(b + 96)
+            end
 
             -- Ctrl+S = Save
             if lower == 's' then
@@ -742,36 +878,15 @@ local function main()
 
             -- Ctrl+N = New empty buffer
             elseif lower == 'n' then
-                if large_file then
-                    reset_large_file_state()
-                    lines = {""}
-                    cursor_x = 1; cursor_y = 1; scroll_y = 0; scroll_x = 0
-                    filename = nil; modified = false
-                    message = "[New File]  Ctrl+S to save"
-                    message_time = sys.getTimeMs()
-                elseif modified then
+                if modified and not large_file then
                     local choice = ui.confirm("Save changes before creating new file?")
                     if choice then
-                        if save_file() then
-                            lines = {""}
-                            cursor_x = 1; cursor_y = 1; scroll_y = 0; scroll_x = 0
-                            filename = nil; modified = false
-                            message = "[New File]  Ctrl+S to save"
-                            message_time = sys.getTimeMs()
-                        end
+                        if save_file() then new_buffer() end
                     else
-                        lines = {""}
-                        cursor_x = 1; cursor_y = 1; scroll_y = 0; scroll_x = 0
-                        filename = nil; modified = false
-                        message = "[New File]  Ctrl+S to save"
-                        message_time = sys.getTimeMs()
+                        new_buffer()
                     end
                 else
-                    lines = {""}
-                    cursor_x = 1; cursor_y = 1; scroll_y = 0; scroll_x = 0
-                    filename = nil; modified = false
-                    message = "[New File]  Ctrl+S to save"
-                    message_time = sys.getTimeMs()
+                    new_buffer()
                 end
 
             -- Ctrl+K = Delete current line
@@ -866,6 +981,10 @@ local function main()
         end
 
         clamp_cursor()
+
+        -- Refresh the pager view cache after any scroll change this frame,
+        -- so drawing never reads a stale window
+        update_view_cache()
 
         -- Draw
         draw_status_bar()
