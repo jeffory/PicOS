@@ -1027,11 +1027,14 @@ def test_render_targets_are_16_bit(cdogs_quickplay_stats):
 def test_render_pipeline_saving(cdogs_quickplay_stats):
     """The five window textures sit at the RGB565 figure, from both sides.
 
-    Bounded above and below on purpose. The ceiling catches a per-pic
-    duplication regression; the floor catches a silent revert to 4-byte
-    pixels, which a ceiling alone cannot see (a revert makes tex bigger,
-    but so does legitimately loading more sprites, so only a floor pins
-    the format down).
+    Bounded above and below on purpose. The ceiling catches `tex` growing —
+    a revert to 4-byte pixels (~1_536_000) or a reintroduced per-pic
+    duplication path (~1_078_376). The floor catches `tex` shrinking —
+    buffers not allocated, allocated undersized, or dropped from the
+    accounting. The floor matters because this is a memory-reduction
+    change: an undercount would look like a further saving rather than a
+    defect, so the figure has to be pinned from both sides to be
+    trustworthy.
 
     Not covered here, because g_picos_pic_tex_bytes only counts textures
     created through SDL_CreateTexture: PicosRenderer.framebuf (307_200 ->
