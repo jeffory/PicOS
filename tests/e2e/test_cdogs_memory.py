@@ -217,7 +217,7 @@ def _poll_and_accumulate(simulator, parse_fn, seen, stats):
     return text
 
 
-# How often _sleep_and_accumulate re-polls while waiting. Deliberately
+# How often the drive re-polls get_output() while waiting. Deliberately
 # tight: campaign/map/sprite loading after the third Enter can emit a
 # dense burst of "[TRAMP] fs_*" lines (see module docstring), and the
 # whole point of polling throughout the drive instead of once at the end
@@ -229,25 +229,135 @@ def _poll_and_accumulate(simulator, parse_fn, seen, stats):
 # poll-only-at-the-edges variant of this same drive.
 _POLL_INTERVAL_S = 0.05
 
+# Throttle for the display_stats RPC calls _screen_signature makes below.
+# Separate from _POLL_INTERVAL_S because, unlike a local deque read for
+# get_output(), display_stats is a network round trip to the simulator
+# (albeit a cheap one — a single framebuffer scan server-side, no PNG
+# encode/decode the way screenshot_pil() would need; see
+# simulator/sim_socket_handler.c's h_display_stats). Menu redraws don't
+# happen faster than this, so polling it every _POLL_INTERVAL_S (50ms)
+# would just multiply RPC traffic for no extra sensitivity.
+_SCREEN_POLL_INTERVAL_S = 0.15
 
-def _sleep_and_accumulate(simulator, parse_fn, seen, stats, duration):
-    """Sleep ~duration seconds, polling and accumulating every
-    _POLL_INTERVAL_S throughout instead of once at the end or start.
 
-    Used in place of a blind time.sleep() anywhere in the drive below
-    that waits on the app doing work (e.g. between keypresses) — see
-    _POLL_INTERVAL_S for why an unpolled sleep is unsafe here.
+def _screen_signature(simulator):
+    """Cheap fingerprint of the current framebuffer, used as evidence of
+    what's currently on screen.
+
+    Uses the display_stats RPC (the same one test_display_colors.py
+    exercises) rather than screenshot_pil(): it's a single framebuffer
+    scan on the simulator side with no PNG encode/decode round trip, so
+    it's cheap enough to poll repeatedly during a wait. Combines
+    unique_colors, nonzero_pixels, and the first non-zero pixel's
+    position/value into one tuple — main-menu-family screens in this app
+    reportedly hold ~24 distinct colours (including a magenta accent,
+    0xB817) while the post-load mission briefing is a sparse white-on-
+    black screen with only ~4, but this drive doesn't need to know which
+    specific screen it's looking at: any two visually different screens
+    are highly likely to differ in at least one of these fields.
+
+    NOT safe to compare directly against a single prior sample as "did
+    the screen change": C-Dogs' menu screens animate a blinking selection
+    cursor at roughly 15-30Hz even with no input at all (confirmed
+    empirically — see .superpowers/sdd/prereq-5-report.md), so two
+    consecutive samples of the very same idle screen routinely differ.
+    Callers need _learn_screen_baseline's idle-set comparison, not a
+    naive prev-vs-current diff, to tell a real transition apart from that
+    animation.
+
+    Returns None if the RPC call fails for any reason (e.g. a transient
+    hiccup, or the app briefly not rendering between frames). Callers
+    must treat None as inconclusive — neither "matches the baseline" nor
+    "differs from it".
     """
-    deadline = time.time() + duration
-    while True:
+    try:
+        stats = simulator.call("display_stats", timeout=3.0)
+    except Exception:
+        return None
+    first_nonzero = stats.get("first_nonzero") or {}
+    return (
+        stats.get("unique_colors"),
+        stats.get("nonzero_pixels"),
+        first_nonzero.get("rgb565"),
+        first_nonzero.get("x"),
+        first_nonzero.get("y"),
+    )
+
+
+# _learn_screen_baseline stops once the observed signature set has gone
+# this many consecutive samples without gaining a new value ("stale") —
+# not after a fixed clock duration. A fixed duration (this drive's first
+# attempt at this) undersamples under host load: display_stats round trips
+# get slower, so fewer samples fit in any fixed window, and a screen whose
+# idle blink has (say) 2 states can easily get caught with only 1 of them
+# characterized — the nudge loop then mistakes the screen's OWN other
+# blink phase for a real transition the moment it shows up, firing an
+# extra Enter mid-load, which is a genuinely unsafe moment for one (unlike
+# a menu at rest, "extra Enters are harmless" does not obviously hold
+# while a campaign is actively loading) — reproduced directly under
+# deliberate host load (`yes > /dev/null`) while developing this drive;
+# see .superpowers/sdd/prereq-5-report.md. Requiring the set to actually
+# stop growing for a streak of samples, however long that takes in wall
+# time, removes the guesswork: it costs a little more time on a slow
+# system and almost none on a fast one, rather than being wrong on a slow
+# one. _BASELINE_MAX_DURATION_S is still a hard backstop in case a screen
+# never truly settles (e.g. baseline-learning starts mid-transition and
+# the screen keeps changing) so this can't wait forever.
+_BASELINE_STABLE_STREAK = 6
+_BASELINE_MAX_DURATION_S = 2.5
+_BASELINE_POLL_INTERVAL_S = 0.05
+
+
+def _learn_screen_baseline(simulator, parse_fn, seen, stats,
+                            stable_streak=_BASELINE_STABLE_STREAK,
+                            max_duration=_BASELINE_MAX_DURATION_S,
+                            poll_interval=_BASELINE_POLL_INTERVAL_S):
+    """Return the set of _screen_signature values seen on the CURRENT
+    screen while idling (no keypress sent) — sampled until the set stops
+    growing, not for a fixed duration. See _BASELINE_STABLE_STREAK for why.
+
+    This is what makes the nudge loop's screen-based evidence reliable
+    despite C-Dogs' menus animating at rest: instead of trusting a single
+    before/after sample (which would trip on the very next blink frame
+    with no keypress involved at all), the loop first characterizes every
+    value this screen's own idle animation cycles through, then treats
+    only a signature OUTSIDE that known set as real evidence of a
+    transition.
+
+    Also calls _poll_and_accumulate on every iteration, exactly like every
+    other wait in this drive — this window is not a spectator to the log
+    output despite being focused on the screen: skipping that accumulation
+    here would silently reopen the eviction race this drive exists to
+    close (see _poll_and_accumulate's and _POLL_INTERVAL_S's docstrings).
+    parse_fn/seen/stats are threaded through for exactly that purpose, not
+    because this function otherwise needs to know about HEAPSTAT/GFXSTAT.
+    """
+    baseline = set()
+    stale_streak = 0
+    deadline = time.time() + max_duration
+    while time.time() < deadline and stale_streak < stable_streak:
         _poll_and_accumulate(simulator, parse_fn, seen, stats)
-        remaining = deadline - time.time()
-        if remaining <= 0:
-            return
-        time.sleep(min(_POLL_INTERVAL_S, remaining))
+        sig = _screen_signature(simulator)
+        if sig is not None:
+            if sig in baseline:
+                stale_streak += 1
+            else:
+                baseline.add(sig)
+                stale_streak = 0
+        time.sleep(poll_interval)
+    if not baseline:
+        # A live simulator should always yield at least one sample; only
+        # hit if display_stats failed on every single attempt above
+        # (e.g. a transient RPC hiccup for the whole window). One last
+        # try so callers get a real (possibly singleton) set rather than
+        # an empty one that would make everything look like a transition.
+        sig = _screen_signature(simulator)
+        if sig is not None:
+            baseline.add(sig)
+    return baseline
 
 
-def _drive_quickplay(simulator, boot_marker, parse_fn, settle_s=12, done=None):
+def _drive_quickplay(simulator, boot_marker, parse_fn, settle_s=45, done=None):
     """Launch C-Dogs, drive the quick-play menu flow, and return the parsed
     reports once navigation has demonstrably worked.
 
@@ -278,11 +388,21 @@ def _drive_quickplay(simulator, boot_marker, parse_fn, settle_s=12, done=None):
     message below, which names this exact dependency rather than failing
     silently.
 
-    Sends the 3-Enter sequence up to twice: if the first attempt's report
-    count never proves navigation worked, it retries once rather than
-    failing immediately (self-healing, not a fixed-delay guess — see the
-    retry loop's own comment for why resending 3 Enters is safe from any
-    of the three levels this drive can get stuck at).
+    Drives with an adaptive nudge-and-check loop rather than a fixed
+    3-Enter sequence on a timer: send one Enter, then poll for direct
+    evidence it actually registered (a completion signal, or the screen
+    itself changing — see _screen_signature) before sending the next,
+    with a generous per-nudge timeout rather than a fixed sleep. A fixed
+    0.8s-per-keypress delay (this drive's previous approach) assumes the
+    simulator always processes a keypress and redraws within that window;
+    under host contention it sometimes doesn't, so the next Enter would
+    land before the previous one had taken effect and get eaten by
+    whatever menu level the drive was actually still on. Nudging on
+    observed evidence instead removes that race: no keypress is sent
+    "blind". Extra nudges beyond the 3 actually needed are harmless — see
+    the nudge loop's own comment for why resending Enter is safe from any
+    of the three levels this drive can get stuck at — so this converges
+    reliably even when several presses in a row don't land.
 
     done: optional predicate(stats) -> bool checked every poll of the
     settle loop; polling stops as soon as it returns True (or settle_s
@@ -343,39 +463,119 @@ def _drive_quickplay(simulator, boot_marker, parse_fn, settle_s=12, done=None):
         f"reach an input-ready main menu:\n{text[-2000:]}"
     )
 
-    # Two attempts: send Start > Campaign > first campaign, then poll for
-    # the completion signal; if it never arrives, send the same 3 Enters
-    # again before giving up. This is a genuine self-healing retry, not a
-    # blind resend: from any of the three menu levels this drive can get
-    # stuck at (main menu, "Start:" submenu, or the campaign list — e.g.
-    # if the very first Enter races LoopRunnerRun's first input poll and
-    # gets dropped, observed directly under host CPU contention from other
-    # concurrent processes), 3 fresh Enters from wherever navigation
-    # actually stalled always reaches a loaded campaign. A real menu-layout
-    # drift, by contrast, reproduces identically on the retry and still
-    # fails below with the same diagnostic.
-    for attempt in range(2):
-        for _ in range(3):
-            simulator.keypress("enter")
-            # Not a blind time.sleep(0.8): the third Enter (loading a
-            # campaign) is exactly when the dense "[TRAMP] fs_*" burst
-            # from campaign/map/sprite I/O happens, so this window must
-            # keep polling throughout rather than only checking once
-            # after the fact — see _POLL_INTERVAL_S.
-            _sleep_and_accumulate(simulator, parse_fn, seen, stats, 0.8)
+    # Adaptive nudge-and-check: send one Enter, then poll (both the log
+    # output and a screen fingerprint) for direct evidence it registered
+    # before sending the next, instead of trusting a fixed sleep to have
+    # been long enough. Resending Enter is safe from any of the three menu
+    # levels this drive can get stuck at (main menu, "Start:" submenu, or
+    # the campaign list — e.g. if an Enter races LoopRunnerRun's input
+    # poll and gets dropped, observed directly under host CPU contention
+    # from other concurrent processes) because each of those levels'
+    # default-selected item leads deeper into quick-play. A real
+    # menu-layout drift, by contrast, still never produces a second
+    # report no matter how many Enters are sent, and still fails below
+    # with the same diagnostic.
+    #
+    # _EXPECTED_TRANSITIONS caps how many CONFIRMED transitions this loop
+    # will chase with fresh Enters — exactly the 3 real levels (Start >
+    # Campaign > first campaign in the list), not an arbitrarily larger
+    # number. Earlier development of this drive sent Enters far more
+    # liberally (nudging again on every timeout, uncapped) on the
+    # assumption from the task brief that extra Enters are harmless once
+    # the campaign has loaded; that held under light load, but under
+    # sustained host contention a nudge's Enter can land *while the app is
+    # already busy loading* rather than idle at the briefing screen — and
+    # this simulator's ARM code runs under Unicorn CPU emulation (not
+    # natively), so "busy loading" can legitimately last many seconds,
+    # widening that unsafe window considerably. A keypress landing there
+    # is not obviously safe: reproduced directly while developing this
+    # drive, a run that sent dozens of extra Enters past the third real
+    # transition went on to observe a screen that never changed again for
+    # 400+ seconds and no second report — consistent with extra input
+    # having been queued and then fired once the app became responsive,
+    # overshooting past the state this drive needs to observe. Capping at
+    # exactly the expected count removes that risk: once 3 transitions are
+    # confirmed, this loop stops sending input entirely and only waits
+    # (see the settle loop below) — see .superpowers/sdd/prereq-5-report.md.
+    _EXPECTED_TRANSITIONS = 3
+    _MAX_NUDGES = 15  # headroom for dropped presses before any of the 3 land
+    _NUDGE_TIMEOUT_S = 5.0  # ceiling on one nudge's wait for evidence
+    _NAV_TIMEOUT_S = 60.0  # backstop on the whole nudge phase
 
-        # Poll for the completion signal, breaking out as soon as it's met
-        # instead of sleeping the full window unconditionally — quick-play's
-        # post-navigation report typically lands well under the settle_s
-        # backstop.
-        settle_deadline = time.time() + settle_s
-        text = _poll_and_accumulate(simulator, parse_fn, seen, stats)
-        while time.time() < settle_deadline and not done(stats):
-            time.sleep(_POLL_INTERVAL_S)
-            text = _poll_and_accumulate(simulator, parse_fn, seen, stats)
-
-        if len(stats) > 1:
+    nav_deadline = time.time() + _NAV_TIMEOUT_S
+    baseline = _learn_screen_baseline(simulator, parse_fn, seen, stats)
+    confirmed_transitions = 0
+    for _ in range(_MAX_NUDGES):
+        if (done(stats) or confirmed_transitions >= _EXPECTED_TRANSITIONS
+                or time.time() >= nav_deadline):
             break
+
+        simulator.keypress("enter")
+
+        step_deadline = min(time.time() + _NUDGE_TIMEOUT_S, nav_deadline)
+        last_screen_check = 0.0
+        transitioned = False
+        while time.time() < step_deadline:
+            # Keep accumulating on every poll regardless of which evidence
+            # is being waited on: the third Enter (loading a campaign) is
+            # exactly when the dense "[TRAMP] fs_*" burst from
+            # campaign/map/sprite I/O happens, and the whole point of
+            # polling throughout instead of only at the edges is that a
+            # burst entirely between two checks can still evict a report
+            # no poll ever saw — see _POLL_INTERVAL_S.
+            _poll_and_accumulate(simulator, parse_fn, seen, stats)
+            if done(stats):
+                break
+
+            now = time.time()
+            if now - last_screen_check >= _SCREEN_POLL_INTERVAL_S:
+                last_screen_check = now
+                sig = _screen_signature(simulator)
+                # A signature outside this screen's own known idle-blink
+                # set is direct evidence this Enter registered and the app
+                # rendered something new (a menu transitioned, or a load
+                # screen appeared) — move on rather than continuing to
+                # wait out the rest of this nudge's timeout for no reason.
+                if sig is not None and sig not in baseline:
+                    transitioned = True
+                    break
+
+            time.sleep(_POLL_INTERVAL_S)
+
+        if done(stats):
+            break
+        if transitioned:
+            confirmed_transitions += 1
+            if confirmed_transitions >= _EXPECTED_TRANSITIONS:
+                # The third confirmed transition is the load-triggering
+                # Enter itself — stop sending input and drop straight to
+                # the settle loop below, which just watches for the
+                # completion signal without touching the keyboard again.
+                break
+            # Learn the new screen's own idle-blink set before the next
+            # nudge, so that comparison is against what *this* screen does
+            # at rest, not the previous one's.
+            baseline = _learn_screen_baseline(simulator, parse_fn, seen, stats)
+        # else: no out-of-baseline signature turned up within this nudge's
+        # timeout — most likely this Enter was dropped (e.g. it raced the
+        # app's own input poll under host contention) rather than the menu
+        # genuinely not responding, so the baseline is still valid and the
+        # next loop iteration just tries again.
+
+    # One more generous poll window for the completion signal — no more
+    # Enters sent here even if confirmed_transitions never reached
+    # _EXPECTED_TRANSITIONS (e.g. nav_deadline or _MAX_NUDGES ran out
+    # first): past this point, sending more input is exactly the
+    # "extra Enter mid-load" risk _EXPECTED_TRANSITIONS exists to avoid,
+    # and the caller's own assertions below already produce a clear
+    # diagnostic if navigation genuinely never got this far. If
+    # done(stats) is already true this is a no-op single poll, not an
+    # unconditional wait.
+    settle_deadline = time.time() + settle_s
+    text = _poll_and_accumulate(simulator, parse_fn, seen, stats)
+    while time.time() < settle_deadline and not done(stats):
+        time.sleep(_POLL_INTERVAL_S)
+        text = _poll_and_accumulate(simulator, parse_fn, seen, stats)
 
     assert stats, f"no {boot_marker} lines found in log:\n{text[-2000:]}"
 
@@ -392,11 +592,12 @@ def _drive_quickplay(simulator, boot_marker, parse_fn, settle_s=12, done=None):
     # file I/O that triggers it. Catch that case here with a message that
     # names the actual suspect.
     assert len(stats) > 1, (
-        f"only one {boot_marker} line observed after driving quick-play "
-        "(3 Enters: Start > Campaign > first campaign in the list) — the "
-        "main menu layout likely drifted from what this drive expects "
-        "(main menu Start/Options/Quit -> \"Start:\" submenu "
-        "Campaign/Dogfight/Deathmatch/Join game/Back -> \"Select a "
+        f"only one {boot_marker} line observed after adaptively driving "
+        f"quick-play (up to {_MAX_NUDGES} Enters: Start > Campaign > first "
+        "campaign in the list, each sent only after evidence the previous "
+        "one registered) — the main menu layout likely drifted from what "
+        "this drive expects (main menu Start/Options/Quit -> \"Start:\" "
+        "submenu Campaign/Dogfight/Deathmatch/Join game/Back -> \"Select a "
         "campaign:\" list; every Enter here relies on landing on an "
         "already-default-selected top item at that level) rather than a "
         f"{'heap' if boot_marker == 'HEAPSTAT' else 'graphics'}-instrumentation bug"
@@ -488,7 +689,7 @@ def parse_gfxstats(log_text):
     return out
 
 
-def peak_gfx_total(simulator, settle_s=12):
+def peak_gfx_total(simulator, settle_s=45):
     """Launch cdogs, drive quick-play, and return the GFXSTAT line whose
     peak= field equals the overall observed high-water mark.
 
