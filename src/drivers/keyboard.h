@@ -100,9 +100,15 @@ void kbd_clear_state(void);
 // Pulses SCL 9 times to clear stuck STM32 state and reinitializes I2C peripheral.
 void kbd_recover_i2c_bus(void);
 
-// Inject button states (BTN_* from os.h). Injected buttons appear in kbd_get_buttons()
-// and kbd_get_buttons_pressed() until cleared.
+// Inject a one-shot button press (BTN_* from os.h). The press is published by
+// the next kbd_poll() and stays visible for exactly one full poll cycle, so an
+// app's update→read sequence always observes both its press and release edge.
 void kbd_inject_buttons(uint32_t buttons);
+
+// Hold buttons down until kbd_release_buttons() — for injected modifier
+// chords (e.g. hold ctrl, type 's', release ctrl). BTN_MENU is click-only.
+void kbd_hold_buttons(uint32_t buttons);
+void kbd_release_buttons(uint32_t buttons);
 
 // Inject a character. The character is stored in s_last_char and consumed on the
 // next call to kbd_get_char() (similar to real keyboard input).

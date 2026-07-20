@@ -198,3 +198,12 @@ void kbd_inject_char(char c) {
     // chars were wiped before any app could read them.
     hal_input_inject_char(c);
 }
+
+void kbd_hold_buttons(uint32_t buttons) {
+    buttons &= ~BTN_MENU;  // menu is click-only, matches hardware driver
+    hal_input_hold_buttons(buttons);
+}
+
+void kbd_release_buttons(uint32_t buttons) {
+    hal_input_release_buttons(buttons);
+}

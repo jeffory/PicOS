@@ -69,6 +69,28 @@ static int b64_decode_char(char c) {
 static void b64_recv_char(int c);
 static void b64_recv_abort(const char *why);
 
+// Map a dev-command key name to a BTN_* mask (0 = not a named button).
+static uint32_t dev_key_name_to_mask(const char *key) {
+    static const struct { const char *name; uint32_t mask; } map[] = {
+        {"up", BTN_UP},        {"down", BTN_DOWN},
+        {"left", BTN_LEFT},    {"right", BTN_RIGHT},
+        {"enter", BTN_ENTER},  {"esc", BTN_ESC},
+        {"menu", BTN_MENU},    {"backspace", BTN_BACKSPACE},
+        {"tab", BTN_TAB},      {"del", BTN_DEL},
+        {"shift", BTN_SHIFT},  {"ctrl", BTN_CTRL},
+        {"alt", BTN_ALT},      {"sym", BTN_FN},
+        {"fn", BTN_FN},
+        {"f1", BTN_F1}, {"f2", BTN_F2}, {"f3", BTN_F3}, {"f4", BTN_F4},
+        {"f5", BTN_F5}, {"f6", BTN_F6}, {"f7", BTN_F7}, {"f8", BTN_F8},
+        {"f9", BTN_F9}, {"f10", BTN_MENU},
+    };
+    for (size_t i = 0; i < sizeof(map) / sizeof(map[0]); i++) {
+        if (strcmp(key, map[i].name) == 0)
+            return map[i].mask;
+    }
+    return 0;
+}
+
 // Encode exactly n (1-3) bytes into 4 chars.
 static void b64_encode_group(const uint8_t *in, uint32_t n, char out[4]) {
     uint32_t v = (uint32_t)in[0] << 16;
@@ -399,43 +421,35 @@ bool dev_commands_process(void) {
                d[0], d[1], d[2], d[3], d[4], d[5], d[6], d[7], d[8], d[9],
                d[1] ? (unsigned long)(d[10] / d[1]) : 0ul);
         mp3_player_reset_diag();
-    } else if (strncmp(s_cmd_buf, "keypress ", 9) == 0) {
-        const char *key = s_cmd_buf + 9;
-        uint32_t buttons = 0;
+    } else if (strncmp(s_cmd_buf, "keypress ", 9) == 0 ||
+               strncmp(s_cmd_buf, "keydown ", 8) == 0 ||
+               strncmp(s_cmd_buf, "keyup ", 6) == 0) {
+        bool is_down = (strncmp(s_cmd_buf, "keydown ", 8) == 0);
+        bool is_up   = (strncmp(s_cmd_buf, "keyup ", 6) == 0);
+        const char *key = s_cmd_buf + (is_down ? 8 : is_up ? 6 : 9);
+        uint32_t buttons = dev_key_name_to_mask(key);
         char ch = 0;
 
-        if (strcmp(key, "up") == 0)       buttons = BTN_UP;
-        else if (strcmp(key, "down") == 0)     buttons = BTN_DOWN;
-        else if (strcmp(key, "left") == 0)    buttons = BTN_LEFT;
-        else if (strcmp(key, "right") == 0)   buttons = BTN_RIGHT;
-        else if (strcmp(key, "enter") == 0)    buttons = BTN_ENTER;
-        else if (strcmp(key, "esc") == 0)      buttons = BTN_ESC;
-        else if (strcmp(key, "menu") == 0)     buttons = BTN_MENU;
-        else if (strcmp(key, "backspace") == 0) buttons = BTN_BACKSPACE;
-        else if (strcmp(key, "tab") == 0)       buttons = BTN_TAB;
-        else if (strcmp(key, "del") == 0)      buttons = BTN_DEL;
-        else if (strcmp(key, "shift") == 0)    buttons = BTN_SHIFT;
-        else if (strcmp(key, "f1") == 0)       buttons = BTN_F1;
-        else if (strcmp(key, "f2") == 0)       buttons = BTN_F2;
-        else if (strcmp(key, "f3") == 0)       buttons = BTN_F3;
-        else if (strcmp(key, "f4") == 0)       buttons = BTN_F4;
-        else if (strcmp(key, "f5") == 0)       buttons = BTN_F5;
-        else if (strcmp(key, "f6") == 0)       buttons = BTN_F6;
-        else if (strcmp(key, "f7") == 0)       buttons = BTN_F7;
-        else if (strcmp(key, "f8") == 0)       buttons = BTN_F8;
-        else if (strcmp(key, "f9") == 0)       buttons = BTN_F9;
-        else if (strcmp(key, "f10") == 0)      buttons = BTN_MENU;
-        else if (strlen(key) == 1 && key[0] >= 0x20 && key[0] < 0x7F) {
-            ch = key[0];
-        } else {
-            printf("[DEV] Unknown key: %s\n", key);
-            s_cmd_buf[0] = '\0';
-            s_cmd_ready = false;
-            return true;
+        if (!buttons) {
+            if (!is_down && !is_up && strlen(key) == 1 &&
+                key[0] >= 0x20 && key[0] < 0x7F) {
+                ch = key[0];
+            } else {
+                printf("[DEV] Unknown key: %s\n", key);
+                s_cmd_buf[0] = '\0';
+                s_cmd_ready = false;
+                return true;
+            }
         }
 
-        if (buttons) kbd_inject_buttons(buttons);
-        if (ch) kbd_inject_char(ch);
+        if (is_down) {
+            kbd_hold_buttons(buttons);
+        } else if (is_up) {
+            kbd_release_buttons(buttons);
+        } else {
+            if (buttons) kbd_inject_buttons(buttons);
+            if (ch) kbd_inject_char(ch);
+        }
         printf("[DEV] Key injected: %s\n", key);
     } else if (strncmp(s_cmd_buf, "put ", 4) == 0) {
         const char *args = s_cmd_buf + 4;
@@ -576,6 +590,7 @@ bool dev_commands_process(void) {
         printf("[DEV]   list           - List installed apps\n");
         printf("[DEV]   screenshot     - Capture screen\n");
         printf("[DEV]   keypress <key> - Inject keypress\n");
+        printf("[DEV]   keydown <key> / keyup <key> - Hold/release a key (chords)\n");
         printf("[DEV]   put <path> <size> - Receive file from host (USB CDC only)\n");
         printf("[DEV]   get <path>     - Send file to host (USB CDC only)\n");
         printf("[DEV]   putb64 <path> <size> - Receive file as base64 (any transport)\n");

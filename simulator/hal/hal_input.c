@@ -7,7 +7,8 @@
 
 static uint32_t g_buttons = 0;
 static uint32_t g_buttons_pressed = 0;
-static uint32_t g_injected_held = 0;  // injected buttons, auto-released on read
+static uint32_t g_injected_click = 0;    // one-shot injections, auto-released on read
+static uint32_t g_injected_latched = 0;  // held injections, released only by hal_input_release_buttons
 static char g_char_buffer[256];
 static int g_char_head = 0;
 static int g_char_tail = 0;
@@ -93,8 +94,8 @@ void hal_input_update(void) {
     pthread_mutex_lock(&s_input_mutex);
     // Clear pressed flags each frame (they're edge-triggered)
     g_buttons_pressed = 0;
-    g_buttons &= ~g_injected_held;
-    g_injected_held = 0;
+    g_buttons &= ~g_injected_click;
+    g_injected_click = 0;
     pthread_mutex_unlock(&s_input_mutex);
 }
 
@@ -103,8 +104,10 @@ void hal_input_read_buttons(uint32_t* out_buttons, uint32_t* out_pressed) {
     if (out_buttons) *out_buttons = g_buttons;
     if (out_pressed) *out_pressed = g_buttons_pressed;
     g_buttons_pressed = 0;
-    g_buttons &= ~g_injected_held;
-    g_injected_held = 0;
+    // Only one-shot (click) injections auto-release; latched holds persist
+    // until an explicit hal_input_release_buttons — enables modifier chords.
+    g_buttons &= ~g_injected_click;
+    g_injected_click = 0;
     pthread_mutex_unlock(&s_input_mutex);
 }
 
@@ -112,14 +115,25 @@ void hal_input_inject_buttons(uint32_t buttons) {
     pthread_mutex_lock(&s_input_mutex);
     g_buttons |= buttons;
     g_buttons_pressed |= buttons;
-    g_injected_held |= buttons;
+    g_injected_click |= buttons;
+    pthread_mutex_unlock(&s_input_mutex);
+}
+
+void hal_input_hold_buttons(uint32_t buttons) {
+    pthread_mutex_lock(&s_input_mutex);
+    g_buttons |= buttons;
+    g_buttons_pressed |= buttons;
+    g_injected_latched |= buttons;
+    // A held button must not be auto-released by an earlier click of the same key
+    g_injected_click &= ~buttons;
     pthread_mutex_unlock(&s_input_mutex);
 }
 
 void hal_input_release_buttons(uint32_t buttons) {
     pthread_mutex_lock(&s_input_mutex);
     g_buttons &= ~buttons;
-    g_injected_held &= ~buttons;
+    g_injected_click &= ~buttons;
+    g_injected_latched &= ~buttons;
     pthread_mutex_unlock(&s_input_mutex);
 }
 

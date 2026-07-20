@@ -65,6 +65,9 @@ bool hal_input_poll_char(char* out_char);
 // Inject button press (for RPC control)
 void hal_input_inject_buttons(uint32_t buttons);
 
+// Hold buttons down until hal_input_release_buttons (modifier chords).
+void hal_input_hold_buttons(uint32_t buttons);
+
 // Release (possibly injected) buttons immediately (for RPC control)
 void hal_input_release_buttons(uint32_t buttons);
 
