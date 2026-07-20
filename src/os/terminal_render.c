@@ -54,11 +54,6 @@ static int get_content_cols(terminal_t* term) {
     return cols > 0 ? cols : 1;
 }
 
-// Wrapper: delegates to shared text_wrap utility
-static int find_wrap_position(const char* text, int text_len, int max_cols) {
-    return text_wrap_find_break(text, text_len, max_cols);
-}
-
 // Find the first buffer row of the logical line containing the given buffer row.
 // A logical line is a group of consecutive buffer rows where all but the first
 // have row_continuation[row] == 1.
@@ -169,11 +164,14 @@ static void terminal_renderLineNumbers(terminal_t* term) {
     int logical_starts[27]; // max 26 rows + sentinel
     int num_logical = build_logical_lines(term, logical_starts, 26);
 
+    int next_line_num = start_line;  // no-wrap mode: next number to draw
+
     for (int row = 0; row < term->rows; row++) {
         int y = term->render_y_start + row * FONT_H;
         int x = term->render_x_start;
         bool is_continuation = false;
         int logical_line_idx = 0;
+        int line_num = 0;
 
         if (term->word_wrap_enabled) {
             // Find which logical line and segment this visual row corresponds to
@@ -194,16 +192,15 @@ static void terminal_renderLineNumbers(terminal_t* term) {
                 current_visual += ns;
                 logical_line_idx = li + 1;
             }
+            line_num = start_line + logical_line_idx;
+        } else {
+            // Continuation rows (auto-wrapped long lines) belong to the previous
+            // logical line: blank gutter, and the line number is not advanced.
+            is_continuation = term->row_continuation[row] != 0;
+            if (!is_continuation) line_num = next_line_num++;
         }
 
         if (!is_continuation) {
-            int line_num;
-            if (term->word_wrap_enabled) {
-                line_num = start_line + logical_line_idx;
-            } else {
-                line_num = start_line + row;
-            }
-
             char num_str[16];
             snprintf(num_str, sizeof(num_str), "%*d", term->line_number_cols - 1, line_num);
             num_str[term->line_number_cols - 1] = ' ';
@@ -562,13 +559,16 @@ void terminal_render(terminal_t* term) {
                             break;
                         }
                     }
-                    cursor_vis_y = current_visual + seg_idx - term->scroll_position;
+                    cursor_vis_y = current_visual + seg_idx;
                     break;
                 }
                 current_visual += ns;
             }
         } else {
-            cursor_vis_y = term->cursor_y - term->scroll_position;
+            // cursor_x/y are buffer (window) coordinates; scroll_position is
+            // document-level info for the scrollbar thumb only and must not
+            // offset the cursor (editors pass window-relative cursor coords).
+            cursor_vis_y = term->cursor_y;
         }
 
         if (cursor_vis_y >= 0 && cursor_vis_y < term->rows && cursor_vis_x >= 0 && cursor_vis_x < content_cols) {
