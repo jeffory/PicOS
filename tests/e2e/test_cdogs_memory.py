@@ -151,6 +151,10 @@ def parse_gfxstats(log_text):
 # only the boot-time state.
 LOADED_PEAK_FLOOR_BYTES = 1_500_000
 
+# 5 whole-screen 320x240 window textures at 2 bytes per pixel (RGB565).
+# Fixed in number and size, so this figure is deterministic.
+ALL_16BIT_TEX_BYTES = 5 * 320 * 240 * 2  # 768_000
+
 # Logged once via api->sys->log() in apps/cdogs/cdogs_picos.c, right
 # before the menu's LoopRunnerRun() starts consuming input — the first
 # point C-Dogs is actually ready to receive a keypress. _drive_quickplay
@@ -914,22 +918,23 @@ def test_textures_borrow_rather_than_duplicate(cdogs_quickplay_stats):
     peak = _peak_gfx_entry(cdogs_quickplay_stats["GFXSTAT"])
 
     # Measured on this simulator (deterministic across repeated runs — these
-    # are fixed 320x240 ARGB8888 window buffers created once during
+    # are fixed 320x240 window buffers created once during
     # GraphicsInitialize, independent of how many sprites load):
-    #   5 owning textures * 320 * 240 * 4 bytes = 1_536_000
-    # If a per-pic duplication path were reintroduced (i.e. Task 3's
-    # regression), tex would additionally gain roughly one more copy of
-    # `data` per pic — using this run's own data=81824 as the estimate,
-    # that's ~1_536_000 + 81_824 ~= 1_617_824. The ceiling below sits
-    # roughly halfway between the measured legitimate baseline and that
-    # regression estimate: generous headroom over what's actually observed,
-    # but comfortably below the point a reintroduced duplication path would
-    # reach.
-    TEX_CEILING_BYTES = 1_580_000
+    #   5 owning textures * 320 * 240 * 2 bytes = 768_000
+    # (Sub-project 2A converted these from ARGB8888 to RGB565; they were
+    # 1_536_000 before.) These five buffers are window-sized and fixed in
+    # number, so this figure is deterministic — it does NOT grow with the
+    # number of sprites loaded. That is what lets the ceiling sit tight.
+    # If a per-pic duplication path were reintroduced, tex would gain
+    # roughly one more copy of `data` per pic; at the current data=310_376
+    # that lands near 768_000 + 310_376 ~= 1_078_376. The ceiling below
+    # leaves a small margin over the deterministic baseline and sits far
+    # below that regression estimate.
+    TEX_CEILING_BYTES = 810_000
     assert peak["tex"] < TEX_CEILING_BYTES, (
         f"tex holds {peak['tex']} bytes, expected under {TEX_CEILING_BYTES} "
         "— legitimate owning textures (grafx.c's window-sized render "
-        "buffers) measured at 1_536_000 on this simulator; a figure "
+        "buffers) measured at 768_000 on this simulator; a figure "
         "meaningfully above that suggests a per-pic texture-duplication "
         "path was reintroduced somewhere"
     )
@@ -1010,7 +1015,6 @@ def test_render_targets_are_16_bit(cdogs_quickplay_stats):
 
     # 5 whole-screen 320x240 textures at 2 bytes per pixel. bkgTgt, the one
     # SDL_TEXTUREACCESS_TARGET texture, is the last to convert (Task 4).
-    ALL_16BIT_TEX_BYTES = 5 * 320 * 240 * 2  # 768_000
     TASK3_INTERIM_BYTES = ALL_16BIT_TEX_BYTES + 320 * 240 * 2  # 921_600
     assert peak["tex"] < TASK3_INTERIM_BYTES, (
         f"tex holds {peak['tex']} bytes, at or above the Task 3 interim "
@@ -1018,3 +1022,29 @@ def test_render_targets_are_16_bit(cdogs_quickplay_stats):
         "still looks like ARGB8888"
     )
     assert peak["tex"] > 0, "no owning textures counted; accounting is broken"
+
+
+def test_render_pipeline_saving(cdogs_quickplay_stats):
+    """The five window textures sit at the RGB565 figure, from both sides.
+
+    Bounded above and below on purpose. The ceiling catches a per-pic
+    duplication regression; the floor catches a silent revert to 4-byte
+    pixels, which a ceiling alone cannot see (a revert makes tex bigger,
+    but so does legitimately loading more sprites, so only a floor pins
+    the format down).
+
+    Not covered here, because g_picos_pic_tex_bytes only counts textures
+    created through SDL_CreateTexture: PicosRenderer.framebuf (307_200 ->
+    153_600) and the deleted s_rgb565_buf staging buffer (153_600). Those
+    307_200 further bytes are verified statically in the same-named task
+    step, by reading the two calloc sites in picos_sdl_impl.c.
+    """
+    peak = _peak_gfx_entry(cdogs_quickplay_stats["GFXSTAT"])
+
+    EXPECTED = ALL_16BIT_TEX_BYTES  # 768_000
+    assert EXPECTED * 0.9 < peak["tex"] < EXPECTED * 1.1, (
+        f"tex holds {peak['tex']} bytes; expected ~{EXPECTED} "
+        f"(5 x 320 x 240 x 2). Roughly {EXPECTED * 2} would mean the "
+        "buffers reverted to ARGB8888; a much larger figure would mean a "
+        "per-pic texture-duplication path came back."
+    )
