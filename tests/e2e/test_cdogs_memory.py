@@ -995,3 +995,26 @@ def test_owned_textures_are_16_bit(cdogs_quickplay_stats):
         "not appear to have been converted to RGB565"
     )
     assert peak["tex"] > 0, "no owning textures counted; accounting is broken"
+
+
+def test_render_targets_are_16_bit(cdogs_quickplay_stats):
+    """Every shim-owned texture is RGB565, including the render target.
+
+    Task 3 left bkgTgt (SDL_TEXTUREACCESS_TARGET) at ARGB8888 so
+    get_target() could keep one pointer type while the framebuffer was
+    still 32-bit. Once the framebuffer is RGB565 that exception is gone,
+    and tex should sit at the all-16-bit figure rather than 153_600
+    above it.
+    """
+    peak = _peak_gfx_entry(cdogs_quickplay_stats["GFXSTAT"])
+
+    # 5 whole-screen 320x240 textures at 2 bytes per pixel. bkgTgt, the one
+    # SDL_TEXTUREACCESS_TARGET texture, is the last to convert (Task 4).
+    ALL_16BIT_TEX_BYTES = 5 * 320 * 240 * 2  # 768_000
+    TASK3_INTERIM_BYTES = ALL_16BIT_TEX_BYTES + 320 * 240 * 2  # 921_600
+    assert peak["tex"] < TASK3_INTERIM_BYTES, (
+        f"tex holds {peak['tex']} bytes, at or above the Task 3 interim "
+        f"figure of {TASK3_INTERIM_BYTES} — the render target (bkgTgt) "
+        "still looks like ARGB8888"
+    )
+    assert peak["tex"] > 0, "no owning textures counted; accounting is broken"
