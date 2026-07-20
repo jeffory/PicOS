@@ -135,6 +135,41 @@ def parse_gfxstats(log_text):
     return out
 
 
+# Pre-existing debug instrumentation in picos_sdl_impl.c's SDL_RenderPresent
+# (not added for this test): it fprintf(stderr, ...)s a per-frame pixel
+# census — how many of the just-presented framebuffer's pixels are non-zero
+# — for the first 8 SDL_RenderPresent calls of the process, then goes
+# silent. Reused here (see test_boot_loading_screen_is_not_blank) instead
+# of polling the display_stats RPC because it's synchronous with the exact
+# frame it describes: RPC-polling display_stats independently was tried
+# first and proved unreliable for this purpose — it can observe the
+# PicOS launcher's own leftover screen content from before C-Dogs ever
+# presented a frame (nothing has overwritten the panel yet at that point),
+# which reads as "non-blank" regardless of whether C-Dogs' own render path
+# is healthy. This log line has no such gap: it's computed from the exact
+# buffer C-Dogs itself just presented, at the moment it presented it.
+RENDERPRESENT_RE = re.compile(
+    r"RenderPresent #(\d+): (\d+)x(\d+) colored=(\d+)/(\d+) "
+    r"first@\((-?\d+),(-?\d+)\)=0x([0-9A-Fa-f]{4})"
+)
+
+
+def parse_renderpresents(log_text):
+    """Return list of dicts for every RenderPresent debug line in the log,
+    in the order SDL_RenderPresent was called (its numbering starts at 1
+    and is never reused within one process lifetime)."""
+    out = []
+    for m in RENDERPRESENT_RE.finditer(log_text):
+        out.append({
+            "num": int(m.group(1)),
+            "w": int(m.group(2)),
+            "h": int(m.group(3)),
+            "colored": int(m.group(4)),
+            "total": int(m.group(5)),
+        })
+    return out
+
+
 # Floor proving the peak tracker actually witnessed substantial heap
 # growth during asset loading, not just the boot-time sample. This used
 # to mirror IMG_LOAD_HEAP_RESERVE (utils.c's 2.5 MiB reserve guard) to
@@ -758,13 +793,16 @@ def cdogs_quickplay_stats(cdogs_simulator):
     entry, so a plain launch-and-wait would see almost nothing on either
     stream. See _drive_quickplay for the full navigation rationale.
 
-    Returns {"HEAPSTAT": [...], "GFXSTAT": [...]} — see parse_heapstats /
-    parse_gfxstats for the shape of each entry. All four stats-consuming
-    tests below read from this dict; none of them re-drive the simulator.
+    Returns {"HEAPSTAT": [...], "GFXSTAT": [...], "RENDERPRESENT": [...]} —
+    see parse_heapstats / parse_gfxstats / parse_renderpresents for the
+    shape of each entry. RENDERPRESENT was added for
+    test_boot_loading_screen_is_not_blank; every other test below only
+    reads HEAPSTAT/GFXSTAT. None of them re-drive the simulator.
     """
     return _drive_quickplay(
         cdogs_simulator,
-        [("HEAPSTAT", parse_heapstats), ("GFXSTAT", parse_gfxstats)],
+        [("HEAPSTAT", parse_heapstats), ("GFXSTAT", parse_gfxstats),
+         ("RENDERPRESENT", parse_renderpresents)],
         done=_quickplay_settled,
     )
 
@@ -1050,4 +1088,95 @@ def test_render_pipeline_saving(cdogs_quickplay_stats):
         f"(5 x 320 x 240 x 2). Roughly {EXPECTED * 2} would mean the "
         "buffers reverted to ARGB8888; a much larger figure would mean a "
         "per-pic texture-duplication path came back."
+    )
+
+
+# Floor for a single RenderPresent frame's `colored` pixel count (see
+# test_boot_loading_screen_is_not_blank). A fully blank/black loading-screen
+# frame reads colored=0 (the RGB565-zero-is-opaque-black regression this
+# test exists to catch — reproduced directly while writing this test: every
+# one of RenderPresent #1-#4 read colored=0/76800 with the SDL_CreateTexture
+# fix reverted). A healthy first frame measured on this simulator reads
+# colored=138/76800 (panel art + logo + "Loading graphics..." text). The
+# floor sits comfortably above the blank figure (0) and comfortably below
+# the healthy one (138), so it fails hard on a blank frame without being
+# brittle to small pixel-count drift from font/logo asset changes.
+BOOT_FRAME_COLORED_FLOOR = 40
+
+
+def test_boot_loading_screen_is_not_blank(cdogs_quickplay_stats):
+    """C-Dogs' boot loading screens actually draw content, not solid black.
+
+    Regression test for the Critical finding in the RGB565-conversion final
+    review: SDL_CreateTexture relied on calloc's zero fill for a fresh
+    texture's "nothing drawn yet" state. That was correct for ARGB8888
+    (0x00000000 is alpha=0, transparent) but wrong for RGB565, which has no
+    alpha channel — 0x0000 is opaque black, not transparent, and isn't
+    PICOS_RGB565_CKEY either. g->screen (grafx.c's window texture, created
+    with SDL_BLENDMODE_BLEND) was never written before the first
+    LoadingScreenDraw() call, so every one of C-Dogs' boot loading screens
+    (LoadingScreenDraw, cdogs_picos.c) rendered as solid black — both on
+    real hardware and in this simulator.
+
+    Nothing else in this module would have caught this: the GFXSTAT/
+    HEAPSTAT assertions above only see byte counts, not pixel content, and
+    a check anchored to the main menu (post MENU_READY_MARKER) would pass
+    regardless of this bug, because the menu loop redraws g->screen every
+    single frame — only the loading screens that run BEFORE the first real
+    draw are exposed to a stale/zeroed buffer.
+
+    This does NOT poll the display_stats RPC the way the reviewer's manual
+    verification did (see the module's RENDERPRESENT_RE comment for why):
+    an independent RPC poll during boot turned out to be unreliable for
+    this specific purpose — it can observe the PicOS launcher's own
+    leftover screen content from before C-Dogs ever presented a single
+    frame, which reads as "non-blank" no matter what C-Dogs itself does,
+    producing a false pass. Confirmed directly: an RPC-polling version of
+    this test, tried first, PASSED even with the SDL_CreateTexture fix
+    reverted. Parsing the RENDERPRESENT stream instead — the shim's own
+    pre-existing fprintf(stderr, ...) census of each of the first 8
+    presented frames, computed synchronously from the exact buffer just
+    presented — has no such gap. RenderPresent numbering starts fresh at
+    process start and only C-Dogs' own boot sequence (font load, 4x
+    LoadingScreenDraw, first main-menu frame) produces the first 8, so
+    every entry here is unambiguously one of C-Dogs' own frames.
+
+    Verified directly against both states of this fix while writing it:
+    stashing just the SDL_CreateTexture fix and rebuilding reproduced
+    colored=0/76800 for every one of RenderPresent #1-#4 (all 4 boot
+    loading screens); restoring the fix reproduced colored=138/76800 on
+    #1 — see final-review-fix-report.md for both raw pytest runs.
+    """
+    frames = cdogs_quickplay_stats.get("RENDERPRESENT", [])
+    assert frames, (
+        "no RenderPresent debug lines found in the log — either the "
+        "instrumentation in picos_sdl_impl.c's SDL_RenderPresent was "
+        "removed, or C-Dogs never presented a frame at all"
+    )
+
+    # Only the boot-time frames are relevant here — MainMenu's own frames
+    # (drawn continuously once the menu is up, and eligible to be numbered
+    # anywhere from #5 up to the #8 cap depending on exactly how many
+    # LoadingScreenDraw calls preceded them) legitimately have real content
+    # regardless of this bug, so including them would dilute (not corrupt,
+    # since max() is used below and a blank max only comes from an
+    # all-blank set — but still worth being precise) what this test is
+    # actually checking. cdogs_picos.c calls LoadingScreenDraw exactly 4
+    # times before "Entering main menu loop", so #1-#4 are guaranteed to
+    # all be loading-screen frames.
+    boot_frames = [f for f in frames if f["num"] <= 4]
+    assert boot_frames, (
+        f"no RenderPresent frames numbered <= 4 in {frames!r} — expected "
+        "C-Dogs' 4 boot-time LoadingScreenDraw calls to have presented "
+        "frames #1-#4"
+    )
+
+    max_colored = max(f["colored"] for f in boot_frames)
+    assert max_colored > BOOT_FRAME_COLORED_FLOOR, (
+        f"every one of C-Dogs' boot loading-screen frames "
+        f"({boot_frames!r}) peaked at only {max_colored} colored pixels "
+        f"(floor {BOOT_FRAME_COLORED_FLOOR}) — this is what a solid-black "
+        "loading screen looks like, exactly the "
+        "zeroed-RGB565-texture-reads-as-opaque-black regression this test "
+        "guards against"
     )
