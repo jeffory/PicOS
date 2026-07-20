@@ -200,6 +200,11 @@ bool file_browser_show(const char *start_path, const char *root_path,
     // for the entire time this modal is open.
     dev_commands_poll();
     dev_commands_process();
+    // Let a dev "exit" unwind this modal (cancel; the Lua hook handles exit).
+    if (dev_commands_wants_exit()) {
+      kbd_clear_state();
+      return false;
+    }
     uint32_t pressed = kbd_get_buttons_pressed();
 
     if (pressed & BTN_UP) {

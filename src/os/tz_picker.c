@@ -189,6 +189,9 @@ bool tz_picker_show(void) {
         // for the entire time this modal is open.
         dev_commands_poll();
         dev_commands_process();
+        // Let a dev "exit" unwind this modal (cancel; the Lua hook handles exit).
+        if (dev_commands_wants_exit())
+            return false;
 
         char     ch      = kbd_get_char();
         uint32_t pressed = kbd_get_buttons_pressed();

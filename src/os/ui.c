@@ -277,6 +277,9 @@ bool ui_text_input(const char *prompt, const char *default_val,
     kbd_poll();
     dev_commands_poll();
     dev_commands_process();
+    // A dev "exit" must be able to unwind this modal: cancel so the Lua hook
+    // can process the exit once control returns to the app.
+    if (dev_commands_wants_exit()) break;
     uint32_t btns = kbd_get_buttons_pressed();
     char c        = kbd_get_char();
 
@@ -342,6 +345,8 @@ bool ui_confirm(const char *message) {
     kbd_poll();
     dev_commands_poll();
     dev_commands_process();
+    // Let a dev "exit" unwind this modal (cancel; the Lua hook handles exit).
+    if (dev_commands_wants_exit()) return false;
     uint32_t btns = kbd_get_buttons_pressed();
     char c        = kbd_get_char();
     if (btns & BTN_ESC || c == 'n' || c == 'N') return false;
