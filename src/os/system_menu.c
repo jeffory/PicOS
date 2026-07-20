@@ -373,6 +373,17 @@ static void draw_panel(const flat_item_t *items, int count, int sel, int px,
 // ── Shared menu loop
 // ────────────────────────────────────────────────────────────────
 
+// Persist brightness once per menu session (on close / before reboot) rather
+// than on every adjustment keypress, to avoid burst SD writes.
+static void save_brightness_if_changed(uint8_t entry_brightness) {
+  if (s_brightness == entry_brightness)
+    return;
+  char buf[8];
+  snprintf(buf, sizeof(buf), "%u", s_brightness);
+  config_set("brightness", buf);
+  config_save();
+}
+
 // context: 0=launcher, 1=Lua app, 2=native app
 // Returns true if Exit App was selected.
 static bool menu_loop(lua_State *L, int context) {
@@ -392,6 +403,7 @@ static bool menu_loop(lua_State *L, int context) {
   bg_save();
 
   int sel = 0;
+  uint8_t entry_brightness = s_brightness;
   bool running = true;
   bool need_redraw = true;
   bool need_bg_restore = false;
@@ -544,11 +556,13 @@ static bool menu_loop(lua_State *L, int context) {
         running = false;
         break;
       case ITEM_REBOOT:
+        save_brightness_if_changed(entry_brightness);
         watchdog_enable(1, true);
         for (;;)
           tight_loop_contents();
         break; /* unreachable */
       case ITEM_REBOOT_FLASH:
+        save_brightness_if_changed(entry_brightness);
         reset_usb_boot(0, 0);
         break; /* unreachable */
       case ITEM_WIFI_AUTO_DISCONNECT:
@@ -594,6 +608,7 @@ static bool menu_loop(lua_State *L, int context) {
   }
   bg_free();
   kbd_clear_state();
+  save_brightness_if_changed(entry_brightness);
   return exit_requested;
 }
 
@@ -602,7 +617,7 @@ static bool menu_loop(lua_State *L, int context) {
 
 void system_menu_init(void) {
   s_app_item_count = 0;
-  s_brightness = 128;
+  s_brightness = config_parse_brightness(config_get("brightness"));
   const char *dm = config_get("dev_mode");
   s_dev_mode = (dm && strcmp(dm, "1") == 0);
   const char *wad = config_get("wifi_auto_disconnect");
