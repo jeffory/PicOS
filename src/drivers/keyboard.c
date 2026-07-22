@@ -25,6 +25,16 @@
 #define KBD_REG_DELAY_MS 1
 #define KBD_I2C_TIMEOUT_US 5000  // 5ms — ample for 100kHz I2C; 50ms was causing ~150ms stalls per frame on failure
 
+// Minimum wall-clock duration an injected one-shot button stays "active"
+// before kbd_poll() auto-releases it. Some apps call kbd_poll() more than
+// once per logical frame (watchdog-feed pumps), so a poll-count-based hold
+// (e.g. "released on the next poll") isn't safe — the extra polls can retire
+// the press before the app ever samples it. A wall-time hold makes delivery
+// independent of poll cadence, like a real human keypress. Must stay below
+// the MCP `keypress` tool's default 100ms inter-key delay so back-to-back
+// injected presses of different buttons don't get delayed into merging.
+#define KBD_INJECT_HOLD_MS 80
+
 // ── Internal state
 // ────────────────────────────────────────────────────────────
 
@@ -42,12 +52,18 @@ static uint32_t s_i2c_backoff_ms = 0; // when to next attempt recovery
 
 // Injected input (dev commands). Injection happens asynchronously — the
 // dev-command pump runs from the Lua debug hook, at an arbitrary point in the
-// app's frame — so a one-shot press must stay *pending* until the next
-// kbd_poll() publishes it for one full update→read cycle. (The old scheme
-// cleared the injection at the top of every kbd_poll, so the app's own
-// input.update() usually wiped it before the app read the button state.)
+// app's frame — so a one-shot press must stay *pending* until kbd_poll()
+// publishes it, and then stay *active* for a minimum wall-clock hold
+// (KBD_INJECT_HOLD_MS) rather than for just one poll call. (The original
+// scheme cleared the injection at the top of every kbd_poll, so the app's
+// own input.update() usually wiped it before the app read the button state;
+// a later fix held it for exactly one poll-to-poll cycle, but extra
+// kbd_poll() calls within that cycle — e.g. watchdog-feed pumps added since
+// — could still retire it early. See KBD_INJECT_HOLD_MS.)
 static uint32_t s_injected_pending = 0; // one-shot press awaiting publication
 static uint32_t s_injected_active = 0;  // one-shot published for this poll cycle
+static uint32_t s_injected_active_since_ms =
+    0; // wall-clock ms when s_injected_active was last published
 static uint32_t s_injected_held = 0;    // latched until kbd_release_buttons()
 static char s_injected_char = 0;        // character injected via kbd_inject_char()
 
@@ -233,12 +249,38 @@ void kbd_poll(void) {
   s_last_char = 0;
   s_last_raw_key = 0;
 
-  // Retire the previous one-shot injection and publish any pending one.
-  // Folding injected buttons into s_buttons_curr (rather than OR-ing them in
-  // the getters) gives them real press AND release edges.
-  s_buttons_curr &= ~s_injected_active;
-  s_injected_active = s_injected_pending;
-  s_injected_pending = 0;
+  uint32_t now_ms = to_ms_since_boot(get_absolute_time());
+
+  // Retire the previous one-shot injection (once it has been held for at
+  // least KBD_INJECT_HOLD_MS) and publish any pending one. Folding injected
+  // buttons into s_buttons_curr (rather than OR-ing them in the getters)
+  // gives them real press AND release edges.
+  //
+  // Retiring on wall time rather than "the next poll" is the fix: apps now
+  // call kbd_poll() more than once per logical frame in places (the C-Dogs
+  // SDL_Delay pump, the blit-path pump, picos_asset_load_tick — all added to
+  // feed the watchdog during long-running work). Any such extra poll landing
+  // between publish and the app's actual getButtons()/read call used to eat
+  // the press before the app ever saw it. A minimum wall-clock hold makes
+  // delivery independent of how many times kbd_poll() happens to run.
+  bool injected_retired_this_poll = false;
+  if (s_injected_active &&
+      (now_ms - s_injected_active_since_ms >= KBD_INJECT_HOLD_MS)) {
+    s_buttons_curr &= ~s_injected_active;
+    s_injected_active = 0;
+    injected_retired_this_poll = true;
+  }
+  // Publish a pending one-shot only when active is empty AND we didn't just
+  // retire it in this very call. The latter guarantees at least one full
+  // poll-to-poll cycle where the button reads as released before it (or the
+  // same button re-injected while it was still active, which was left
+  // sitting in s_injected_pending) can be republished — a real release edge,
+  // the same way a human can't press a key again without releasing it first.
+  if (!injected_retired_this_poll && !s_injected_active && s_injected_pending) {
+    s_injected_active = s_injected_pending;
+    s_injected_pending = 0;
+    s_injected_active_since_ms = now_ms;
+  }
   s_buttons_curr |= s_injected_active | s_injected_held;
 
   // Poll REG_FIF (0x09) directly — up to 8 events per frame.
@@ -247,7 +289,6 @@ void kbd_poll(void) {
   // After repeated failures, skip the I2C attempt entirely until the backoff
   // window expires — prevents 5ms timeouts from dominating the frame budget.
   bool poll_ok = false;
-  uint32_t now_ms = to_ms_since_boot(get_absolute_time());
   if (s_i2c_fail_count > 5 && now_ms < s_i2c_backoff_ms) {
     // Bus is struggling — skip this frame entirely to keep display responsive
     goto done_polling;
