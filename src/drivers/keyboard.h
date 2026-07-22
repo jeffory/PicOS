@@ -114,6 +114,10 @@ void kbd_inject_buttons(uint32_t buttons);
 // Hold buttons down until kbd_release_buttons() — for injected modifier
 // chords (e.g. hold ctrl, type 's', release ctrl). BTN_MENU is click-only.
 void kbd_hold_buttons(uint32_t buttons);
+
+// Release injected buttons. Clears both latched holds (from kbd_hold_buttons)
+// and any in-flight injected one-shot clicks (active and pending), ensuring
+// a keyup always terminates the key completely.
 void kbd_release_buttons(uint32_t buttons);
 
 // Inject a character. The character is stored in s_last_char and consumed on the

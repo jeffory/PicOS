@@ -487,7 +487,7 @@ static char *h_inject_button(const char *params) {
         SDL_Delay(16);
         return strdup("{\"jsonrpc\":\"2.0\",\"result\":{\"ok\":true}}");
     }
-    // "click" / default: one-shot press, auto-released after one read
+    // "click" / default: one-shot press, held ~HAL_INJECT_HOLD_MS ms before auto-release
     kbd_inject_buttons(btn_mask);
     SDL_Delay(16);
     return strdup("{\"jsonrpc\":\"2.0\",\"result\":{\"ok\":true}}");

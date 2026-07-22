@@ -33,6 +33,8 @@
 // independent of poll cadence, like a real human keypress. Must stay below
 // the MCP `keypress` tool's default 100ms inter-key delay so back-to-back
 // injected presses of different buttons don't get delayed into merging.
+// NOTE: The simulator carries an independent parallel implementation in
+// simulator/hal/hal_input.c (HAL_INJECT_HOLD_MS) — changes here must be mirrored there.
 #define KBD_INJECT_HOLD_MS 80
 
 // ── Internal state

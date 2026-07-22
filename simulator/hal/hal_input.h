@@ -50,10 +50,12 @@ uint32_t hal_input_get_buttons(void);
 uint32_t hal_input_get_buttons_pressed(void);
 
 // Atomically snapshot held+pressed buttons and clear edge state.
-// Injected buttons auto-release here, so one inject = press edge + one
-// frame of held + release edge on the following frame. Taking the mutex
-// once for the whole read+clear closes the race where an RPC inject
-// landing between the old separate read/clear calls was dropped.
+// Injected one-shot clicks stay asserted for at least HAL_INJECT_HOLD_MS
+// (80ms) of wall-clock time before auto-release. A guaranteed released
+// read-cycle separates repeated same-button injections, enforced by
+// retire_and_publish_injected_click_locked(). Taking the mutex once for
+// the whole operation closes the race where an RPC inject landing between
+// separate read/clear calls was dropped.
 void hal_input_read_buttons(uint32_t* out_buttons, uint32_t* out_pressed);
 
 // Get character input (for text entry)

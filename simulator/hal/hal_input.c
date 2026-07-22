@@ -162,6 +162,9 @@ void hal_input_read_buttons(uint32_t* out_buttons, uint32_t* out_pressed) {
 
 void hal_input_inject_buttons(uint32_t buttons) {
     pthread_mutex_lock(&s_input_mutex);
+    // Retire any expired click before checking if it's still active, so an
+    // expired click doesn't needlessly queue a fresh same-button injection.
+    retire_and_publish_injected_click_locked(hal_get_time_ms());
     uint32_t already_active = buttons & g_injected_click;
     uint32_t fresh = buttons & ~already_active;
     if (fresh) {
