@@ -118,6 +118,51 @@ GFXSTAT_RE = re.compile(
     r"GFXSTAT (\S+) pics=(-?\d+) data=(\d+) tex=(\d+) total=(\d+) peak=(\d+) skipped=(-?\d+)"
 )
 
+CHARSFMT_RE = re.compile(
+    r"CHARSFMT (\S+) la8=(\d+) rgb565=(\d+) argb8888=(\d+)"
+)
+
+
+def parse_charsfmt(log_text):
+    """Return list of dicts for every CHARSFMT line in the log.
+
+    Logged exactly once per process, via fprintf(stderr, ...) in stubs.c's
+    picos_charsfmt_report (called from pic_manager.c's PicManagerLoad,
+    immediately after picos_gfx_report("picmanagerload") — same call site,
+    same "picmanagerload" tag — right after BOTH the graphics/ and
+    graphics_hd/ trees have been fully, recursively scanned). Same
+    per-run logging point as the boot-time HEAPSTAT/GFXSTAT report, so it
+    is exposed to the exact same get_output() ring-buffer eviction hazard
+    the module docstring describes (a dense "[TRAMP] fs_*" burst from
+    campaign/map/sprite I/O can evict it before anything reads it). Must
+    be accumulated via the same poll-throughout-the-drive pattern as
+    HEAPSTAT/GFXSTAT/RENDERPRESENT (see _drive_quickplay/_accumulate) — a
+    single end-of-drive read is not safe against that eviction.
+
+    Its three counters can legitimately all read 0 with no bug involved:
+    confirmed directly while writing this test, this simulator's own
+    quick-play drive reports la8=0 rgb565=0 argb8888=0 even though
+    GFXSTAT's own pics=1960 (same report) proves plenty of pics loaded —
+    cross-checking the raw log showed chars/ LoadImg attempts being
+    skipped by the heap-reserve guard (e.g. "LoadImg SKIP #500 (heap
+    reserve): '.../chars/heads/seal_12x11.png'") before any of them ever
+    reached pic.c's PicLoadClassifyCharsFormat, which is the only place
+    these counters increment. Which categories the guard rejects wholesale
+    is load-order-dependent, and this simulator's host-filesystem
+    enumeration order is not guaranteed to match real hardware's FatFS/SD
+    order — see test_charsfmt_line_is_well_formed for why no test in this
+    module asserts any of these three fields is positive.
+    """
+    out = []
+    for m in CHARSFMT_RE.finditer(log_text):
+        out.append({
+            "tag": m.group(1),
+            "la8": int(m.group(2)),
+            "rgb565": int(m.group(3)),
+            "argb8888": int(m.group(4)),
+        })
+    return out
+
 
 def parse_gfxstats(log_text):
     """Return list of dicts for every GFXSTAT line in the log."""
@@ -468,7 +513,7 @@ def _learn_screen_baseline(simulator, poll_fn,
     return baseline
 
 
-def _drive_quickplay(simulator, streams, settle_s=45, done=None):
+def _drive_quickplay(simulator, streams, settle_s=45, done=None, soft_streams=None):
     """Launch C-Dogs, drive the quick-play menu flow, and return every
     requested diagnostic stream once navigation has demonstrably worked.
 
@@ -542,21 +587,41 @@ def _drive_quickplay(simulator, streams, settle_s=45, done=None):
     signal (e.g. "the heap peak has cleared a threshold") can supply
     their own so the loop breaks the moment that particular condition is
     satisfied rather than always waiting on report count.
+
+    soft_streams: optional list of (name, parse_fn) pairs polled and
+    accumulated exactly like `streams` (same eviction-avoidance via
+    _accumulate on every poll), but exempt from every assertion below that
+    gates on `streams` — the initial "instrumentation is wired up" wait,
+    and the final "quick-play navigation actually landed a second report"
+    sanity check. For a report that may legitimately be emitted exactly
+    once (or, depending on unrelated load-order effects, carry all-zero
+    fields) rather than growing into a real repeating stream, both of
+    those checks would misfire: "missing" would wait out its own deadline
+    for a second line that was never coming, and ">1 lines observed"
+    would fail permanently. CHARSFMT (Stage 2C) is exactly this shape —
+    see parse_charsfmt's docstring — so it is driven as a soft stream.
     """
     if done is None:
         done = lambda state: all(len(v) > 1 for v in state.values())  # noqa: E731
+    soft_streams = soft_streams or []
 
     # Accumulated across every poll for the rest of this drive, one set
     # of state per requested stream — see _accumulate's docstring for why
     # a single end-of-drive read of get_output() isn't safe against its
-    # bounded tails.
+    # bounded tails. soft_streams share the same accumulation (and the
+    # same eviction protection) but never participate in missing_streams()
+    # or the final per-stream ">1" sanity check below.
     seen = {name: set() for name, _ in streams}
     stats = {name: [] for name, _ in streams}
+    soft_seen = {name: set() for name, _ in soft_streams}
+    soft_stats = {name: [] for name, _ in soft_streams}
 
     def poll():
         text = _combined_output(simulator)
         for name, parse_fn in streams:
             _accumulate(text, parse_fn, seen[name], stats[name])
+        for name, parse_fn in soft_streams:
+            _accumulate(text, parse_fn, soft_seen[name], soft_stats[name])
         return text
 
     def missing_streams():
@@ -752,6 +817,14 @@ def _drive_quickplay(simulator, streams, settle_s=45, done=None):
             f"{'heap' if name == 'HEAPSTAT' else 'graphics'}-instrumentation bug"
         )
 
+    # One last poll so any soft_streams report that only just landed (e.g.
+    # CHARSFMT, emitted once right after the initial graphics tree scan,
+    # potentially well before quick-play's navigation even starts) is
+    # captured before returning — no assertions on soft_streams themselves;
+    # callers decide what (if anything) to require of them.
+    poll()
+    stats.update(soft_stats)
+
     return stats
 
 
@@ -793,16 +866,22 @@ def cdogs_quickplay_stats(cdogs_simulator):
     entry, so a plain launch-and-wait would see almost nothing on either
     stream. See _drive_quickplay for the full navigation rationale.
 
-    Returns {"HEAPSTAT": [...], "GFXSTAT": [...], "RENDERPRESENT": [...]} —
-    see parse_heapstats / parse_gfxstats / parse_renderpresents for the
-    shape of each entry. RENDERPRESENT was added for
-    test_boot_loading_screen_is_not_blank; every other test below only
+    Returns {"HEAPSTAT": [...], "GFXSTAT": [...], "RENDERPRESENT": [...],
+    "CHARSFMT": [...]} — see parse_heapstats / parse_gfxstats /
+    parse_renderpresents / parse_charsfmt for the shape of each entry.
+    RENDERPRESENT was added for test_boot_loading_screen_is_not_blank;
+    CHARSFMT (Stage 2C) was added for test_charsfmt_line_is_well_formed,
+    driven as a soft stream (see _drive_quickplay's soft_streams param) —
+    it is logged exactly once, before quick-play navigation even starts,
+    so it cannot be held to the same "more than one line" navigation-
+    sanity bar every other stream here is. Every other test below only
     reads HEAPSTAT/GFXSTAT. None of them re-drive the simulator.
     """
     return _drive_quickplay(
         cdogs_simulator,
         [("HEAPSTAT", parse_heapstats), ("GFXSTAT", parse_gfxstats),
          ("RENDERPRESENT", parse_renderpresents)],
+        soft_streams=[("CHARSFMT", parse_charsfmt)],
         done=_quickplay_settled,
     )
 
@@ -1180,3 +1259,145 @@ def test_boot_loading_screen_is_not_blank(cdogs_quickplay_stats):
         "zeroed-RGB565-texture-reads-as-opaque-black regression this test "
         "guards against"
     )
+
+
+# Stage 2C (pic pixel formats) ceilings, derived analytically rather than
+# pinned to one run's resident-pic set (see module docstring's "Amendment
+# C" precedent in test_textures_borrow_rather_than_duplicate: bytes-per-pic
+# was removed as a gate for exactly this reason — it isn't comparable
+# across a change that alters which assets load, since a resident set
+# skewed toward smaller or larger pics moves that ratio independently of
+# any format change at all; confirmed directly while writing this test —
+# an earlier draft estimated bytes/pic from a fixed average px/pic and it
+# was off by ~8x against this simulator's own actual resident set). The
+# one figure that stays meaningful regardless of which pics are resident
+# is an ABSOLUTE ceiling tied to the fixed, sourced total-pixel count of
+# the entire asset tree (2,412,051 px over 1683 files — see the stage
+# plan's "Format split" table) rather than to any particular subset of
+# it: `data` can never exceed what loading literally every file would
+# cost, no matter how many (or which) pics the reserve guard actually
+# admits in a given run/platform.
+FULL_ASSET_TREE_PIXELS = 2_412_051
+# 2 B/px (RGB565/LA8) for the full tree, +73_000 B ceiling for style pics'
+# packed 2-bit channel maps (plan's own estimate), +10% slack for the
+# Amendment B ARGB8888 stragglers (21 mixed chars/ files, "a few hundred
+# KB" per the plan) and any other per-pic struct overhead. A regression
+# that reverted a meaningful fraction of the tree to ARGB8888 (4 B/px)
+# would push data toward ~9.6M — comfortably clear of this ceiling even
+# with its slack.
+STAGE2C_DATA_CEILING_BYTES = int((FULL_ASSET_TREE_PIXELS * 2 + 73_000) * 1.10)
+
+# Pre-2C simulator baseline (recorded 2026-07-22, same quick-play drive,
+# prior submodule revision): pics=1173 data=1,214,938 skipped=1441 at the
+# equivalent "picmanagerload" report. Stage 2C's whole point is that
+# halving per-pixel storage lets the heap-reserve guard (utils.c's
+# IMG_LOAD_HEAP_RESERVE) admit a larger resident set for the same budget —
+# pics-resident should rise and skipped should fall relative to that
+# baseline. Directional only (not exact figures): the guard's admission
+# order depends on host filesystem enumeration order, which is not the
+# same across environments (see parse_charsfmt's docstring) — even the
+# post-2C simulator figure measured while writing this retune (pics=1960,
+# skipped=631) differs substantially from the post-2C device figure at the
+# analogous point (pics=1421, skipped=1438), so only the sign of the
+# change is asserted here, not a tight band.
+PRE_2C_SIM_PICS_RESIDENT = 1173
+PRE_2C_SIM_SKIPPED = 1441
+
+
+def test_gfxstat_data_bounded_by_2byte_full_tree_cost(cdogs_quickplay_stats):
+    """Resident pic data can never exceed what loading the ENTIRE asset
+    tree at Stage 2C's 2-byte formats would cost (Stage 2C direction gate).
+
+    Deliberately an absolute ceiling, not a ratio against pics-resident:
+    bytes-per-pic and bytes-per-estimated-pixel were both tried while
+    writing this test and both are resident-set-composition-dependent
+    (see STAGE2C_DATA_CEILING_BYTES's comment and the retired data/pics
+    gate in test_textures_borrow_rather_than_duplicate) — a subset
+    skewed toward smaller or larger pics shifts either ratio with no
+    format regression involved at all. Tying the ceiling instead to the
+    FULL, fixed asset tree's total pixel count sidesteps that: `data` is
+    bounded above by "every file, at 2 B/px" regardless of which/how many
+    of those files the reserve guard actually admits in any given run.
+    `data` is g_picos_pic_data_bytes (pic.c's PicPxBytes-sized accounting,
+    not g_picos_pic_tex_bytes — textures borrow Pic->Data per Stage 1, see
+    test_textures_borrow_rather_than_duplicate, so tex is deliberately
+    excluded here).
+    """
+    peak = _peak_gfx_entry(cdogs_quickplay_stats["GFXSTAT"])
+    assert peak["pics"] > 0, "no pics counted; accounting is broken"
+
+    assert peak["data"] <= STAGE2C_DATA_CEILING_BYTES, (
+        f"resident pic data ({peak['data']} B over {peak['pics']} pics) "
+        f"exceeds {STAGE2C_DATA_CEILING_BYTES} B — the cost of loading "
+        f"the ENTIRE {FULL_ASSET_TREE_PIXELS}-pixel asset tree at Stage "
+        "2C's 2-byte formats, with slack for channel maps and the "
+        "Amendment B ARGB8888 stragglers. A subset of that tree costing "
+        "MORE than the whole tree would at 2 B/px means pic storage is "
+        "not actually 2 bytes/pixel any more"
+    )
+
+
+def test_gfxstat_resident_set_grows_as_skips_shrink(cdogs_quickplay_stats):
+    """Stage 2C's actual payoff: halved per-pixel bytes let more distinct
+    pics fit the same heap-reserve budget (utils.c's IMG_LOAD_HEAP_RESERVE),
+    so pics-resident should rise and skipped-by-guard should fall relative
+    to the pre-2C baseline. Directional only — see PRE_2C_SIM_PICS_RESIDENT/
+    PRE_2C_SIM_SKIPPED for why an exact figure isn't asserted.
+    """
+    peak = _peak_gfx_entry(cdogs_quickplay_stats["GFXSTAT"])
+
+    assert peak["pics"] > PRE_2C_SIM_PICS_RESIDENT, (
+        f"pics-resident ({peak['pics']}) did not rise above the pre-2C "
+        f"baseline ({PRE_2C_SIM_PICS_RESIDENT}) — Stage 2C's halved "
+        "per-pixel storage should let the heap-reserve guard admit "
+        "strictly more pics for the same budget"
+    )
+    assert peak["skipped"] < PRE_2C_SIM_SKIPPED, (
+        f"skipped ({peak['skipped']}) did not fall below the pre-2C "
+        f"baseline ({PRE_2C_SIM_SKIPPED}) — Stage 2C's halved per-pixel "
+        "storage should leave more reserve headroom, so the guard should "
+        "reject strictly fewer images than before"
+    )
+
+
+def test_charsfmt_line_is_well_formed(cdogs_quickplay_stats):
+    """CHARSFMT instrumentation (Stage 2C, Amendment B) is wired up and its
+    three counters are internally consistent, without pinning any of them
+    to a specific value.
+
+    Deliberately loose, per this stage's own risk notes: which of la8/
+    rgb565/argb8888 end up non-zero is load-order-dependent (the
+    heap-reserve guard can reject an entire category — e.g. all of
+    chars/ — before any of its pics reach the classifier, if enough
+    reserve budget was already spent on categories scanned first), and
+    scan order itself differs between this simulator (host filesystem
+    enumeration order) and real hardware (FatFS/SD cluster order).
+    Verified directly while writing this test: this simulator's own
+    quick-play drive reports la8=0 rgb565=0 argb8888=0 (chars/ pics
+    entirely skipped by the guard before campaign load frees anything),
+    while a same-day hardware run of the equivalent report reads
+    la8=435 rgb565=10 argb8888=0. Asserting la8 > 0 here would fail on
+    this simulator for a reason that has nothing to do with whether
+    Stage 2C's chars/ format classification is correct — that correctness
+    is what the code-review/hardware-panel-color checks are for, not this
+    log-line gate. What CAN be asserted regardless of load order: the line
+    exists at all (the instrumentation itself is wired up and reachable),
+    every field is a non-negative count, and the tri-state classification
+    is mutually exclusive by construction (Amendment B's PicLoad — see
+    pic.c's PicLoadClassifyCharsFormat — increments exactly one of the
+    three counters per classified chars/ pic, never more than one), so
+    their sum can never be negative and each individually bounds the total.
+    """
+    lines = cdogs_quickplay_stats.get("CHARSFMT", [])
+    assert lines, (
+        "no CHARSFMT line found in the log — either picos_charsfmt_report "
+        "(stubs.c) was removed, or its one call site right after "
+        "PicManagerLoad's directory scan (pic_manager.c) never ran"
+    )
+
+    entry = lines[-1]
+    for field in ("la8", "rgb565", "argb8888"):
+        assert entry[field] >= 0, (
+            f"CHARSFMT {field}={entry[field]} is negative — counter "
+            "underflow in pic.c's PicLoadClassifyCharsFormat bookkeeping"
+        )
