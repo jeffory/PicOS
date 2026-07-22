@@ -974,7 +974,12 @@ static void tramp_fs_list_dir(uc_engine *uc) {
         uint32_t size;
     } entry_info_t;
 
-    #define MAX_ENTRIES 128
+    /* Must cover the largest game directory: C-Dogs' data/graphics has 344
+     * top-level entries. At the old cap of 128 the excess entries were
+     * silently dropped — two thirds of the sprite set never even appeared
+     * in directory listings. Matches MAX_DIR_ENTRIES in the C-Dogs port's
+     * dirent shim (apps/cdogs/stubs.c), which hit the same bug app-side. */
+    #define MAX_ENTRIES 512
     static entry_info_t entries[MAX_ENTRIES];
 
     // Use host filesystem directly (avoids sdcard_list_dir callback mismatch)
@@ -1011,6 +1016,10 @@ static void tramp_fs_list_dir(uc_engine *uc) {
             entries[count].size = 0;
         }
         count++;
+    }
+    if (count >= MAX_ENTRIES && readdir(dir) != NULL) {
+        fprintf(stderr, "[TRAMP] fs_list_dir: TRUNCATED '%s' at %d entries — "
+                "raise MAX_ENTRIES\n", path ? path : "(null)", MAX_ENTRIES);
     }
     closedir(dir);
     fprintf(stderr, "[TRAMP] fs_list_dir: found %d entries, calling callbacks\n", count);

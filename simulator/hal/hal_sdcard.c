@@ -55,10 +55,21 @@ static void build_path(char* out, size_t out_size, const char* path) {
 // Simulate FatFS file operations
 void* hal_sdcard_open(const char* path, const char* mode) {
     if (!g_initialized) return NULL;
-    
+
     char full_path[1024];
     build_path(full_path, sizeof(full_path), path);
-    
+
+    // FatFS parity: f_open() on a directory fails on hardware, but host
+    // fopen(dir, "r") succeeds on Linux. Apps distinguish files from
+    // directories by exactly this difference (C-Dogs' stat() shim treats
+    // "openable" as a regular file), so without this check every
+    // subdirectory classifies as a file and directory walks never recurse
+    // — C-Dogs silently loaded ~90 of its 1683 sprites in the simulator
+    // while loading all of them on hardware.
+    struct stat st;
+    if (stat(full_path, &st) == 0 && S_ISDIR(st.st_mode)) {
+        return NULL;
+    }
     return fopen(full_path, mode);
 }
 
