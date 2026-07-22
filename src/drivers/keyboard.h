@@ -101,8 +101,14 @@ void kbd_clear_state(void);
 void kbd_recover_i2c_bus(void);
 
 // Inject a one-shot button press (BTN_* from os.h). The press is published by
-// the next kbd_poll() and stays visible for exactly one full poll cycle, so an
-// app's update→read sequence always observes both its press and release edge.
+// the next kbd_poll() and then held for a minimum wall-clock duration
+// (KBD_INJECT_HOLD_MS, currently 80ms) before being auto-released, rather
+// than for exactly one poll cycle — apps that call kbd_poll() more than once
+// per logical frame (e.g. watchdog-feed pumps) would otherwise retire the
+// press before ever sampling it. An app's update→read sequence still always
+// observes both a press and a release edge; a repeat injection of the same
+// button while it's still active is queued and only republished after a full
+// release cycle, guaranteeing a real release-then-press edge.
 void kbd_inject_buttons(uint32_t buttons);
 
 // Hold buttons down until kbd_release_buttons() — for injected modifier

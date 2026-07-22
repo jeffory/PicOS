@@ -467,6 +467,19 @@ done_polling:;
       s_buttons_curr &= s_buttons_prev; // drop fresh press edges
       s_last_char = 0;
       s_last_raw_key = 0;
+      // A waking injected one-shot must be retired for good here, not just
+      // masked out of s_buttons_curr for this one poll. s_injected_active is
+      // now held across multiple polls (KBD_INJECT_HOLD_MS), so if we left
+      // it set, the very next poll's `s_buttons_curr |= s_injected_active |
+      // s_injected_held` line above would OR it straight back in — and with
+      // s_buttons_prev now 0 (we just cleared it), that reads as a brand new
+      // rising edge, leaking the "swallowed" wake press to the app one poll
+      // late. Clearing s_injected_active/pending here matches the pre-hold
+      // behavior, where a swallowed wake press was gone for good.
+      s_buttons_curr &= ~s_injected_active;
+      s_injected_active = 0;
+      s_injected_active_since_ms = 0;
+      s_injected_pending = 0;
     }
   }
   idle_dim_poll();
@@ -554,6 +567,12 @@ void kbd_inject_buttons(uint32_t buttons) {
     s_menu_pressed = true;
     buttons &= ~BTN_MENU;
   }
+  // NOTE: pending is a single bitmask, not a per-button queue — two DIFFERENT
+  // buttons injected within the same KBD_INJECT_HOLD_MS window merge into a
+  // momentary chord (both alive in s_injected_active at once) instead of
+  // arriving as two separate presses. The MCP `keypress` tool's default
+  // 100ms inter-key delay is comfortably above KBD_INJECT_HOLD_MS (80ms), so
+  // back-to-back sequence presses never actually overlap in practice.
   s_injected_pending |= buttons;
 }
 
@@ -566,6 +585,13 @@ void kbd_hold_buttons(uint32_t buttons) {
 
 void kbd_release_buttons(uint32_t buttons) {
   s_injected_held &= ~buttons;
+  // Also clear from the one-shot active/pending state: without this, an
+  // explicit keyup targeting a button that's currently an active injected
+  // one-shot doesn't actually retire it, so the next poll's
+  // `s_buttons_curr |= s_injected_active | s_injected_held` line resurrects
+  // the bit right after this call cleared it from s_buttons_curr.
+  s_injected_active &= ~buttons;
+  s_injected_pending &= ~buttons;
   s_buttons_curr &= ~buttons;
 }
 
