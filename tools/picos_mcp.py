@@ -34,6 +34,7 @@ import sys
 import tempfile
 import threading
 import time
+from collections import deque
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Optional
 
@@ -294,6 +295,15 @@ class SimulatorManager:
         self.process: subprocess.Popen | None = None
         self.port: int = 0
         self.project_root = Path(__file__).parent.parent
+        # Bounded tails of the child's stdout/stderr. The pipes MUST be
+        # drained continuously (see _start_pipe_drains) or the simulator
+        # deadlocks once the 64KB kernel pipe buffer fills — the sim's own
+        # host-side traces (e.g. "[TRAMP] fs_read" per file read) block in
+        # write() while holding the stdio lock, wedging the main thread.
+        # Same bug and fix as tests/e2e/picos_simulator.py.
+        self._stdout_tail: deque = deque(maxlen=2000)
+        self._stderr_tail: deque = deque(maxlen=2000)
+        self._drain_threads: list[threading.Thread] = []
 
     def ensure_running(self, port: int = 0, sd_card_path: str | None = None,
                        headless: bool = False) -> int:
@@ -364,6 +374,11 @@ class SimulatorManager:
         if actual_port <= 0:
             raise RuntimeError("Failed to determine simulator TCP port")
 
+        # From here on nothing else reads the child's pipes, so they must be
+        # drained continuously or the simulator eventually deadlocks in
+        # write() — see __init__ for the mechanism.
+        self._start_pipe_drains()
+
         # Wait for port to be connectable
         start = time.monotonic()
         while time.monotonic() - start < 5.0:
@@ -373,6 +388,34 @@ class SimulatorManager:
 
         self.port = actual_port
         return actual_port
+
+    def _start_pipe_drains(self):
+        """Continuously drain the child's stdout/stderr into bounded tails.
+
+        The startup loop above reads stdout only until it finds the port
+        line; without these threads the sim wedges once either pipe fills
+        (64KB), which a single read-heavy app launch (C-Dogs asset load,
+        one "[TRAMP] fs_read" stderr line per read) achieves in seconds.
+        """
+        def drain(stream, tail):
+            try:
+                for line in iter(stream.readline, ""):
+                    tail.append(line.rstrip("\n"))
+            except (ValueError, OSError):
+                pass  # stream closed during shutdown
+            finally:
+                try:
+                    stream.close()
+                except Exception:
+                    pass
+
+        for stream, tail in ((self.process.stdout, self._stdout_tail),
+                             (self.process.stderr, self._stderr_tail)):
+            if stream is None:
+                continue
+            t = threading.Thread(target=drain, args=(stream, tail), daemon=True)
+            t.start()
+            self._drain_threads.append(t)
 
     def stop(self):
         """Stop managed simulator."""
