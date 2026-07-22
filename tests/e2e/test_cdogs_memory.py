@@ -127,11 +127,18 @@ def parse_charsfmt(log_text):
     """Return list of dicts for every CHARSFMT line in the log.
 
     Logged exactly once per process, via fprintf(stderr, ...) in stubs.c's
-    picos_charsfmt_report (called from pic_manager.c's PicManagerLoad,
-    immediately after picos_gfx_report("picmanagerload") — same call site,
-    same "picmanagerload" tag — right after BOTH the graphics/ and
-    graphics_hd/ trees have been fully, recursively scanned). Same
-    per-run logging point as the boot-time HEAPSTAT/GFXSTAT report, so it
+    picos_charsfmt_report (called from cdogs_picos.c's picos_main —
+    apps/cdogs's native PICOS entry point, NOT pic_manager.c's
+    PicManagerLoad — immediately after picos_gfx_report("picmanagerload") —
+    same call site, same "picmanagerload" tag — right after BOTH the
+    graphics/ and graphics_hd/ trees have been fully, recursively scanned).
+    picos_main calls PicManagerLoadDir directly for both trees and never
+    calls PicManagerLoad itself; PicManagerLoad has its own matching
+    #ifdef PICOS report call with the same tag; but it never runs on this
+    target since nothing calls PicManagerLoad here (see cdogs_picos.c's own
+    comment at that call site) — desktop never defines PICOS either, so that
+    copy is dead on both targets. Same per-run logging point as the
+    boot-time HEAPSTAT/GFXSTAT report, so it
     is exposed to the exact same get_output() ring-buffer eviction hazard
     the module docstring describes (a dense "[TRAMP] fs_*" burst from
     campaign/map/sprite I/O can evict it before anything reads it). Must
@@ -1391,8 +1398,9 @@ def test_charsfmt_line_is_well_formed(cdogs_quickplay_stats):
     lines = cdogs_quickplay_stats.get("CHARSFMT", [])
     assert lines, (
         "no CHARSFMT line found in the log — either picos_charsfmt_report "
-        "(stubs.c) was removed, or its one call site right after "
-        "PicManagerLoad's directory scan (pic_manager.c) never ran"
+        "(stubs.c) was removed, or its call site right after picos_main's "
+        "own directory scan (cdogs_picos.c, not PicManagerLoad in "
+        "pic_manager.c — see parse_charsfmt's docstring) never ran"
     )
 
     entry = lines[-1]
