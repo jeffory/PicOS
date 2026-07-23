@@ -81,6 +81,27 @@ messages and thresholds, against that shared data — a real regression in
 any one of them still fails on its own, legibly. Only the drive itself is
 shared, not the pass/fail verdicts. See .superpowers/sdd/prereq-6-report.md
 for the before/after measurements.
+
+Reaching live gameplay (input-injection reliability plan, Task 3, 2026-07-23)
+------------------------------------------------------------
+Everything above this point only ever drives (or, per cdogs_quickplay_stats'
+own done predicate, may not even need to actually drive — see
+cdogs_gameplay_stats' comment for why) as far as a loaded campaign menu.
+That used to be as far as automation could reach at all: the numplayers and
+"Press Fire to join" screens are gated on C-Dogs' own per-player character
+keys (button1, 'x' by default), and until apps/cdogs' char-keyup-deferral
+fix (this plan's Task 2) those keys never registered as an edge a menu
+could observe, physical or injected alike — a permanent dead end for this
+kind of test, not a timing flake. With that fix (and this plan's Task 1
+OS/sim-side injected-button hold, closing the separate one-shot-eaten-by-
+an-extra-poll race), cdogs_gameplay_stats and test_quickplay_reaches_live_
+mission below now drive the SAME shared simulator instance the rest of
+this module already booted all the way through campaign/character/mission
+setup into an actual live mission — GFXSTAT tag=="missionstart", mission-
+specific art resident on top of the boot-time set, no HardFault. See
+_GAMEPLAY_KEY_STEPS' own comment for the full verified screen-by-screen
+path and _drive_to_mission_start's for why the final equip->mission step
+needs its own retry shape.
 """
 import re
 import shutil
@@ -893,6 +914,316 @@ def cdogs_quickplay_stats(cdogs_simulator):
     )
 
 
+# ---------------------------------------------------------------------------
+# Driving all the way into a live mission (input-injection reliability plan,
+# Task 3, 2026-07-23).
+#
+# Why this needs its own drive rather than extending _drive_quickplay above:
+# _quickplay_settled (that drive's `done` predicate) is already satisfied by
+# the BOOT-TIME graphics scan alone — PicManagerLoadDir's recursive scan of
+# graphics/+graphics_hd/ at startup already emits a HEAPSTAT/GFXSTAT pair
+# whose peak clears LOADED_PEAK_FLOOR_BYTES (confirmed empirically: ~1.66MB
+# resident before a single menu Enter is ever sent, well past the 1.5MB
+# floor), so cdogs_quickplay_stats' nudge loop can (and, verified while
+# writing this, typically does) return with `confirmed_transitions == 0` —
+# it never actually has to prove 3-level menu navigation works, only that
+# instrumentation exists. That's fine for the 11 tests above (all boot-time
+# accounting properties), but means that drive was never real evidence of
+# reachable gameplay and must not be repurposed as if it were. This stage
+# drives BEYOND it instead of replacing it: cdogs_gameplay_stats below
+# depends on cdogs_quickplay_stats (guaranteeing it runs first and the app
+# is sitting at an input-ready main menu) and continues the SAME already-
+# booted simulator instance with its own explicit screen-by-screen sequence
+# and its own completion signal (GFXSTAT tag=="missionstart", not a peak
+# threshold that boot alone can satisfy).
+#
+# The real screen-by-screen path from the main menu into a live mission,
+# verified empirically THREE times against this exact codebase (Task 2's two
+# runs, see task-inj-2-report.md, plus one more scripted run while writing
+# this test, screenshotted at every step):
+#
+#   main menu:        enter -> "Start:" submenu (Campaign default-selected)
+#   Start: submenu:    enter -> "Select a campaign:" list. NOTE this list's
+#                      default-selected first entry is "custom" — a
+#                      DIRECTORY that sits alongside flat built-in campaign
+#                      files like "Sand (10)" — not a campaign file itself.
+#                      (_drive_quickplay's older docstring, "one entry per
+#                      campaign file", predates this nested structure and,
+#                      per the note above, was never actually exercised
+#                      this deep to notice.)
+#   custom/:           enter -> directory listing (Wuzzy/, techdemo/;
+#                      Wuzzy/ is alphabetically first and default-selected)
+#   Wuzzy/:            enter -> "Gun Game (25)" (default-selected)
+#   Gun Game (25):     enter -> loads the campaign -> "Gun Game by Wuzzy"
+#                      briefing text
+#   briefing:          'x' (player-1 button1, per the SD's own
+#                      com.picos.cdogsoptions.cnf — plain `enter` does not
+#                      advance this screen; this is the exact fix Task 2
+#                      shipped in apps/cdogs) -> "Select number of players"
+#                      (default "1")
+#   numplayers:        enter -> "Press Fire to choose input device and
+#                      join…"
+#   join:              'x' -> joins as player 1 -> customize/name screen
+#                      ("Jones", "Done" default-selected)
+#   customize:         enter -> "Continue / Level select / Start Campaign /
+#                      High Scores" menu (Start Campaign default-selected)
+#   continue menu:     enter -> game options screen ("Done" default)
+#   game options:      enter -> "Mission 1: Piecemarker Challenge" briefing,
+#                      partial text (still typewriter-revealing)
+#   mission briefing
+#   (partial text):    'x' -> same screen, full text now revealed
+#   mission briefing
+#   (full text):       'x' -> equip/weapon screen ("End")
+#
+# The final "equip -> live mission" transition is deliberately NOT one more
+# entry in this list: unlike every step above (a single keypress reliably
+# landed in all three verification runs), that specific transition triggers
+# a real campaign/character/mission-engine reload that can take several
+# seconds under this simulator's Unicorn CPU emulation, and Task 2 found it
+# can take 2-5 presses of 'x' (spaced seconds apart) to actually register
+# once the engine becomes responsive again — a different shape of wait than
+# "one dropped keypress, retry once". _drive_to_mission_start below handles
+# it separately, gated on the GFXSTAT missionstart line itself rather than
+# on screen-signature evidence.
+_GAMEPLAY_KEY_STEPS = [
+    ("enter", "main menu Start -> \"Start:\" submenu"),
+    ("enter", "\"Start:\" submenu Campaign -> \"Select a campaign:\" list"),
+    ("enter", "\"Select a campaign:\" custom/ -> directory listing"),
+    ("enter", "custom/ directory Wuzzy/ -> Wuzzy's own campaign list"),
+    ("enter", "Wuzzy/ \"Gun Game (25)\" -> loads campaign, briefing appears"),
+    ("x", "briefing -> \"Select number of players\" screen"),
+    ("enter", "numplayers (default 1) -> \"Press Fire to join\" screen"),
+    ("x", "join as player 1 (button1) -> customize/name screen"),
+    ("enter", "customize \"Done\" -> continue/level-select menu"),
+    ("enter", "continue menu \"Start Campaign\" -> game options screen"),
+    ("enter", "game options \"Done\" -> Mission 1 briefing (partial text)"),
+    ("x", "mission briefing -> full text revealed"),
+    ("x", "mission briefing (full text) -> equip/weapon screen"),
+]
+
+# Per-step retry knobs for _advance_through_screens. Deliberately NOT built
+# on the same dense _learn_screen_baseline/_screen_signature polling
+# _drive_quickplay's own nudge loop uses — see this function's own
+# docstring for why. Short version: a first version of this function DID
+# poll display_stats every _SCREEN_POLL_INTERVAL_S throughout the wait
+# (identical to _drive_quickplay's own approach) and it measurably broke
+# navigation on these deeper screens — verified directly, side by side,
+# with the simulator's own log as evidence: the exact same key sequence
+# via plain fixed delays (no display_stats calls in the wait at all)
+# reliably reached the customize screen every time, while the
+# dense-polling variant left the app stuck one screen earlier, repeatedly.
+# get_output() (this drive's `poll`) never showed this effect anywhere in
+# this module (every drive here leans on it throughout multi-second
+# waits) — it is a pure local read of an already-filled deque. display_stats
+# is a live JSON-RPC round trip that the simulator process itself must
+# service, competing with its own Unicorn CPU-emulation thread; this whole
+# plan's premise is that extra polling can perturb injected-input timing
+# (Amendment A's sim-side one-shot race), and this is that same class of
+# effect showing up one level up, in this test harness's own RPC traffic
+# rather than the app's internal poll() calls.
+_STEP_SETTLE_S = 3.0
+_STEP_MAX_ATTEMPTS = 4
+_STEPS_OVERALL_TIMEOUT_S = 120.0
+
+
+def _advance_through_screens(simulator, poll, steps,
+                              settle_s=_STEP_SETTLE_S,
+                              max_attempts=_STEP_MAX_ATTEMPTS,
+                              overall_timeout=_STEPS_OVERALL_TIMEOUT_S):
+    """Send each (key, description) in `steps` in order, confirming with a
+    SPARSE _screen_signature check (one sample before the key, one after)
+    that each one actually registered before sending the next — not a
+    polling loop threaded through the wait (see this function's own
+    trailing comment on _STEP_SETTLE_S for why a denser, poll-throughout
+    shape actively broke this specific sequence).
+
+    Evidence for one attempt: sample the screen once right before sending
+    the key (`before`), send it, wait `settle_s` doing nothing but the
+    passive log poll (cheap and RPC-free — see `poll`'s call site comment),
+    then sample ONCE more (`after`). `after` differing from `before` is
+    treated as a real transition. Deliberately NOT a "sample twice more and
+    require them to agree" confirmation (an earlier version of this
+    function did that): several of these screens keep visibly changing on
+    their own for a few seconds after they first appear (e.g. the mission
+    briefing's own typewriter-style text reveal, or the customize screen's
+    background name-preview regeneration — both observed directly while
+    writing this test), so requiring two post-wait samples to match can
+    keep failing for as long as that settling continues, for reasons that
+    have nothing to do with whether the keypress itself landed. A single
+    before/after difference does not have that failure mode: any point
+    during or after such a reveal already differs from the PRIOR screen's
+    own signature. Any _screen_signature call returning None (a transient
+    RPC hiccup) makes the attempt inconclusive rather than a false verdict
+    either way — it just costs this attempt a retry.
+
+    Retries (resending the SAME key, up to max_attempts) are the safety
+    net for an actual dropped keypress — see _drive_quickplay's own nudge
+    loop comment for why resending is safe here too: every step's key is
+    that screen's own already-default-selected confirm action, so a
+    repeat lands on either the same screen (harmless no-op re-select) or,
+    if the first press actually landed and this drive's own evidence check
+    merely mistimed it, the next screen's own valid confirm input.
+
+    Raises an AssertionError naming the exact step description (not just
+    "navigation failed") if a step's screen never settles into a new state
+    after exhausting its retries, or if the overall walk runs past
+    overall_timeout — both point straight at the failing screen rather
+    than requiring a log dive.
+    """
+    overall_deadline = time.time() + overall_timeout
+    for key, desc in steps:
+        transitioned = False
+        for attempt in range(max_attempts):
+            if time.time() >= overall_deadline:
+                break
+            before = _screen_signature(simulator)
+            simulator.keypress(key)
+
+            settle_deadline = min(time.time() + settle_s, overall_deadline)
+            while time.time() < settle_deadline:
+                poll()
+                time.sleep(_POLL_INTERVAL_S)
+
+            after = _screen_signature(simulator)
+
+            if after is not None and after != before:
+                transitioned = True
+                break
+        assert transitioned, (
+            f"screen never settled into a new state after sending {key!r} "
+            f"for step {desc!r} ({max_attempts} attempts x {settle_s}s "
+            "each) — either this keypress was dropped every single time "
+            "(unlikely; see this function's own docstring) or C-Dogs' menu "
+            "layout at this exact screen has drifted from what this drive "
+            "expects (see _GAMEPLAY_KEY_STEPS' comment for the full "
+            "expected path)"
+        )
+
+
+# Knobs for the equip -> live-mission transition. Generous relative to
+# _STEP_SETTLE_S/_STEP_MAX_ATTEMPTS above on purpose — this is a
+# real engine reload under Unicorn emulation, not a dropped-keypress retry
+# (see _GAMEPLAY_KEY_STEPS' trailing comment). Task 2 observed 2-5 presses
+# of 'x', several seconds apart; these ceilings sit comfortably above that
+# with room for slower host load.
+_MISSION_START_ATTEMPT_TIMEOUT_S = 12.0
+_MISSION_START_MAX_ATTEMPTS = 10
+_MISSION_START_OVERALL_TIMEOUT_S = 120.0
+
+
+def _mission_started(gfx_stats):
+    """True once a GFXSTAT missionstart line (mission.c's own instrumentation
+    call, right after a mission actually begins — see this module's search
+    for "missionstart" in apps/cdogs/src/src/cdogs/mission.c) has been
+    observed."""
+    return any(s["tag"] == "missionstart" for s in gfx_stats)
+
+
+def _drive_to_mission_start(simulator, poll, stats,
+                             attempt_timeout=_MISSION_START_ATTEMPT_TIMEOUT_S,
+                             max_attempts=_MISSION_START_MAX_ATTEMPTS,
+                             overall_timeout=_MISSION_START_OVERALL_TIMEOUT_S):
+    """From the equip/weapon screen, press 'x' (repeated, spaced seconds
+    apart) until GFXSTAT reports tag=="missionstart" or the retry budget is
+    exhausted. Returns True once observed, False otherwise (the caller
+    asserts — kept a plain bool return here so the caller can attach its
+    own diagnostic-rich message using `stats`).
+
+    Gated on the missionstart log line itself, not on _screen_signature:
+    unlike every earlier step, the live mission's own screen keeps changing
+    on its own once reached (a moving player, an animated minimap), so a
+    signature-outside-baseline check would fire on ordinary gameplay motion
+    just as readily as on the equip->mission transition itself. The log
+    line is unambiguous: it is only ever emitted once, from mission.c's
+    MissionBegin(), right as m->state is set to MISSION_STATE_PLAY — that
+    specific event, not merely "some screen changed".
+    """
+    overall_deadline = time.time() + overall_timeout
+    for _ in range(max_attempts):
+        if time.time() >= overall_deadline:
+            break
+        if _mission_started(stats.get("GFXSTAT", [])):
+            return True
+        simulator.keypress("x")
+        step_deadline = min(time.time() + attempt_timeout, overall_deadline)
+        while time.time() < step_deadline:
+            poll()
+            if _mission_started(stats.get("GFXSTAT", [])):
+                return True
+            time.sleep(_POLL_INTERVAL_S)
+    return _mission_started(stats.get("GFXSTAT", []))
+
+
+def _seed_stream_state(existing_stats, names):
+    """Build the (seen, stats) pair _accumulate expects, pre-populated from
+    an already-collected {name: [stats...]} dict (e.g. cdogs_quickplay_stats'
+    return value) rather than starting empty.
+
+    Lets cdogs_gameplay_stats below continue accumulating into the SAME
+    logical stream cdogs_quickplay_stats already started (so callers see
+    the full boot-through-mission history in one list, in first-seen
+    order) without double-counting any line the earlier drive already
+    recorded — the returned `seen` set is seeded with every existing
+    entry's field-tuple, exactly what _accumulate itself would have
+    inserted had it recorded them.
+    """
+    seen = {}
+    stats = {}
+    for name in names:
+        entries = list(existing_stats.get(name, []))
+        stats[name] = entries
+        seen[name] = {tuple(sorted(e.items())) for e in entries}
+    return seen, stats
+
+
+@pytest.fixture(scope="module")
+def cdogs_gameplay_stats(cdogs_simulator, cdogs_quickplay_stats):
+    """Continue the shared C-Dogs drive past the main menu into a LIVE
+    MISSION and return the full HEAPSTAT+GFXSTAT history (boot through
+    mission start).
+
+    Depends on cdogs_quickplay_stats (not just cdogs_simulator) so pytest
+    instantiates that fixture's own drive first regardless of test
+    collection order — guaranteeing the app is already sitting at an
+    input-ready main menu (MENU_READY_MARKER already observed) before this
+    fixture sends a single keypress of its own. Reuses the SAME simulator
+    process and never calls launch_app again (it's already running).
+
+    Module-scoped like cdogs_simulator/cdogs_quickplay_stats: this is by
+    far the most expensive drive in this file (a real campaign/mission
+    load under Unicorn emulation on top of everything cdogs_quickplay_stats
+    already paid for), so it is driven exactly once and shared with every
+    test that needs gameplay-time evidence, matching this module's existing
+    "Fixture structure" rationale (see the module docstring).
+    """
+    streams = [("HEAPSTAT", parse_heapstats), ("GFXSTAT", parse_gfxstats)]
+    seen, stats = _seed_stream_state(cdogs_quickplay_stats,
+                                      [name for name, _ in streams])
+
+    def poll():
+        text = _combined_output(cdogs_simulator)
+        for name, parse_fn in streams:
+            _accumulate(text, parse_fn, seen[name], stats[name])
+        return text
+
+    _advance_through_screens(cdogs_simulator, poll, _GAMEPLAY_KEY_STEPS)
+    reached = _drive_to_mission_start(cdogs_simulator, poll, stats)
+    assert reached, (
+        "GFXSTAT missionstart never appeared after driving through the "
+        "equip screen (see _drive_to_mission_start's retry budget) — every "
+        "earlier menu step registered (see _advance_through_screens' own "
+        "per-step assertion, which would have failed first and named the "
+        "actual stuck screen if one of THOSE had dropped), so this points "
+        "at the equip->mission engine-reload transition specifically, not "
+        "a menu-layout drift"
+    )
+    # One last poll so the very last mission-time report (and any trailing
+    # noise — see test_quickplay_reaches_live_mission's KNOWN NOISE comment)
+    # that landed right at the deadline is captured before returning.
+    poll()
+    return stats
+
+
 def _peak_gfx_entry(gfx_stats):
     """Return the GFXSTAT line whose peak= field equals the overall
     observed high-water mark, from an already-collected list of
@@ -1409,3 +1740,84 @@ def test_charsfmt_line_is_well_formed(cdogs_quickplay_stats):
             f"CHARSFMT {field}={entry[field]} is negative — counter "
             "underflow in pic.c's PicLoadClassifyCharsFormat bookkeeping"
         )
+
+
+# KNOWN non-fatal noise on the equip->mission transition (input-injection
+# reliability plan, Task 3; first discovered by Task 2's own manual/scripted
+# verification — see task-inj-2-report.md's "Concerns" section, and
+# reproduced a third time, byte-for-byte at the same SP addresses, while
+# writing this test): up to two "[UNICORN] MEM_ERROR: WRITE unmapped" lines
+# and one "HEAP EXHAUSTED" line can appear during mission-engine load. Both
+# are the FIRST-EVER automated drive to exercise this code path (per project
+# memory, no prior automation reached gameplay at all) hitting a pre-existing
+# condition, not something this test or the input-injection fixes introduced:
+# HEAP EXHAUSTED is stubs.c's _sbrk() logging a bounded-heap allocation
+# failure through the same graceful ENOMEM path the reserve-guard/`skipped`
+# counter mechanism already exercises elsewhere in this module, and
+# MEM_ERROR is a Unicorn-emulation-level trap, not a HardFault — get_crash_log
+# returned None after every verification run. Root-causing exactly which
+# large-local-frame function traps is tracked as follow-on work, not this
+# task; this is deliberately just a comment, not a constant any assertion
+# below gates on — see test_quickplay_reaches_live_mission's own docstring
+# for why neither line's presence nor absence is asserted on.
+
+
+def test_quickplay_reaches_live_mission(cdogs_simulator, cdogs_gameplay_stats):
+    """The full quick-play drive (input-injection reliability plan, Task 3)
+    now reaches ACTUAL gameplay, not just a loaded campaign menu — this is
+    the plan's payoff gate, and the first automated test in this module (or,
+    per project memory, in this repo at all) to exercise anything past the
+    main-menu/campaign-selection screens.
+
+    Three independent things this asserts, each individually meaningful:
+
+    1. A GFXSTAT missionstart line was observed at all — direct proof
+       mission.c's MissionBegin() actually ran (see _mission_started),
+       not merely that some screen looked different.
+    2. Mission-time pics is strictly greater than the boot-time
+       (picmanagerload) pics count from the SAME run — proof the mission
+       load actually resulted in MORE resident graphics than a plain boot
+       does (mission-specific tile/sprite art), not just that the tag
+       string matched.
+    3. No HardFault and no crash log — the simulator process is still
+       alive and healthy after reaching gameplay, not merely that one log
+       line happened to appear before it died.
+
+    Deliberately does NOT assert, either way, on the up-to-two
+    "[UNICORN] MEM_ERROR: WRITE unmapped" lines or the one "HEAP EXHAUSTED"
+    line that can appear during mission-engine load (see the comment right
+    above this function) — asserting on either would make this test flaky
+    for a reason that has nothing to do with input injection reliability,
+    the actual subject of this plan.
+    """
+    gfx = cdogs_gameplay_stats["GFXSTAT"]
+
+    mission_entries = [s for s in gfx if s["tag"] == "missionstart"]
+    assert mission_entries, (
+        "no GFXSTAT missionstart line observed — the drive reached the "
+        "equip screen (see cdogs_gameplay_stats' own assertion, which "
+        "would have failed first and pointed at the exact stuck screen "
+        "otherwise) but the mission itself never actually started"
+    )
+
+    boot_entries = [s for s in gfx if s["tag"] == "picmanagerload"]
+    assert boot_entries, (
+        "no boot-time picmanagerload GFXSTAT line observed — needed as "
+        "this run's own baseline for the mission-pics growth check below"
+    )
+    boot_pics = boot_entries[0]["pics"]
+    mission_pics = mission_entries[-1]["pics"]
+    assert mission_pics > boot_pics, (
+        f"mission-time pics ({mission_pics}) did not exceed this run's own "
+        f"boot-time pics ({boot_pics}) — a live mission should always load "
+        "at least some mission-specific tile/sprite art on top of the "
+        "boot-time menu/UI set"
+    )
+
+    combined = _combined_output(cdogs_simulator)
+    assert "HardFault" not in combined, (
+        "'HardFault' text found in the simulator's own output after "
+        "reaching a live mission:\n" + combined[-2000:]
+    )
+    crash = cdogs_simulator.call("get_crash_log", timeout=2.0).get("crash_log")
+    assert not crash, f"C-Dogs simulator crashed while reaching gameplay:\n{crash}"
