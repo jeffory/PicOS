@@ -185,6 +185,15 @@ void kbd_recover_i2c_bus(void) {
 }
 
 void kbd_inject_buttons(uint32_t buttons) {
+    // Mirror the device driver: BTN_MENU is an OS-level trigger — set the
+    // menu flag here and strip the bit so it never enters the HAL's 80ms
+    // injected-click hold. (Pre-hold, kbd_poll's press-edge intercept caught
+    // it; with the hold, the bit would leak into s_buttons on the hold
+    // frames after the edge-only intercept stripped the first frame.)
+    if (buttons & BTN_MENU) {
+        s_menu_pressed = true;
+        buttons &= ~BTN_MENU;
+    }
     // Inject through HAL only — the next kbd_poll picks them up atomically.
     // (Writing s_buttons/s_buttons_pressed directly here would double-fire
     // the pressed edge and race with kbd_poll's assignment.)
