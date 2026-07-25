@@ -11,55 +11,15 @@
 static int l_save_set(lua_State *L) {
     const char *filename = luaL_checkstring(L, 1);
     luaL_checktype(L, 2, LUA_TTABLE);
-    
+
     char path[SAVE_MAX_PATH];
     snprintf(path, sizeof(path), "/saves/%s.json", filename);
-    
-    luaL_Buffer buf;
-    luaL_buffinit(L, &buf);
-    
-    lua_pushvalue(L, 2);
-    lua_pushnil(L);
-    
-    luaL_addchar(&buf, '{');
-    bool first = true;
-    
-    while (lua_next(L, -2) != 0) {
-        if (!first) luaL_addchar(&buf, ',');
-        first = false;
-        
-        if (lua_type(L, -2) == LUA_TSTRING) {
-            const char *key = lua_tostring(L, -2);
-            luaL_addchar(&buf, '"');
-            luaL_addstring(&buf, key);
-            luaL_addstring(&buf, "\":");
-        } else {
-            lua_pop(L, 1);
-            continue;
-        }
-        
-        int type = lua_type(L, -1);
-        if (type == LUA_TSTRING) {
-            const char *val = lua_tostring(L, -1);
-            luaL_addchar(&buf, '"');
-            luaL_addstring(&buf, val);
-            luaL_addchar(&buf, '"');
-        } else if (type == LUA_TNUMBER) {
-            char num[32];
-            snprintf(num, sizeof(num), "%g", lua_tonumber(L, -1));
-            luaL_addstring(&buf, num);
-        } else if (type == LUA_TBOOLEAN) {
-            luaL_addstring(&buf, lua_toboolean(L, -1) ? "true" : "false");
-        } else {
-            luaL_addstring(&buf, "null");
-        }
-        
-        lua_pop(L, 1);
-    }
-    
-    luaL_addchar(&buf, '}');
-    luaL_pushresult(&buf);
-    
+
+    // Uses the shared picocalc.json encoder. The previous implementation was a
+    // flat inline loop that emitted `null` for any non-scalar value, so a table
+    // with nested fields was silently written out as unrecoverable data loss.
+    lua_json_encode_push(L, 2, 0);
+
     const char *json_str = lua_tostring(L, -1);
     size_t json_len = strlen(json_str);
     
@@ -97,74 +57,30 @@ static int l_save_get(lua_State *L) {
         lua_pushnil(L);
         return 1;
     }
-    
-    lua_newtable(L);
-    
-    char *ptr = data;
-    while (*ptr && *ptr != '{') ptr++;
-    if (*ptr == '{') ptr++;
-    
-    while (*ptr && *ptr != '}') {
-        while (*ptr && (*ptr == ' ' || *ptr == '\t' || *ptr == '\n' || *ptr == ',')) ptr++;
-        if (*ptr == '}') break;
-        
-        if (*ptr == '"') {
-            ptr++;
-            char *key_start = ptr;
-            while (*ptr && *ptr != '"') ptr++;
-            size_t key_len = ptr - key_start;
-            char *key = (char *)malloc(key_len + 1);
-            memcpy(key, key_start, key_len);
-            key[key_len] = '\0';
-            if (*ptr == '"') ptr++;
-            
-            while (*ptr && *ptr != ':') ptr++;
-            if (*ptr == ':') ptr++;
-            while (*ptr && (*ptr == ' ' || *ptr == '\t')) ptr++;
-            
-            if (*ptr == '"') {
-                ptr++;
-                char *val_start = ptr;
-                while (*ptr && *ptr != '"') ptr++;
-                size_t val_len = ptr - val_start;
-                char *val = (char *)malloc(val_len + 1);
-                memcpy(val, val_start, val_len);
-                val[val_len] = '\0';
-                if (*ptr == '"') ptr++;
-                
-                lua_pushstring(L, val);
-                lua_setfield(L, -2, key);
-                free(val);
-            } else if (*ptr >= '0' && *ptr <= '9' || *ptr == '-') {
-                char *val_start = ptr;
-                if (*ptr == '-') ptr++;
-                while (*ptr && ((*ptr >= '0' && *ptr <= '9') || *ptr == '.')) ptr++;
-                size_t val_len = ptr - val_start;
-                char *val = (char *)malloc(val_len + 1);
-                memcpy(val, val_start, val_len);
-                val[val_len] = '\0';
-                
-                double num = atof(val);
-                lua_pushnumber(L, num);
-                lua_setfield(L, -2, key);
-                free(val);
-            } else if (strncmp(ptr, "true", 4) == 0) {
-                ptr += 4;
-                lua_pushboolean(L, 1);
-                lua_setfield(L, -2, key);
-            } else if (strncmp(ptr, "false", 5) == 0) {
-                ptr += 5;
-                lua_pushboolean(L, 0);
-                lua_setfield(L, -2, key);
-            }
-            
-            free(key);
-        } else {
-            ptr++;
-        }
-    }
-    
+
+    // Uses the shared picocalc.json decoder. The previous implementation was a
+    // hand-rolled flat scanner that could only recover top-level scalars, so it
+    // could not read back anything the (now fixed) encoder writes.
+    const char *err = NULL;
+    bool ok = lua_json_decode_push(L, data, (size_t)size, &err);
     umm_free(data);
+
+    if (!ok) {
+        // A corrupt or truncated save must not take the app down; nil reads the
+        // same as "no save yet", which every caller already handles.
+        printf("[SAVE] %s: %s\n", path, err ? err : "parse error");
+        lua_pushnil(L);
+        return 1;
+    }
+
+    // Guard the contract: callers index the result, so a save file holding a
+    // bare scalar or array must not be handed back as one.
+    if (!lua_istable(L, -1)) {
+        lua_pop(L, 1);
+        lua_pushnil(L);
+        return 1;
+    }
+
     return 1;
 }
 
