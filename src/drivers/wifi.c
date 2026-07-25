@@ -1,5 +1,6 @@
 #include "wifi.h"
 #include "tcp.h"
+#include "../dev_commands.h"
 #include "../os/clock.h"
 #include "../os/config.h"
 #include "../os/system_menu.h"
@@ -358,7 +359,23 @@ static void drain_requests(void) {
 // ── Public API
 // ─────────────────────────────────────────────────────────────────
 
+// Mongoose log sink.  The vendored mongoose defaults to MG_LL_DEBUG, so
+// Core 1 floods the shared serial console with ARP/IP-proto chatter; a log
+// line landing mid-payload corrupts dev-command bulk transfers (b64
+// screenshots and file transfers).  Runs on Core 1.
+static void wifi_mg_log_sink(char c, void *param) {
+  (void)param;
+  if (dev_commands_transfer_active()) return;
+  putchar(c);
+}
+
 void wifi_init(void) {
+  // Quieten mongoose (default level is DEBUG — see wifi_mg_log_sink) and
+  // route what remains through the transfer-aware sink.  Must happen before
+  // Core 1 starts polling the event manager.
+  mg_log_set(MG_LL_ERROR);
+  mg_log_set_fn(wifi_mg_log_sink, NULL);
+
   // Claim a hardware spinlock for WiFi state protection (s_ip, s_ssid)
   int lock_num = spin_lock_claim_unused(true);
   s_state_lock = spin_lock_instance(lock_num);

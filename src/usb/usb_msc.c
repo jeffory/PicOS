@@ -91,6 +91,18 @@ void usb_msc_enter_mode(void) {
   s_msc_ejected = false;  // Reset eject flag on entry
   s_media_changed = true;  // Signal UNIT ATTENTION on next TUR
 
+  // Force a USB re-enumeration so the host re-probes the medium.  The MSC
+  // interface enumerates at boot with no media (TUR: NOT READY), and Linux
+  // then stops polling ("[sda] Media removed, stopped polling") — without
+  // this, the UNIT ATTENTION armed above is never delivered and the host
+  // needs a manual rescan or replug to see the disk.  Cost: CDC serial
+  // drops and /dev/ttyACM* may renumber; hosts must reopen the port.
+  printf("[USB MSC] Re-enumerating USB so the host re-probes media...\n");
+  stdio_flush();
+  tud_disconnect();
+  sleep_ms(300);
+  tud_connect();
+
   // 2. Draw the splash screen
   ui_draw_splash("USB Mode", "Hold escape to exit");
 

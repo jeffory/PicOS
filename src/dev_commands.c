@@ -4,6 +4,8 @@
 #include "drivers/mp3_player.h"
 #include "drivers/pio_psram.h"
 #include "drivers/sdcard.h"
+#include "drivers/wifi.h"
+#include "os/launcher.h"
 #include "os/os.h"
 #include "tusb.h"
 #include "pico/stdlib.h"
@@ -46,6 +48,16 @@ static uint8_t s_b64_writebuf[B64_WRITE_BUF_SIZE];
 static uint32_t s_b64_writelen = 0;
 static uint32_t s_b64_hash = 2166136261u; // FNV-1a running hash
 static uint64_t s_b64_last_rx_us = 0;
+
+// True while a bulk transfer is streaming over serial.  Core 1's log sink
+// (wifi.c) checks this and drops its output: an async log line landing
+// mid-payload-line defeats the '~' line framing and corrupts the transfer.
+// volatile: written on Core 0, read on Core 1.
+static volatile bool s_transfer_quiet = false;
+
+bool dev_commands_transfer_active(void) {
+    return s_transfer_quiet;
+}
 
 // FNV-1a 32-bit — cheap integrity check for serial transfers (not
 // cryptographic; OTA does its own SHA-256 before touching flash).
@@ -128,6 +140,7 @@ void dev_commands_init(void) {
     s_b64_recv_active = false;
     s_b64_group_len = 0;
     s_b64_writelen = 0;
+    s_transfer_quiet = false;
 }
 
 const char* dev_commands_get_device(void) {
@@ -159,6 +172,7 @@ void dev_commands_poll(void) {
                 printf("[DEV] Error writing file\n");
                 sdcard_fclose(s_file_recv_handle);
                 s_file_recv_handle = NULL;
+                s_transfer_quiet = false;
                 return;
             }
             s_file_recv_received += written;
@@ -166,12 +180,14 @@ void dev_commands_poll(void) {
         if (s_file_recv_received >= s_file_recv_expected) {
             sdcard_fclose(s_file_recv_handle);
             s_file_recv_handle = NULL;
+            s_transfer_quiet = false;
             printf("[DEV] File received: %s (%lu bytes)\n", s_file_recv_path, (unsigned long)s_file_recv_received);
         } else if (time_us_64() - s_b64_last_rx_us > B64_RECV_TIMEOUT_US) {
             // Stalled CDC transfer (e.g. host went away): abort so the console
             // does not stay captured in receive mode forever.
             sdcard_fclose(s_file_recv_handle);
             s_file_recv_handle = NULL;
+            s_transfer_quiet = false;
             printf("[DEV] Error: put timed out at %lu/%lu bytes\n",
                    (unsigned long)s_file_recv_received,
                    (unsigned long)s_file_recv_expected);
@@ -234,6 +250,7 @@ static void b64_recv_abort(const char *why) {
         s_file_recv_handle = NULL;
     }
     s_b64_recv_active = false;
+    s_transfer_quiet = false;
     printf("[DEV] Error: b64 receive aborted (%s) at %lu/%lu bytes\n",
            why, (unsigned long)s_file_recv_received,
            (unsigned long)s_file_recv_expected);
@@ -265,6 +282,7 @@ static void b64_recv_char(int c) {
                 sdcard_fclose(s_file_recv_handle);
                 s_file_recv_handle = NULL;
                 s_b64_recv_active = false;
+                s_transfer_quiet = false;
                 printf("[DEV] File received: %s (%lu bytes) fnv1a=%08lx\n",
                        s_file_recv_path, (unsigned long)s_file_recv_received,
                        (unsigned long)s_b64_hash);
@@ -330,8 +348,11 @@ void dev_commands_send_screenshot(void) {
     // Flush stdio so our raw CDC writes don't interleave with printf output
     stdio_flush();
 
-    if (!cdc_write_all(header, sizeof(header)) ||
-        !cdc_write_all((const uint8_t *)fb, FB_WIDTH * FB_HEIGHT * sizeof(uint16_t)))
+    s_transfer_quiet = true;
+    bool ok = cdc_write_all(header, sizeof(header)) &&
+              cdc_write_all((const uint8_t *)fb, FB_WIDTH * FB_HEIGHT * sizeof(uint16_t));
+    s_transfer_quiet = false;
+    if (!ok)
         printf("[DEV] Error: CDC write stalled\n");
 }
 
@@ -365,6 +386,7 @@ static void dev_send_file_b64(const char *path) {
         printf("[DEV] Failed to open file: %s\n", path);
         return;
     }
+    s_transfer_quiet = true;
     int size = sdcard_fsize_handle(f);
     printf("[DEV] B64 size=%d\n", size);
     uint8_t buf[B64_LINE_RAW * 4];
@@ -374,6 +396,7 @@ static void dev_send_file_b64(const char *path) {
         hash = b64_send_buf(buf, (uint32_t)nread, hash);
     sdcard_fclose(f);
     printf("[DEV] B64_END fnv1a=%08lx path=%s\n", (unsigned long)hash, path);
+    s_transfer_quiet = false;
 }
 
 bool dev_commands_process(void) {
@@ -385,10 +408,26 @@ bool dev_commands_process(void) {
         printf("[DEV] pong\n");
     } else if (strcmp(s_cmd_buf, "ver") == 0) {
         printf("[DEV] PicOS build %s %s\n", __DATE__, __TIME__);
+    } else if (strcmp(s_cmd_buf, "status") == 0) {
+        static const char *wifi_names[] = {
+            "disconnected", "connecting", "connected", "failed", "online"};
+        wifi_status_t ws = wifi_get_status();
+        const char *wifi_str =
+            (ws <= WIFI_STATUS_ONLINE) ? wifi_names[ws] : "?";
+        const char *app = launcher_get_running_app_name();
+        printf("[DEV] Status: app=%s app_uptime_ms=%lu uptime_ms=%lu "
+               "wifi=%s sd=%s battery=%d\n",
+               (app && app[0]) ? app : "launcher",
+               (unsigned long)launcher_get_app_uptime_ms(),
+               (unsigned long)to_ms_since_boot(get_absolute_time()),
+               wifi_str,
+               sdcard_is_mounted() ? "mounted" : "absent",
+               kbd_get_battery_percent());
     } else if (strcmp(s_cmd_buf, "exit") == 0) {
         s_cmd_exit = true;
     } else if (strcmp(s_cmd_buf, "usb") == 0) {
         s_cmd_usb = true;
+        printf("[DEV] USB MSC mode starting (USB re-enumerates; serial drops until exit)\n");
     } else if (strcmp(s_cmd_buf, "reboot") == 0) {
         s_cmd_reboot = true;
     } else if (strcmp(s_cmd_buf, "reboot-flash") == 0) {
@@ -477,6 +516,7 @@ bool dev_commands_process(void) {
         s_file_recv_expected = size;
         s_file_recv_received = 0;
         s_b64_last_rx_us = time_us_64();
+        s_transfer_quiet = true;
         printf("[DEV] Ready to receive %lu bytes for %s\n", (unsigned long)size, args);
     } else if (strncmp(s_cmd_buf, "putb64 ", 7) == 0) {
         char *args = s_cmd_buf + 7;
@@ -508,15 +548,18 @@ bool dev_commands_process(void) {
         s_b64_writelen = 0;
         s_b64_hash = 2166136261u;
         s_b64_last_rx_us = time_us_64();
+        s_transfer_quiet = true;
         printf("[DEV] Ready B64 %lu bytes for %s (chunk<=%u raw, newline-terminated, await ACK)\n",
                (unsigned long)size, args, (unsigned)B64_WRITE_BUF_SIZE);
     } else if (strncmp(s_cmd_buf, "getb64 ", 7) == 0) {
         dev_send_file_b64(s_cmd_buf + 7);
     } else if (strcmp(s_cmd_buf, "screenshot64") == 0) {
         const uint8_t *fb = (const uint8_t *)display_get_screen_buffer();
+        s_transfer_quiet = true;
         printf("[DEV] SCRN64 w=%u h=%u fmt=565\n", (unsigned)FB_WIDTH, (unsigned)FB_HEIGHT);
         uint32_t hash = b64_send_buf(fb, FB_WIDTH * FB_HEIGHT * 2u, 2166136261u);
         printf("[DEV] SCRN64_END fnv1a=%08lx\n", (unsigned long)hash);
+        s_transfer_quiet = false;
     } else if (strcmp(s_cmd_buf, "crashlog") == 0) {
         sdfile_t f = sdcard_fopen("/system/crashlog.txt", "rb");
         if (!f) {
@@ -561,6 +604,7 @@ bool dev_commands_process(void) {
         printf("FILE_DATA:\nSIZE:%d\n", size);
         stdio_flush();
 
+        s_transfer_quiet = true;
         uint8_t buf[256];
         int read;
         while ((read = sdcard_fread(f, buf, sizeof(buf))) > 0) {
@@ -570,7 +614,36 @@ bool dev_commands_process(void) {
             }
         }
         sdcard_fclose(f);
+        s_transfer_quiet = false;
         printf("[DEV] File sent: %s (%d bytes)\n", path, size);
+    } else if (strncmp(s_cmd_buf, "mkdir ", 6) == 0) {
+        const char *path = s_cmd_buf + 6;
+        if (path[0] != '/') {
+            printf("[DEV] Usage: mkdir /absolute/path\n");
+            s_cmd_buf[0] = '\0';
+            s_cmd_ready = false;
+            return true;
+        }
+        // Recursive create ("mkdir -p"): make each component in turn.
+        char tmp[CMD_BUF_SIZE];
+        strncpy(tmp, path, sizeof(tmp) - 1);
+        tmp[sizeof(tmp) - 1] = '\0';
+        size_t len = strlen(tmp);
+        while (len > 1 && tmp[len - 1] == '/')
+            tmp[--len] = '\0';
+        bool ok = true;
+        for (char *p = tmp + 1; *p && ok; p++) {
+            if (*p == '/') {
+                *p = '\0';
+                ok = sdcard_mkdir(tmp);
+                *p = '/';
+            }
+        }
+        if (ok) ok = sdcard_mkdir(tmp);
+        if (ok)
+            printf("[DEV] Created: %s\n", tmp);
+        else
+            printf("[DEV] Error: mkdir failed: %s\n", tmp);
     } else if (strncmp(s_cmd_buf, "ls ", 3) == 0) {
         const char *path = s_cmd_buf + 3;
         if (strlen(path) == 0) {
@@ -598,6 +671,8 @@ bool dev_commands_process(void) {
         printf("[DEV]   screenshot64   - Capture screen as base64 (any transport)\n");
         printf("[DEV]   crashlog       - Print /system/crashlog.txt ('crashlog clear' deletes)\n");
         printf("[DEV]   ls <dir>       - List directory contents\n");
+        printf("[DEV]   mkdir <path>   - Create directory (recursive)\n");
+        printf("[DEV]   status         - Show app/uptime/wifi/sd/battery\n");
         printf("[DEV]   help           - Show this help\n");
         printf("[DEV] Valid keys: up, down, left, right, enter, esc, menu, f1-f10, backspace, tab, del, shift, a-z, A-Z, 0-9, punctuation\n");
     } else {
