@@ -93,16 +93,9 @@ extern uint64_t hal_get_time_us(void);
 extern void system_menu_add_item(const char *label, void (*cb)(void *user), void *user);
 extern void system_menu_clear_items(void);
 
-// FS functions (from stubs)
-extern void *sdcard_fopen(const char *path, const char *mode);
-extern int   sdcard_fread(void *f, void *buf, int len);
-extern int   sdcard_fwrite(void *f, const void *buf, int len);
-extern void  sdcard_fclose(void *f);
-extern bool  sdcard_fexists(const char *path);
-extern size_t sdcard_fsize(const char *path);
-extern size_t sdcard_fsize_handle(void *f);
-extern int   sdcard_fseek(void *f, long offset, int whence);
-extern long  sdcard_ftell(void *f);
+// FS functions — real driver header (stub implementations in driver_stubs.c
+// share these exact signatures; "pico/mutex.h" resolves to the sim stub).
+#include "sdcard.h"
 
 // Audio functions
 extern void audio_play_tone(uint32_t freq, uint32_t dur);
@@ -1069,14 +1062,14 @@ static void tramp_fs_exists(uc_engine *uc) {
 static void tramp_fs_size(uc_engine *uc) {
     uint32_t path_addr = read_reg(uc, UC_ARM_REG_R0);
     char *path = uc_read_string(uc, path_addr);
-    int sz = (int)sdcard_fsize(path ? path : "");
+    int sz = sdcard_fsize(path ? path : "");
     write_reg(uc, UC_ARM_REG_R0, (uint32_t)sz);
 }
 
 static void tramp_fs_fsize(uc_engine *uc) {
     uint32_t handle = read_reg(uc, UC_ARM_REG_R0);
     void *f = handle_unwrap(handle);
-    int sz = f ? (int)sdcard_fsize_handle(f) : 0;
+    int sz = f ? sdcard_fsize_handle(f) : -1;
     fprintf(stderr, "[TRAMP] fs_fsize(handle=%u) -> %d\n", handle, sz);
     write_reg(uc, UC_ARM_REG_R0, (uint32_t)sz);
 }
@@ -1085,14 +1078,14 @@ static void tramp_fs_seek(uc_engine *uc) {
     uint32_t handle = read_reg(uc, UC_ARM_REG_R0);
     uint32_t offset = read_reg(uc, UC_ARM_REG_R1);
     void *f = handle_unwrap(handle);
-    bool ok = f ? (sdcard_fseek(f, (long)offset, 0) == 0) : false;
+    bool ok = f ? sdcard_fseek(f, offset) : false;
     write_reg(uc, UC_ARM_REG_R0, ok ? 1 : 0);
 }
 
 static void tramp_fs_tell(uc_engine *uc) {
     uint32_t handle = read_reg(uc, UC_ARM_REG_R0);
     void *f = handle_unwrap(handle);
-    uint32_t pos = f ? (uint32_t)sdcard_ftell(f) : 0;
+    uint32_t pos = f ? sdcard_ftell(f) : 0;
     write_reg(uc, UC_ARM_REG_R0, pos);
 }
 
@@ -1228,9 +1221,7 @@ static void tramp_fs_list_dir(uc_engine *uc) {
 }
 
 // Forward declarations for FS operations (implemented in driver_stubs.c)
-extern bool sdcard_mkdir(const char *path);
-extern bool sdcard_delete(const char *path);
-extern bool sdcard_rename(const char *oldpath, const char *newpath);
+// sdcard_mkdir / sdcard_delete / sdcard_rename declared by sdcard.h above.
 
 static void tramp_fs_mkdir(uc_engine *uc) {
     uint32_t path_addr = read_reg(uc, UC_ARM_REG_R0);

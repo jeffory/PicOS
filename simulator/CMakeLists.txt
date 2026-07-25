@@ -208,9 +208,11 @@ set(BUILD_SHARED_LIBS OFF CACHE BOOL "" FORCE)
 FetchContent_MakeAvailable(unicorn)
 
 # ── Generate miniz_export.h stub (miniz's own CMake does this, but we
-#    compile sources directly so we need to create it ourselves) ─────────────
-if(NOT EXISTS "${PICOS_ROOT}/third_party/miniz/miniz_export.h")
-    file(WRITE "${PICOS_ROOT}/third_party/miniz/miniz_export.h"
+#    compile sources directly so we need to create it ourselves). Written to
+#    the build tree — never into third_party/miniz, which would dirty the
+#    submodule. The generated dir is on picos_simulator's include path. ──────
+if(NOT EXISTS "${CMAKE_BINARY_DIR}/generated/miniz/miniz_export.h")
+    file(WRITE "${CMAKE_BINARY_DIR}/generated/miniz/miniz_export.h"
         "#ifndef MINIZ_EXPORT_H\n"
         "#define MINIZ_EXPORT_H\n"
         "#define MINIZ_EXPORT\n"
@@ -307,6 +309,7 @@ target_include_directories(picos_simulator PRIVATE
     ${PICOS_ROOT}/src/usb
     ${PICOS_ROOT}/third_party/umm_malloc/src
     ${PICOS_ROOT}/third_party/miniz
+    ${CMAKE_BINARY_DIR}/generated/miniz
     ${PICOS_ROOT}/third_party/stb
     ${PICOS_ROOT}/third_party/pocketmod
     ${unicorn_SOURCE_DIR}/include

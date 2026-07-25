@@ -307,6 +307,7 @@ target_include_directories(picocalc_os PRIVATE
     third_party/mongoose/
     third_party/umm_malloc/src/
     third_party/miniz/
+    ${CMAKE_BINARY_DIR}/generated/miniz/
     third_party/libmad/
     third_party/pocketmod/
     data/
@@ -336,9 +337,11 @@ target_link_libraries(picocalc_os
 )
 
 # ── Generate miniz_export.h stub (miniz's own CMake does this, but we
-#    compile sources directly so we need to create it ourselves) ─────────────
-if(NOT EXISTS "${CMAKE_SOURCE_DIR}/third_party/miniz/miniz_export.h")
-    file(WRITE "${CMAKE_SOURCE_DIR}/third_party/miniz/miniz_export.h"
+#    compile sources directly so we need to create it ourselves). Written to
+#    the build tree — never into third_party/miniz, which would dirty the
+#    submodule. The generated dir is on the include path above. ─────────────
+if(NOT EXISTS "${CMAKE_BINARY_DIR}/generated/miniz/miniz_export.h")
+    file(WRITE "${CMAKE_BINARY_DIR}/generated/miniz/miniz_export.h"
         "#ifndef MINIZ_EXPORT_H\n"
         "#define MINIZ_EXPORT_H\n"
         "#define MINIZ_EXPORT\n"
