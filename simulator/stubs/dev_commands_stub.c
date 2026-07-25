@@ -100,6 +100,11 @@ void dev_commands_set_exit(void) {
     s_cmd_exit = true;
 }
 
+// Bulk-transfer quiet flag — no async log producers in the simulator.
+bool dev_commands_transfer_active(void) {
+    return false;
+}
+
 // USB command
 bool dev_commands_wants_usb(void) {
     return s_cmd_usb;

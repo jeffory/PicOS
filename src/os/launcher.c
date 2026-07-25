@@ -23,6 +23,7 @@
 #include <stdatomic.h>
 
 #include "../dev_commands.h"
+#include "../usb/usb_msc.h"
 #include "pico/stdlib.h"
 #include "hardware/clocks.h"
 #include "hardware/uart.h"
@@ -894,6 +895,12 @@ void launcher_run(void) {
       stdio_flush();
       sleep_ms(100);
       reset_usb_boot(0, 0);
+    }
+    if (dev_commands_wants_usb()) {
+      dev_commands_clear_usb();
+      usb_msc_enter_mode();
+      kbd_clear_state();
+      dirty = true;
     }
 
     if (kbd_consume_menu_press()) {
