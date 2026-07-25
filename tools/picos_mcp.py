@@ -779,13 +779,18 @@ def _do_get_file_b64_once(port: str, remote_path: str) -> bytes:
         ser.close()
 
 
-def do_put_file_b64(port: str, data: bytes, remote_path: str) -> str:
-    """Send bytes via the firmware's putb64 command (chunk + ACK pacing)."""
+def do_put_file_b64(port: str, data: bytes, remote_path: str,
+                    progress=None) -> str:
+    """Send bytes via the firmware's putb64 command (chunk + ACK pacing).
+
+    progress: optional callback(raw_bytes_sent, raw_bytes_total), invoked
+    after each ACKed chunk (used by tools/ota_flash.py)."""
     with _exclusive_serial(port):
-        return _do_put_file_b64_once(port, data, remote_path)
+        return _do_put_file_b64_once(port, data, remote_path, progress)
 
 
-def _do_put_file_b64_once(port: str, data: bytes, remote_path: str) -> str:
+def _do_put_file_b64_once(port: str, data: bytes, remote_path: str,
+                          progress=None) -> str:
     b64 = base64.b64encode(data)
     CHUNK = 512  # b64 chars per line → 384 raw bytes ≤ device write buffer
     ser = open_serial(port, timeout=0.2)
@@ -813,6 +818,8 @@ def _do_put_file_b64_once(port: str, data: bytes, remote_path: str) -> str:
             ser.flush()
             line = reader.wait_marker([b"ACK ", b"File received"],
                                       [b"Error"], 15.0)
+            if progress:
+                progress(min(off + CHUNK, len(b64)) * 3 // 4, len(data))
             if b"File received" in line:
                 final = line
         if final is None:

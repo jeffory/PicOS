@@ -1,7 +1,7 @@
 # PicOS Makefile
 # Automated setup, build, and deployment for ClockworkPi PicoCalc
 
-.PHONY: help setup build clean flash rebuild check-env test-lua simulator simulator-run simulator-clean
+.PHONY: help setup build clean flash flash-ota rebuild check-env test-lua simulator simulator-run simulator-clean
 
 # ── Configuration ─────────────────────────────────────────────────────────────
 
@@ -28,7 +28,8 @@ help:
 	@echo "  make build          - Build the firmware (creates build/picocalc_os.uf2)"
 	@echo "  make clean          - Remove build directory"
 	@echo "  make rebuild        - Clean and rebuild from scratch"
-	@echo "  make flash          - Show instructions for flashing the device"
+	@echo "  make flash          - Show instructions for flashing the device (BOOTSEL)"
+	@echo "  make flash-ota      - Build and push firmware to a USB-connected device (OTA)"
 	@echo "  make check-env      - Verify build environment is ready"
 	@echo ""
 	@echo "Simulator Targets (PC):"
@@ -184,6 +185,16 @@ flash:
 		[ "$$confirm" = "y" ] && cp $(BUILD_DIR)/picocalc_os.uf2 /media/$$USER/RPI-RP2/ && \
 		echo "✓ Firmware copied! Device will reboot."; \
 	fi
+
+# ── OTA flash ─────────────────────────────────────────────────────────────────
+# Builds, then pushes build/picocalc_os.bin to a USB-connected device over the
+# SD-staged OTA path (upload + reboot; the device verifies the SHA-256 and
+# reflashes itself on boot). The device must be at the launcher.
+# Optional: FLASH_DEVICE=/dev/ttyACM0 to skip auto-detection.
+
+flash-ota: build
+	@python3 tools/ota_flash.py $(BUILD_DIR)/picocalc_os.bin \
+		$(if $(FLASH_DEVICE),--device $(FLASH_DEVICE),)
 
 # ── Lua App Testing ───────────────────────────────────────────────────────────
 
