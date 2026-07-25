@@ -68,3 +68,10 @@ void lua_bridge_video_init(lua_State *L);
 void lua_bridge_tcp_init(lua_State *L);
 void lua_bridge_crypto_init(lua_State *L);
 void lua_bridge_mod_init(lua_State *L);
+void lua_bridge_json_init(lua_State *L);
+
+// Shared JSON codec — game.save is built on these so the firmware carries one
+// JSON implementation rather than several hand-rolled ones.
+void lua_json_encode_push(lua_State *L, int idx, int indent);
+bool lua_json_decode_push(lua_State *L, const char *s, size_t len,
+                          const char **err);

@@ -194,6 +194,8 @@ void lua_bridge_register(lua_State *L) {
   lua_bridge_mod_init(L);
   printf("[LUA] registering zip...\n");
   lua_bridge_zip_init(L);
+  printf("[LUA] registering json...\n");
+  lua_bridge_json_init(L);
   printf("[LUA] all modules done, PSRAM free=%lu\n",
          (unsigned long)umm_free_heap_size());
   // Set as global

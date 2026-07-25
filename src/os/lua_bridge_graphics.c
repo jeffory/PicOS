@@ -3066,6 +3066,13 @@ static int l_animation_loop_gc(lua_State *L) {
 }
 
 static int l_animation_loop_new(lua_State *L) {
+  // Same hazard as l_animation_blinker_new: capture the argument count before
+  // lua_newuserdata pushes the object, or the object is counted as a trailing
+  // argument. Here it failed silently rather than loudly — loop.new(ms, frames)
+  // saw the userdata at index 2 instead of the frames table, so the animation
+  // was created with zero frames and simply never drew.
+  int top = lua_gettop(L);
+
   lua_animation_loop_t *loop = (lua_animation_loop_t *)lua_newuserdata(L, sizeof(lua_animation_loop_t));
   loop->frame_count = 0;
   loop->current_frame = 0;
@@ -3074,13 +3081,13 @@ static int l_animation_loop_new(lua_State *L) {
   loop->looping = true;
   loop->valid = false;
 
-  if (lua_gettop(L) >= 1) {
+  if (top >= 1) {
     if (lua_isnumber(L, 1)) {
       loop->interval_ms = luaL_checkinteger(L, 1);
     }
   }
 
-  if (lua_gettop(L) >= 2 && lua_istable(L, 2)) {
+  if (top >= 2 && lua_istable(L, 2)) {
     lua_pushvalue(L, 2);
     loop->frame_count = (int)lua_rawlen(L, -1);
     if (loop->frame_count > MAX_ANIMATION_LOOP_FRAMES) {
@@ -3099,7 +3106,7 @@ static int l_animation_loop_new(lua_State *L) {
     loop->valid = (loop->frame_count > 0);
   }
 
-  if (lua_gettop(L) >= 3) {
+  if (top >= 3) {
     loop->looping = lua_toboolean(L, 3);
   }
 
@@ -3500,6 +3507,15 @@ static int l_animation_blinker_gc(lua_State *L) {
 }
 
 static int l_animation_blinker_new(lua_State *L) {
+  // Argument count MUST be read before lua_newuserdata: that call pushes the
+  // new object onto the stack, so a later lua_gettop() counts the object as if
+  // it were a trailing argument. Reading it after made every call fail —
+  // blinker.new(420, 220, true) saw top == 4 and tried to read the userdata as
+  // the integer `cycles`, and even blinker.new() with no arguments saw top == 1
+  // and read the userdata as on_duration_ms. The constructor was unusable at
+  // any arity, which is why nothing in the tree called it.
+  int top = lua_gettop(L);
+
   lua_animation_blinker_t *b = (lua_animation_blinker_t *)lua_newuserdata(L, sizeof(lua_animation_blinker_t));
   b->on_duration_ms = 500;
   b->off_duration_ms = 500;
@@ -3510,7 +3526,6 @@ static int l_animation_blinker_new(lua_State *L) {
   b->running = false;
   b->state = true;
 
-  int top = lua_gettop(L);
   if (top >= 1) b->on_duration_ms = luaL_checkinteger(L, 1);
   if (top >= 2) b->off_duration_ms = luaL_checkinteger(L, 2);
   if (top >= 3) b->loop = lua_toboolean(L, 3);
