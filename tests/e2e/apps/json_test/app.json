@@ -1,0 +1,7 @@
+{
+    "id": "com.picos.json_test",
+    "name": "JSON Test",
+    "description": "picocalc.json encode/decode regression fixture",
+    "version": "1.0",
+    "author": "PicOS"
+}
