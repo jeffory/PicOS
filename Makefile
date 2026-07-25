@@ -133,6 +133,10 @@ build: check-env $(LUA_DIR) $(FATFS_DIR)
 	@cd $(BUILD_DIR) && \
 		cmake .. -DPICO_BOARD=$(PICO_BOARD) && \
 		$(MAKE) -j$$(nproc 2>/dev/null || echo 4)
+	@test -f $(BUILD_DIR)/picocalc_os.uf2 || { \
+		echo "ERROR: build finished but $(BUILD_DIR)/picocalc_os.uf2 is missing"; \
+		exit 1; \
+	}
 	@echo ""
 	@echo "✓ Build complete!"
 	@echo "  Firmware: $(BUILD_DIR)/picocalc_os.uf2"
@@ -228,6 +232,10 @@ simulator: simulator-check download-lua
 	@cd $(SIM_BUILD_DIR) && \
 		cmake ../simulator -DCMAKE_BUILD_TYPE=Release && \
 		$(MAKE) -j$$(nproc 2>/dev/null || echo 4)
+	@test -x $(SIM_BINARY) || { \
+		echo "ERROR: build finished but $(SIM_BINARY) is missing"; \
+		exit 1; \
+	}
 	@echo ""
 	@echo "✓ Simulator build complete!"
 	@echo "  Binary: $(SIM_BINARY)"
@@ -250,6 +258,10 @@ simulator-debug: simulator-check download-lua
 	@cd $(SIM_BUILD_DIR) && \
 		cmake ../simulator -DCMAKE_BUILD_TYPE=Debug && \
 		$(MAKE) -j$$(nproc 2>/dev/null || echo 4)
+	@test -x $(SIM_BINARY) || { \
+		echo "ERROR: build finished but $(SIM_BINARY) is missing"; \
+		exit 1; \
+	}
 	@echo ""
 	@echo "✓ Simulator build complete (Debug)!"
 	@echo "  Binary: $(SIM_BINARY)"
