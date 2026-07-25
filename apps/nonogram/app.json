@@ -1,0 +1,10 @@
+{
+    "id": "com.picos.nonogram",
+    "name": "Neurogram",
+    "description": "Cyberpunk nonogram puzzles — solve, create and share",
+    "version": "1.0",
+    "author": "PicOS",
+    "category": "games",
+    "requirements": ["audio", "http"],
+    "min_firmware": "1.0.0"
+}
