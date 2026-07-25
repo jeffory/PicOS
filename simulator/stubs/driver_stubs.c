@@ -268,10 +268,18 @@ static const uint8_t s_font8x12[95][12] = {
 // Active font tracking
 static int s_active_font = 0;  // 0 = 6x8, 1 = 8x12, 2 = scientifica, 3 = bold
 
-int display_draw_text(int x, int y, const char* text, uint16_t fg, uint16_t bg) {
+// Mirrors draw_text_impl in src/drivers/display.c. `transparent` skips the
+// background write so text can sit over existing art. Kept as one flagged
+// function for the same reason as the hardware version: the three font branches
+// have different glyph layouts and duplicating them invites drift.
+//
+// Note this writes host-order colour directly (no byte swap) — the simulator
+// framebuffer is host order, the hardware one is byte-swapped.
+static int sim_draw_text_impl(int x, int y, const char* text, uint16_t fg,
+                              uint16_t bg, bool transparent) {
     int start_x = x;
     uint16_t* fb = display_get_back_buffer();
-    
+
     if (s_active_font == 1) {
         // 8x12 font: row-major, MSB = leftmost pixel
         while (*text) {
@@ -285,7 +293,9 @@ int display_draw_text(int x, int y, const char* text, uint16_t fg, uint16_t bg) 
                 for (int col = 0; col < FONT8X12_W; col++) {
                     int px = x + col;
                     if (px >= 0 && px < 320) {
-                        fb[py * 320 + px] = (rowdata & (0x80 >> col)) ? fg : bg;
+                        bool on = (rowdata & (0x80 >> col)) != 0;
+                        if (on) fb[py * 320 + px] = fg;
+                        else if (!transparent) fb[py * 320 + px] = bg;
                     }
                 }
             }
@@ -306,7 +316,9 @@ int display_draw_text(int x, int y, const char* text, uint16_t fg, uint16_t bg) 
                 for (int col = 0; col < FONT_SCI_WIDTH; col++) {
                     int px = x + col;
                     if (px >= 0 && px < 320) {
-                        fb[py * 320 + px] = (rowdata & (0x80 >> col)) ? fg : bg;
+                        bool on = (rowdata & (0x80 >> col)) != 0;
+                        if (on) fb[py * 320 + px] = fg;
+                        else if (!transparent) fb[py * 320 + px] = bg;
                     }
                 }
             }
@@ -324,7 +336,9 @@ int display_draw_text(int x, int y, const char* text, uint16_t fg, uint16_t bg) 
                     int px = x + col;
                     int py = y + row;
                     if (px >= 0 && px < 320 && py >= 0 && py < 320) {
-                        fb[py * 320 + px] = (coldata & (1 << row)) ? fg : bg;
+                        bool on = (coldata & (1 << row)) != 0;
+                        if (on) fb[py * 320 + px] = fg;
+                        else if (!transparent) fb[py * 320 + px] = bg;
                     }
                 }
             }
@@ -332,6 +346,14 @@ int display_draw_text(int x, int y, const char* text, uint16_t fg, uint16_t bg) 
         }
     }
     return x - start_x;
+}
+
+int display_draw_text(int x, int y, const char* text, uint16_t fg, uint16_t bg) {
+    return sim_draw_text_impl(x, y, text, fg, bg, false);
+}
+
+int display_draw_text_transparent(int x, int y, const char* text, uint16_t fg) {
+    return sim_draw_text_impl(x, y, text, fg, 0, true);
 }
 
 int display_text_width(const char* text) {
@@ -491,6 +513,11 @@ void display_draw_textured_column(int x, int y0, int y1,
     (void)tex; (void)tex_w; (void)tex_h; (void)tex_x; (void)tex_y0; (void)tex_y1;
     display_draw_line(x, y0, x, y1, 0x7BEF); // gray stub
 }
+void display_fill_hline(int y, int x0, int x1, uint16_t color) {
+    if (x0 > x1) { int t = x0; x0 = x1; x1 = t; }
+    display_fill_rect(x0, y, x1 - x0 + 1, 1, color);
+}
+
 void display_fill_vline(int x, int y0, int y1, uint16_t color) {
     display_draw_line(x, y0, x, y1, color);
 }
@@ -823,17 +850,258 @@ void crashlog_write_lua_error(const char *app_name, const char *context, const c
     if (message) fprintf(stderr, "[CRASHLOG] %s\n", message);
 }
 
-// Display effects (no-op stubs for simulator)
-void display_effect_invert(void) {}
-void display_effect_darken(uint8_t factor) { (void)factor; }
-void display_effect_brighten(uint8_t factor) { (void)factor; }
-void display_effect_tint(uint8_t r, uint8_t g, uint8_t b, uint8_t strength) { (void)r; (void)g; (void)b; (void)strength; }
-void display_effect_grayscale(void) {}
-void display_effect_blend(const uint16_t *src, int w, int h, uint8_t alpha) { (void)src; (void)w; (void)h; (void)alpha; }
-void display_effect_palette(const uint16_t *lut, int lut_size) { (void)lut; (void)lut_size; }
-void display_effect_dither(uint8_t levels) { (void)levels; }
-void display_effect_scanline(uint8_t intensity) { (void)intensity; }
-void display_effect_posterize(uint8_t levels) { (void)levels; }
+// ── Display effects ──────────────────────────────────────────────────────────
+//
+// Ports of the hardware implementations in src/drivers/display.c:1500-1867.
+//
+// TWO deliberate differences from the hardware versions:
+//
+//   1. Byte order. The hardware framebuffer holds byte-SWAPPED RGB565 (the
+//      ST7365P is big-endian), so display.c wraps every access in
+//      FB_UNSWAP/FB_RESWAP. The simulator framebuffer holds HOST-order RGB565
+//      (see display_fill_rect above, which writes `color` straight through), so
+//      those macros collapse to identity here and are omitted. The one place
+//      this is visible is the scanline halving mask, which is byte-order
+//      dependent — see display_effect_scanline.
+//
+//   2. No RP2350 interpolator. The hardware versions drive interp0 in BLEND
+//      mode; blend8() below reproduces its exact arithmetic so the two
+//      implementations agree pixel-for-pixel.
+//
+// Effects operate on the back buffer, matching every other draw call here.
+
+#define SIM_FB_W 320
+#define SIM_FB_H 320
+
+// RP2350 interpolator BLEND mode:  (base0*(255-accum1) + base1*accum1) >> 8
+// Reproduced exactly, including the slight undershoot at t=255, so simulator
+// output matches hardware rather than merely looking similar.
+static inline uint8_t blend8(uint8_t a, uint8_t b, uint8_t t) {
+    return (uint8_t)((a * (255 - t) + b * t) >> 8);
+}
+
+void display_effect_invert(void) {
+    uint16_t *fb = display_get_back_buffer();
+    size_t n = SIM_FB_W * SIM_FB_H;
+    // Bit-level complement — endian-agnostic, same as hardware.
+    uint32_t *fb32 = (uint32_t *)fb;
+    for (size_t i = 0; i < n / 2; i++) fb32[i] ^= 0xFFFFFFFFu;
+}
+
+void display_effect_darken(uint8_t factor) {
+    uint16_t *fb = display_get_back_buffer();
+    size_t n = SIM_FB_W * SIM_FB_H;
+
+    if (factor == 0) { memset(fb, 0, n * sizeof(uint16_t)); return; }
+    if (factor >= 255) return;
+
+    for (size_t i = 0; i < n; i++) {
+        uint16_t p = fb[i];
+        uint8_t r = blend8((p >> 11) & 0x1F, 0, 255 - factor);
+        uint8_t g = blend8((p >> 5)  & 0x3F, 0, 255 - factor);
+        uint8_t b = blend8( p        & 0x1F, 0, 255 - factor);
+        fb[i] = (uint16_t)((r << 11) | (g << 5) | b);
+    }
+}
+
+void display_effect_brighten(uint8_t factor) {
+    if (factor == 0) return;
+
+    uint16_t *fb = display_get_back_buffer();
+    size_t n = SIM_FB_W * SIM_FB_H;
+
+    for (size_t i = 0; i < n; i++) {
+        uint16_t p = fb[i];
+        uint8_t r = blend8((p >> 11) & 0x1F, 31, factor);  // max 5-bit
+        uint8_t g = blend8((p >> 5)  & 0x3F, 63, factor);  // max 6-bit
+        uint8_t b = blend8( p        & 0x1F, 31, factor);  // max 5-bit
+        fb[i] = (uint16_t)((r << 11) | (g << 5) | b);
+    }
+}
+
+void display_effect_tint(uint8_t r_tint, uint8_t g_tint, uint8_t b_tint,
+                         uint8_t strength) {
+    if (strength == 0) return;
+
+    uint16_t *fb = display_get_back_buffer();
+    size_t n = SIM_FB_W * SIM_FB_H;
+
+    uint8_t tr = r_tint >> 3;  // 5-bit
+    uint8_t tg = g_tint >> 2;  // 6-bit
+    uint8_t tb = b_tint >> 3;  // 5-bit
+
+    for (size_t i = 0; i < n; i++) {
+        uint16_t p = fb[i];
+        uint8_t r = blend8((p >> 11) & 0x1F, tr, strength);
+        uint8_t g = blend8((p >> 5)  & 0x3F, tg, strength);
+        uint8_t b = blend8( p        & 0x1F, tb, strength);
+        fb[i] = (uint16_t)((r << 11) | (g << 5) | b);
+    }
+}
+
+void display_effect_grayscale(void) {
+    uint16_t *fb = display_get_back_buffer();
+    size_t n = SIM_FB_W * SIM_FB_H;
+
+    for (size_t i = 0; i < n; i++) {
+        uint16_t p = fb[i];
+        uint8_t r = (p >> 11) & 0x1F;
+        uint8_t g = (p >> 5)  & 0x3F;
+        uint8_t b =  p        & 0x1F;
+
+        // ITU-R BT.601 luma, 6-bit green scaled to 5-bit for uniform weighting
+        uint8_t g5 = g >> 1;
+        uint8_t luma = (uint8_t)((r * 77 + g5 * 150 + b * 29) >> 8);
+        if (luma > 31) luma = 31;
+        uint8_t luma6 = (uint8_t)(luma << 1);
+
+        fb[i] = (uint16_t)((luma << 11) | (luma6 << 5) | luma);
+    }
+}
+
+void display_effect_blend(const uint16_t *src, int w, int h, uint8_t alpha) {
+    if (!src || alpha == 0) return;
+
+    uint16_t *fb = display_get_back_buffer();
+
+    int max_h = (h < SIM_FB_H) ? h : SIM_FB_H;
+    int max_w = (w < SIM_FB_W) ? w : SIM_FB_W;
+
+    for (int y = 0; y < max_h; y++) {
+        for (int x = 0; x < max_w; x++) {
+            int idx = y * SIM_FB_W + x;
+            uint16_t f = fb[idx];
+            uint16_t s = src[y * w + x];   // src is host order on both targets
+
+            uint8_t r = blend8((f >> 11) & 0x1F, (s >> 11) & 0x1F, alpha);
+            uint8_t g = blend8((f >> 5)  & 0x3F, (s >> 5)  & 0x3F, alpha);
+            uint8_t b = blend8( f        & 0x1F,  s        & 0x1F, alpha);
+
+            fb[idx] = (uint16_t)((r << 11) | (g << 5) | b);
+        }
+    }
+}
+
+void display_effect_palette(const uint16_t *lut, int lut_size) {
+    if (!lut || lut_size <= 0) return;
+
+    uint16_t *fb = display_get_back_buffer();
+    size_t n = SIM_FB_W * SIM_FB_H;
+
+    for (size_t i = 0; i < n; i++) {
+        uint16_t p = fb[i];
+        // Index from the top bits of each channel: (r3 << 5) | (g3 << 2) | b2
+        uint8_t r = (p >> 13) & 0x07;
+        uint8_t g = (p >> 8)  & 0x07;
+        uint8_t b = (p >> 3)  & 0x03;
+        int idx = (r << 5) | (g << 2) | b;
+        if (idx >= lut_size) idx = lut_size - 1;
+        fb[i] = lut[idx];          // LUT entries are host order
+    }
+}
+
+void display_effect_dither(uint8_t levels) {
+    if (levels < 2) levels = 2;
+    if (levels > 32) levels = 32;
+
+    uint16_t *fb = display_get_back_buffer();
+
+    // Bayer 4x4 ordered dither matrix, normalised to 0-255
+    static const uint8_t bayer4[4][4] = {
+        {   0, 128,  32, 160 },
+        { 192,  64, 224,  96 },
+        {  48, 176,  16, 144 },
+        { 240, 112, 208,  80 }
+    };
+
+    for (int y = 0; y < SIM_FB_H; y++) {
+        for (int x = 0; x < SIM_FB_W; x++) {
+            uint16_t p = fb[y * SIM_FB_W + x];
+            uint8_t r = (p >> 11) & 0x1F;
+            uint8_t g = (p >> 5)  & 0x3F;
+            uint8_t b =  p        & 0x1F;
+
+            uint8_t threshold = bayer4[y & 3][x & 3];
+            int bias = (threshold / levels) - 128 / levels;
+
+            int r8 = ((r << 3) | (r >> 2)) + bias;
+            if (r8 < 0) r8 = 0; if (r8 > 255) r8 = 255;
+            r = (uint8_t)((uint8_t)(r8 / (256 / levels)) * (255 / (levels - 1))) >> 3;
+            if (r > 31) r = 31;
+
+            int g8 = ((g << 2) | (g >> 4)) + bias;
+            if (g8 < 0) g8 = 0; if (g8 > 255) g8 = 255;
+            g = (uint8_t)((uint8_t)(g8 / (256 / levels)) * (255 / (levels - 1))) >> 2;
+            if (g > 63) g = 63;
+
+            int b8 = ((b << 3) | (b >> 2)) + bias;
+            if (b8 < 0) b8 = 0; if (b8 > 255) b8 = 255;
+            b = (uint8_t)((uint8_t)(b8 / (256 / levels)) * (255 / (levels - 1))) >> 3;
+            if (b > 31) b = 31;
+
+            fb[y * SIM_FB_W + x] = (uint16_t)((r << 11) | (g << 5) | b);
+        }
+    }
+}
+
+void display_effect_scanline(uint8_t intensity) {
+    if (intensity == 0) return;
+
+    uint16_t *fb = display_get_back_buffer();
+
+    // Darken every odd row. intensity selects how many times to halve:
+    //   1-127 = one shift (50%), 128-254 = two shifts (25%), 255 = black.
+    int shifts = (intensity < 128) ? 1 : (intensity < 255) ? 2 : 0;
+
+    if (intensity == 255) {
+        for (int y = 1; y < SIM_FB_H; y += 2)
+            memset(&fb[y * SIM_FB_W], 0, SIM_FB_W * sizeof(uint16_t));
+        return;
+    }
+
+    // Halving mask stops bits bleeding across channel boundaries.
+    // Host-order RGB565 (RRRRRGGG GGGBBBBB) -> 0x7BEF, so 0x7BEF7BEF for a
+    // 32-bit pair. Hardware uses 0xEF7BEF7B because its buffer is byte-swapped;
+    // this is THE line that differs, and getting it wrong corrupts colour
+    // rather than failing loudly.
+    const uint32_t hmask = 0x7BEF7BEFu;
+
+    for (int y = 1; y < SIM_FB_H; y += 2) {
+        uint32_t *row32 = (uint32_t *)&fb[y * SIM_FB_W];
+        int n32 = SIM_FB_W / 2;
+        for (int i = 0; i < n32; i++) {
+            uint32_t v = row32[i];
+            for (int s = 0; s < shifts; s++) v = (v >> 1) & hmask;
+            row32[i] = v;
+        }
+    }
+}
+
+void display_effect_posterize(uint8_t levels) {
+    if (levels < 2) levels = 2;
+    if (levels > 32) levels = 32;
+
+    uint16_t *fb = display_get_back_buffer();
+    size_t n = SIM_FB_W * SIM_FB_H;
+
+    uint8_t lut5[32], lut6[64];
+    for (int i = 0; i < 32; i++) {
+        int q = (i * (levels - 1) + 15) / 31;
+        lut5[i] = (uint8_t)((q * 31 + (levels - 1) / 2) / (levels - 1));
+    }
+    for (int i = 0; i < 64; i++) {
+        int q = (i * (levels - 1) + 31) / 63;
+        lut6[i] = (uint8_t)((q * 63 + (levels - 1) / 2) / (levels - 1));
+    }
+
+    for (size_t i = 0; i < n; i++) {
+        uint16_t p = fb[i];
+        uint8_t r = lut5[(p >> 11) & 0x1F];
+        uint8_t g = lut6[(p >> 5)  & 0x3F];
+        uint8_t b = lut5[ p        & 0x1F];
+        fb[i] = (uint16_t)((r << 11) | (g << 5) | b);
+    }
+}
 
 // Audio/sound/fileplayer/mp3 are implemented in simulator/sim_audio.c
 

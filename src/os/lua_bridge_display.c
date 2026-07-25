@@ -63,15 +63,54 @@ static int l_display_setScrollOffset(lua_State *L) {
   return 0;
 }
 
+// drawText(x, y, text, fg [, bg])
+//
+// bg == false selects transparent background: only glyph pixels are written, so
+// the text can sit over existing art. Any other value (including absent) keeps
+// the original opaque behaviour with bg defaulting to black.
+//
+// `false` is the sentinel rather than nil because an explicit nil is
+// indistinguishable from a nil-valued variable at the call site — so
+// drawText(x, y, t, fg, someNilVar) would silently go transparent. Nothing
+// passes false today, since l_checkcolor would have thrown on it.
 static int l_display_drawText(lua_State *L) {
   int x = (int)luaL_checknumber(L, 1);
   int y = (int)luaL_checknumber(L, 2);
   const char *text = luaL_checkstring(L, 3);
   uint16_t fg = l_checkcolor(L, 4);
+
+  if (lua_isboolean(L, 5) && !lua_toboolean(L, 5)) {
+    lua_pushinteger(L, display_draw_text_transparent(x, y, text, fg));
+    return 1;
+  }
+
   uint16_t bg = (lua_gettop(L) >= 5) ? l_checkcolor(L, 5) : COLOR_BLACK;
   int width = display_draw_text(x, y, text, fg, bg);
   lua_pushinteger(L, width);
   return 1;
+}
+
+// fillHLine(y, x0, x1, color) — horizontal counterpart to fillVLine.
+static int l_display_fillHLine(lua_State *L) {
+  int y = (int)luaL_checknumber(L, 1);
+  int x0 = (int)luaL_checknumber(L, 2);
+  int x1 = (int)luaL_checknumber(L, 3);
+  display_fill_hline(y, x0, x1, l_checkcolor(L, 4));
+  return 0;
+}
+
+// fillTriangle(x0, y0, x1, y1, x2, y2, color)
+// display_fill_triangle already existed in both display implementations and was
+// simply never registered for Lua.
+static int l_display_fillTriangle(lua_State *L) {
+  int x0 = (int)luaL_checknumber(L, 1);
+  int y0 = (int)luaL_checknumber(L, 2);
+  int x1 = (int)luaL_checknumber(L, 3);
+  int y1 = (int)luaL_checknumber(L, 4);
+  int x2 = (int)luaL_checknumber(L, 5);
+  int y2 = (int)luaL_checknumber(L, 6);
+  display_fill_triangle(x0, y0, x1, y1, x2, y2, l_checkcolor(L, 7));
+  return 0;
 }
 
 // Set by menu_lua_hook when a screenshot is requested.  Cleared and fired
@@ -257,6 +296,8 @@ static const luaL_Reg l_display_lib[] = {
     {"rgb", l_display_rgb},
     {"applyEffect", l_display_applyEffect},
     {"fillVLine", l_display_fillVLine},
+    {"fillHLine", l_display_fillHLine},
+    {"fillTriangle", l_display_fillTriangle},
     {"drawTexturedColumn", l_display_drawTexturedColumn},
     {"fillVLineGradient", l_display_fillVLineGradient},
     {NULL, NULL}};

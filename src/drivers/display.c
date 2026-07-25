@@ -850,8 +850,18 @@ void display_fill_triangle(int x0, int y0, int x1, int y1, int x2, int y2,
   }
 }
 
-int display_draw_text(int x, int y, const char *text, uint16_t fg,
-                      uint16_t bg) {
+// Shared glyph blitter for both the opaque and transparent text entry points.
+//
+// `transparent` skips the background write instead of painting bg, which is the
+// only way to put text over existing art — until this existed, every caller had
+// to know the exact colour behind its text and pass it as bg.
+//
+// Kept as ONE function with a flag rather than two copies: the three font
+// branches below have subtly different glyph layouts (row-major MSB-first for
+// 8x12 and scientifica, column-major LSB-first for 6x8), and duplicating that
+// is how the two paths would silently drift apart.
+static int draw_text_impl(int x, int y, const char *text, uint16_t fg,
+                          uint16_t bg, bool transparent) {
   int start_x = x;
   uint16_t fg_be = (fg >> 8) | (fg << 8);
   uint16_t bg_be = (bg >> 8) | (bg << 8);
@@ -869,8 +879,9 @@ int display_draw_text(int x, int y, const char *text, uint16_t fg,
         for (int col = 0; col < FONT8X12_W; col++) {
           int px = x + col;
           if (px >= 0 && px < FB_WIDTH) {
-            s_framebuffer[py * FB_WIDTH + px] =
-                (rowdata & (0x80 >> col)) ? fg_be : bg_be;
+            bool on = (rowdata & (0x80 >> col)) != 0;
+            if (on) s_framebuffer[py * FB_WIDTH + px] = fg_be;
+            else if (!transparent) s_framebuffer[py * FB_WIDTH + px] = bg_be;
           }
         }
       }
@@ -891,8 +902,9 @@ int display_draw_text(int x, int y, const char *text, uint16_t fg,
         for (int col = 0; col < FONT_SCI_WIDTH; col++) {
           int px = x + col;
           if (px >= 0 && px < FB_WIDTH) {
-            s_framebuffer[py * FB_WIDTH + px] =
-                (rowdata & (0x80 >> col)) ? fg_be : bg_be;
+            bool on = (rowdata & (0x80 >> col)) != 0;
+            if (on) s_framebuffer[py * FB_WIDTH + px] = fg_be;
+            else if (!transparent) s_framebuffer[py * FB_WIDTH + px] = bg_be;
           }
         }
       }
@@ -910,8 +922,9 @@ int display_draw_text(int x, int y, const char *text, uint16_t fg,
           int px = x + col;
           int py = y + row;
           if (px >= 0 && px < FB_WIDTH && py >= 0 && py < FB_HEIGHT) {
-            s_framebuffer[py * FB_WIDTH + px] =
-                (coldata & (1 << row)) ? fg_be : bg_be;
+            bool on = (coldata & (1 << row)) != 0;
+            if (on) s_framebuffer[py * FB_WIDTH + px] = fg_be;
+            else if (!transparent) s_framebuffer[py * FB_WIDTH + px] = bg_be;
           }
         }
       }
@@ -919,6 +932,23 @@ int display_draw_text(int x, int y, const char *text, uint16_t fg,
     }
   }
   return x - start_x;
+}
+
+int display_draw_text(int x, int y, const char *text, uint16_t fg,
+                      uint16_t bg) {
+  return draw_text_impl(x, y, text, fg, bg, false);
+}
+
+int display_draw_text_transparent(int x, int y, const char *text, uint16_t fg) {
+  return draw_text_impl(x, y, text, fg, 0, true);
+}
+
+// Horizontal counterpart to display_fill_vline. Sugar over display_fill_rect,
+// which is already the row-optimized path — this exists for call-site symmetry
+// with fill_vline, not for speed.
+void display_fill_hline(int y, int x0, int x1, uint16_t color) {
+  if (x0 > x1) { int t = x0; x0 = x1; x1 = t; }
+  display_fill_rect(x0, y, x1 - x0 + 1, 1, color);
 }
 
 int display_draw_text_to_buffer(uint16_t *buf, int buf_w, int buf_h,
