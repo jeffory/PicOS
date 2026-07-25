@@ -1,69 +1,52 @@
 #include "zip_archive.h"
 
 #include <stdio.h>
-#include <string.h>
 
-// Redirect miniz allocations to PSRAM (umm_malloc), not the tiny SRAM heap
-#define MZ_MALLOC(x)     umm_malloc(x)
-#define MZ_FREE(x)       umm_free(x)
-#define MZ_REALLOC(p, x) umm_realloc(p, x)
-#include "miniz.h"
-#include "../drivers/sdcard.h"
-#include "umm_malloc.h"
+#include "zip_util.h"
+
+#ifndef PICOS_SIMULATOR
+#include "hardware/watchdog.h"
+#endif
+
+// Shared g_api.zip / simulator-trampoline entry points. Everything goes
+// through the hardened seek-based engine in zip_util.c: the archive streams
+// from SD (no whole-file PSRAM copy), entry names are validated against
+// traversal, parent directories are created, and entry-count / total-size
+// caps are enforced.
+
+static bool zip_archive_progress(int done, int total, const char *name,
+                                 void *user) {
+    (void)done; (void)total; (void)name; (void)user;
+#ifndef PICOS_SIMULATOR
+    // Extraction can outlast the 10s watchdog window and nothing else feeds
+    // it while we're in here.
+    watchdog_update();
+#endif
+    return true;
+}
 
 bool zip_archive_extract(const char *zip_path, const char *dest_dir) {
-    int zip_len = 0;
-    char *zip_data = sdcard_read_file(zip_path, &zip_len);
-    if (!zip_data) return false;
-
-    mz_zip_archive zip;
-    memset(&zip, 0, sizeof(zip));
-    if (!mz_zip_reader_init_mem(&zip, zip_data, (size_t)zip_len, 0)) {
-        umm_free(zip_data);
+    zip_reader_t zr;
+    char err[ZIP_ERR_MAX];
+    if (!zip_reader_open(&zr, zip_path, err)) {
+        printf("[ZIP] %s: %s\n", zip_path, err);
         return false;
     }
-
-    bool ok = true;
-    int n = (int)mz_zip_reader_get_num_files(&zip);
-    for (int i = 0; i < n && ok; i++) {
-        if (mz_zip_reader_is_file_a_directory(&zip, (mz_uint)i)) continue;
-        mz_zip_archive_file_stat st;
-        if (!mz_zip_reader_file_stat(&zip, (mz_uint)i, &st)) { ok = false; break; }
-
-        char path[256];
-        snprintf(path, sizeof(path), "%s/%s", dest_dir, st.m_filename);
-
-        size_t uncomp = 0;
-        void *data = mz_zip_reader_extract_to_heap(&zip, (mz_uint)i, &uncomp, 0);
-        if (!data) { ok = false; break; }
-
-        sdcard_mkdir(dest_dir);  // ensure dest exists
-        sdfile_t f = sdcard_fopen(path, "w");
-        if (f) {
-            sdcard_fwrite(f, data, (int)uncomp);
-            sdcard_fclose(f);
-        } else { ok = false; }
-        mz_free(data);
-    }
-
-    mz_zip_reader_end(&zip);
-    umm_free(zip_data);
+    zip_extract_result_t result;
+    bool ok = zip_reader_extract_all(&zr, dest_dir, NULL,
+                                     zip_archive_progress, NULL, &result, err);
+    zip_reader_close(&zr);
+    if (!ok)
+        printf("[ZIP] extract %s -> %s failed: %s\n", zip_path, dest_dir, err);
     return ok;
 }
 
 int zip_archive_list(const char *zip_path) {
-    int zip_len = 0;
-    char *zip_data = sdcard_read_file(zip_path, &zip_len);
-    if (!zip_data) return -1;
-
-    mz_zip_archive zip;
-    memset(&zip, 0, sizeof(zip));
-    if (!mz_zip_reader_init_mem(&zip, zip_data, (size_t)zip_len, 0)) {
-        umm_free(zip_data);
+    zip_reader_t zr;
+    char err[ZIP_ERR_MAX];
+    if (!zip_reader_open(&zr, zip_path, err))
         return -1;
-    }
-    int n = (int)mz_zip_reader_get_num_files(&zip);
-    mz_zip_reader_end(&zip);
-    umm_free(zip_data);
+    int n = zip_reader_num_entries(&zr);
+    zip_reader_close(&zr);
     return n;
 }

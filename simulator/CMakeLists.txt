@@ -261,6 +261,7 @@ set(PICOS_CORE_SOURCES
     ${PICOS_ROOT}/src/os/lua_bridge_mod.c
     ${PICOS_ROOT}/src/os/lua_bridge_zip.c
     ${PICOS_ROOT}/src/os/zip_archive.c
+    ${PICOS_ROOT}/src/os/zip_util.c
     ${PICOS_ROOT}/src/os/lua_bridge_json.c
     ${PICOS_ROOT}/src/drivers/mod_player.c
     ${PICOS_ROOT}/third_party/miniz/miniz.c

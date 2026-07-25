@@ -1261,15 +1261,12 @@ static const picocalc_modplayer_t s_modplayer_impl = {
 };
 
 // ── ZIP extraction (thin wrappers for g_api — Lua bridge has its own richer API) ──
+// zip_archive.c delegates to the shared hardened engine (os/zip_util.c): the
+// archive is streamed from SD (no whole-file PSRAM copy), entry names are
+// validated (the old native path had NO traversal guard), parent directories
+// are created, and size/entry-count caps are enforced. The simulator's Unicorn
+// trampolines link the same zip_archive.c, so both worlds get the same engine.
 
-#define MINIZ_NO_STDIO
-#define MINIZ_NO_ARCHIVE_WRITING_APIS
-#define MINIZ_NO_ZLIB_COMPATIBLE_NAMES
-// Redirect miniz allocations to PSRAM (umm_malloc), not tiny SRAM heap
-#define MZ_MALLOC(x)     umm_malloc(x)
-#define MZ_FREE(x)       umm_free(x)
-#define MZ_REALLOC(p, x) umm_realloc(p, x)
-#include "miniz.h"
 #include "os/zip_archive.h"
 
 static const picocalc_zip_t s_zip_impl = {
