@@ -53,48 +53,175 @@ static bool json_is_null(lua_State *L, int idx) {
 }
 
 // ── Encoder ──────────────────────────────────────────────────────────────────
+//
+// The output is accumulated in a buffer of our own rather than in a
+// luaL_Buffer, because lauxlib's buffer cannot be used the way an encoder needs
+// to use it. Its storage lives in a stack slot that every add call expects to
+// find at the TOP of the stack (prepbuffsize(B, sz, -1)), whereas the encoder
+// must keep the value it is currently encoding above the buffer for the
+// duration, plus that value's key while walking a table.
+//
+// While the output fitted in LUAL_BUFFERSIZE nothing went wrong, which is why
+// this survived review: that is 16 * sizeof(void*) * sizeof(lua_Number), so 256
+// bytes on the RP2350 (LUA_32BITS makes lua_Number a float) and 512 in the
+// simulator. The first add past it removed the value being encoded instead of
+// lauxlib's own placeholder and put the buffer's box in its stack slot; the
+// encoder's matching pop then closed that box, freeing the storage still being
+// written to. The result was a corrupt string, "cannot encode a userdata value"
+// once the box was reached as if it were a value, or a fault in resizebox.
+// Neurogram's records.json crossed 256 bytes at about the seventh puzzle and so
+// wiped the player's progress on the next load.
+//
+// The storage is owned by a userdata box, so raising a Lua error (cycle,
+// unsupported type, out of memory) still unwinds without leaking it, and it is
+// allocated through the Lua allocator, which is the PSRAM umm heap here rather
+// than the ~29KB SRAM heap that plain malloc draws from.
+
+#define JSON_ENC_MIN_CAP 256
+#define JSON_BOX_MT "picocalc.json.buf"
 
 typedef struct {
-  luaL_Buffer buf;
+  char  *p;
+  size_t n;         // bytes written
+  size_t cap;       // bytes allocated
+} json_box_t;
+
+typedef struct {
+  lua_State *L;
+  json_box_t *box;
+  int boxidx;       // absolute stack index of the box userdata
   int indent;       // 0 = compact
 } json_enc_t;
 
 static void enc_value(lua_State *L, json_enc_t *e, int idx, int depth);
 
+static void *enc_realloc(lua_State *L, void *p, size_t osize, size_t nsize) {
+  void *ud;
+  lua_Alloc allocf = lua_getallocf(L, &ud);
+  return allocf(ud, p, osize, nsize);
+}
+
+static int json_box_gc(lua_State *L) {
+  json_box_t *bx = (json_box_t *)lua_touserdata(L, 1);
+  if (bx && bx->p) {
+    enc_realloc(L, bx->p, bx->cap, 0);
+    bx->p = NULL;
+    bx->cap = 0;
+    bx->n = 0;
+  }
+  return 0;
+}
+
+// Pushes the box that owns the output and points e at it.
+static void enc_open(lua_State *L, json_enc_t *e, int indent) {
+  json_box_t *bx = (json_box_t *)lua_newuserdatauv(L, sizeof(json_box_t), 0);
+  bx->p = NULL;
+  bx->n = 0;
+  bx->cap = 0;
+  if (luaL_newmetatable(L, JSON_BOX_MT)) {
+    lua_pushcfunction(L, json_box_gc);
+    lua_setfield(L, -2, "__gc");
+  }
+  lua_setmetatable(L, -2);
+
+  e->L = L;
+  e->box = bx;
+  e->boxidx = lua_gettop(L);
+  e->indent = (indent < 0) ? 0 : (indent > 8 ? 8 : indent);
+}
+
+// Replaces the box with the finished string.
+static void enc_close(json_enc_t *e) {
+  lua_State *L = e->L;
+  json_box_t *bx = e->box;
+
+  lua_pushlstring(L, bx->p ? bx->p : "", bx->n);
+
+  // Freed here rather than at the next GC step: encode is usually followed
+  // immediately by a write that wants the heap back.
+  if (bx->p) {
+    enc_realloc(L, bx->p, bx->cap, 0);
+    bx->p = NULL;
+    bx->cap = 0;
+    bx->n = 0;
+  }
+  lua_remove(L, e->boxidx);
+}
+
+static void enc_reserve(json_enc_t *e, size_t extra) {
+  json_box_t *bx = e->box;
+  if (bx->cap - bx->n >= extra) return;
+
+  size_t need = bx->n + extra;
+  size_t cap = bx->cap ? bx->cap : JSON_ENC_MIN_CAP;
+  while (cap < need) {
+    if (cap > (size_t)-1 / 2) { cap = need; break; }
+    cap *= 2;
+  }
+
+  // The Lua allocator leaves the old block alone when it cannot satisfy the
+  // request, so the box still owns it and __gc will still free it.
+  char *np = (char *)enc_realloc(e->L, bx->p, bx->cap, cap);
+  if (!np)
+    luaL_error(e->L, "json.encode: out of memory (%u bytes)", (unsigned)cap);
+  bx->p = np;
+  bx->cap = cap;
+}
+
+static void enc_addlstring(json_enc_t *e, const char *s, size_t len) {
+  if (len == 0) return;
+  enc_reserve(e, len);
+  memcpy(e->box->p + e->box->n, s, len);
+  e->box->n += len;
+}
+
+static void enc_addstring(json_enc_t *e, const char *s) {
+  enc_addlstring(e, s, strlen(s));
+}
+
+static void enc_addchar(json_enc_t *e, char c) {
+  enc_reserve(e, 1);
+  e->box->p[e->box->n++] = c;
+}
+
 static void enc_newline_indent(json_enc_t *e, int depth) {
   if (e->indent <= 0) return;
-  luaL_addchar(&e->buf, '\n');
+  enc_addchar(e, '\n');
   int n = e->indent * depth;
-  for (int i = 0; i < n; i++) luaL_addchar(&e->buf, ' ');
+  for (int i = 0; i < n; i++) enc_addchar(e, ' ');
 }
 
 static void enc_string(json_enc_t *e, const char *s, size_t len) {
-  luaL_addchar(&e->buf, '"');
+  // Most strings need no escaping, so ask for the whole thing up front and let
+  // the escapes grow the buffer further only when they actually appear.
+  enc_reserve(e, len + 2);
+
+  enc_addchar(e, '"');
   for (size_t i = 0; i < len; i++) {
     unsigned char c = (unsigned char)s[i];
     switch (c) {
-      case '"':  luaL_addstring(&e->buf, "\\\""); break;
-      case '\\': luaL_addstring(&e->buf, "\\\\"); break;
-      case '\b': luaL_addstring(&e->buf, "\\b");  break;
-      case '\f': luaL_addstring(&e->buf, "\\f");  break;
-      case '\n': luaL_addstring(&e->buf, "\\n");  break;
-      case '\r': luaL_addstring(&e->buf, "\\r");  break;
-      case '\t': luaL_addstring(&e->buf, "\\t");  break;
+      case '"':  enc_addstring(e, "\\\""); break;
+      case '\\': enc_addstring(e, "\\\\"); break;
+      case '\b': enc_addstring(e, "\\b");  break;
+      case '\f': enc_addstring(e, "\\f");  break;
+      case '\n': enc_addstring(e, "\\n");  break;
+      case '\r': enc_addstring(e, "\\r");  break;
+      case '\t': enc_addstring(e, "\\t");  break;
       default:
         if (c < 0x20) {
           // Control characters must be escaped; \u00XX is the portable form.
           char tmp[7];
           snprintf(tmp, sizeof(tmp), "\\u%04x", c);
-          luaL_addstring(&e->buf, tmp);
+          enc_addstring(e, tmp);
         } else {
           // Bytes >= 0x20 pass through verbatim, which keeps valid UTF-8
           // intact without needing to decode it.
-          luaL_addchar(&e->buf, (char)c);
+          enc_addchar(e, (char)c);
         }
         break;
     }
   }
-  luaL_addchar(&e->buf, '"');
+  enc_addchar(e, '"');
 }
 
 static void enc_number(lua_State *L, json_enc_t *e, int idx) {
@@ -111,7 +238,7 @@ static void enc_number(lua_State *L, json_enc_t *e, int idx) {
     // %.14g round-trips a double without trailing float noise.
     snprintf(tmp, sizeof(tmp), "%.14g", (double)v);
   }
-  luaL_addstring(&e->buf, tmp);
+  enc_addstring(e, tmp);
 }
 
 // Returns the array length n if the table at idx is a clean 1..n sequence,
@@ -153,22 +280,22 @@ static void enc_table(lua_State *L, json_enc_t *e, int idx, int depth) {
     // An empty Lua table is ambiguous; {} is the safer default because a table
     // used as a map is far more common in config/save data than an empty list,
     // and [] would decode back as a table that then re-encodes as {}.
-    if (alen == 0) { luaL_addstring(&e->buf, "{}"); return; }
+    if (alen == 0) { enc_addstring(e, "{}"); return; }
 
-    luaL_addchar(&e->buf, '[');
+    enc_addchar(e, '[');
     for (lua_Integer i = 1; i <= alen; i++) {
-      if (i > 1) luaL_addchar(&e->buf, ',');
+      if (i > 1) enc_addchar(e, ',');
       enc_newline_indent(e, depth + 1);
       lua_rawgeti(L, idx, i);
       enc_value(L, e, lua_gettop(L), depth + 1);
       lua_pop(L, 1);
     }
     enc_newline_indent(e, depth);
-    luaL_addchar(&e->buf, ']');
+    enc_addchar(e, ']');
     return;
   }
 
-  luaL_addchar(&e->buf, '{');
+  enc_addchar(e, '{');
   bool first = true;
   lua_pushnil(L);
   while (lua_next(L, idx) != 0) {
@@ -179,7 +306,7 @@ static void enc_table(lua_State *L, json_enc_t *e, int idx, int depth) {
       continue;
     }
 
-    if (!first) luaL_addchar(&e->buf, ',');
+    if (!first) enc_addchar(e, ',');
     first = false;
     enc_newline_indent(e, depth + 1);
 
@@ -198,26 +325,26 @@ static void enc_table(lua_State *L, json_enc_t *e, int idx, int depth) {
       lua_pop(L, 1);
     }
 
-    luaL_addchar(&e->buf, ':');
-    if (e->indent > 0) luaL_addchar(&e->buf, ' ');
+    enc_addchar(e, ':');
+    if (e->indent > 0) enc_addchar(e, ' ');
     enc_value(L, e, lua_gettop(L), depth + 1);
     lua_pop(L, 1);
   }
   enc_newline_indent(e, depth);
-  luaL_addchar(&e->buf, '}');
+  enc_addchar(e, '}');
 }
 
 static void enc_value(lua_State *L, json_enc_t *e, int idx, int depth) {
   idx = lua_absindex(L, idx);
 
-  if (json_is_null(L, idx)) { luaL_addstring(&e->buf, "null"); return; }
+  if (json_is_null(L, idx)) { enc_addstring(e, "null"); return; }
 
   switch (lua_type(L, idx)) {
     case LUA_TNIL:
-      luaL_addstring(&e->buf, "null");
+      enc_addstring(e, "null");
       break;
     case LUA_TBOOLEAN:
-      luaL_addstring(&e->buf, lua_toboolean(L, idx) ? "true" : "false");
+      enc_addstring(e, lua_toboolean(L, idx) ? "true" : "false");
       break;
     case LUA_TNUMBER:
       enc_number(L, e, idx);
@@ -239,23 +366,15 @@ static void enc_value(lua_State *L, json_enc_t *e, int idx, int depth) {
 
 // json.encode(value [, opts])   opts = { indent = n }
 static int l_json_encode(lua_State *L) {
-  json_enc_t e;
-  e.indent = 0;
+  int indent = 0;
 
   if (lua_gettop(L) >= 2 && lua_istable(L, 2)) {
     lua_getfield(L, 2, "indent");
-    if (!lua_isnil(L, -1)) {
-      int n = (int)luaL_checkinteger(L, -1);
-      if (n < 0) n = 0;
-      if (n > 8) n = 8;
-      e.indent = n;
-    }
+    if (!lua_isnil(L, -1)) indent = (int)luaL_checkinteger(L, -1);
     lua_pop(L, 1);
   }
 
-  luaL_buffinit(L, &e.buf);
-  enc_value(L, &e, 1, 0);
-  luaL_pushresult(&e.buf);
+  lua_json_encode_push(L, 1, indent);
   return 1;
 }
 
@@ -556,10 +675,12 @@ static int l_json_isNull(lua_State *L) {
 // Raises a Lua error on cycles / unsupported types, like json.encode.
 void lua_json_encode_push(lua_State *L, int idx, int indent) {
   json_enc_t e;
-  e.indent = (indent < 0) ? 0 : (indent > 8 ? 8 : indent);
-  luaL_buffinit(L, &e.buf);
+  // Resolved before the box goes on the stack, so a relative idx still refers
+  // to the caller's value.
+  idx = lua_absindex(L, idx);
+  enc_open(L, &e, indent);
   enc_value(L, &e, idx, 0);
-  luaL_pushresult(&e.buf);
+  enc_close(&e);
 }
 
 // Decodes `s` and pushes the value, returning true. On failure pushes nothing,

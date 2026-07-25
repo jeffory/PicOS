@@ -108,6 +108,61 @@ ok("dec_null_identity", withnull ~= nil and withnull.a == json.null)
 ok("enc_null", json.encode({ a = json.null }) == '{"a":null}',
    json.encode({ a = json.null }))
 
+-- ── documents larger than one buffer growth ──────────────────────────────────
+--
+-- Every case above fits in LUAL_BUFFERSIZE, which is why the encoder's original
+-- luaL_Buffer misuse went unnoticed: the bug only bites once the output has to
+-- grow. LUAL_BUFFERSIZE is 16 * sizeof(void*) * sizeof(lua_Number), which is
+-- 512 bytes in the simulator and 256 on the RP2350 (LUA_32BITS makes
+-- lua_Number a float), so these cases are deliberately kilobytes wide to force
+-- several growths on both. Neurogram's records.json crossed 256 bytes at
+-- roughly the seventh puzzle.
+
+-- A per-key map, the shape a records/progress file uses.
+local bigmap = {}
+for i = 1, 40 do
+    bigmap[("p_%08x"):format(i * 0x1234567)] =
+        { solved = true, secs = 40 + i, moves = 90 + i, plays = 2 }
+end
+roundtrip("rt_big_map", { v = 1, records = bigmap })
+
+-- Key count must survive, not just decodability: a truncated document can still
+-- parse if the damage lands on a boundary.
+local bigenc = json.encode({ v = 1, records = bigmap })
+local bigdec = json.decode(bigenc)
+local nkeys = 0
+if bigdec and type(bigdec.records) == "table" then
+    for _ in pairs(bigdec.records) do nkeys = nkeys + 1 end
+end
+ok("big_map_keeps_every_key", nkeys == 40, "got " .. nkeys .. " of 40")
+
+-- One long string: growth happens mid-value rather than between keys.
+local long = string.rep("cyberpunk-", 500)          -- 5000 bytes
+local ls = json.decode(json.encode({ s = long }))
+ok("rt_long_string", ls ~= nil and ls.s == long,
+   ls and ("len=" .. #tostring(ls.s)) or "decode failed")
+
+-- A long array, and nested tables deep inside a large document.
+local arr = {}
+for i = 1, 400 do arr[i] = i * 7 end
+local ad = json.decode(json.encode(arr))
+ok("rt_big_array", ad ~= nil and #ad == 400 and ad[400] == 2800,
+   ad and ("n=" .. #ad .. " last=" .. tostring(ad[400])) or "decode failed")
+
+local nested = {}
+for i = 1, 30 do
+    nested[i] = { id = i, name = ("row-%03d"):format(i),
+                  clues = { { 1, 2, 3 }, { 4, 5 }, { 6 } },
+                  meta = { tag = "abcdefghij", flag = (i % 2 == 0) } }
+end
+roundtrip("rt_big_nested", { v = 1, rows = nested })
+
+-- Pretty-printing multiplies the output size, so indent must grow safely too.
+local pbig = json.encode({ v = 1, records = bigmap }, { indent = 2 })
+local pdec = json.decode(pbig)
+ok("rt_big_indented", pdec ~= nil and type(pdec.records) == "table",
+   "len=" .. #pbig)
+
 -- ── malformed input returns nil,err rather than raising ───────────────────────
 
 local bad = {
