@@ -81,11 +81,14 @@ is kept (guinea pig sheets, house, clouds, hawk, hay pile, veggies, most props).
 | `sprites/heart.png` | 12×12 | Heart icon for HP (replaces procedural block hearts) |
 | `sprites/veggie_icon.png` | 12×12 | Small carrot icon for the veggie counter |
 
-### Audio (`sfx/*.wav`, 22050 Hz 16-bit mono PCM, each < 64 KB)
+### Audio (`sfx/*.wav`, synthesized at one uniform rate: 11025 Hz 16-bit mono PCM)
 jump, popcorn_jump, collect_carrot, collect_capsicum, collect_zucchini
 (3 pitched chime variants), collect_powerup, dash, squeak (charged "WHEEK"),
 damage, hawk_screech, water_burst, enemy_defeat, win_jingle, game_over,
-menu_move, menu_select, plus `bgm.wav` (~8 s chiptune loop, streamed).
+menu_move, menu_select — concatenated by the synth script into
+`sfx/bank1.wav` (+ `sfx/bank2.wav` only if the total exceeds 64 KB), with a
+generated Lua table of per-effect frame ranges — plus `sfx/bgm.wav`
+(~8 s chiptune loop, streamed via fileplayer, not size-capped).
 
 ## Code changes (`main.lua` and new `tools/`)
 
@@ -124,13 +127,46 @@ menu_move, menu_select, plus `bgm.wav` (~8 s chiptune loop, streamed).
 - Power-up timer bars kept, restyled to match.
 
 ### Sound engine
-- Replace `snd_*` playTone helpers with an SFX table: preload one
-  `pc.sound.sampleplayer` per effect at boot.
-- Priority under the 4-slot hardware cap: damage > collect > jump > ambience.
-  If all slots busy, lowest-priority in-flight effect is dropped.
-- BGM via `pc.sound.fileplayer` with loop: ~70% volume on title/win, ~40% in
-  gameplay. Stopped when leaving the app.
-- Graceful fallback to `playTone` per effect if its WAV fails to load.
+- **SFX bank(s)**: all short effects are concatenated into one (at most two)
+  bank WAVs — 11025 Hz 16-bit mono, each ≤64 KB — loaded ONCE at boot via an
+  explicit `pc.sound.sample` userdata (this path is leak-free; see firmware
+  notes). Each effect is a **play range** (`player:setPlayRange(start, end)`)
+  within the bank; up to 4 `sampleplayer`s share the bank for simultaneous
+  effects. `setRate` gives pitch variation where wanted.
+- **Uniform sample rate is mandatory**: `sound_player_play()` sets the shared
+  playback-timer interval from the last-played sample's native rate — mixed
+  rates drift. All synth output uses one rate.
+- Priority under the 4-player cap: damage > collect > jump > ambience; if all
+  players busy, the lowest-priority in-flight effect is dropped.
+- BGM via `pc.sound.fileplayer` (separate pool, streams from SD): loop via
+  `setFinishCallback` flag + replay on next update() (proven panels.lua
+  pattern; the callback fires from the opcode hook and must not call audio
+  APIs directly). ~70% volume title/win, ~40% in gameplay. Stopped on exit.
+- Graceful fallback to `playTone` per effect if the bank fails to load.
+
+## Firmware fixes proposed (small, separable commits; game works without them)
+
+Found while auditing the sound path for this design:
+
+1. **Sample leak (real bug, live in panels_demo too).** Samples loaded through
+   the path-string constructor (`pc.sound.sampleplayer("/x.wav")`) are never
+   freed: `sound_player_destroy()` only NULLs the pointer, and `sound_init()`
+   on app exit memsets the context, orphaning the umm_malloc'd PCM data
+   (permanent PSRAM leak) and its sample slot. After 4 distinct loads,
+   `sound_sample_create()` fails and SFX silently stop working.
+   Fix: add `owns_sample` to `sound_player_t`, set it in the bridge's
+   path-constructor, free the owned sample in `sound_player_destroy()`
+   (~8 lines across `sound.h`, `sound.c`, `lua_bridge_sound.c`).
+2. **Harden `sound_init()`** to umm_free any loaded sample data before
+   zeroing the context (reclaims leaked data at app exit regardless of path).
+3. **Raise `SOUND_MAX_SAMPLES` 4 → 8** (~400 B SRAM, trivial mixer cost) —
+   headroom for overlapping game SFX.
+4. Verified NOT needed: `drawTiled` (correct — gaps were purely tile art),
+   backdrop dimming (`pc.display.applyEffect("darken", factor)` already
+   exists), player-slot recycling (fields reset on create).
+5. Firmware changes are built and verified on hardware (sound driver is
+   stubbed in the simulator). Each lands as its own commit so the game never
+   depends on unreleased firmware.
 
 ## Pipeline & verification
 
