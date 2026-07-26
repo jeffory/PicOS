@@ -328,6 +328,11 @@ bool ui_confirm(const char *message) {
   const int DH = 44 + lines * 12 + 18; // border + text lines + hint
   const int DY = (FB_HEIGHT - DH) / 2;
 
+  // OS modals draw full-screen even if the app set a clip rect.
+  int saved_cx, saved_cy, saved_cw, saved_ch;
+  display_get_clip_rect(&saved_cx, &saved_cy, &saved_cw, &saved_ch);
+  display_clear_clip_rect();
+
   display_darken();
   display_fill_rect(DLG_X, DY, DLG_W, DH, DLG_BG);
   display_draw_rect(DLG_X, DY, DLG_W, DH, DLG_BORDER);
@@ -346,11 +351,11 @@ bool ui_confirm(const char *message) {
     dev_commands_poll();
     dev_commands_process();
     // Let a dev "exit" unwind this modal (cancel; the Lua hook handles exit).
-    if (dev_commands_wants_exit()) return false;
+    if (dev_commands_wants_exit()) { display_set_clip_rect(saved_cx, saved_cy, saved_cw, saved_ch); return false; }
     uint32_t btns = kbd_get_buttons_pressed();
     char c        = kbd_get_char();
-    if (btns & BTN_ESC || c == 'n' || c == 'N') return false;
-    if (c == '\n'       || c == 'y' || c == 'Y') return true;
+    if (btns & BTN_ESC || c == 'n' || c == 'N') { display_set_clip_rect(saved_cx, saved_cy, saved_cw, saved_ch); return false; }
+    if (c == '\n'       || c == 'y' || c == 'Y') { display_set_clip_rect(saved_cx, saved_cy, saved_cw, saved_ch); return true; }
     watchdog_update();
     sleep_ms(20);
   }

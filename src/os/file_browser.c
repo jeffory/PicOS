@@ -180,6 +180,11 @@ bool file_browser_show(const char *start_path, const char *root_path,
   // Darken the current framebuffer once to create the overlay backdrop
   display_darken();
 
+  // The browser draws full-screen even if the app set a clip rect.
+  int saved_cx, saved_cy, saved_cw, saved_ch;
+  display_get_clip_rect(&saved_cx, &saved_cy, &saved_cw, &saved_ch);
+  display_clear_clip_rect();
+
   int sel = 0;
   int scroll = 0;
   bool need_redraw = true;
@@ -203,7 +208,7 @@ bool file_browser_show(const char *start_path, const char *root_path,
     // Let a dev "exit" unwind this modal (cancel; the Lua hook handles exit).
     if (dev_commands_wants_exit()) {
       kbd_clear_state();
-      return false;
+      display_set_clip_rect(saved_cx, saved_cy, saved_cw, saved_ch); return false;
     }
     uint32_t pressed = kbd_get_buttons_pressed();
 
@@ -245,7 +250,7 @@ bool file_browser_show(const char *start_path, const char *root_path,
           // system_menu.c) so the caller's own button checks don't see a
           // stale Enter/Esc edge from this modal's input handling.
           kbd_clear_state();
-          return true;
+          display_set_clip_rect(saved_cx, saved_cy, saved_cw, saved_ch); return true;
         }
       }
     }
@@ -257,7 +262,7 @@ bool file_browser_show(const char *start_path, const char *root_path,
         // system_menu.c) so the caller's own button checks don't see a
         // stale Esc edge from this modal's input handling.
         kbd_clear_state();
-        return false; // already at the sandbox root — cancel
+        display_set_clip_rect(saved_cx, saved_cy, saved_cw, saved_ch); return false; // already at the sandbox root — cancel
       }
       char *last_slash = strrchr(cur_path, '/');
       if (last_slash && last_slash != cur_path) {
@@ -274,7 +279,7 @@ bool file_browser_show(const char *start_path, const char *root_path,
         // system_menu.c) so the caller's own button checks don't see a
         // stale Esc edge from this modal's input handling.
         kbd_clear_state();
-        return false;
+        display_set_clip_rect(saved_cx, saved_cy, saved_cw, saved_ch); return false;
       }
     }
 
