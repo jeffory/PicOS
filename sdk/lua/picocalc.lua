@@ -2566,6 +2566,14 @@ function picocalc.crypto.sha256(data) end
 ---@return string hash
 function picocalc.crypto.sha1(data) end
 
+---Compute the SHA-256 of a file, streamed from the SD card (never loaded
+---whole into memory). Returns a 64-character lowercase hex digest (not a
+---binary string, unlike `sha256`), or `nil, error` if the file cannot be read.
+---@param path string
+---@return string? hex
+---@return string? error
+function picocalc.crypto.sha256File(path) end
+
 ---Compute HMAC-SHA256. Returns a 32-byte binary string.
 ---@param key string
 ---@param data string
@@ -2713,6 +2721,58 @@ function picocalc.zip.list(zip_path) end
 ---@return boolean ok
 ---@return string? error
 function picocalc.zip.extract(zip_path, dest_dir, progress_fn) end
+
+---@class PicOSZipArchive : userdata
+local PicOSZipArchive = {}
+
+---Open a ZIP archive for random access without extracting it (API v5).
+---At most 4 archives may be open at once per app. Archives close via
+---`:close()`, the GC, `<close>` scope exit, or automatically at app exit.
+---@param path string
+---@return PicOSZipArchive? archive
+---@return string? error
+function picocalc.zip.open(path) end
+
+---List the archive's file entries (directory entries are skipped).
+---@return { name: string, size: integer, compressed_size: integer }[] entries
+function PicOSZipArchive:list() end
+
+---Return `true` if an entry with this exact name exists.
+---@param name string
+---@return boolean
+function PicOSZipArchive:exists(name) end
+
+---Return an entry's uncompressed size in bytes, or `nil` if it does not exist.
+---@param name string
+---@return integer? bytes
+function PicOSZipArchive:size(name) end
+
+---Decompress a whole entry into a Lua string. Fails if the entry exceeds
+---`max_len` (when given) or the 4 MB in-memory cap.
+---@param name string
+---@param max_len? integer Reject entries larger than this many bytes
+---@return string? data
+---@return string? error
+function PicOSZipArchive:read(name, max_len) end
+
+---Stream one entry to a file on the SD card (constant memory). Parent
+---directories are created as needed.
+---@param name string
+---@param dest_path string
+---@return boolean ok
+---@return string? error
+function PicOSZipArchive:extract(name, dest_path) end
+
+---Extract every file entry into a directory. Optional progress callback.
+---@param dest_dir string
+---@param progress_fn? fun(done: integer, total: integer)
+---@return boolean ok
+---@return string? error
+function PicOSZipArchive:extractAll(dest_dir, progress_fn) end
+
+---Close the archive and release its SD file handle. Double close is a no-op.
+---Also called by the GC and on `<close>` scope exit.
+function PicOSZipArchive:close() end
 
 -- =============================================================================
 -- picocalc.json  (JSON encode/decode)

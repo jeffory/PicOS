@@ -41,6 +41,8 @@ Output: `build/picocalc_os.uf2` — drag-and-drop to Pico in BOOTSEL mode.
 ### Debug
 USB serial at 115200 baud. App log calls appear as `[APP] message`. Lua errors display on-screen with stack trace (dismiss with **Esc**).
 
+To stage a multi-file app on hardware or the simulator, prefer the `push_app` MCP tool (`tools/picos_mcp.py`): it ships the whole directory as one ZIP and extracts it on-device via the `unzip <zip> <dest>` dev command (`rm <path>` cleans up), far faster than per-file transfers for asset-heavy apps.
+
 There is no automated test suite or linter.
 
 ## Architecture
@@ -85,8 +87,8 @@ main()
 - `g_api.graphics` — image loading and drawing (Phase 2; Lua exposes as `picocalc.graphics.image`)
 - `g_api.video` — MJPEG video playback (Phase 2; Lua exposes as `picocalc.video`)
 - `g_api.modplayer` — MOD tracker music (Phase 2; Lua exposes as `picocalc.modplayer`)
-- `g_api.zip` — ZIP extraction (Lua exposes as `picocalc.zip`)
-- `g_api.version` — 1 = Phase 1, 2 = Phase 2, 3 = `fs->browse`, 4 = clip rect + mode-7 plane
+- `g_api.zip` — ZIP extraction plus read-in-place archive handles (Lua exposes as `picocalc.zip`)
+- `g_api.version` — 1 = Phase 1, 2 = Phase 2, 3 = `fs->browse`, 4 = clip rect + mode-7 plane, 5 = zip read-in-place handles
 
 > ⚠️ **Config naming**: in Lua, `picocalc.config` (alias `picocalc.appconfig`) is the **per-app** store (`/data/<APP_ID>/config.json`); `picocalc.sysconfig` is the **system-wide** store (`/system/config.json`). Older docs had these inverted.
 
@@ -283,6 +285,8 @@ SD card auto-creates `/data/` and `/system/` on first mount.
 
 ## Lua API Reference
 
+System Lua libraries live in `/system/lib/` and load via `picocalc.sys.loadlib(name)`: `system/lib/download.lua` provides `download.toFile(url, dest, opts)` (blocking HTTP(S)-to-SD streaming download), and `picocalc.crypto.sha256File(path)` returns a file's SHA-256 as lowercase hex for checksum verification.
+
 ### picocalc.network
 
 ```lua
@@ -323,7 +327,7 @@ Status constants: `picocalc.network.kStatusNotConnected` (0), `kStatusConnected`
 - Display post-effects (`effectInvert`…`effectPosterize`) are no-ops on the native (Unicorn) path; Lua-side effects work.
 - `setScrollArea`/`setScrollOffset` are no-ops (no LCD registers).
 - The launcher caches the app list at boot — newly staged apps need a sim restart.
-- Everything else (zip, modplayer, display clip rect, drawPlane, tilemap, sprites) mirrors firmware, including `g_api.version = 4`.
+- Everything else (zip including read-in-place archive handles, modplayer, display clip rect, drawPlane, tilemap, sprites) mirrors firmware. Note: `simulator/main.c` still reports `g_api.version = 4` even though the v5 zip trampolines are wired (firmware reports 5).
 
 ## Not Yet Implemented
 
