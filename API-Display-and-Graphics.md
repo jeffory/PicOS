@@ -433,30 +433,67 @@ local charHeight = picocalc.display.getFontHeight()
 ---
 
 #### `picocalc.display.setScrollArea(top, height, bottom)`
-Configure the hardware vertical scroll area on the LCD.
+Configure the LCD's hardware vertical scroll area (ST7365P VSCRDEF).
+
+The controller's frame memory is 480 lines; the visible panel shows lines
+0..319. The three values must sum to **480**. The standard configuration is
+`setScrollArea(0, 320, 160)`, which turns the whole visible panel into a
+mod-320 ring: with an offset set, screen row `L` displays frame-memory row
+`(offset + L) % 320`.
 
 - **Parameters:**
-  - `top` (number): Fixed top area in pixels
-  - `height` (number): Scrolling area height in pixels
-  - `bottom` (number): Fixed bottom area in pixels
+  - `top` (number): Fixed rows at the top of frame memory
+  - `height` (number): Scrolling area height in rows
+  - `bottom` (number): Fixed rows at the bottom of frame memory
 - **Returns:** None
 
 ```lua
--- Set up a scrolling area in the middle of the screen
-picocalc.display.setScrollArea(40, 240, 40)
+-- Ring the whole visible panel over its 320 frame-memory rows
+picocalc.display.setScrollArea(0, 320, 160)
 ```
 
 ---
 
 #### `picocalc.display.setScrollOffset(offset)`
-Set the hardware vertical scroll offset.
+Set the hardware vertical scroll offset (ST7365P VSCRSADD): the frame-memory
+row displayed at the top of the scroll area. The remap is instant and moves
+no pixel data — combined with `flushRows` for the newly revealed strip, this
+scrolls full-screen content for the cost of a few rows per frame
+(`panels.lua` does exactly this for rigid scroll sequences).
+
+`0` restores the identity mapping. The setter waits out any in-flight flush
+DMA before touching the register, so it is safe immediately after
+`flush`/`flushRows`.
 
 - **Parameters:**
-  - `offset` (number): Scroll offset in pixels
+  - `offset` (number): Frame-memory row shown at the top of the scroll area
 - **Returns:** None
 
 ```lua
-picocalc.display.setScrollOffset(scrollPos)
+picocalc.display.setScrollOffset(scrollPos % 320)
+```
+
+---
+
+#### `picocalc.display.getScrollOffset()`
+Return the last offset written with `setScrollOffset`, plus a write counter
+(the LCD register itself is write-only).
+
+The OS resets the offset to 0 whenever it takes over the screen (system
+menu, app switch) and does **not** restore it. An app driving hardware
+scroll must poll this each frame and repaint when either value changes
+unexpectedly — the counter catches a foreign write even when the value
+matches what the app last set.
+
+- **Returns:**
+  - `offset` (number): Last written scroll offset
+  - `writeCount` (number): Total register writes since boot
+
+```lua
+local off, gen = picocalc.display.getScrollOffset()
+if off ~= myOffset or gen ~= myGen then
+    -- someone else (system menu) touched the register: repaint
+end
 ```
 
 ---

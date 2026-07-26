@@ -238,7 +238,44 @@ Global tuning table — assign before (or after) `Panels.new`; most values are r
 | `choiceColor` | `rgb(255, 210, 80)` | Choice-menu highlight colour. |
 | `transitionMs` | `450` | Fade transition duration. |
 | `idleSkip` | `true` | Skip draw+flush on provably static frames (no motion, no pending triggers). |
+| `useHwScroll` | `true` | LCD hardware scrolling for rigid vertical scroll sequences (see below). Set `false` to force the software path. |
 | `volume` | `nil` | Reserved; currently unused (`nil` = leave the system volume alone). |
+
+---
+
+## Hardware-accelerated scrolling
+
+Vertical `"scroll"` sequences whose panels are **rigid** scroll in the LCD
+silicon instead of being redrawn: the library lays the sequence into the
+panel's frame memory as a mod-320 ring, and each frame draws only the newly
+revealed strip (a few rows) before bumping the scroll register
+(`display.setScrollOffset`). Full-screen blits and the 205 KB frame DMA
+disappear from the loop, so scrolling is smooth regardless of how heavy the
+artwork is.
+
+A panel is rigid when its pixels depend only on its position — concretely,
+when it has **no**:
+
+- layer `parallax` greater than 0 (`0`/omitted is fine)
+- `animate` blocks, `images` frame arrays, or layer `scrollTrigger`s
+- `shake`/`blink` effects (panel or layer)
+- `renderFunction` / `updateFunction`
+
+Audio `scrollTrigger`s are fine — they change no pixels and are evaluated
+against the true scroll position every frame. Choices are fine too: the
+choice UI exits the fast path when it opens. If any panel in a sequence is
+not rigid, the whole sequence uses the software path; nothing changes except
+frame rate. The demo's "The Descent" sequence is a worked example.
+
+Embedders driving `Panels.new` directly must respect `comic.drewThisFrame`:
+when it is `false`, the library flushed its own strips and a full
+`display.flush()` would scramble the ring (see the header example in
+`panels.lua`).
+
+On-device screenshot tools read the draw framebuffer, which holds the ring
+layout while the fast path is active — captures of a scrolling sequence look
+rotated. The simulator composes screenshots through its scroll emulation, so
+sim captures show the true screen.
 
 ---
 
