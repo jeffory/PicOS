@@ -26,6 +26,10 @@ static uint16_t g_front_buffer[320 * 320];
 static uint16_t g_back_buffer[320 * 320];
 static int g_current_buffer = 0;
 
+// Clip rect state (mirrors src/drivers/display.c)
+static int s_clip_x0 = 0, s_clip_y0 = 0;
+static int s_clip_x1 = 319, s_clip_y1 = 319;
+
 void display_darken(void) {
     // Copy front buffer to back buffer with darkening
     uint16_t* front = g_current_buffer == 0 ? g_front_buffer : g_back_buffer;
@@ -43,6 +47,11 @@ uint16_t* display_get_back_buffer(void) {
 
 void display_fill_rect(int x, int y, int w, int h, uint16_t color) {
     uint16_t* fb = display_get_back_buffer();
+    if (x < s_clip_x0) { w -= (s_clip_x0 - x); x = s_clip_x0; }
+    if (y < s_clip_y0) { h -= (s_clip_y0 - y); y = s_clip_y0; }
+    if (x + w - 1 > s_clip_x1) w = s_clip_x1 - x + 1;
+    if (y + h - 1 > s_clip_y1) h = s_clip_y1 - y + 1;
+    if (w <= 0 || h <= 0) return;
     for (int dy = y; dy < y + h && dy < 320; dy++) {
         for (int dx = x; dx < x + w && dx < 320; dx++) {
             if (dx >= 0 && dy >= 0) fb[dy * 320 + dx] = color;
@@ -405,7 +414,7 @@ void display_clear(uint16_t color) {
 void display_set_brightness(uint8_t brightness) { (void)brightness; }
 
 void display_set_pixel(int x, int y, uint16_t color) {
-    if (x >= 0 && x < 320 && y >= 0 && y < 320) {
+    if (x >= s_clip_x0 && x <= s_clip_x1 && y >= s_clip_y0 && y <= s_clip_y1) {
         display_get_back_buffer()[y * 320 + x] = color;
     }
 }
@@ -510,8 +519,31 @@ void display_fill_triangle(int x0, int y0, int x1, int y1, int x2, int y2, uint1
 void display_draw_textured_column(int x, int y0, int y1,
                                   const uint16_t *tex, int tex_w, int tex_h,
                                   int tex_x, int tex_y0, int tex_y1) {
-    (void)tex; (void)tex_w; (void)tex_h; (void)tex_x; (void)tex_y0; (void)tex_y1;
-    display_draw_line(x, y0, x, y1, 0x7BEF); // gray stub
+    if (!tex || y0 > y1) return;
+    if (tex_x < 0 || tex_x >= tex_w) return;
+    if (x < s_clip_x0 || x > s_clip_x1) return;
+
+    int screen_h = y1 - y0 + 1;
+    int tex_span = tex_y1 - tex_y0 + 1;
+    if (screen_h <= 0 || tex_span <= 0) return;
+
+    uint32_t step = ((uint32_t)tex_span << 16) / (uint32_t)screen_h;
+    uint32_t tex_pos = (uint32_t)tex_y0 << 16;
+    if (y0 < s_clip_y0) {
+        tex_pos += step * (uint32_t)(s_clip_y0 - y0);
+        y0 = s_clip_y0;
+    }
+    if (y1 > s_clip_y1) y1 = s_clip_y1;
+    if (y0 > y1) return;
+
+    uint16_t *fb = display_get_back_buffer();
+    for (int y = y0; y <= y1; y++) {
+        int ty = (int)(tex_pos >> 16);
+        if (ty < 0) ty = 0;
+        if (ty >= tex_h) ty = tex_h - 1;
+        fb[y * 320 + x] = tex[ty * tex_w + tex_x];
+        tex_pos += step;
+    }
 }
 void display_fill_hline(int y, int x0, int x1, uint16_t color) {
     if (x0 > x1) { int t = x0; x0 = x1; x1 = t; }
@@ -525,7 +557,94 @@ void display_fill_vline_gradient(int x, int y0, int y1, uint16_t color_top, uint
     (void)color_bottom;
     display_draw_line(x, y0, x, y1, color_top);
 }
-void display_set_scroll_area(int y, int h) { (void)y; (void)h; }
+// ── Clip rect API (state declared at top of file) ────────────────────────────
+
+void display_set_clip_rect(int x, int y, int w, int h) {
+    int x1 = x + w - 1;
+    int y1 = y + h - 1;
+    if (x < 0) x = 0;
+    if (y < 0) y = 0;
+    if (x1 > 319) x1 = 319;
+    if (y1 > 319) y1 = 319;
+    if (x1 < x || y1 < y) { x = 0; y = 0; x1 = -1; y1 = -1; }
+    s_clip_x0 = x; s_clip_y0 = y;
+    s_clip_x1 = x1; s_clip_y1 = y1;
+}
+
+void display_get_clip_rect(int *x, int *y, int *w, int *h) {
+    if (x) *x = s_clip_x0;
+    if (y) *y = s_clip_y0;
+    if (w) *w = s_clip_x1 - s_clip_x0 + 1;
+    if (h) *h = s_clip_y1 - s_clip_y0 + 1;
+}
+
+void display_clear_clip_rect(void) {
+    s_clip_x0 = 0; s_clip_y0 = 0;
+    s_clip_x1 = 319; s_clip_y1 = 319;
+}
+
+// ── Mode 7 perspective ground plane (host-endian framebuffer, no byte swap) ──
+void display_draw_plane(const uint16_t *tex, int tex_w, int tex_h,
+                        float cam_x, float cam_y, float cam_z,
+                        float angle, int horizon_y, float scale) {
+    if (!tex || tex_w <= 0 || tex_h <= 0 || cam_z <= 0.0f) return;
+    if (scale <= 0.0f) scale = 1.0f;
+
+    const bool pow2 = ((tex_w & (tex_w - 1)) == 0) && ((tex_h & (tex_h - 1)) == 0);
+    const uint32_t mask_w = (uint32_t)tex_w - 1;
+    const uint32_t mask_h = (uint32_t)tex_h - 1;
+
+    const float sin_a = sinf(angle);
+    const float cos_a = cosf(angle);
+    const float fwd_x = -sin_a, fwd_y = cos_a;
+    const float right_x = cos_a, right_y = sin_a;
+
+    int y0 = horizon_y + 1;
+    if (y0 < s_clip_y0) y0 = s_clip_y0;
+    if (y0 < 0) y0 = 0;
+    int y1 = s_clip_y1 > 319 ? 319 : s_clip_y1;
+    if (y0 > y1) return;
+
+    const int cx0 = s_clip_x0 < 0 ? 0 : s_clip_x0;
+    const int cx1 = s_clip_x1 > 319 ? 319 : s_clip_x1;
+    uint16_t *fb = display_get_back_buffer();
+
+    for (int y = y0; y <= y1; y++) {
+        const int p = y - horizon_y;
+        const float z = cam_z * scale / (float)p;
+        const float center_x = cam_x + fwd_x * z;
+        const float center_y = cam_y + fwd_y * z;
+        const float step_x = right_x * z / scale;
+        const float step_y = right_y * z / scale;
+
+        int32_t fx = (int32_t)((center_x + (cx0 - 160) * step_x) * 65536.0f);
+        int32_t fy = (int32_t)((center_y + (cx0 - 160) * step_y) * 65536.0f);
+        const int32_t dx = (int32_t)(step_x * 65536.0f);
+        const int32_t dy = (int32_t)(step_y * 65536.0f);
+
+        uint16_t *row = &fb[y * 320 + cx0];
+        if (pow2) {
+            for (int x = cx0; x <= cx1; x++) {
+                *row++ = tex[((fy >> 16) & mask_h) * tex_w + ((fx >> 16) & mask_w)];
+                fx += dx;
+                fy += dy;
+            }
+        } else {
+            for (int x = cx0; x <= cx1; x++) {
+                int tx = fx >> 16, ty = fy >> 16;
+                if (tx < 0) tx = 0; else if (tx >= tex_w) tx = tex_w - 1;
+                if (ty < 0) ty = 0; else if (ty >= tex_h) ty = tex_h - 1;
+                *row++ = tex[ty * tex_w + tx];
+                fx += dx;
+                fy += dy;
+            }
+        }
+    }
+}
+
+void display_set_scroll_area(int top_fixed, int scroll_height, int bottom_fixed) {
+    (void)top_fixed; (void)scroll_height; (void)bottom_fixed;
+}
 void display_set_scroll_offset(int offset) { (void)offset; }
 void display_set_transparent_color(uint16_t color) { (void)color; }
 uint16_t display_get_transparent_color(void) { return 0; }

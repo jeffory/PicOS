@@ -129,18 +129,16 @@ function picocalc.display.fillHLine(y, x0, x1, color) end
 ---@param color integer RGB565
 function picocalc.display.fillTriangle(x0, y0, x1, y1, x2, y2, color) end
 
----Draw a textured vertical column (raycasting wall slice). tex_x selects the
----texture column; tex_y0/tex_y1 select the vertical source range.
+---Draw a textured vertical column (raycasting wall slice) from an image.
+---tex_x selects the texture column; tex_y0/tex_y1 select the source row range.
 ---@param x integer Destination column
 ---@param y0 integer Destination start y
 ---@param y1 integer Destination end y
----@param tex integer[]|string Texture pixels (RGB565 array)
----@param tex_w integer Texture width
----@param tex_h integer Texture height
+---@param tex PicOSImage Texture image
 ---@param tex_x integer Texture column
 ---@param tex_y0 integer Texture start row
 ---@param tex_y1 integer Texture end row
-function picocalc.display.drawTexturedColumn(x, y0, y1, tex, tex_w, tex_h, tex_x, tex_y0, tex_y1) end
+function picocalc.display.drawTexturedColumn(x, y0, y1, tex, tex_x, tex_y0, tex_y1) end
 
 ---Fill a vertical line with a two-colour gradient (sky/floor shading).
 ---@param x integer
@@ -166,6 +164,38 @@ function picocalc.display.fillVLineGradient(x, y0, y1, color_top, color_bottom) 
 ---@param name string Effect name (see above)
 ---@param ... any Effect arguments
 function picocalc.display.applyEffect(name, ...) end
+
+---Restrict all drawing primitives to a rectangle (split-screen, panels,
+---partial redraw). `clear()` and post-effects are NOT clipped.
+---@param x integer
+---@param y integer
+---@param w integer
+---@param h integer
+function picocalc.display.setClipRect(x, y, w, h) end
+
+---Return the current clip rectangle.
+---@return integer x
+---@return integer y
+---@return integer w
+---@return integer h
+function picocalc.display.getClipRect() end
+
+---Restore the clip rectangle to the full screen.
+function picocalc.display.clearClipRect() end
+
+---Render a Mode 7-style perspective ground plane from an image (SNES F-Zero /
+---Mario Kart floor). The camera sits at (cam_x, cam_y) in texture space,
+---`cam_z` units above the plane, facing `angle` radians (0 = toward +Y).
+---Rows below `horizon_y` are filled. Power-of-two texture dimensions wrap
+---seamlessly; other sizes clamp at edges. Respects the clip rect.
+---@param tex PicOSImage Ground texture
+---@param cam_x number Camera x in texture space
+---@param cam_y number Camera y in texture space
+---@param cam_z number Camera height above the plane
+---@param angle? number Facing in radians (default 0)
+---@param horizon_y? integer Horizon scanline (default 120)
+---@param scale? number FOV/zoom tuning, larger = further view (default 1.0)
+function picocalc.display.drawPlane(tex, cam_x, cam_y, cam_z, angle, horizon_y, scale) end
 
 ---Configure the hardware scroll area (for smooth vertical scrolling).
 ---@param top integer Lines at the top that do not scroll
@@ -1756,7 +1786,7 @@ function PicOSSprite:alphaCollision(other) end
 
 ---Move toward (goalX, goalY), sliding along any collision rects in the way.
 ---Returns the actual position reached plus a list of collisions; each
----collision is `{sprite, other, type, normal, touch, move}`.
+---collision is `{sprite, other, type, x, y, normal = {x, y}, touch}`.
 ---@param goalX integer
 ---@param goalY integer
 ---@return integer actualX

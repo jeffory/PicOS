@@ -67,6 +67,17 @@ extern int  display_draw_text(int x, int y, const char *text, uint16_t fg, uint1
 extern void display_flush(void);
 extern void display_set_brightness(uint8_t brightness);
 extern uint16_t *display_get_back_buffer(void);
+extern void display_fill_vline(int x, int y0, int y1, uint16_t color);
+extern void display_fill_hline(int y, int x0, int x1, uint16_t color);
+extern void display_fill_triangle(int x0, int y0, int x1, int y1, int x2, int y2, uint16_t color);
+extern void display_draw_textured_column(int x, int y0, int y1, const uint16_t *tex, int tex_w, int tex_h, int tex_x, int tex_y0, int tex_y1);
+extern void display_fill_vline_gradient(int x, int y0, int y1, uint16_t color_top, uint16_t color_bottom);
+extern void display_set_clip_rect(int x, int y, int w, int h);
+extern void display_get_clip_rect(int *x, int *y, int *w, int *h);
+extern void display_clear_clip_rect(void);
+extern void display_set_scroll_area(int top_fixed, int scroll_height, int bottom_fixed);
+extern void display_set_scroll_offset(int offset);
+extern void display_draw_plane(const uint16_t *tex, int tex_w, int tex_h, float cam_x, float cam_y, float cam_z, float angle, int horizon_y, float scale);
 
 // Input functions (from keyboard stub)
 extern uint32_t kbd_get_buttons(void);
@@ -296,7 +307,7 @@ static uint32_t read_stack_arg(uc_engine *uc, int index) {
 // Each sub-table's first slot. Slots within a sub-table are sequential.
 // The offsets here define the struct layout in emulated memory.
 enum {
-    // picocalc_display_t (25 functions)
+    // picocalc_display_t (36 functions incl. API v4 clip-rect/mode-7 slots)
     SLOT_DISPLAY_CLEAR = 0,
     SLOT_DISPLAY_SET_PIXEL,
     SLOT_DISPLAY_FILL_RECT,
@@ -323,6 +334,19 @@ enum {
     SLOT_DISPLAY_EFFECT_DITHER,
     SLOT_DISPLAY_EFFECT_SCANLINE,
     SLOT_DISPLAY_EFFECT_POSTERIZE,
+    // Raycasting primitives (must match picocalc_display_t order)
+    SLOT_DISPLAY_FILL_VLINE,
+    SLOT_DISPLAY_DRAW_TEXTURED_COLUMN,
+    SLOT_DISPLAY_FILL_VLINE_GRADIENT,
+    // API v4 additions
+    SLOT_DISPLAY_SET_CLIP_RECT,
+    SLOT_DISPLAY_GET_CLIP_RECT,
+    SLOT_DISPLAY_CLEAR_CLIP_RECT,
+    SLOT_DISPLAY_FILL_HLINE,
+    SLOT_DISPLAY_FILL_TRIANGLE,
+    SLOT_DISPLAY_SET_SCROLL_AREA,
+    SLOT_DISPLAY_SET_SCROLL_OFFSET,
+    SLOT_DISPLAY_DRAW_PLANE,
     SLOT_DISPLAY_END,
 
     // picocalc_input_t (4 functions)
@@ -821,6 +845,129 @@ static void tramp_display_get_back_buffer(uc_engine *uc) {
 static void tramp_display_effect_stub(uc_engine *uc) {
     (void)uc;
     // Effect stubs — most display effects are non-critical
+}
+
+// Helper: reinterpret a 32-bit register/stack value as float (softfp ABI)
+static float u32_as_float(uint32_t v) { float f; memcpy(&f, &v, 4); return f; }
+
+static void tramp_display_fill_vline(uc_engine *uc) {
+    int x = (int)read_reg(uc, UC_ARM_REG_R0);
+    int y0 = (int)read_reg(uc, UC_ARM_REG_R1);
+    int y1 = (int)read_reg(uc, UC_ARM_REG_R2);
+    uint16_t color = (uint16_t)read_reg(uc, UC_ARM_REG_R3);
+    display_fill_vline(x, y0, y1, color);
+    s_back_buffer_dirty = 1;
+}
+
+static void tramp_display_fill_hline(uc_engine *uc) {
+    int y = (int)read_reg(uc, UC_ARM_REG_R0);
+    int x0 = (int)read_reg(uc, UC_ARM_REG_R1);
+    int x1 = (int)read_reg(uc, UC_ARM_REG_R2);
+    uint16_t color = (uint16_t)read_reg(uc, UC_ARM_REG_R3);
+    display_fill_hline(y, x0, x1, color);
+    s_back_buffer_dirty = 1;
+}
+
+static void tramp_display_fill_triangle(uc_engine *uc) {
+    int x0 = (int)read_reg(uc, UC_ARM_REG_R0);
+    int y0 = (int)read_reg(uc, UC_ARM_REG_R1);
+    int x1 = (int)read_reg(uc, UC_ARM_REG_R2);
+    int y1 = (int)read_reg(uc, UC_ARM_REG_R3);
+    int x2 = (int)read_stack_arg(uc, 0);
+    int y2 = (int)read_stack_arg(uc, 1);
+    uint16_t color = (uint16_t)read_stack_arg(uc, 2);
+    display_fill_triangle(x0, y0, x1, y1, x2, y2, color);
+    s_back_buffer_dirty = 1;
+}
+
+static void tramp_display_draw_textured_column(uc_engine *uc) {
+    int x = (int)read_reg(uc, UC_ARM_REG_R0);
+    int y0 = (int)read_reg(uc, UC_ARM_REG_R1);
+    int y1 = (int)read_reg(uc, UC_ARM_REG_R2);
+    uint32_t tex_addr = read_reg(uc, UC_ARM_REG_R3);
+    int tex_w = (int)read_stack_arg(uc, 0);
+    int tex_h = (int)read_stack_arg(uc, 1);
+    int tex_x = (int)read_stack_arg(uc, 2);
+    int tex_y0 = (int)read_stack_arg(uc, 3);
+    int tex_y1 = (int)read_stack_arg(uc, 4);
+
+    int pixels = tex_w * tex_h;
+    if (pixels <= 0 || pixels > 2048 * 2048) return;
+    uint16_t *buf = (uint16_t *)malloc((size_t)pixels * 2);
+    if (!buf) return;
+    uc_mem_read(uc, tex_addr, buf, (size_t)pixels * 2);
+    display_draw_textured_column(x, y0, y1, buf, tex_w, tex_h, tex_x, tex_y0, tex_y1);
+    free(buf);
+    s_back_buffer_dirty = 1;
+}
+
+static void tramp_display_fill_vline_gradient(uc_engine *uc) {
+    int x = (int)read_reg(uc, UC_ARM_REG_R0);
+    int y0 = (int)read_reg(uc, UC_ARM_REG_R1);
+    int y1 = (int)read_reg(uc, UC_ARM_REG_R2);
+    uint16_t color_top = (uint16_t)read_reg(uc, UC_ARM_REG_R3);
+    uint16_t color_bottom = (uint16_t)read_stack_arg(uc, 0);
+    display_fill_vline_gradient(x, y0, y1, color_top, color_bottom);
+    s_back_buffer_dirty = 1;
+}
+
+static void tramp_display_set_clip_rect(uc_engine *uc) {
+    int x = (int)read_reg(uc, UC_ARM_REG_R0);
+    int y = (int)read_reg(uc, UC_ARM_REG_R1);
+    int w = (int)read_reg(uc, UC_ARM_REG_R2);
+    int h = (int)read_reg(uc, UC_ARM_REG_R3);
+    display_set_clip_rect(x, y, w, h);
+}
+
+static void tramp_display_get_clip_rect(uc_engine *uc) {
+    uint32_t px = read_reg(uc, UC_ARM_REG_R0);
+    uint32_t py = read_reg(uc, UC_ARM_REG_R1);
+    uint32_t pw = read_reg(uc, UC_ARM_REG_R2);
+    uint32_t ph = read_reg(uc, UC_ARM_REG_R3);
+    int x, y, w, h;
+    display_get_clip_rect(&x, &y, &w, &h);
+    if (px) uc_mem_write(uc, px, &x, 4);
+    if (py) uc_mem_write(uc, py, &y, 4);
+    if (pw) uc_mem_write(uc, pw, &w, 4);
+    if (ph) uc_mem_write(uc, ph, &h, 4);
+}
+
+static void tramp_display_clear_clip_rect(uc_engine *uc) {
+    (void)uc;
+    display_clear_clip_rect();
+}
+
+static void tramp_display_set_scroll_area(uc_engine *uc) {
+    int top_fixed = (int)read_reg(uc, UC_ARM_REG_R0);
+    int scroll_height = (int)read_reg(uc, UC_ARM_REG_R1);
+    int bottom_fixed = (int)read_reg(uc, UC_ARM_REG_R2);
+    display_set_scroll_area(top_fixed, scroll_height, bottom_fixed);
+}
+
+static void tramp_display_set_scroll_offset(uc_engine *uc) {
+    int offset = (int)read_reg(uc, UC_ARM_REG_R0);
+    display_set_scroll_offset(offset);
+}
+
+static void tramp_display_draw_plane(uc_engine *uc) {
+    uint32_t tex_addr = read_reg(uc, UC_ARM_REG_R0);
+    int tex_w = (int)read_reg(uc, UC_ARM_REG_R1);
+    int tex_h = (int)read_reg(uc, UC_ARM_REG_R2);
+    float cam_x = u32_as_float(read_reg(uc, UC_ARM_REG_R3));
+    float cam_y = u32_as_float(read_stack_arg(uc, 0));
+    float cam_z = u32_as_float(read_stack_arg(uc, 1));
+    float angle = u32_as_float(read_stack_arg(uc, 2));
+    int horizon_y = (int)read_stack_arg(uc, 3);
+    float scale = u32_as_float(read_stack_arg(uc, 4));
+
+    int pixels = tex_w * tex_h;
+    if (pixels <= 0 || pixels > 2048 * 2048) return;
+    uint16_t *buf = (uint16_t *)malloc((size_t)pixels * 2);
+    if (!buf) return;
+    uc_mem_read(uc, tex_addr, buf, (size_t)pixels * 2);
+    display_draw_plane(buf, tex_w, tex_h, cam_x, cam_y, cam_z, angle, horizon_y, scale);
+    free(buf);
+    s_back_buffer_dirty = 1;
 }
 
 // =============================================================================
@@ -2709,6 +2856,17 @@ void unicorn_tramp_init(uc_engine *uc) {
     s_dispatch[SLOT_DISPLAY_EFFECT_DITHER]  = tramp_display_effect_stub;
     s_dispatch[SLOT_DISPLAY_EFFECT_SCANLINE]= tramp_display_effect_stub;
     s_dispatch[SLOT_DISPLAY_EFFECT_POSTERIZE]= tramp_display_effect_stub;
+    s_dispatch[SLOT_DISPLAY_FILL_VLINE]      = tramp_display_fill_vline;
+    s_dispatch[SLOT_DISPLAY_DRAW_TEXTURED_COLUMN] = tramp_display_draw_textured_column;
+    s_dispatch[SLOT_DISPLAY_FILL_VLINE_GRADIENT] = tramp_display_fill_vline_gradient;
+    s_dispatch[SLOT_DISPLAY_SET_CLIP_RECT]   = tramp_display_set_clip_rect;
+    s_dispatch[SLOT_DISPLAY_GET_CLIP_RECT]   = tramp_display_get_clip_rect;
+    s_dispatch[SLOT_DISPLAY_CLEAR_CLIP_RECT] = tramp_display_clear_clip_rect;
+    s_dispatch[SLOT_DISPLAY_FILL_HLINE]      = tramp_display_fill_hline;
+    s_dispatch[SLOT_DISPLAY_FILL_TRIANGLE]   = tramp_display_fill_triangle;
+    s_dispatch[SLOT_DISPLAY_SET_SCROLL_AREA] = tramp_display_set_scroll_area;
+    s_dispatch[SLOT_DISPLAY_SET_SCROLL_OFFSET] = tramp_display_set_scroll_offset;
+    s_dispatch[SLOT_DISPLAY_DRAW_PLANE]      = tramp_display_draw_plane;
 
     // Input
     s_dispatch[SLOT_INPUT_GET_BUTTONS]         = tramp_input_get_buttons;
@@ -3012,7 +3170,7 @@ static uint32_t write_func_table(uc_engine *uc, uint32_t base_addr,
 
 void unicorn_build_api_struct(uc_engine *uc, uint32_t api_base, uint32_t tramp_base) {
     // Layout: PicoCalcAPI struct at api_base, followed by sub-tables
-    // PicoCalcAPI has 17 pointer fields + 1 uint32_t (version)
+    // PicoCalcAPI has 19 pointer fields + 1 uint32_t (version)
     uint32_t api_struct_size = 20 * 4;  // 19 pointers + version
 
     // Sub-tables start after the main struct
@@ -3026,7 +3184,7 @@ void unicorn_build_api_struct(uc_engine *uc, uint32_t api_base, uint32_t tramp_b
     uint32_t input_addr = sub_base;
     sub_base = write_func_table(uc, sub_base, tramp_base, SLOT_INPUT_GET_BUTTONS, 4);
 
-    // picocalc_display_t (26 function pointers — count from enum)
+    // picocalc_display_t (count from enum — keep in struct order!)
     uint32_t display_addr = sub_base;
     uint32_t display_count = SLOT_DISPLAY_END - SLOT_DISPLAY_CLEAR;
     sub_base = write_func_table(uc, sub_base, tramp_base, SLOT_DISPLAY_CLEAR, display_count);
@@ -3168,7 +3326,7 @@ void unicorn_build_api_struct(uc_engine *uc, uint32_t api_base, uint32_t tramp_b
     write32(uc, api_base + 64, video_addr);
     write32(uc, api_base + 68, modplayer_addr);
     write32(uc, api_base + 72, zip_addr);
-    write32(uc, api_base + 76, 3);  // version = 3 (fs->browse)
+    write32(uc, api_base + 76, 4);  // version = 4 (clip rect + mode-7 plane)
 
-    printf("[UNICORN] PicoCalcAPI struct at 0x%08x, version=3\n", api_base);
+    printf("[UNICORN] PicoCalcAPI struct at 0x%08x, version=4\n", api_base);
 }

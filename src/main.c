@@ -421,6 +421,14 @@ static picocalc_display_t s_display_impl = {
     .fillVLine = display_fill_vline,
     .drawTexturedColumn = display_draw_textured_column,
     .fillVLineGradient = display_fill_vline_gradient,
+    .setClipRect = display_set_clip_rect,
+    .getClipRect = display_get_clip_rect,
+    .clearClipRect = display_clear_clip_rect,
+    .fillHLine = display_fill_hline,
+    .fillTriangle = display_fill_triangle,
+    .setScrollArea = display_set_scroll_area,
+    .setScrollOffset = display_set_scroll_offset,
+    .drawPlane = display_draw_plane,
 };
 
 static uint32_t sys_getTimeMs(void) {
@@ -1700,7 +1708,7 @@ int main(void) {
   g_api.video       = &s_video_impl;
   g_api.modplayer   = &s_modplayer_impl;
   g_api.zip         = &s_zip_impl;
-  g_api.version     = 3;
+  g_api.version     = 4;  // 4 = clip rect + mode-7 plane + native display parity
   // fs wired after SD card init
 
   // Bring up the QMI PSRAM in quad (QPI) mode before any PSRAM pointers are

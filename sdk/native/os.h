@@ -13,7 +13,7 @@
 // apps borrow it through here.
 //
 // In Lua, this is exposed as the `picocalc` global module.
-// In C (future), a pointer to this struct is passed to the app entry point.
+// In C, a pointer to this struct is passed to picos_main() by the native loader.
 // =============================================================================
 
 // --- Input ------------------------------------------------------------------
@@ -105,6 +105,25 @@ typedef struct {
                                int tex_x, int tex_y0, int tex_y1);
     void (*fillVLineGradient)(int x, int y0, int y1,
                               uint16_t color_top, uint16_t color_bottom);
+    // --- API version 4 additions ---
+    // Clip rect: all pixel-writing primitives respect it except clear(),
+    // flush*(), and the whole-buffer effects. Default is full screen.
+    void (*setClipRect)(int x, int y, int w, int h);
+    void (*getClipRect)(int *x, int *y, int *w, int *h);
+    void (*clearClipRect)(void);
+    // Extra primitives (previously Lua-only)
+    void (*fillHLine)(int y, int x0, int x1, uint16_t color);
+    void (*fillTriangle)(int x0, int y0, int x1, int y1,
+                         int x2, int y2, uint16_t color);
+    // Hardware vertical scroll (ST7365P VSCRDEF/VSCRSADD).
+    // top_fixed + scroll_height + bottom_fixed must equal 320.
+    void (*setScrollArea)(int top_fixed, int scroll_height, int bottom_fixed);
+    void (*setScrollOffset)(int offset);
+    // Mode 7 perspective ground-plane render. Power-of-two texture dims wrap
+    // seamlessly; other sizes clamp. Respects the clip rect.
+    void (*drawPlane)(const uint16_t *tex, int tex_w, int tex_h,
+                      float cam_x, float cam_y, float cam_z,
+                      float angle, int horizon_y, float scale);
 } picocalc_display_t;
 
 // --- Filesystem (SD card) ---------------------------------------------------
@@ -562,7 +581,8 @@ typedef struct PicoCalcAPI {
     const picocalc_video_t       *video;       // MJPEG video playback
     const picocalc_modplayer_t   *modplayer;   // MOD tracker music
     const picocalc_zip_t         *zip;         // ZIP extraction
-    uint32_t                      version;     // 1=Phase1, 2=Phase2, 3=fs->browse
+    uint32_t                      version;     // 1=Phase1, 2=Phase2, 3=fs->browse,
+                                             // 4=clip rect + mode-7 plane + display parity
 } PicoCalcAPI;
 
 // The global API instance, populated during os_init()

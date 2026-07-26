@@ -113,6 +113,50 @@ static int l_display_fillTriangle(lua_State *L) {
   return 0;
 }
 
+// setClipRect(x, y, w, h) — restrict all drawing primitives to a rect.
+// clearClipRect() restores the full screen. getClipRect() returns x, y, w, h.
+static int l_display_setClipRect(lua_State *L) {
+  int x = (int)luaL_checknumber(L, 1);
+  int y = (int)luaL_checknumber(L, 2);
+  int w = (int)luaL_checknumber(L, 3);
+  int h = (int)luaL_checknumber(L, 4);
+  display_set_clip_rect(x, y, w, h);
+  return 0;
+}
+
+static int l_display_getClipRect(lua_State *L) {
+  int x, y, w, h;
+  display_get_clip_rect(&x, &y, &w, &h);
+  lua_pushinteger(L, x);
+  lua_pushinteger(L, y);
+  lua_pushinteger(L, w);
+  lua_pushinteger(L, h);
+  return 4;
+}
+
+static int l_display_clearClipRect(lua_State *L) {
+  (void)L;
+  display_clear_clip_rect();
+  return 0;
+}
+
+// drawPlane(image, cam_x, cam_y, cam_z, angle, horizon_y, scale)
+// Mode 7 perspective ground plane — see display_draw_plane().
+static int l_display_drawPlane(lua_State *L) {
+  lua_image_t *img = (lua_image_t *)luaL_checkudata(L, 1, GRAPHICS_IMAGE_MT);
+  if (!img->data)
+    return luaL_error(L, "invalid image");
+  float cam_x = (float)luaL_checknumber(L, 2);
+  float cam_y = (float)luaL_checknumber(L, 3);
+  float cam_z = (float)luaL_checknumber(L, 4);
+  float angle = (float)luaL_optnumber(L, 5, 0.0);
+  int horizon_y = (int)luaL_optnumber(L, 6, 120);
+  float scale = (float)luaL_optnumber(L, 7, 1.0);
+  display_draw_plane(img->data, img->w, img->h, cam_x, cam_y, cam_z, angle,
+                     horizon_y, scale);
+  return 0;
+}
+
 // Set by menu_lua_hook when a screenshot is requested.  Cleared and fired
 // inside l_display_flush so the capture always happens on a complete frame.
 bool s_screenshot_pending = false;
@@ -298,6 +342,10 @@ static const luaL_Reg l_display_lib[] = {
     {"fillVLine", l_display_fillVLine},
     {"fillHLine", l_display_fillHLine},
     {"fillTriangle", l_display_fillTriangle},
+    {"setClipRect", l_display_setClipRect},
+    {"getClipRect", l_display_getClipRect},
+    {"clearClipRect", l_display_clearClipRect},
+    {"drawPlane", l_display_drawPlane},
     {"drawTexturedColumn", l_display_drawTexturedColumn},
     {"fillVLineGradient", l_display_fillVLineGradient},
     {NULL, NULL}};
