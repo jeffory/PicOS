@@ -1662,11 +1662,13 @@ local play_scene = {
         draw_world(ox, oy)
         draw_hud()
         if player.dead then
-            disp.fillRect(60, 120, 200, 80, BLACK)
-            disp.drawRect(60, 120, 200, 80, RED)
-            disp.drawText(110, 135, "GAME OVER", RED, BLACK)
-            disp.drawText(100, 155, "Score: " .. player.score, WHITE, BLACK)
-            disp.drawText(80, 175, "ENTER: Try Again", GRAY, BLACK)
+            pc.display.applyEffect("darken", 140)
+            disp.fillRect(56, 116, 208, 88, BLACK)
+            disp.drawRect(56, 116, 208, 88, RED)
+            disp.drawText(116, 130, "GAME OVER", RED, BLACK)
+            disp.drawText(100, 150, "Score: " .. player.score, WHITE, BLACK)
+            disp.drawText(84, 168, "Veggies: " .. veggies_collected .. "/" .. total_veggies, GREEN, BLACK)
+            disp.drawText(84, 186, "ENTER: Try Again", GRAY, BLACK)
         end
     end
 }
@@ -1688,21 +1690,38 @@ local win_scene = {
         if pressed & input.BTN_ESC ~= 0 then game.scene.switch("menu") end
     end,
     draw = function()
+        local PANEL_TOP = 116
         draw_sky()
-        draw_house(136, 60)
-        disp.drawText(68, 110, "HOME SWEET HOME!", GOLD, SKY_DARK)
-        disp.drawText(100, 140, "Score: " .. player.score, WHITE, SKY_MID)
-        disp.drawText(80, 160, "Veggies: " .. veggies_collected .. "/" .. total_veggies, GREEN, SKY_MID)
+        for _, c in ipairs(clouds_near) do
+            draw_cloud(c.x % SCREEN_W, c.y * 0.6, c.w)
+        end
+        -- Garden crest tiled edge-to-edge (menu-style strip; the gameplay
+        -- cluster sets are far too sparse to fill a static 320px frame),
+        -- grounded on the panel top so the house stands on it
+        draw_title_strip({sprites.bg_trees_far_1, sprites.bg_trees_far_2}, PANEL_TOP, 160)
+        draw_title_strip({sprites.bg_fence_mid_1, sprites.bg_fence_mid_2}, PANEL_TOP, 160)
+        draw_title_strip({sprites.bg_garden_near_1, sprites.bg_garden_near_2}, PANEL_TOP, 128)
+        draw_house(136, PANEL_TOP - 36)
+        -- Stats panel
+        local panel = disp.rgb(20, 40, 20)
+        disp.fillRect(40, 116, 240, 120, panel)
+        disp.drawRect(40, 116, 240, 120, GOLD)
+        disp.drawText(72, 126, "HOME SWEET HOME!", GOLD, panel)
+        disp.drawText(100, 146, "Score: " .. player.score, WHITE, panel)
+        disp.drawText(84, 162, "Veggies: " .. veggies_collected .. "/" .. total_veggies, GREEN, panel)
         if veggies_collected >= total_veggies then
-            disp.drawText(60, 180, "ALL VEGGIES! +500!", GOLD, SKY_MID)
+            disp.drawText(64, 178, "ALL VEGGIES! +500!", GOLD, panel)
         end
         if player.score >= high_score and player.score > 0 then
-            disp.drawText(72, 200, "NEW HIGH SCORE!", YELLOW, SKY_MID)
+            disp.drawText(76, 196, "NEW HIGH SCORE!", YELLOW, panel)
         else
-            disp.drawText(76, 200, "Best: " .. high_score, GRAY, SKY_MID)
+            disp.drawText(80, 196, "Best: " .. high_score, GRAY, panel)
         end
-        disp.drawText(70, 240, "ENTER: Play Again", BLACK, SKY_LIGHT)
-        disp.drawText(88, 260, "ESC: Menu", DARK_GRAY, SKY_LIGHT)
+        disp.drawText(74, 212, "ENTER: Play Again", WHITE, panel)
+        disp.drawText(92, 226, "ESC: Menu", GRAY, panel)
+        -- Foreground ground echo, matching the gameplay platform look
+        disp.fillRect(0, 280, SCREEN_W, SCREEN_H - 280, BROWN)
+        disp.fillRect(0, 280, SCREEN_W, 4, GRASS_GREEN)
         draw_particles_at(0, 0)
     end
 }
