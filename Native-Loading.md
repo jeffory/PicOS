@@ -2,6 +2,15 @@
 
 PicOS supports running native ARM Cortex-M33 (RP2350) applications in addition to Lua scripts. Native apps are Position-Independent ELF32 (PIE) binaries loaded from the SD card into PSRAM at runtime.
 
+
+## Choosing Lua vs native
+
+Both runtimes share the same `PicoCalcAPI`, but the convenience layers differ:
+
+- **Lua** has the full game framework: sprites, spritesheets, tilemaps, camera, scene manager, animation, particles, save files. New games should start here.
+- **Native (C)** gets the raw primitives: display (incl. clip rect, mode-7 `drawPlane`, raycasting columns), images, audio, input, fs. It suits ports and emulators (Doom, C-Dogs, GBC) and CPU-bound renderers. There is no native sprite/tilemap engine — replicate what you need in app code, or drive the game logic in Lua.
+
+
 ## Application Structure
 
 A native application typically consists of:
@@ -105,8 +114,17 @@ The `PicoCalcAPI` struct contains pointers to all OS subsystems. The full type d
 |---------|------|-------------|
 | `api->graphics` | `picocalc_graphics_t` | Image loading (BMP/JPEG/PNG/GIF), drawing, scaling |
 | `api->video` | `picocalc_video_t` | MJPEG video playback with audio |
+| `api->modplayer` | `picocalc_modplayer_t` | MOD tracker music playback |
+| `api->zip` | `picocalc_zip_t` | ZIP archive extraction |
 
 #### Version detection
+
+The `api->version` field indicates which additions are present:
+
+- `1` — Phase 1 additions
+- `2` — Phase 2 additions
+- `3` — `api->fs->browse` (modal file-browser overlay for native apps)
+- `4` — display clip rect (`setClipRect`/`getClipRect`/`clearClipRect`), mode-7 `drawPlane`, and native parity for `fillHLine`/`fillTriangle`/`setScrollArea`/`setScrollOffset`
 
 ```c
 if (api->version >= 2) {
@@ -115,7 +133,7 @@ if (api->version >= 2) {
 }
 ```
 
-See `sdk/native/os.h` for the complete type definitions and function signatures. The C API maps directly to the `picocalc.*` Lua modules documented in the [[Lua SDK Reference]].
+`sdk/native/os.h` is the source of truth for the complete type definitions, the exact struct layout, and the latest `version` values. The C API maps directly to the `picocalc.*` Lua modules documented in the [[Lua SDK Reference]].
 
 ## Compilation
 

@@ -35,14 +35,13 @@ Creates a new video player instance.
 player:load("/apps/myvideo/clip.avi")  -- path on SD card
 player:play()
 player:stop()
-player:destroy()   -- free all resources (also called by GC)
+-- no destroy(): the player is freed automatically by Lua garbage collection
 ```
 
 ### Playback control
 
 ```lua
 player:setLoop(true)         -- loop continuously (default: false)
-player:setSpeed(1.0)         -- playback speed multiplier (default: 1.0)
 player:seek(frame_number)    -- jump to a specific frame index
 ```
 
@@ -109,12 +108,12 @@ player:getVolume()           -- returns current volume
 
 ```lua
 player:isPlaying()           -- true while playing
-player:isPaused()            -- (not currently implemented)
+player:isPaused()            -- true while paused
 local info = player:getInfo()
 -- info.width, info.height   — frame dimensions
--- info.fps                  — frames per second
--- info.frame_count          — total frames in file
+-- info.frames               — total frames in file
 -- info.current_frame        — current playback position
+-- info.dropped_frames       — frames dropped during playback
 -- info.has_audio            — whether an audio track was found
 ```
 
@@ -138,7 +137,6 @@ while true do
 end
 
 player:stop()
-player:destroy()
 ```
 
 ---
@@ -238,7 +236,7 @@ ffmpeg -i <input>
 
 Audio is decoded using the **MP3 fed mode** in `mp3_player.c`. Rather than reading from an SD file directly, Core 0 (video player) pre-indexes audio chunks from the AVI file and feeds compressed MP3 data into a 64 KB ring buffer in QMI PSRAM. Core 1 reads from this ring and decodes in the normal MP3 DMA path. This avoids PIO PSRAM bus contention (PIO1 SPI is not safe across cores) and lets video and audio share the existing MP3 playback pipeline.
 
-Audio playback is automatically stopped and the ring freed when `player:stop()` or `player:destroy()` is called.
+Audio playback is automatically stopped and the ring freed when `player:stop()` is called or the player is garbage-collected.
 
 ---
 

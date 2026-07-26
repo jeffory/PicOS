@@ -88,33 +88,6 @@ end
 
 ---
 
-#### `picocalc.wifi.isHwDisconnected()`
-Check if the WiFi hardware is physically disconnected or unavailable.
-
-- **Parameters:** None
-- **Returns:** (boolean) `true` if hardware is disconnected
-
-```lua
-if picocalc.wifi.isHwDisconnected() then
-    print("No WiFi hardware detected")
-end
-```
-
----
-
-#### `picocalc.wifi.setEnabled(flag)`
-Enable or disable the WiFi hardware.
-
-- **Parameters:**
-  - `flag` (boolean): `true` to enable, `false` to disable
-- **Returns:** None
-
-```lua
-picocalc.wifi.setEnabled(true)   -- Turn on WiFi hardware
-```
-
----
-
 ### WiFi Status Constants
 
 | Constant | Description |
@@ -123,6 +96,7 @@ picocalc.wifi.setEnabled(true)   -- Turn on WiFi hardware
 | `picocalc.wifi.STATUS_CONNECTING` | Connection in progress |
 | `picocalc.wifi.STATUS_CONNECTED` | Connected successfully |
 | `picocalc.wifi.STATUS_FAILED` | Connection failed |
+| `picocalc.wifi.STATUS_ONLINE` | Internet connectivity confirmed |
 
 ---
 
@@ -149,19 +123,31 @@ end
 ---
 
 #### `picocalc.network.setEnabled(flag [, callback])`
-Enables or disables WiFi. The optional callback is called once the operation completes.
+Enables or disables WiFi. The optional callback is fired **synchronously** with `nil` (reserved for a future async result).
 
 - **Parameters:**
   - `flag` (boolean): `true` to enable, `false` to disable
-  - `callback` (function, optional): Called when done. Receives `true` if connected, `false` otherwise.
+  - `callback` (function, optional): Called synchronously with `nil`
 - **Returns:** None
 
 ```lua
-picocalc.network.setEnabled(true, function(connected)
-    if connected then
-        print("WiFi enabled, IP: " .. picocalc.wifi.getIP())
-    end
+picocalc.network.setEnabled(true, function()
+    print("WiFi enable requested")
 end)
+```
+
+---
+
+#### `picocalc.network.isHwDisconnected()`
+Check if the WiFi hardware has been disabled (e.g. by video playback).
+
+- **Parameters:** None
+- **Returns:** (boolean) `true` if the WiFi hardware is disconnected
+
+```lua
+if picocalc.network.isHwDisconnected() then
+    print("WiFi hardware is off")
+end
 ```
 
 ---
@@ -284,7 +270,7 @@ Sets the timeout waiting for response data after connecting. Default is 30 secon
 ---
 
 #### `conn:setReadBufferSize(bytes)`
-Resizes the receive ring buffer. Must be called before `get`/`post`. Capped at 32768 bytes. Defaults to 4096 bytes.
+Resizes the receive ring buffer. Must be called before `get`/`post`. Defaults to 4096 bytes. Maximum is 2097152 bytes (2 MiB).
 
 - **Parameters:**
   - `bytes` (number): Buffer size in bytes
@@ -329,7 +315,7 @@ Returns the number of bytes currently available to read from the receive buffer.
 Reads data from the receive buffer.
 
 - **Parameters:**
-  - `length` (number, optional): Maximum bytes to read. Defaults to all available. Capped at 65536 bytes per call.
+  - `length` (number, optional): Maximum bytes to read. Defaults to all available. Capped at 131072 bytes per call.
 - **Returns:** (string or nil) Data, or `nil` if nothing is available yet
 
 ```lua
