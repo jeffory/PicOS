@@ -281,7 +281,7 @@ static int l_sound_sampleplayer_new(lua_State *L) {
 
     sound_player_t *player = (sound_player_t *)g_api.soundplayer->playerNew();
     if (!player) {
-        if (sample)
+        if (sample && lua_isstring(L, 1))
             g_api.soundplayer->sampleFree(sample);
         lua_pushnil(L);
         lua_pushstring(L, "failed to create player");
@@ -290,6 +290,8 @@ static int l_sound_sampleplayer_new(lua_State *L) {
 
     if (sample)
         g_api.soundplayer->playerSetSample(player, sample);
+    if (sample && lua_isstring(L, 1))
+        ((sound_player_t *)player)->owns_sample = true;   // GC reclaims it (path-constructed only; userdata samples are owned by their userdata)
 
     sound_player_t **ud = lua_newuserdata(L, sizeof(sound_player_t *));
     *ud = player;
@@ -300,7 +302,13 @@ static int l_sound_sampleplayer_new(lua_State *L) {
 static int l_sound_sampleplayer_setSample(lua_State *L) {
     sound_player_t *player = check_player(L, 1);
     sound_sample_t *sample = check_sample(L, 2);
+    // API returns void, but player/sample are guaranteed non-NULL by
+    // check_player/check_sample, so the reseat always succeeds. Reseating
+    // means the player no longer owns any path-constructed sample it may
+    // have loaded (leaked-by-design until sound_init's backstop; freeing
+    // here would double-free if it was ever re-set).
     g_api.soundplayer->playerSetSample(player, sample);
+    ((sound_player_t *)player)->owns_sample = false;
     lua_pushboolean(L, true);
     return 1;
 }

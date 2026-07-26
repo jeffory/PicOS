@@ -75,6 +75,16 @@ void sound_init(void) {
     }
     pwm_set_gpio_level(AUDIO_PIN_L, 0);
     pwm_set_gpio_level(AUDIO_PIN_R, 0);
+    // Reclaim any loaded sample data before dropping the pointers (app exit
+    // must not leak PSRAM, even for path-constructed samples).
+    for (int i = 0; i < SOUND_MAX_SAMPLES; i++) {
+        sound_sample_t *s = s_context.samples[i];
+        if (s) {
+            if (s->data) umm_free(s->data);
+            free(s);
+            s_context.samples[i] = NULL;
+        }
+    }
     memset(&s_context, 0, sizeof(s_context));
 }
 
@@ -263,6 +273,7 @@ sound_player_t *sound_player_create(void) {
             player->play_start = 0;
             player->play_end = 0;
             player->rate = 1.0f;
+            player->owns_sample = false;
             return player;
         }
     }
@@ -272,7 +283,11 @@ sound_player_t *sound_player_create(void) {
 void sound_player_destroy(sound_player_t *player) {
     if (player) {
         sound_player_stop(player);
+        if (player->owns_sample && player->sample) {
+            sound_sample_destroy(player->sample);
+        }
         player->sample = NULL;
+        player->owns_sample = false;
     }
 }
 

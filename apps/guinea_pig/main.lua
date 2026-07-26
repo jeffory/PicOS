@@ -50,14 +50,13 @@ local DARK_BROWN = disp.rgb(90, 55, 25)
 local LIGHT_BROWN = disp.rgb(180, 130, 70)
 local GRAY = disp.rgb(128, 128, 128)
 local DARK_GRAY = disp.rgb(64, 64, 64)
-local SKY_LIGHT = disp.rgb(135, 206, 235)
-local SKY_MID = disp.rgb(100, 170, 220)
-local SKY_DARK = disp.rgb(70, 130, 200)
+local SKY_LIGHT = disp.rgb(255, 224, 160)   -- golden horizon glow
+local SKY_MID = disp.rgb(150, 200, 235)
+local SKY_DARK = disp.rgb(90, 160, 215)
 local GRASS_GREEN = disp.rgb(80, 180, 50)
 local GRASS_DARK = disp.rgb(50, 130, 30)
 local CLOUD_WHITE = disp.rgb(240, 245, 255)
 local CLOUD_SHADOW = disp.rgb(200, 210, 230)
-local HILL_FAR = disp.rgb(40, 90, 40)
 local PINK = disp.rgb(255, 180, 180)
 local GOLD = disp.rgb(255, 215, 0)
 local MAGENTA = disp.rgb(255, 0, 255)
@@ -144,18 +143,136 @@ local function draw_particles_at(ox, oy)
     end
 end
 
--- Sound helpers
-local function snd_jump() pc.audio.playTone(440, 80) end
-local function snd_popcorn() pc.audio.playTone(660, 60) end
-local function snd_collect_carrot() pc.audio.playTone(880, 100) end
-local function snd_collect_capsicum() pc.audio.playTone(660, 100) end
-local function snd_collect_zucchini() pc.audio.playTone(550, 100) end
-local function snd_collect_powerup() pc.audio.playTone(440, 80) end
-local function snd_dash() pc.audio.playTone(330, 60) end
-local function snd_squeak() pc.audio.playTone(1200, 200) end
-local function snd_damage() pc.audio.playTone(220, 150) end
-local function snd_hawk() pc.audio.playTone(1000, 120) end
-local function snd_win() pc.audio.playTone(440, 150) end
+-- Sound engine: SFX bank (play ranges) + playTone fallback
+local sfx = { ok = false, banks = {}, players = {}, pbank = {}, ranges = {}, busy = {} }
+local SFX_PRIORITY = {  -- higher wins when stealing a busy player
+    damage = 100, game_over = 95, win_jingle = 90, collect_powerup = 60,
+    enemy_defeat = 55, collect_carrot = 50, collect_capsicum = 50,
+    collect_zucchini = 50, popcorn = 40, jump = 30, dash = 30,
+    squeak = 30, hawk_screech = 20, water_burst = 10,
+    menu_move = 80, menu_select = 85,
+}
+
+local function sfx_init()
+    -- dofile is blocked on PicOS (no host fopen for the SD FATFS);
+    -- load the ranges module via pc.fs + load() like picoforge does.
+    local src = pc.fs.readFile(APP_DIR .. "/sfx/sfx_ranges.lua")
+    if not src then return end
+    local fn = load(src, "@sfx_ranges.lua")
+    if not fn then return end
+    local ok, ranges = pcall(fn)
+    if not ok or type(ranges) ~= "table" then return end
+    sfx.ranges = ranges
+    for b = 1, 2 do
+        local path = APP_DIR .. "/sfx/bank" .. b .. ".wav"
+        if pc.fs.exists(path) then
+            local s = pc.sound.sample(path)   -- sample userdata: GC-safe load
+            if s then sfx.banks[b] = s end
+        end
+    end
+    if not sfx.banks[1] then return end
+    for i = 1, 4 do
+        local p = pc.sound.sampleplayer(sfx.banks[1])
+        if not p then break end
+        sfx.players[i] = p
+        sfx.pbank[i] = 1
+        sfx.busy[i] = 0
+    end
+    sfx.ok = #sfx.players > 0
+end
+
+local SFX_FALLBACK = {  -- name -> {freq, ms} for playTone when bank missing
+    jump = {440, 80}, popcorn = {660, 60}, collect_carrot = {880, 100},
+    collect_capsicum = {660, 100}, collect_zucchini = {550, 100},
+    collect_powerup = {440, 80}, dash = {330, 60}, squeak = {1200, 200},
+    damage = {220, 150}, hawk_screech = {1000, 120}, win_jingle = {440, 150},
+    water_burst = {300, 120}, enemy_defeat = {480, 100},
+    menu_move = {800, 30}, menu_select = {1000, 60}, game_over = {220, 250},
+}
+
+function sfx.play(name)
+    local fb = SFX_FALLBACK[name]
+    if not sfx.ok then
+        if fb then pc.audio.playTone(fb[1], fb[2]) end
+        return
+    end
+    local r = sfx.ranges[name]
+    local bank = r and (r.bank or 1) or 1
+    if not r or not sfx.banks[bank] then
+        if fb then pc.audio.playTone(fb[1], fb[2]) end
+        return
+    end
+    local my_pri = SFX_PRIORITY[name] or 10
+    local slot, lowest, lowest_i = nil, math.huge, 1
+    for i, p in ipairs(sfx.players) do
+        if not p:isPlaying() then slot = i break end
+        if sfx.busy[i] < lowest then lowest = sfx.busy[i] lowest_i = i end
+    end
+    if not slot then
+        if lowest >= my_pri then return end  -- keep higher-priority sound
+        slot = lowest_i
+    end
+    local p = sfx.players[slot]
+    p:stop()
+    if sfx.pbank[slot] ~= bank then
+        -- owns_sample=false for userdata samples: reseat is safe
+        p:setSample(sfx.banks[bank])
+        sfx.pbank[slot] = bank
+    end
+    p:setPlayRange(r.first, r.last)
+    p:setVolume(100)
+    p:play(1)
+    sfx.busy[slot] = my_pri
+end
+
+sfx_init()
+
+-- Thin wrappers (same names as before: zero call-site churn)
+local function snd_jump() sfx.play("jump") end
+local function snd_popcorn() sfx.play("popcorn") end
+local function snd_collect_carrot() sfx.play("collect_carrot") end
+local function snd_collect_capsicum() sfx.play("collect_capsicum") end
+local function snd_collect_zucchini() sfx.play("collect_zucchini") end
+local function snd_collect_powerup() sfx.play("collect_powerup") end
+local function snd_dash() sfx.play("dash") end
+local function snd_squeak() sfx.play("squeak") end
+local function snd_damage() sfx.play("damage") end
+local function snd_hawk() sfx.play("hawk_screech") end
+local function snd_win() sfx.play("win_jingle") end
+
+-- BGM: streamed loop via fileplayer; replay-on-finish (panels.lua pattern)
+local bgm = { fp = nil, want = nil, restart = false }
+local BGM_VOLUME = { menu = 70, play = 40, win = 70 }
+
+function bgm.play(scene)
+    bgm.want = scene
+    if not bgm.fp then
+        local ok, fp = pcall(pc.sound.fileplayer)
+        if not ok or not fp then return end
+        local loaded = pcall(function() fp:load(APP_DIR .. "/sfx/bgm.wav") end)
+        if not loaded then return end
+        bgm.fp = fp
+        pcall(function()
+            bgm.fp:setFinishCallback(function() bgm.restart = true end)
+        end)
+    end
+    pcall(function() bgm.fp:setVolume(BGM_VOLUME[scene] or 50) end)
+    if bgm.fp.isPlaying and not bgm.fp:isPlaying() then
+        pcall(function() bgm.fp:play(1) end)
+    end
+end
+
+function bgm.update()
+    if bgm.fp and bgm.restart and bgm.want then
+        bgm.restart = false
+        pcall(function() bgm.fp:play(1) end)
+    end
+end
+
+function bgm.stop()
+    bgm.want = nil
+    if bgm.fp then pcall(function() bgm.fp:stop() end) end
+end
 
 -- ============================================================
 -- [3] SPRITE LOADING & DRAWING
@@ -189,21 +306,29 @@ load_sprite("zucchini", "zucchini.png")
 load_sprite("strawberry", "strawberry.png")
 load_sprite("vitamin_c", "vitamin_c.png")
 load_sprite("nail_grip", "nail_grip.png")
+load_sprite("heart", "heart.png")                -- 32x32 HUD heart
 load_sprite("hawk_glide", "hawk_glide.png")        -- 48x32
 load_sprite("hawk_dive", "hawk_dive.png")          -- 48x32
 load_sprite("snail", "snail.png")
 load_sprite("broccoli", "broccoli.png")            -- 32x40
 load_sprite("spicy_pepper", "spicy_pepper.png")    -- 32x40
-load_sprite("hose_nozzle", "hose_nozzle.png")
+load_sprite("sprinkler_body", "sprinkler_body.png") -- 32x32 brass head on spike
+load_sprite("water_arc", "water_arc.png")           -- 5 frames, 320x32
 load_sprite("house", "house.png")                  -- 64x64
 load_sprite("hay_pile", "hay_pile.png")            -- 48x32
 load_sprite("cloud_large", "cloud_large.png")      -- 64x32
 load_sprite("cloud_small", "cloud_small.png")      -- 48x32
 load_sprite("tile_grass", "tile_grass_top.png")     -- 16x16 grass top
 load_sprite("tile_earth", "tile_earth.png")         -- 16x16 solid earth
-load_sprite("mountain_far", "mountain_far.png")     -- 128x64 far mountain
-load_sprite("mountain_mid", "mountain_mid.png")     -- 96x80 mid mountain
-load_sprite("island_distant", "island_distant.png") -- 64x48 distant island
+load_sprite("tile_edge_l", "tile_edge_l.png")     -- 16x16 left end cap
+load_sprite("tile_edge_r", "tile_edge_r.png")     -- 16x16 right end cap
+load_sprite("bg_trees_far_1", "bg_trees_far_1.png")     -- 160x72 dense tree line
+load_sprite("bg_trees_far_2", "bg_trees_far_2.png")     -- 160x72 orchard + shed
+load_sprite("bg_fence_mid_1", "bg_fence_mid_1.png")     -- 160x56 picket fence + hedge
+load_sprite("bg_fence_mid_2", "bg_fence_mid_2.png")     -- 160x56 weathered fence + flowers
+load_sprite("bg_garden_near_1", "bg_garden_near_1.png") -- 128x32 carrot/radish bed
+load_sprite("bg_garden_near_2", "bg_garden_near_2.png") -- 128x32 tulip bed
+load_sprite("title_logo", "title_logo.png")             -- 256x64 title logo
 
 -- Guinea pig animation: sprite sheet frame drawing
 -- Sheets are horizontal strips: frame N is at x=N*32, y=0, w=32, h=32
@@ -364,21 +489,33 @@ local function draw_spicy_pepper(sx, sy)
     end
 end
 
-local function draw_hose_nozzle(sx, sy, dir)
-    if sprites.hose_nozzle then
-        sprites.hose_nozzle:draw(sx - 8, sy - 8, {flipX = (dir < 0)})
+local function draw_sprinkler(sx, sy, sweep, active, t)
+    if sprites.sprinkler_body then
+        sprites.sprinkler_body:draw(sx - 8, sy - 16)
     else
         disp.fillRect(sx + 4, sy + 4, 8, 8, GREEN)
-        disp.fillRect(sx + 2, sy + 6, 12, 4, DARK_GREEN)
     end
-end
-
--- Water spray stays procedural (animated particle effect)
-local function draw_water_spray(sx, sy, w, dir)
-    for i = 0, w - 4, 6 do
-        local ix = dir > 0 and (sx + i) or (sx + w - i - 4)
-        disp.fillRect(ix, sy + 1 + (i % 3), 4, 3, WATER_BLUE)
-        disp.fillRect(ix + 2, sy + (i % 2), 2, 2, WATER_LIGHT)
+    if not active then return end
+    if sprites.water_arc then
+        -- 320x32 strip, 5 frames of 64x32, arc always sprays right; flip for left
+        local frame = math.floor(t * 12) % 5
+        local ax = math.floor(sx - 56 + sweep * 48)   -- arc pivots over the body with the sweep
+        sprites.water_arc:draw(ax, sy - 16, {flipX = sweep < 0.5},
+            {x = frame * 64, y = 0, w = 64, h = 32})
+        -- droplets at the arc's landing point, following the sweep
+        local dx = sweep >= 0.5 and (ax + 60) or (ax + 3)
+        for i = 0, 2 do
+            local dy = math.floor(math.sin(t * 10 + i * 2) * 3)
+            disp.fillRect(dx + i * 3 - 3, sy + 5 + dy + i * 2, 2, 2, WATER_LIGHT)
+        end
+    else
+        local jet_w = 24
+        -- mirror the sprite path: sweep<0.5 sprays left of the nozzle, >=0.5 right;
+        -- travel the same 48px envelope as the hitbox swing
+        local jx = math.floor(sx - jet_w + sweep * 48 + 8)
+        for i = 0, jet_w - 4, 6 do
+            disp.fillRect(jx + i, sy + 1 + (i % 3), 4, 3, WATER_BLUE)
+        end
     end
 end
 
@@ -479,11 +616,11 @@ local function build_level()
     end
 
     -- Enemies
-    table.insert(enemies, {type = "hose", x = 750, y = GROUND_Y - 16, dir = 1, timer = 0, active = false, spray_w = 48, alive = true})
+    table.insert(enemies, {type = "hose", x = 750, y = GROUND_Y - 16, sweep = 0.5, timer = 0, active = false, spray_w = 48, alive = true})
     table.insert(enemies, {type = "hawk", x = 1100, y = 30, patrol_x1 = 900, patrol_x2 = 1400, state = "patrol", vx = 80, target_x = 0, target_y = 0, timer = 0, alive = true, w = 28, h = 16})
     table.insert(enemies, {type = "snail", x = 1060, y = 210 - 12, vx = 30, flipped = false, flip_timer = 0, w = 16, h = 12, alive = true})
     table.insert(enemies, {type = "broccoli", x = 1200, y = GROUND_Y - 18, w = 14, h = 18, alive = true, hit_timer = 0})
-    table.insert(enemies, {type = "hose", x = 1500, y = GROUND_Y - 16, dir = -1, timer = 2.0, active = false, spray_w = 48, alive = true})
+    table.insert(enemies, {type = "hose", x = 1500, y = GROUND_Y - 16, sweep = 0.5, timer = 2.0, active = false, spray_w = 48, alive = true})
     table.insert(enemies, {type = "snail", x = 1770, y = 180 - 12, vx = 30, flipped = false, flip_timer = 0, w = 16, h = 12, alive = true})
     table.insert(enemies, {type = "pepper", x = 1870, y = GROUND_Y - 14, w = 10, h = 14, alive = true, fire_timer = 1.5})
     table.insert(enemies, {type = "hawk", x = 2300, y = 30, patrol_x1 = 2050, patrol_x2 = 2600, state = "patrol", vx = 80, target_x = 0, target_y = 0, timer = 0, alive = true, w = 28, h = 16})
@@ -588,26 +725,18 @@ local clouds_near = {
     {x = 3000, y = 70, w = 32},
 }
 
-local hills = {
-    {cx = 150, h = 60},
-    {cx = 550, h = 50},
-    {cx = 950, h = 55},
-    {cx = 1350, h = 45},
-    {cx = 1850, h = 60},
-    {cx = 2250, h = 50},
-    {cx = 2750, h = 55},
+local bg_trees_far = {
+    {x = 80, img = 1}, {x = 620, img = 2}, {x = 1180, img = 1},
+    {x = 1760, img = 2}, {x = 2340, img = 1}, {x = 2920, img = 2},
 }
-
-local mountains_far = {
-    {x = 100, y = 185}, {x = 600, y = 175}, {x = 1200, y = 190},
-    {x = 1800, y = 180}, {x = 2400, y = 185}, {x = 3000, y = 175},
+local bg_fence_mid = {
+    {x = 260, img = 1}, {x = 900, img = 2}, {x = 1540, img = 1},
+    {x = 2180, img = 2}, {x = 2820, img = 1},
 }
-local mountains_mid = {
-    {x = 350, y = 195}, {x = 900, y = 200}, {x = 1500, y = 190},
-    {x = 2100, y = 200}, {x = 2700, y = 195},
-}
-local islands_distant = {
-    {x = 700, y = 160}, {x = 2000, y = 150},
+local bg_garden_near = {
+    {x = 40, img = 1}, {x = 480, img = 2}, {x = 980, img = 1},
+    {x = 1520, img = 2}, {x = 2060, img = 1}, {x = 2560, img = 2},
+    {x = 2980, img = 1},
 }
 
 local function parallax_x(world_x, ox, factor)
@@ -615,53 +744,28 @@ local function parallax_x(world_x, ox, factor)
 end
 
 local function draw_sky()
-    disp.fillRect(0, 0, SCREEN_W, 80, SKY_LIGHT)
-    disp.fillRect(0, 80, SCREEN_W, 80, SKY_MID)
-    disp.fillRect(0, 160, SCREEN_W, 160, SKY_DARK)
+    disp.fillRect(0, 0, SCREEN_W, 120, SKY_DARK)
+    disp.fillRect(0, 120, SCREEN_W, 120, SKY_MID)
+    disp.fillRect(0, 240, SCREEN_W, 80, SKY_LIGHT)
 end
 
-local function draw_hills(ox)
-    for _, h in ipairs(hills) do
-        local sx = parallax_x(h.cx, ox, 0.15)
-        local hw = 120
-        for row = 0, h.h - 1 do
-            local ratio = (h.h - row) / h.h
-            local rw = math.floor(hw * ratio)
-            if sx - rw < SCREEN_W and sx + rw > 0 then
-                disp.fillRect(sx - rw, GROUND_Y - h.h + row, rw * 2, 1, HILL_FAR)
+local function draw_cluster_set(set, imgs, base_y, ox, factor)
+    for _, c in ipairs(set) do
+        local img = imgs[c.img]
+        if img then
+            local _, ih = img:getSize()
+            local sx = parallax_x(c.x, ox, factor)
+            if sx > -170 and sx < SCREEN_W + 10 then
+                img:draw(sx, base_y - ih)
             end
         end
     end
 end
 
-local function draw_mountains(ox)
-    -- Far mountains: parallax 0.1 (slowest, most distant)
-    if sprites.mountain_far then
-        for _, m in ipairs(mountains_far) do
-            local sx = parallax_x(m.x, ox, 0.1)
-            if sx > -130 and sx < SCREEN_W + 10 then
-                sprites.mountain_far:draw(sx, m.y)
-            end
-        end
-    end
-    -- Mid mountains: parallax 0.2
-    if sprites.mountain_mid then
-        for _, m in ipairs(mountains_mid) do
-            local sx = parallax_x(m.x, ox, 0.2)
-            if sx > -100 and sx < SCREEN_W + 10 then
-                sprites.mountain_mid:draw(sx, m.y)
-            end
-        end
-    end
-    -- Distant islands: parallax 0.15
-    if sprites.island_distant then
-        for _, isl in ipairs(islands_distant) do
-            local sx = parallax_x(isl.x, ox, 0.15)
-            if sx > -70 and sx < SCREEN_W + 10 then
-                sprites.island_distant:draw(sx, isl.y)
-            end
-        end
-    end
+local function draw_garden_layers(ox)
+    draw_cluster_set(bg_trees_far,  {sprites.bg_trees_far_1, sprites.bg_trees_far_2},  GROUND_Y + 8, ox, 0.10)
+    draw_cluster_set(bg_fence_mid,  {sprites.bg_fence_mid_1, sprites.bg_fence_mid_2},  GROUND_Y + 4, ox, 0.25)
+    draw_cluster_set(bg_garden_near,{sprites.bg_garden_near_1, sprites.bg_garden_near_2}, GROUND_Y + 2, ox, 0.50)
 end
 
 local function draw_cloud(sx, sy, w)
@@ -704,6 +808,7 @@ local function damage_player(amount)
     if camera_obj then camera_obj:shake(6, 0.3) end
     if player.hp <= 0 then
         player.dead = true
+        sfx.play("game_over")
         spawn_burst(player.x + player.w / 2, player.y + player.h / 2, RED, 10)
     end
 end
@@ -926,11 +1031,14 @@ local function update_player(dt)
         end
     end
 
-    -- Checkpoint
+    -- Checkpoint (respawn x must sit ON solid ground: AABB overlap needs
+    -- player.x + w > plat.x, so the old gap-lip values 550/950 respawned the
+    -- pig over the void -> fall loop -> guaranteed death. 620/900 are safely
+    -- inside ground segments 600-950.)
     if player.x > 2050 then player.checkpoint_x = 2050
     elseif player.x > 1450 then player.checkpoint_x = 1450
-    elseif player.x > 950 then player.checkpoint_x = 950
-    elseif player.x > 550 then player.checkpoint_x = 550 end
+    elseif player.x > 950 then player.checkpoint_x = 900
+    elseif player.x > 550 then player.checkpoint_x = 620 end
 
     -- Animation
     if not player.on_ground then
@@ -966,13 +1074,20 @@ local function update_enemies(dt)
         elseif e.type == "hose" then
             e.timer = e.timer + dt
             if e.active then
-                if e.timer > 2.0 then e.active = false; e.timer = 0 end
-                local spray_x = e.dir > 0 and (e.x + 16) or (e.x - e.spray_w)
+                if e.timer > 4.8 then e.active = false; e.timer = 0 end
+                -- sweep: phase 0..1 across the active window, dwell at extremes
+                local phase = clamp(e.timer / 4.8, 0, 1)
+                local swing = math.sin(phase * math.pi * 2 - math.pi / 2) * 0.5 + 0.5
+                e.sweep = swing                       -- 0=left .. 1=right
+                e.dir = swing >= 0.5 and 1 or -1
+                local spray_x = e.x - e.spray_w + swing * (e.spray_w - 8) + 8
                 if not player.dead and not player.hiding and
-                   aabb_overlap(player.x, player.y, player.w, player.h, spray_x, e.y - 4, e.spray_w, 16) then
+                   aabb_overlap(player.x, player.y, player.w, player.h, spray_x, e.y - 4, 24, 16) then
                     player.vx = player.vx + e.dir * 2000 * dt
                 end
+                if not e.burst_done then sfx.play("water_burst"); e.burst_done = true end
             else
+                e.burst_done = false
                 if e.timer > 3.0 then e.active = true; e.timer = 0 end
             end
 
@@ -1042,6 +1157,7 @@ local function update_enemies(dt)
             end
             if player.dashing and aabb_overlap(player.x, player.y, player.w, player.h, e.x, e.y + 9, e.w, 9) then
                 e.alive = false
+                sfx.play("enemy_defeat")
                 spawn_burst(e.x + 7, e.y + 9, GREEN, 6)
                 player.score = player.score + 50
             end
@@ -1074,6 +1190,7 @@ local function update_enemies(dt)
             end
             if player.dashing and aabb_overlap(player.x, player.y, player.w, player.h, e.x, e.y, e.w, e.h) then
                 e.alive = false
+                sfx.play("enemy_defeat")
                 spawn_burst(e.x + 5, e.y + 7, RED, 6)
                 player.score = player.score + 50
             end
@@ -1182,6 +1299,33 @@ end
 -- [11] DRAWING
 -- ============================================================
 
+local function draw_tiled_platform(sx, sy, w, h)
+    if not (sprites.tile_grass and sprites.tile_earth) then
+        disp.fillRect(sx, sy + 3, w, h - 3, BROWN)
+        disp.fillRect(sx, sy, w, 4, GRASS_GREEN)
+        return
+    end
+    local body_x, body_w = sx, w
+    if sprites.tile_edge_l and w >= 16 then
+        sprites.tile_edge_l:draw(sx, sy)
+        body_x = body_x + 16
+        body_w = body_w - 16
+    end
+    if sprites.tile_edge_r and w >= 32 then
+        sprites.tile_edge_r:draw(sx + w - 16, sy)
+        body_w = body_w - 16
+    end
+    if body_w > 0 then
+        sprites.tile_grass:drawTiled(body_x, sy, body_w, 16)
+        if h > 16 then
+            sprites.tile_earth:drawTiled(body_x, sy + 16, body_w, h - 16)
+            -- fill strip under the caps too
+            sprites.tile_earth:drawTiled(sx, sy + 16, 16, h - 16)
+            sprites.tile_earth:drawTiled(sx + w - 16, sy + 16, 16, h - 16)
+        end
+    end
+end
+
 local function draw_world(ox, oy)
     -- Platforms
     for _, plat in ipairs(platforms) do
@@ -1190,30 +1334,12 @@ local function draw_world(ox, oy)
         if sx > SCREEN_W or sx + plat.w < 0 or sy > SCREEN_H or sy + plat.h < 0 then
             -- skip off-screen
         elseif plat.ground then
-            if sprites.tile_grass and sprites.tile_earth then
-                sprites.tile_grass:drawTiled(sx, sy, plat.w, 16)
-                if plat.h > 16 then
-                    sprites.tile_earth:drawTiled(sx, sy + 16, plat.w, plat.h - 16)
-                end
-            else
-                disp.fillRect(sx, sy + 4, plat.w, plat.h - 4, BROWN)
-                disp.fillRect(sx, sy, plat.w, 4, GRASS_GREEN)
-                disp.fillRect(sx, sy + 3, plat.w, 2, GRASS_DARK)
-            end
+            draw_tiled_platform(sx, sy, plat.w, plat.h)
         elseif plat.wall then
             disp.fillRect(sx, sy, plat.w, plat.h, GRAY)
             disp.drawRect(sx, sy, plat.w, plat.h, DARK_GRAY)
         else
-            if sprites.tile_grass and sprites.tile_earth then
-                sprites.tile_grass:drawTiled(sx, sy, plat.w, 16)
-                if plat.h > 16 then
-                    sprites.tile_earth:drawTiled(sx, sy + 16, plat.w, plat.h - 16)
-                end
-            else
-                disp.fillRect(sx, sy + 3, plat.w, plat.h - 3, BROWN)
-                disp.fillRect(sx, sy, plat.w, 4, GRASS_GREEN)
-                disp.fillRect(sx, sy + 3, plat.w, 1, GRASS_DARK)
-            end
+            draw_tiled_platform(sx, sy, plat.w, plat.h)
         end
     end
 
@@ -1266,11 +1392,7 @@ local function draw_world(ox, oy)
             local sy = math.floor(e.y + oy)
             if sx > -50 and sx < SCREEN_W + 50 then
                 if e.type == "hose" then
-                    draw_hose_nozzle(sx, sy, e.dir)
-                    if e.active then
-                        local spx = e.dir > 0 and (sx + 16) or (sx - e.spray_w)
-                        draw_water_spray(spx, sy, e.spray_w, e.dir)
-                    end
+                    draw_sprinkler(sx, sy, e.sweep or 0.5, e.active, game_time)
                 elseif e.type == "hawk" then
                     draw_hawk(sx, sy, e.vx < 0 and -1 or 1, e.state == "diving")
                 elseif e.type == "snail" then
@@ -1359,22 +1481,28 @@ end
 
 local function draw_hud()
     disp.fillRect(0, 0, SCREEN_W, 18, BLACK)
-    -- HP hearts
     for i = 0, 2 do
-        local hx = 4 + i * 10
+        local hx = 4 + i * 18
         if i < player.hp then
-            disp.fillRect(hx, 3, 3, 3, RED)
-            disp.fillRect(hx + 4, 3, 3, 3, RED)
-            disp.fillRect(hx + 1, 5, 5, 4, RED)
-            disp.fillRect(hx + 2, 9, 3, 2, RED)
+            if sprites.heart then
+                sprites.heart:drawScaled(hx, 1, 0.5)
+            else
+                disp.fillRect(hx, 3, 3, 3, RED) disp.fillRect(hx + 4, 3, 3, 3, RED)
+                disp.fillRect(hx + 1, 5, 5, 4, RED) disp.fillRect(hx + 2, 9, 3, 2, RED)
+            end
         else
-            disp.fillRect(hx + 1, 4, 5, 6, DARK_GRAY)
+            -- empty heart: dark outline, same footprint as the 16px sprite
+            disp.drawRect(hx + 2, 3, 5, 5, DARK_GRAY) disp.drawRect(hx + 9, 3, 5, 5, DARK_GRAY)
+            disp.fillRect(hx + 3, 8, 10, 3, DARK_GRAY) disp.fillRect(hx + 5, 11, 6, 3, DARK_GRAY)
         end
     end
-    disp.drawText(40, 4, "" .. player.score, WHITE, BLACK)
-    disp.drawText(100, 4, veggies_collected .. "/" .. total_veggies, GREEN, BLACK)
+    disp.drawText(62, 4, "" .. player.score, WHITE, BLACK)
+    if sprites.carrot then
+        sprites.carrot:drawScaled(104, 1, 0.5)
+    end
+    disp.drawText(122, 4, veggies_collected .. "/" .. total_veggies, GREEN, BLACK)
     -- Power indicators
-    local ix = 160
+    local ix = 168
     if player.zoomies_active then
         local bar = math.floor((player.zoomies_timer / ZOOMIES_DURATION) * 16)
         disp.fillRect(ix, 3, bar, 4, RED)
@@ -1412,16 +1540,34 @@ local function save_high_score()
     game.save.set("guineapig", {high_score = high_score})
 end
 
+-- Title backdrop helper: tile a garden layer's sprites edge-to-edge across
+-- the screen. The gameplay cluster sets are sprinkled over a 3200px world —
+-- far too sparse to fill a static 320px title frame.
+local function draw_title_strip(imgs, base_y, tile_w)
+    if #imgs == 0 then return end
+    local n = 0
+    for x = 0, SCREEN_W - 1, tile_w do
+        local img = imgs[(n % #imgs) + 1]
+        if img then
+            local _, ih = img:getSize()
+            img:draw(x, base_y - ih)
+        end
+        n = n + 1
+    end
+end
+
 -- MENU
 local menu_scene = {
     enter = function()
         load_high_score()
         game_time = 0
+        bgm.play("menu")
     end,
     update = function(dt)
         game_time = game_time + dt
         local pressed = input.getButtonsPressed()
         if pressed & input.BTN_ENTER ~= 0 then
+            sfx.play("menu_select")
             game.scene.switch("play")
         end
         if pressed & input.BTN_ESC ~= 0 then
@@ -1429,31 +1575,45 @@ local menu_scene = {
         end
     end,
     draw = function()
+        local FOOTER_TOP = 236
         draw_sky()
-        disp.drawText(68, 50, "GUINEA PIG RUN", YELLOW, SKY_LIGHT)
-        -- Big guinea pig (scaled sprite or fallback)
-        local cx, cy = 140, 100
-        local menu_img = sprites.gp_east
-        if menu_img then
-            menu_img:drawScaledNN(cx, cy, 3)
-        else
-            disp.fillRect(cx, cy + 8, 40, 20, BROWN)
-            disp.fillRect(cx + 4, cy + 4, 32, 28, BROWN)
-            disp.fillRect(cx + 8, cy + 16, 24, 12, LIGHT_BROWN)
-            disp.fillRect(cx + 34, cy + 6, 12, 16, BROWN)
-            disp.fillRect(cx + 42, cy + 12, 4, 4, PINK)
+        for _, c in ipairs(clouds_near) do
+            draw_cloud(c.x % SCREEN_W, c.y * 0.6, c.w)
         end
-        disp.drawText(50, 160, "Arrows: Move   Up: Jump", DARK_GREEN, SKY_DARK)
-        disp.drawText(50, 175, "F1: Sonic Squeak (hold)", DARK_GREEN, SKY_DARK)
-        disp.drawText(50, 190, "F2: Dash Attack", DARK_GREEN, SKY_DARK)
-        disp.drawText(50, 205, "Down: Hide in hay", DARK_GREEN, SKY_DARK)
+        if sprites.title_logo then
+            local lw = sprites.title_logo:getSize()
+            sprites.title_logo:drawScaled((SCREEN_W - lw * 0.75) / 2, 40, 0.75)
+        else
+            disp.drawText(66, 48, "GUINEA PIG RUN", DARK_BROWN, SKY_DARK)
+            disp.drawText(64, 46, "GUINEA PIG RUN", YELLOW, SKY_DARK)
+        end
+        -- Garden backdrop composed from the game's own layer sprites,
+        -- grounded on the footer panel
+        draw_title_strip({sprites.bg_trees_far_1, sprites.bg_trees_far_2}, FOOTER_TOP, 160)
+        draw_title_strip({sprites.bg_fence_mid_1, sprites.bg_fence_mid_2}, FOOTER_TOP, 160)
+        draw_title_strip({sprites.bg_garden_near_1, sprites.bg_garden_near_2}, FOOTER_TOP, 128)
+        -- Pig runs home along the footer top; the house occludes it at the
+        -- end of each pass
+        local run_x = math.floor((game_time * 60) % (SCREEN_W + 80)) - 60
+        local rf = math.floor(game_time * 10) % GP_RUN_FRAMES
+        if sprites.gp_run_east then
+            sprites.gp_run_east:draw(run_x, FOOTER_TOP - GP_FRAME_H, nil,
+                {x = rf * GP_FRAME_W, y = 0, w = GP_FRAME_W, h = GP_FRAME_H})
+        end
+        draw_house(250, FOOTER_TOP - 50)
+        -- Footer panel
+        local panel = disp.rgb(30, 60, 30)
+        disp.fillRect(0, FOOTER_TOP, SCREEN_W, SCREEN_H - FOOTER_TOP, panel)
+        disp.drawText(12, 244, "Arrows: Move   Up/Enter: Jump", WHITE, panel)
+        disp.drawText(12, 258, "F1: Sonic Squeak (hold)", WHITE, panel)
+        disp.drawText(12, 272, "F2: Dash   Down: Hide in hay", WHITE, panel)
         if high_score > 0 then
-            disp.drawText(80, 240, "High Score: " .. high_score, GOLD, SKY_DARK)
+            disp.drawText(12, 288, "Best: " .. high_score, GOLD, panel)
         end
         if math.floor(game_time * 2) % 2 == 0 then
-            disp.drawText(60, 275, "Press ENTER to Start", WHITE, SKY_DARK)
+            disp.drawText(196, 288, "Press ENTER", YELLOW, panel)
         end
-        disp.drawText(84, 300, "ESC to Exit", GRAY, SKY_DARK)
+        disp.drawText(196, 302, "ESC to Exit", GRAY, panel)
     end
 }
 
@@ -1465,6 +1625,7 @@ local play_scene = {
         camera_obj = game.camera.new()
         camera_obj:setPosition(160, player.y - 40)
         camera_obj:setBounds(0, 0, WORLD_WIDTH, WORLD_HEIGHT)
+        bgm.play("play")
     end,
     update = function(dt)
         game_time = game_time + dt
@@ -1504,17 +1665,18 @@ local play_scene = {
     draw = function()
         local ox, oy = camera_obj:getOffset()
         draw_sky()
-        draw_mountains(ox)
-        draw_hills(ox)
+        draw_garden_layers(ox)
         draw_parallax(ox)
         draw_world(ox, oy)
         draw_hud()
         if player.dead then
-            disp.fillRect(60, 120, 200, 80, BLACK)
-            disp.drawRect(60, 120, 200, 80, RED)
-            disp.drawText(110, 135, "GAME OVER", RED, BLACK)
-            disp.drawText(100, 155, "Score: " .. player.score, WHITE, BLACK)
-            disp.drawText(80, 175, "ENTER: Try Again", GRAY, BLACK)
+            pc.display.applyEffect("darken", 140)
+            disp.fillRect(56, 116, 208, 88, BLACK)
+            disp.drawRect(56, 116, 208, 88, RED)
+            disp.drawText(116, 130, "GAME OVER", RED, BLACK)
+            disp.drawText(100, 150, "Score: " .. player.score, WHITE, BLACK)
+            disp.drawText(84, 168, "Veggies: " .. veggies_collected .. "/" .. total_veggies, GREEN, BLACK)
+            disp.drawText(84, 186, "ENTER: Try Again", GRAY, BLACK)
         end
     end
 }
@@ -1525,33 +1687,49 @@ local win_scene = {
     enter = function()
         win_time = 0
         snd_win()
+        bgm.play("win")
     end,
     update = function(dt)
         win_time = win_time + dt
         game_time = game_time + dt
         update_particles(dt)
-        if win_time > 0.2 and win_time < 0.25 then pc.audio.playTone(660, 150) end
-        if win_time > 0.5 and win_time < 0.55 then pc.audio.playTone(880, 200) end
         local pressed = input.getButtonsPressed()
         if pressed & input.BTN_ENTER ~= 0 then game.scene.switch("play") end
         if pressed & input.BTN_ESC ~= 0 then game.scene.switch("menu") end
     end,
     draw = function()
+        local PANEL_TOP = 116
         draw_sky()
-        draw_house(136, 60)
-        disp.drawText(68, 110, "HOME SWEET HOME!", GOLD, SKY_MID)
-        disp.drawText(100, 140, "Score: " .. player.score, WHITE, SKY_MID)
-        disp.drawText(80, 160, "Veggies: " .. veggies_collected .. "/" .. total_veggies, GREEN, SKY_MID)
+        for _, c in ipairs(clouds_near) do
+            draw_cloud(c.x % SCREEN_W, c.y * 0.6, c.w)
+        end
+        -- Garden crest tiled edge-to-edge (menu-style strip; the gameplay
+        -- cluster sets are far too sparse to fill a static 320px frame),
+        -- grounded on the panel top so the house stands on it
+        draw_title_strip({sprites.bg_trees_far_1, sprites.bg_trees_far_2}, PANEL_TOP, 160)
+        draw_title_strip({sprites.bg_fence_mid_1, sprites.bg_fence_mid_2}, PANEL_TOP, 160)
+        draw_title_strip({sprites.bg_garden_near_1, sprites.bg_garden_near_2}, PANEL_TOP, 128)
+        draw_house(136, PANEL_TOP - 36)
+        -- Stats panel
+        local panel = disp.rgb(20, 40, 20)
+        disp.fillRect(40, 116, 240, 120, panel)
+        disp.drawRect(40, 116, 240, 120, GOLD)
+        disp.drawText(72, 126, "HOME SWEET HOME!", GOLD, panel)
+        disp.drawText(100, 146, "Score: " .. player.score, WHITE, panel)
+        disp.drawText(84, 162, "Veggies: " .. veggies_collected .. "/" .. total_veggies, GREEN, panel)
         if veggies_collected >= total_veggies then
-            disp.drawText(60, 180, "ALL VEGGIES! +500!", GOLD, SKY_MID)
+            disp.drawText(64, 178, "ALL VEGGIES! +500!", GOLD, panel)
         end
         if player.score >= high_score and player.score > 0 then
-            disp.drawText(72, 200, "NEW HIGH SCORE!", YELLOW, SKY_MID)
+            disp.drawText(76, 196, "NEW HIGH SCORE!", YELLOW, panel)
         else
-            disp.drawText(76, 200, "Best: " .. high_score, GRAY, SKY_MID)
+            disp.drawText(80, 196, "Best: " .. high_score, GRAY, panel)
         end
-        disp.drawText(70, 240, "ENTER: Play Again", WHITE, SKY_DARK)
-        disp.drawText(88, 260, "ESC: Menu", GRAY, SKY_DARK)
+        disp.drawText(74, 212, "ENTER: Play Again", WHITE, panel)
+        disp.drawText(92, 226, "ESC: Menu", GRAY, panel)
+        -- Foreground ground echo, matching the gameplay platform look
+        disp.fillRect(0, 280, SCREEN_W, SCREEN_H - 280, BROWN)
+        disp.fillRect(0, 280, SCREEN_W, 4, GRASS_GREEN)
         draw_particles_at(0, 0)
     end
 }
@@ -1571,6 +1749,7 @@ while not game.quit do
     local dt = pc.perf.getFrameTime() / 1000.0
     if dt > 0.05 then dt = 0.05 end
     game.scene.update(dt)
+    bgm.update()
     game.scene.draw()
     pc.display.flush()
     pc.perf.endFrame()
