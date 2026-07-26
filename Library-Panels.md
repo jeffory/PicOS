@@ -224,7 +224,7 @@ Global tuning table — assign before (or after) `Panels.new`; most values are r
 
 | Field | Default | Description |
 |-------|---------|-------------|
-| `scrollSpeed` | `6` | Pixels per key-repeat tick in `"scroll"` mode. |
+| `scrollSpeed` | `180` | Scroll velocity in pixels per second in `"scroll"` mode. Movement is scaled by real frame time, so the speed is identical on hardware and simulator regardless of frame rate. |
 | `repeatDelayMs` | `180` | Key-repeat initial delay. |
 | `repeatRateMs` | `33` | Key-repeat interval. |
 | `advanceMs` | `400` | Snap animation duration in `"advance"` mode. |
