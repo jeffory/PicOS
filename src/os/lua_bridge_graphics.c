@@ -796,9 +796,9 @@ static void tilemap_draw(lua_tilemap_t *tm, int scroll_x, int scroll_y) {
       int dst_x = col * tw - scroll_x;
       int dst_y = row * th - scroll_y;
 
-      display_draw_image_partial(dst_x, dst_y, tw, th,
+      display_draw_image_partial(dst_x, dst_y, tm->tileset->w, tm->tileset->h,
                                   tm->tileset->data, src_x, src_y,
-                                  tm->tileset->w, tm->tileset->h,
+                                  tw, th,
                                   false, false, 0);
     }
   }
