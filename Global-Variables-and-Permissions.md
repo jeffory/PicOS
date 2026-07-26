@@ -29,10 +29,13 @@ Apps can request elevated requirements via the `requirements` array in `app.json
 |------------|-------------|
 | `filesystem` | Default sandbox access: read `/apps/<appname>/`, read/write `/data/<appid>/` |
 | `root-filesystem` | Full SD card read/write access (bypasses sandbox) |
+| `http` | App needs WiFi/network connectivity (WiFi stays connected after boot time sync) |
+| `audio` | App needs audio output |
+| `clipboard` | Reserved for future use |
 
 ### Checking Requirements in Lua
 
-The `APP_REQUIREMENTS` global is a table with boolean fields:
+The `APP_REQUIREMENTS` global is a table with boolean fields — `.filesystem`, `.root_filesystem`, `.http`, `.audio`, `.clipboard`:
 
 ```lua
 if APP_REQUIREMENTS.root_filesystem then

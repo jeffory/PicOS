@@ -350,6 +350,33 @@ player:setPlayRange(0, 44100)  -- play only the first second
 
 ---
 
+#### `player:getLength()`
+Returns the length of the loaded sample in PCM frames.
+
+- **Returns:** (number) Frame count, or `0` if no sample is set
+
+---
+
+#### `player:setOffset(seconds)`
+Seeks to a position in seconds.
+
+- **Parameters:**
+  - `seconds` (number): Playback position in seconds (fractions allowed)
+- **Returns:** None
+
+```lua
+player:setOffset(1.5)  -- seek to 1.5 seconds
+```
+
+---
+
+#### `player:getOffset()`
+Returns the current playback position in seconds.
+
+- **Returns:** (number) Position in seconds
+
+---
+
 #### `player:setRate(rate)` / `player:getRate()`
 Sets or gets the playback rate multiplier. `1.0` is normal speed, `2.0` is double speed, `0.5` is half speed.
 
@@ -413,8 +440,8 @@ Opens a WAV file for streaming.
 
 ---
 
-#### `player:play([repeat])` / `player:stop()` / `player:pause()` / `player:isPlaying()`
-Standard playback controls. `repeat` works the same as SamplePlayer.
+#### `player:play([repeat])` / `player:stop()` / `player:pause()` / `player:resume()` / `player:isPlaying()`
+Standard playback controls. `repeat` works the same as SamplePlayer. `pause()` halts playback keeping the position; `resume()` continues from the paused position.
 
 ---
 

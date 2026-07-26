@@ -5,14 +5,20 @@ This document provides a complete reference for all Lua APIs available to PicOS 
 ## API Sections
 
 - [[Global Variables and Permissions]]
-- [[API Display and Graphics]] — Graphics & Display
-- [[API Input]] — Keyboard & Button Input
-- [[API System and Config]] — System Functions & Persistent Config
-- [[API Filesystem]] — Filesystem (SD Card)
-- [[API UI]] — Standard UI Components
-- [[API Network and WiFi]] — WiFi & HTTP Client
 - [[API Audio and Sound]] — Audio Playback (WAV, MP3) & Tones
+- [[API Crypto]] — Cryptographic Primitives
+- [[API Display and Graphics]] — Graphics & Display
+- [[API Filesystem]] — Filesystem (SD Card)
+- [[API Input]] — Keyboard & Button Input
+- [[API Modplayer]] — Tracker Module Music (MOD, XM, S3M)
+- [[API Network and WiFi]] — WiFi & HTTP Client
 - [[API Performance]] — Performance Monitoring
+- [[API REPL]] — Interactive Lua REPL
+- [[API Sysconfig]] — System-Wide Configuration
+- [[API System and Config]] — System Functions & Per-App Config
+- [[API Terminal]] — Terminal Emulator Widget
+- [[API UI]] — Standard UI Components
+- [[API Video]] — MJPEG Video Playback
 - [[Standard Lua Libraries]]
 
 ---
@@ -56,7 +62,7 @@ end
 - All file paths must be absolute (e.g., `"/apps/myapp/data.txt"` or `APP_DIR .. "/data.txt"`).
 - Use `picocalc.fs.appPath("filename")` for per-app data storage — it auto-creates the directory.
 - Without `root-filesystem` permission, file access is sandboxed to your app's directory and `/data/<appid>/`.
-- Config data is shared across all apps — use namespaced keys (e.g., `"myapp.highscore"`).
+- Per-app config (`picocalc.config`, also available as `picocalc.appconfig`) is isolated per app at `/data/<APP_ID>/config.json`. Only `picocalc.sysconfig` (`/system/config.json`) is shared across all apps.
 
 ---
 

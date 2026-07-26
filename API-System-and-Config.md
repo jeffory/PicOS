@@ -49,10 +49,24 @@ end
 ---
 
 #### `picocalc.sys.isUSBPowered()`
-Checks if the device is powered via USB.
+Checks if the device is powered via USB (GP24 VBUS sense).
 
 - **Parameters:** None
-- **Returns:** (boolean) Currently always returns `false` (stub implementation)
+- **Returns:** (boolean) `true` when USB power is connected
+
+---
+
+#### `picocalc.sys.resetIdleTimer()`
+Resets the idle screen-dim timer. Call on user activity to keep the display from dimming (see the `dim_timeout_s` key in [[API Sysconfig]]).
+
+- **Parameters:** None
+- **Returns:** None
+
+```lua
+if pressed ~= 0 then
+    picocalc.sys.resetIdleTimer()
+end
+```
 
 ---
 
@@ -359,7 +373,9 @@ local data = picocalc.sys.qmiPsramRead(buf, 0, 11)
 
 ## picocalc.config
 
-Persistent key-value configuration storage (stored in `/system/config.json`).
+Persistent **per-app** key-value configuration storage, stored at `/data/<APP_ID>/config.json`. Each app gets its own isolated store. The same store is also available under the alias `picocalc.appconfig` — same data, two names.
+
+For the **system-wide** store shared by all apps (`/system/config.json`), use `picocalc.sysconfig` — see [[API Sysconfig]].
 
 ### Functions
 
@@ -392,7 +408,7 @@ picocalc.config.set("old_key", nil)  -- Delete key
 ---
 
 #### `picocalc.config.save()`
-Saves the current configuration to `/system/config.json`.
+Saves the current configuration to `/data/<APP_ID>/config.json`.
 
 - **Parameters:** None
 - **Returns:** (boolean) `true` on success, `false` on error
@@ -406,7 +422,7 @@ end
 ---
 
 #### `picocalc.config.load()`
-Loads configuration from `/system/config.json`.
+Loads configuration from `/data/<APP_ID>/config.json`.
 
 - **Parameters:** None
 - **Returns:** (boolean) `true` on success, `false` on error

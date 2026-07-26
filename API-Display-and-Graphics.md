@@ -93,11 +93,12 @@ Draws text using the built-in 6×8 pixel bitmap font (ASCII 0x20–0x7E).
   - `y` (number): Top-left Y coordinate
   - `text` (string): Text to draw
   - `fg_color` (number): Foreground RGB565 color
-  - `bg_color` (number, optional): Background RGB565 color. Defaults to `BLACK`.
+  - `bg_color` (number or false, optional): Background RGB565 color. Defaults to `BLACK`. Pass `false` for a transparent background (glyph pixels only).
 - **Returns:** (number) Pixel width of the drawn text
 
 ```lua
 local width = picocalc.display.drawText(10, 10, "Hello!", picocalc.display.WHITE)
+picocalc.display.drawText(10, 20, "Overlay", picocalc.display.WHITE, false)  -- transparent bg
 ```
 
 ---
@@ -220,6 +221,38 @@ picocalc.display.fillVLine(100, 10, 300, picocalc.display.GREEN)
 
 ---
 
+#### `picocalc.display.fillHLine(y, x0, x1, color)`
+Draw an optimized horizontal line.
+
+- **Parameters:**
+  - `y` (number): Y coordinate
+  - `x0` (number): Left X coordinate
+  - `x1` (number): Right X coordinate
+  - `color` (number): RGB565 color value
+- **Returns:** None
+
+```lua
+picocalc.display.fillHLine(50, 10, 300, picocalc.display.GREEN)
+```
+
+---
+
+#### `picocalc.display.fillTriangle(x0, y0, x1, y1, x2, y2, color)`
+Draw a filled triangle.
+
+- **Parameters:**
+  - `x0`, `y0` (number): First vertex
+  - `x1`, `y1` (number): Second vertex
+  - `x2`, `y2` (number): Third vertex
+  - `color` (number): RGB565 color value
+- **Returns:** None
+
+```lua
+picocalc.display.fillTriangle(160, 40, 60, 280, 260, 280, picocalc.display.RED)
+```
+
+---
+
 #### `picocalc.display.fillVLineGradient(x, y0, y1, colorTop, colorBottom)`
 Draw a vertical line with gradient between two colors.
 
@@ -253,6 +286,62 @@ Draw a vertical column of pixels sampled from a texture image. Useful for raycas
 ```lua
 -- Draw a column from a wall texture (raycasting)
 picocalc.display.drawTexturedColumn(x, wallTop, wallBottom, wallTexture, texCol, 0, 63)
+```
+
+---
+
+#### `picocalc.display.setClipRect(x, y, w, h)`
+Restrict all drawing primitives to a rectangle. Useful for split-screen, UI panels, and partial redraws. `clear()` and the framebuffer effects are NOT clipped (they are whole-buffer by design).
+
+- **Parameters:**
+  - `x` (number): Clip rect left
+  - `y` (number): Clip rect top
+  - `w` (number): Clip rect width
+  - `h` (number): Clip rect height
+- **Returns:** None
+
+```lua
+picocalc.display.setClipRect(0, 0, 160, 320)   -- left half only
+-- ... draw player 1 view ...
+picocalc.display.clearClipRect()                -- back to full screen
+```
+
+---
+
+#### `picocalc.display.getClipRect()`
+Return the current clip rectangle.
+
+- **Returns:** (number, number, number, number) `x, y, w, h`
+
+---
+
+#### `picocalc.display.clearClipRect()`
+Restore the clip rectangle to the full screen.
+
+- **Returns:** None
+
+---
+
+#### `picocalc.display.drawPlane(image, camX, camY, camZ, [angle], [horizonY], [scale])`
+Render a Mode 7-style perspective ground plane (SNES F-Zero / Mario Kart floor). The camera sits at `(camX, camY)` in texture space, `camZ` units above the plane, facing `angle` radians (0 = toward +Y in texture space). Rows below `horizonY` are filled. Power-of-two texture dimensions (64/128/256) wrap seamlessly; other sizes clamp at the edges. Respects the clip rect.
+
+- **Parameters:**
+  - `image` (userdata): Ground texture image
+  - `camX` (number): Camera X in texture space
+  - `camY` (number): Camera Y in texture space
+  - `camZ` (number): Camera height above the plane
+  - `angle` (number, optional): Facing in radians (default 0)
+  - `horizonY` (number, optional): Horizon scanline (default 120)
+  - `scale` (number, optional): FOV/zoom tuning, larger = further view (default 1.0)
+- **Returns:** None
+
+```lua
+local floor = picocalc.graphics.image.load(APP_DIR .. "/track.png")  -- 256x256
+while true do
+    picocalc.display.clear(picocalc.display.rgb(64, 64, 128))  -- sky
+    picocalc.display.drawPlane(floor, x, y, 20.0, angle, 120, 40.0)
+    picocalc.display.flush()
+end
 ```
 
 ---
@@ -573,6 +662,19 @@ void picos_main(PicoCalcAPI *api) {
 | `effectScanline` | `void (*)(uint8_t intensity)` |
 | `effectPosterize` | `void (*)(uint8_t levels)` |
 
+API version 4 (`api->version >= 4`) adds the clip rect, mode-7 plane, and the previously Lua-only primitives to the same vtable:
+
+| Function | Signature |
+|----------|-----------|
+| `setClipRect` | `void (*)(int x, int y, int w, int h)` |
+| `getClipRect` | `void (*)(int *x, int *y, int *w, int *h)` |
+| `clearClipRect` | `void (*)(void)` |
+| `fillHLine` | `void (*)(int y, int x0, int x1, uint16_t color)` |
+| `fillTriangle` | `void (*)(int x0, int y0, int x1, int y1, int x2, int y2, uint16_t color)` |
+| `setScrollArea` | `void (*)(int top_fixed, int scroll_height, int bottom_fixed)` |
+| `setScrollOffset` | `void (*)(int offset)` |
+| `drawPlane` | `void (*)(const uint16_t *tex, int tex_w, int tex_h, float cam_x, float cam_y, float cam_z, float angle, int horizon_y, float scale)` |
+
 ---
 
 ## picocalc.graphics
@@ -612,6 +714,20 @@ Sets the global transparent color for image and sprite drawing. Pixels matching 
 Returns the current global transparent color.
 
 - **Returns:** (number or nil) RGB565 color value, or `nil` if transparency is disabled.
+
+---
+
+#### `picocalc.graphics.setStencilPattern(pattern)`
+Sets a global 8-byte stencil pattern applied to subsequent drawing.
+
+- **Parameters:**
+  - `pattern` (table or nil): Array of 8 bytes (one per row of the 8×8 pattern), or `nil` to clear the stencil
+- **Returns:** None
+
+```lua
+picocalc.graphics.setStencilPattern({0xAA, 0x55, 0xAA, 0x55, 0xAA, 0x55, 0xAA, 0x55})
+picocalc.graphics.setStencilPattern(nil)  -- clear
+```
 
 ---
 
@@ -663,6 +779,30 @@ picocalc.graphics.fillBorderedRect(10, 10, 50, 50, picocalc.display.BLUE, picoca
 
 ---
 
+#### `picocalc.graphics.drawPlayfield(playfield, ox, oy, block_size, cols, rows, grid_color)`
+Draws a 2D block grid in a single C call — ideal for falling-block games. `playfield[row][col]` holds an RGB565 color, or `0` for an empty cell. Blocks are filled; the grid lines are drawn in `grid_color`.
+
+- **Parameters:**
+  - `playfield` (table): 2D array indexed `playfield[row][col]` (1-based); RGB565 color or `0` = empty
+  - `ox`, `oy` (number): Top-left corner of the playfield in pixels
+  - `block_size` (number): Width and height of each block in pixels
+  - `cols`, `rows` (number): Playfield dimensions in blocks
+  - `grid_color` (number): RGB565 grid line color
+- **Returns:** None
+
+```lua
+local playfield = {}
+for r = 1, 20 do
+    playfield[r] = {}
+    for c = 1, 10 do playfield[r][c] = 0 end
+end
+playfield[20][5] = picocalc.display.RED
+
+picocalc.graphics.drawPlayfield(playfield, 85, 10, 15, 10, 20, picocalc.display.GRAY)
+```
+
+---
+
 #### `picocalc.graphics.updateDrawParticles(flat_array, delta_s)`
 Updates, draws, and compacts a flat particle array in a single C call. The array holds 6 values per particle: `x, y, vx, vy, life_ms, color`.
 
@@ -710,6 +850,30 @@ while true do
         160, 160, 300, picocalc.display.WHITE)
     picocalc.display.flush()
 end
+```
+
+---
+
+#### `draw3DWireframeEx(verts, edges, angleX, angleY, angleZ, scx, scy, fov, edgeColor [, fillColor [, fillMode [, vertSize [, faces]]]])`
+Enhanced 3D wireframe with optional filled triangles. **Note:** this is a global function, not under `picocalc.*`.
+
+- **Parameters:**
+  - `verts` (table): Flat sequence `{x1, y1, z1, x2, y2, z2, ...}` — `n/3` vertices
+  - `edges` (table): Flat sequence `{a1, b1, a2, b2, ...}` — 1-based vertex index pairs
+  - `angleX`, `angleY`, `angleZ` (number): Rotation angles in radians
+  - `scx`, `scy` (number): Screen-space center point
+  - `fov` (number): Field-of-view scale factor
+  - `edgeColor` (number): RGB565 color for edges
+  - `fillColor` (number, optional): RGB565 fill color. Defaults to `0` (black).
+  - `fillMode` (number, optional): 0 = wireframe only, 1 = fill only, 2 = both. Defaults to `0`.
+  - `vertSize` (number, optional): Vertex dot size in pixels. Defaults to `3`.
+  - `faces` (table, optional): Flat sequence of vertex-index triples `{v1, v2, v3, ...}` defining the triangles to fill
+- **Returns:** None
+
+```lua
+local faces = {1,2,3, 1,3,4,  5,6,7, 5,7,8}  -- two quads as triangles
+draw3DWireframeEx(verts, edges, angle, angle*0.7, 0,
+    160, 160, 300, picocalc.display.WHITE, picocalc.display.BLUE, 2, 3, faces)
 ```
 
 ---
@@ -857,7 +1021,7 @@ local img = picocalc.graphics.image.load("/apps/myapp/sprite.bmp")
 ---
 
 #### `picocalc.graphics.image.loadFromBuffer(data)`
-Decodes an image from an in-memory buffer. Supports JPEG, PNG, and GIF.
+Decodes an image from an in-memory buffer. The format is auto-detected from the magic bytes — BMP, JPEG, PNG, and GIF are all supported.
 
 - **Parameters:**
   - `data` (string or userdata): Image file data
@@ -868,6 +1032,91 @@ Decodes an image from an in-memory buffer. Supports JPEG, PNG, and GIF.
 local raw = picocalc.fs.readFile("/apps/myapp/photo.jpg")
 local img = picocalc.graphics.image.loadFromBuffer(raw)
 ```
+
+---
+
+#### `picocalc.graphics.image.getInfo(path)`
+Reads an image's dimensions from its header only — no full decode.
+
+- **Parameters:**
+  - `path` (string): Absolute file path
+- **Returns:** (table) `{width=number, height=number, format=string}`
+- **Errors:** If the file is not a recognized image
+
+```lua
+local info = picocalc.graphics.image.getInfo("/apps/myapp/photo.jpg")
+print(info.width, info.height, info.format)
+```
+
+---
+
+#### `picocalc.graphics.image.loadRegion(path, x, y, w, h)`
+Loads an image and keeps only the given sub-rectangle. The region is clamped to the image bounds.
+
+- **Parameters:**
+  - `path` (string): Absolute file path
+  - `x`, `y` (number): Top-left of the region
+  - `w`, `h` (number): Region dimensions in pixels
+- **Returns:** (userdata) Image object
+- **Errors:** If the file fails to load or the region lies outside the image
+
+```lua
+-- Load just the top-left 64x64 corner of a large image
+local corner = picocalc.graphics.image.loadRegion("/apps/myapp/big.png", 0, 0, 64, 64)
+```
+
+---
+
+#### `picocalc.graphics.image.loadScaled(path, w, h)`
+Loads an image and resamples it to `w`×`h` (bilinear). Faster and lighter than loading full-size then scaling at draw time.
+
+- **Parameters:**
+  - `path` (string): Absolute file path
+  - `w`, `h` (number): Target dimensions in pixels
+- **Returns:** (userdata) Image object
+- **Errors:** If the file fails to load
+
+```lua
+local thumb = picocalc.graphics.image.loadScaled("/apps/myapp/photo.jpg", 64, 64)
+```
+
+---
+
+#### `picocalc.graphics.image.preload(path)`
+Starts an asynchronous decode of an image on Core 1. Only one preload can be in flight at a time. Poll for completion with `pollPreload()`.
+
+- **Parameters:**
+  - `path` (string): Absolute file path
+- **Returns:** (boolean) `true` if the preload was started
+
+```lua
+picocalc.graphics.image.preload("/apps/myapp/level2.png")
+```
+
+---
+
+#### `picocalc.graphics.image.pollPreload()`
+Checks the state of the pending preload.
+
+- **Returns:** (userdata or nil, boolean) `image, ready` — `ready` is `true` once the preload has finished (successfully or not); `image` is the decoded image, or `nil` while still decoding or on failure
+
+```lua
+while true do
+    local img, ready = picocalc.graphics.image.pollPreload()
+    if ready then
+        if img then levelArt = img end
+        break
+    end
+    picocalc.sys.sleep(10)
+end
+```
+
+---
+
+#### `picocalc.graphics.image.cancelPreload()`
+Cancels the pending preload.
+
+- **Returns:** None
 
 ---
 
@@ -889,6 +1138,18 @@ Returns the image dimensions.
 
 ```lua
 local w, h = img:getSize()
+```
+
+---
+
+#### `img:getMetadata()`
+Returns image metadata without touching pixel data.
+
+- **Returns:** (table) `{width=number, height=number, transparentColor=number?, storage=string}` — `transparentColor` is only present if one is set; `storage` is `"psram"`
+
+```lua
+local meta = img:getMetadata()
+print(meta.width, meta.height, meta.storage)
 ```
 
 ---
@@ -1700,6 +1961,39 @@ Checks if a point collides with the sprite's collision rect.
 
 ---
 
+#### `sprite:moveWithCollisions(goalX, goalY)`
+Moves the sprite toward a goal position, sliding along the collision rects of other sprites. Requires collisions to be enabled (`setCollisionsEnabled(true)`).
+
+- **Parameters:**
+  - `goalX`, `goalY` (number): Desired position
+- **Returns:** (number, number, table) `actualX, actualY, collisions` — the position reached, plus a table of collision records `{sprite, other, type, x, y, normal = {x, y}, touch}`
+
+```lua
+sprite:setCollisionsEnabled(true)
+local x, y, hits = sprite:moveWithCollisions(goalX, goalY)
+for i, c in ipairs(hits) do
+    print("bumped", c.type, c.normal.x, c.normal.y)
+end
+```
+
+---
+
+#### `sprite:collisionResponse()`
+Returns the sprite's collision response type.
+
+- **Returns:** (string) Response type (default `"slide"`)
+
+---
+
+#### `sprite:setStencilImage(image)`
+Sets a stencil image for the sprite.
+
+- **Parameters:**
+  - `image` (userdata): Image object to use as the stencil
+- **Returns:** None
+
+---
+
 #### `sprite:setTilemap(tilemap)`
 Assigns a tilemap to this sprite. When set, the sprite renders the tilemap instead of a single image. The sprite's position acts as the tilemap scroll offset. Pass `nil` to clear.
 
@@ -1960,7 +2254,7 @@ font:drawTextAligned(160, 10, "Centered", 1, picocalc.display.WHITE)
 ---
 
 #### `font:drawTextInRect(x, y, w, h, text [, alignment [, fg [, bg]]])`
-Draws word-wrapped text within a bounding rectangle using this font.
+Draws word-wrapped text within a bounding rectangle using this font. **Monospace fonts only.**
 
 - **Parameters:**
   - `x` (number): Left edge of bounding rectangle
@@ -2162,3 +2456,14 @@ while true do
     picocalc.display.flush()
 end
 ```
+
+---
+
+## Game development APIs
+
+Building a game? These pages cover APIs that pair well with the graphics functions above:
+
+- **API Game** — camera, scene management, and save helpers
+- **API TCP** — raw TCP/TLS sockets
+- **API Zip** — ZIP archive extraction
+- **API JSON** — JSON encoding/decoding

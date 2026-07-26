@@ -72,3 +72,4 @@ picocalc.sysconfig.save()
 | `"wifi_pass"` | WiFi password |
 | `"brightness"` | Display brightness level |
 | `"timezone"` | Timezone string for clock display |
+| `"dim_timeout_s"` | Idle screen-dim timeout in seconds; `"0"` disables dimming (default `60`) |

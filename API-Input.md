@@ -56,6 +56,37 @@ Returns the bitmask of buttons that were **released this frame**.
 
 ---
 
+#### `picocalc.input.getButtonsRepeated()`
+Like `getButtonsPressed()`, but buttons held past the repeat delay also produce synthetic repeat edges (see `setRepeat()`). Useful for menus that should scroll while a button is held.
+
+- **Parameters:** None
+- **Returns:** (number) Bitmask of pressed edges plus synthetic repeat edges
+
+```lua
+picocalc.input.setRepeat(400, 80)  -- start repeating after 400ms, then every 80ms
+local pressed = picocalc.input.getButtonsRepeated()
+if pressed & picocalc.input.BTN_DOWN ~= 0 then
+    selection = selection + 1  -- scrolls while held
+end
+```
+
+---
+
+#### `picocalc.input.setRepeat(delay_ms [, rate_ms])`
+Configures key auto-repeat for `getButtonsRepeated()`.
+
+- **Parameters:**
+  - `delay_ms` (number): Milliseconds a button must be held before repeating starts. `0` disables auto-repeat.
+  - `rate_ms` (number, optional): Milliseconds between repeat edges (default `80`, minimum `1`).
+- **Returns:** None
+
+```lua
+picocalc.input.setRepeat(400)      -- repeat every 80ms after a 400ms hold
+picocalc.input.setRepeat(0)        -- disable auto-repeat
+```
+
+---
+
 #### `picocalc.input.getChar()`
 Returns the last ASCII character typed, if any.
 
