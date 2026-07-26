@@ -273,6 +273,7 @@ sound_player_t *sound_player_create(void) {
             player->play_start = 0;
             player->play_end = 0;
             player->rate = 1.0f;
+            player->owns_sample = false;
             return player;
         }
     }

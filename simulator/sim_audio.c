@@ -504,6 +504,7 @@ sound_player_t *sound_player_create(void) {
             p->rate = 1.0f;
             p->play_start = 0;
             p->play_end = 0;
+            p->owns_sample = false;
             pthread_mutex_unlock(&s_sound_mutex);
             return p;
         }
