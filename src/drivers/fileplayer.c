@@ -34,7 +34,10 @@ static bool parse_wav_header(sdfile_t f, uint32_t *sample_rate, uint16_t *channe
     }
 
     uint32_t pos = 12;
-    while (pos + 8 < 44) {
+    /* A canonical 44-byte WAV header has the data chunk header at bytes
+     * 36-43 — `pos + 8 < 44` rejects it (36+8 is not < 44). Allow the chunk
+     * header to end exactly at the window edge. */
+    while (pos + 8 <= 44) {
         uint32_t chunk_id = *(uint32_t *)(header + pos);
         uint32_t chunk_size = *(uint32_t *)(header + pos + 4);
 
@@ -322,12 +325,25 @@ void fileplayer_update(void) {
         return;
     }
 
+    /* Pace production to the DMA drain rate. The stream ring is small
+     * (AUDIO_RING_SIZE stereo frames); reading at SD speed (~18x realtime)
+     * just makes audio_push_samples drop almost everything while position
+     * races to EOF — the track "finishes" inaudibly in a fraction of a
+     * second. Only read what the ring can actually accept. */
+    float space_rate = s_active_player->rate;
+    if (space_rate < 0.1f) space_rate = 0.1f;
+    size_t to_read = 4096;
+    size_t max_by_space = (size_t)(audio_ring_free() * 2 * space_rate);
+    if (to_read > max_by_space) to_read = max_by_space;
+    to_read &= ~(size_t)1;  // 16-bit alignment
+    if (to_read < 512)
+        return;  // ring nearly full — wait for the DMA to drain
+
     // Non-blocking: skip if Core 0 owns the SD card
     if (!recursive_mutex_try_enter(&g_sdcard_mutex, NULL))
         return;
 
     // Read a chunk of WAV data
-    size_t to_read = 4096;
     UINT br = 0;
     FRESULT res = f_read((FIL *)s_current_file, s_wav_buffer, to_read, &br);
     recursive_mutex_exit(&g_sdcard_mutex);

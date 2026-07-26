@@ -314,17 +314,16 @@ void sound_player_play(sound_player_t *player, uint8_t repeat_count) {
         s_timer_interval_us = 1000000 / sample_rate;
         if (!s_timer_active) {
             audio_pwm_setup(sample_rate);
-            alarm_pool_t *pool = audio_get_core1_alarm_pool();
-            if (pool) {
-                alarm_pool_add_repeating_timer_us(pool, -s_timer_interval_us,
-                                                  playback_timer_callback, NULL,
-                                                  &s_playback_timer);
-            } else {
-                add_repeating_timer_us(-s_timer_interval_us,
-                                       playback_timer_callback, NULL,
-                                       &s_playback_timer);
-            }
+            /* Default alarm pool (Core 0): play/stop/cancel/update then all
+             * run on the same core as the Lua/native callers — no cross-core
+             * timer or state races. NOTE: interval must be cast to a signed
+             * type — negating the uint32_t wraps to ~71 minutes instead of
+             * -90us, and the timer simply never fires. */
+            bool add_ok = add_repeating_timer_us(-(int32_t)s_timer_interval_us,
+                                   playback_timer_callback, NULL,
+                                   &s_playback_timer);
             s_timer_active = true;
+            (void)add_ok;
         }
     }
 }

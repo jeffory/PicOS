@@ -158,12 +158,10 @@ void audio_play_tone(uint32_t freq_hz, uint32_t duration_ms) {
 
   if (duration_ms > 0) {
     s_end_time_us = time_us_64() + (duration_ms * 1000);
-    if (s_core1_alarm_pool) {
-      alarm_pool_add_repeating_timer_us(s_core1_alarm_pool, -1000,
-                                        audio_timer_callback, NULL, &s_timer);
-    } else {
-      add_repeating_timer_us(-1000, audio_timer_callback, NULL, &s_timer);
-    }
+    /* Default alarm pool (Core 0): tone play/stop/cancel are all called from
+     * Core 0 — keeping the timer on the same core avoids cross-core
+     * cancel/state races. */
+    add_repeating_timer_us(-1000, audio_timer_callback, NULL, &s_timer);
   } else {
     s_end_time_us = 0;
   }
