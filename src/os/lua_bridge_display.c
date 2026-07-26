@@ -172,6 +172,38 @@ static int l_display_flush(lua_State *L) {
   return 0;
 }
 
+// flushRows(y0, y1) — push rows y0..y1 (inclusive) of the current draw buffer
+// to the panel WITHOUT swapping buffers.  Mirrors l_display_flush's
+// screenshot-pending hook so MCP screenshots still fire while an app sits in a
+// partial-update idle loop.  toast_draw() is deliberately NOT mirrored: toasts
+// render on full flushes only — painting one here would smear it into an
+// arbitrary row band and it would never be cleanly erased.
+static int l_display_flushRows(lua_State *L) {
+  int y0 = (int)luaL_checkinteger(L, 1);
+  int y1 = (int)luaL_checkinteger(L, 2);
+  display_flush_rows(y0, y1);
+  if (s_screenshot_pending) {
+    s_screenshot_pending = false;
+    screenshot_save();
+  }
+  return 0;
+}
+
+// flushRegion(y0, y1) — like flush() but only transfers rows y0..y1.  Swaps
+// buffers and re-syncs the flushed band into the new back buffer (see
+// display_flush_region).  Same screenshot hook, same no-toast rule as
+// flushRows.
+static int l_display_flushRegion(lua_State *L) {
+  int y0 = (int)luaL_checkinteger(L, 1);
+  int y1 = (int)luaL_checkinteger(L, 2);
+  display_flush_region(y0, y1);
+  if (s_screenshot_pending) {
+    s_screenshot_pending = false;
+    screenshot_save();
+  }
+  return 0;
+}
+
 static int l_display_getWidth(lua_State *L) {
   lua_pushinteger(L, FB_WIDTH);
   return 1;
@@ -345,6 +377,8 @@ static const luaL_Reg l_display_lib[] = {
     {"setClipRect", l_display_setClipRect},
     {"getClipRect", l_display_getClipRect},
     {"clearClipRect", l_display_clearClipRect},
+    {"flushRows", l_display_flushRows},
+    {"flushRegion", l_display_flushRegion},
     {"drawPlane", l_display_drawPlane},
     {"drawTexturedColumn", l_display_drawTexturedColumn},
     {"fillVLineGradient", l_display_fillVLineGradient},
@@ -352,6 +386,11 @@ static const luaL_Reg l_display_lib[] = {
 
 
 void lua_bridge_display_init(lua_State *L) {
+  // Fresh clip state per app launch, mirroring http_close_all() in
+  // lua_bridge_register — a clip left behind by a previous app must not
+  // silently truncate the next app's drawing.
+  display_clear_clip_rect();
+
   register_subtable(L, "display", l_display_lib);
   // Push colour constants into picocalc.display
   lua_getfield(L, -1, "display");

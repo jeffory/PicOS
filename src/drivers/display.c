@@ -881,10 +881,10 @@ static int draw_text_impl(int x, int y, const char *text, uint16_t fg,
       for (int row = 0; row < FONT8X12_H; row++) {
         uint8_t rowdata = glyph[row];
         int py = y + row;
-        if (py < 0 || py >= FB_HEIGHT) continue;
+        if (py < s_clip_y0 || py > s_clip_y1) continue;
         for (int col = 0; col < FONT8X12_W; col++) {
           int px = x + col;
-          if (px >= 0 && px < FB_WIDTH) {
+          if (px >= s_clip_x0 && px <= s_clip_x1) {
             bool on = (rowdata & (0x80 >> col)) != 0;
             if (on) s_framebuffer[py * FB_WIDTH + px] = fg_be;
             else if (!transparent) s_framebuffer[py * FB_WIDTH + px] = bg_be;
@@ -904,10 +904,10 @@ static int draw_text_impl(int x, int y, const char *text, uint16_t fg,
       for (int row = 0; row < FONT_SCI_HEIGHT; row++) {
         uint8_t rowdata = glyph[row];
         int py = y + row;
-        if (py < 0 || py >= FB_HEIGHT) continue;
+        if (py < s_clip_y0 || py > s_clip_y1) continue;
         for (int col = 0; col < FONT_SCI_WIDTH; col++) {
           int px = x + col;
-          if (px >= 0 && px < FB_WIDTH) {
+          if (px >= s_clip_x0 && px <= s_clip_x1) {
             bool on = (rowdata & (0x80 >> col)) != 0;
             if (on) s_framebuffer[py * FB_WIDTH + px] = fg_be;
             else if (!transparent) s_framebuffer[py * FB_WIDTH + px] = bg_be;
@@ -927,7 +927,8 @@ static int draw_text_impl(int x, int y, const char *text, uint16_t fg,
         for (int row = 0; row < FONT_H; row++) {
           int px = x + col;
           int py = y + row;
-          if (px >= 0 && px < FB_WIDTH && py >= 0 && py < FB_HEIGHT) {
+          if (px >= s_clip_x0 && px <= s_clip_x1 &&
+              py >= s_clip_y0 && py <= s_clip_y1) {
             bool on = (coldata & (1 << row)) != 0;
             if (on) s_framebuffer[py * FB_WIDTH + px] = fg_be;
             else if (!transparent) s_framebuffer[py * FB_WIDTH + px] = bg_be;
@@ -1152,12 +1153,21 @@ void display_draw_image_scaled(int x, int y, int img_w, int img_h,
     }
   }
 
-  // Use masked version if transparency is enabled, otherwise use regular version
+  // Use masked version if transparency is enabled, otherwise use regular
+  // version.  The clip is passed through (converted from the driver's
+  // inclusive bounds to the decoder's half-open rect) so TGX renders into a
+  // sub-view of the framebuffer and cannot write outside it.
   if (transparent_color != 0) {
-    tgx_draw_image_scaled_masked(fb, FB_WIDTH, FB_HEIGHT, data, img_w, img_h, (int)cx, (int)cy,
-                                  scale, angle, transparent_color);
+    tgx_draw_image_scaled_masked(fb, FB_WIDTH, FB_HEIGHT,
+                                 s_clip_x0, s_clip_y0,
+                                 s_clip_x1 + 1, s_clip_y1 + 1,
+                                 data, img_w, img_h, (int)cx, (int)cy,
+                                 scale, angle, transparent_color);
   } else {
-    tgx_draw_image_scaled(fb, FB_WIDTH, FB_HEIGHT, data, img_w, img_h, (int)cx, (int)cy,
+    tgx_draw_image_scaled(fb, FB_WIDTH, FB_HEIGHT,
+                          s_clip_x0, s_clip_y0,
+                          s_clip_x1 + 1, s_clip_y1 + 1,
+                          data, img_w, img_h, (int)cx, (int)cy,
                           scale, angle);
   }
 

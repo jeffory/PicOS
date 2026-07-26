@@ -685,6 +685,10 @@ static bool run_app(int idx) {
 
   system_menu_clear_items();
 
+  // Apps can leave a clip rect behind; the launcher (and the next app) must
+  // start with full-screen drawing.
+  display_clear_clip_rect();
+
   s_running_app_name = NULL;
   s_app_launch_time_ms = 0;
 
