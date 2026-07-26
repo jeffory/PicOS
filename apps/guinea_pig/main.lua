@@ -241,6 +241,40 @@ local function snd_damage() sfx.play("damage") end
 local function snd_hawk() sfx.play("hawk_screech") end
 local function snd_win() sfx.play("win_jingle") end
 
+-- BGM: streamed loop via fileplayer; replay-on-finish (panels.lua pattern)
+local bgm = { fp = nil, want = nil, restart = false }
+local BGM_VOLUME = { menu = 70, play = 40, win = 70 }
+
+function bgm.play(scene)
+    bgm.want = scene
+    if not bgm.fp then
+        local ok, fp = pcall(pc.sound.fileplayer)
+        if not ok or not fp then return end
+        local loaded = pcall(function() fp:load(APP_DIR .. "/sfx/bgm.wav") end)
+        if not loaded then return end
+        bgm.fp = fp
+        pcall(function()
+            bgm.fp:setFinishCallback(function() bgm.restart = true end)
+        end)
+    end
+    pcall(function() bgm.fp:setVolume(BGM_VOLUME[scene] or 50) end)
+    if bgm.fp.isPlaying and not bgm.fp:isPlaying() then
+        pcall(function() bgm.fp:play(1) end)
+    end
+end
+
+function bgm.update()
+    if bgm.fp and bgm.restart and bgm.want then
+        bgm.restart = false
+        pcall(function() bgm.fp:play(1) end)
+    end
+end
+
+function bgm.stop()
+    bgm.want = nil
+    if bgm.fp then pcall(function() bgm.fp:stop() end) end
+end
+
 -- ============================================================
 -- [3] SPRITE LOADING & DRAWING
 -- ============================================================
@@ -1513,6 +1547,7 @@ local menu_scene = {
     enter = function()
         load_high_score()
         game_time = 0
+        bgm.play("menu")
     end,
     update = function(dt)
         game_time = game_time + dt
@@ -1561,6 +1596,7 @@ local play_scene = {
         camera_obj = game.camera.new()
         camera_obj:setPosition(160, player.y - 40)
         camera_obj:setBounds(0, 0, WORLD_WIDTH, WORLD_HEIGHT)
+        bgm.play("play")
     end,
     update = function(dt)
         game_time = game_time + dt
@@ -1621,6 +1657,7 @@ local win_scene = {
     enter = function()
         win_time = 0
         snd_win()
+        bgm.play("win")
     end,
     update = function(dt)
         win_time = win_time + dt
@@ -1665,6 +1702,7 @@ while not game.quit do
     local dt = pc.perf.getFrameTime() / 1000.0
     if dt > 0.05 then dt = 0.05 end
     game.scene.update(dt)
+    bgm.update()
     game.scene.draw()
     pc.display.flush()
     pc.perf.endFrame()
