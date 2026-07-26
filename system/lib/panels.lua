@@ -82,7 +82,7 @@ Panels.MAGENTA_KEY = disp.rgb(255, 0, 254)
 local SCREEN = 320
 
 Panels.Settings = {
-    scrollSpeed      = 6,          -- px per key-repeat tick
+    scrollSpeed      = 180,        -- scroll velocity in px per SECOND
     repeatDelayMs    = 180,
     repeatRateMs     = 33,
     advanceMs        = 400,        -- snap animation duration (advance mode)
@@ -879,22 +879,29 @@ function Comic:forwardBack()
     return fwd, back
 end
 
-function Comic:handleScrollInput(pressed, repeated)
+function Comic:handleScrollInput(pressed, repeated, dt)
     local S = Panels.Settings
     local fwd, back = self:forwardBack()
     local st = self.seq.scrollType or "scroll"
 
     if st == "scroll" then
-        local held = repeated | pressed
-        local delta = 0
-        if held & fwd ~= 0 then delta = S.scrollSpeed end
-        if held & back ~= 0 then delta = -S.scrollSpeed end
-        if delta ~= 0 then
+        -- Frame-paced scrolling: movement is scrollSpeed px/second scaled by
+        -- the real frame time, not a fixed step per key-repeat tick. Repeat
+        -- ticks (33ms) beat against slower hardware frames, so tick-stepping
+        -- moved 1-3 steps per frame in an uneven rhythm — judder. Velocity
+        -- scaling keeps every drawn frame's movement proportional instead.
+        local held = input.getButtons()
+        local dir = 0
+        if held & fwd ~= 0 then dir = 1 end
+        if held & back ~= 0 then dir = -1 end
+        if dir ~= 0 then
+            local delta = dir * S.scrollSpeed * dt / 1000
             local np = clamp(self.scrollPos + delta, 0, self.layout.maxScroll)
             if np ~= self.scrollPos then
                 self.scrollPos = np
                 self.dirty = true
-            elseif delta > 0 and pressed & fwd ~= 0 then
+            elseif dir > 0 and pressed & fwd ~= 0
+                   and self.scrollPos >= self.layout.maxScroll then
                 -- Pushed forward at the end of the sequence: advance.
                 self:startTransition(self:nextSequenceIndex())
             end
@@ -960,6 +967,13 @@ function Comic:update()
 
     if self.state == "done" then return end
 
+    -- Frame delta for velocity-based scrolling; capped so a stall (modal,
+    -- sequence load, system menu) doesn't turn into one giant jump.
+    local now = nowMs()
+    local dt = now - (self.lastFrameMs or now)
+    if dt > 100 then dt = 100 end
+    self.lastFrameMs = now
+
     local pressed = input.getButtonsPressed()
     local repeated = input.getButtonsRepeated and input.getButtonsRepeated() or 0
 
@@ -1009,7 +1023,7 @@ function Comic:update()
             self.scrollAnim = nil
         end
     else
-        self:handleScrollInput(pressed, repeated)
+        self:handleScrollInput(pressed, repeated, dt)
     end
 
     -- Track the centre panel; reset off-screen layer state so animations and

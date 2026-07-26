@@ -5,5 +5,6 @@
   "version": "1.0.0",
   "author": "PicOS",
   "category": "demos",
-  "requirements": ["audio"]
+  "requirements": ["audio"],
+  "system_clock_khz": 300000
 }
