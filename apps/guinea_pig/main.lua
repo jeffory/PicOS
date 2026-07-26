@@ -1531,7 +1531,8 @@ end
 local function load_high_score()
     local data = game.save.get("guineapig")
     if data and data.high_score then
-        high_score = tonumber(data.high_score) or 0
+        -- JSON round-trips numbers as floats; keep display/comparison integral
+        high_score = math.floor(tonumber(data.high_score) or 0)
     end
 end
 
