@@ -306,6 +306,7 @@ load_sprite("zucchini", "zucchini.png")
 load_sprite("strawberry", "strawberry.png")
 load_sprite("vitamin_c", "vitamin_c.png")
 load_sprite("nail_grip", "nail_grip.png")
+load_sprite("heart", "heart.png")                -- 32x32 HUD heart
 load_sprite("hawk_glide", "hawk_glide.png")        -- 48x32
 load_sprite("hawk_dive", "hawk_dive.png")          -- 48x32
 load_sprite("snail", "snail.png")
@@ -1473,22 +1474,28 @@ end
 
 local function draw_hud()
     disp.fillRect(0, 0, SCREEN_W, 18, BLACK)
-    -- HP hearts
     for i = 0, 2 do
-        local hx = 4 + i * 10
+        local hx = 4 + i * 18
         if i < player.hp then
-            disp.fillRect(hx, 3, 3, 3, RED)
-            disp.fillRect(hx + 4, 3, 3, 3, RED)
-            disp.fillRect(hx + 1, 5, 5, 4, RED)
-            disp.fillRect(hx + 2, 9, 3, 2, RED)
+            if sprites.heart then
+                sprites.heart:drawScaled(hx, 1, 0.5)
+            else
+                disp.fillRect(hx, 3, 3, 3, RED) disp.fillRect(hx + 4, 3, 3, 3, RED)
+                disp.fillRect(hx + 1, 5, 5, 4, RED) disp.fillRect(hx + 2, 9, 3, 2, RED)
+            end
         else
-            disp.fillRect(hx + 1, 4, 5, 6, DARK_GRAY)
+            -- empty heart: dark outline, same footprint as the 16px sprite
+            disp.drawRect(hx + 2, 3, 5, 5, DARK_GRAY) disp.drawRect(hx + 9, 3, 5, 5, DARK_GRAY)
+            disp.fillRect(hx + 3, 8, 10, 3, DARK_GRAY) disp.fillRect(hx + 5, 11, 6, 3, DARK_GRAY)
         end
     end
-    disp.drawText(40, 4, "" .. player.score, WHITE, BLACK)
-    disp.drawText(100, 4, veggies_collected .. "/" .. total_veggies, GREEN, BLACK)
+    disp.drawText(62, 4, "" .. player.score, WHITE, BLACK)
+    if sprites.carrot then
+        sprites.carrot:drawScaled(104, 1, 0.5)
+    end
+    disp.drawText(122, 4, veggies_collected .. "/" .. total_veggies, GREEN, BLACK)
     -- Power indicators
-    local ix = 160
+    local ix = 168
     if player.zoomies_active then
         local bar = math.floor((player.zoomies_timer / ZOOMIES_DURATION) * 16)
         disp.fillRect(ix, 3, bar, 4, RED)
