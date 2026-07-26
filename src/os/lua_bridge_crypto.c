@@ -1,4 +1,5 @@
 #include "lua_bridge_internal.h"
+#include "crypto.h"
 
 // ── AES-CTR cipher userdata ─────────────────────────────────────────────────
 #define AES_CTR_MT "picocalc.crypto.aes_ctr"
@@ -148,6 +149,24 @@ static int l_crypto_sha1(lua_State *L) {
     return 1;
 }
 
+// sha256File(path) → lowercase hex string | nil, err
+// Streams the file in 512-byte chunks (no whole-file read); hex because the
+// main consumer is comparison against catalog / release checksums.
+static int l_crypto_sha256File(lua_State *L) {
+    const char *path = luaL_checkstring(L, 1);
+    uint8_t hash[32];
+    if (!crypto_sha256_file(path, hash)) {
+        lua_pushnil(L);
+        lua_pushstring(L, "cannot read file");
+        return 2;
+    }
+    char hex[65];
+    for (int i = 0; i < 32; i++)
+        snprintf(&hex[i * 2], 3, "%02x", hash[i]);
+    lua_pushlstring(L, hex, 64);
+    return 1;
+}
+
 static int l_crypto_hmac_sha256(lua_State *L) {
     size_t key_len, data_len;
     const char *key = luaL_checklstring(L, 1, &key_len);
@@ -292,6 +311,7 @@ static const luaL_Reg l_crypto_lib[] = {
     {"randomBytes",     l_crypto_random_bytes},
     {"sha256",          l_crypto_sha256},
     {"sha1",            l_crypto_sha1},
+    {"sha256File",      l_crypto_sha256File},
     {"hmacSHA256",      l_crypto_hmac_sha256},
     {"hmacSHA1",        l_crypto_hmac_sha1},
     {"deriveKey",       l_crypto_derive_key},

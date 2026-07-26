@@ -452,24 +452,28 @@ local function fetch_catalog()
     conn:get(CATALOG_PATH, {["User-Agent"] = "PicOS-Store/1.0"})
 end
 
--- ── Network: Download app ZIP with PSRAM buffering ─────────────────────────
+-- ── Network: Download straight to a file ───────────────────────────────────
+-- Streams the response body to dest_path as it arrives (32KB read buffer, SD
+-- in slow mode while the radio is active) — peak memory is one read buffer
+-- instead of the whole download in PSRAM. on_complete(ok, err); on any
+-- failure the partial file is deleted.
 
-local function download_file_with_redirects(url, redirect_count, on_complete)
+local function download_file_with_redirects(url, dest_path, redirect_count, on_complete)
     redirect_count = redirect_count or 0
     if redirect_count >= MAX_REDIRECTS then
-        on_complete(nil, "Too many redirects")
+        on_complete(false, "Too many redirects")
         return
     end
 
     local host, port, ssl, path = parse_url(url)
     if not host then
-        on_complete(nil, "Invalid URL")
+        on_complete(false, "Invalid URL")
         return
     end
 
     local conn = net.http.new(host, port, ssl)
     if not conn then
-        on_complete(nil, "Cannot connect")
+        on_complete(false, "Cannot connect")
         return
     end
 
@@ -482,7 +486,45 @@ local function download_file_with_redirects(url, redirect_count, on_complete)
     download_conn_id = download_conn_id + 1
     local my_conn_id = download_conn_id
 
-    local chunks = {}
+    local wf = nil          -- staging file handle, opened on first data
+    local write_failed = nil
+
+    local function close_and_delete()
+        if wf then fs.close(wf); wf = nil end
+        fs.setSlowMode(false)
+        fs.delete(dest_path)
+    end
+
+    -- Write everything currently buffered on the connection to dest_path.
+    local function drain_to_file()
+        if write_failed then return end
+        if not wf then
+            if not fs.ensureReady() then
+                write_failed = "SD card not responding"
+                return
+            end
+            fs.setSlowMode(true) -- radio active: SPI0 must run at 1 MHz
+            wf = fs.open(dest_path, "w")
+            if not wf then
+                fs.setSlowMode(false)
+                write_failed = "Cannot write " .. dest_path
+                return
+            end
+        end
+        while true do
+            local avail = conn:getBytesAvailable()
+            if avail <= 0 then break end
+            local data = conn:read()
+            if not data or #data == 0 then break end
+            if download_total > 0 then
+                local remaining = download_total - download_received
+                if remaining <= 0 then break end
+                if #data > remaining then data = data:sub(1, remaining) end
+            end
+            fs.write(wf, data)
+            download_received = download_received + #data
+        end
+    end
 
     conn:setHeadersReadCallback(function()
         if my_conn_id ~= download_conn_id then return end
@@ -499,19 +541,7 @@ local function download_file_with_redirects(url, redirect_count, on_complete)
         local status = conn:getResponseStatus()
         if status and status ~= 200 then return end
 
-        while true do
-            local avail = conn:getBytesAvailable()
-            if avail <= 0 then break end
-            local data = conn:read()
-            if not data or #data == 0 then break end
-            if download_total > 0 then
-                local remaining = download_total - download_received
-                if remaining <= 0 then break end
-                if #data > remaining then data = data:sub(1, remaining) end
-            end
-            chunks[#chunks + 1] = data
-            download_received = download_received + #data
-        end
+        drain_to_file()
     end)
 
     conn:setRequestCompleteCallback(function()
@@ -525,11 +555,11 @@ local function download_file_with_redirects(url, redirect_count, on_complete)
             local location = resp_headers and resp_headers["location"]
             conn:close()
             if current_conn == conn then current_conn = nil end
-            chunks = {}
+            close_and_delete()
             if location then
-                download_file_with_redirects(location, redirect_count + 1, on_complete)
+                download_file_with_redirects(location, dest_path, redirect_count + 1, on_complete)
             else
-                on_complete(nil, "Redirect without location")
+                on_complete(false, "Redirect without location")
             end
             return
         end
@@ -537,37 +567,38 @@ local function download_file_with_redirects(url, redirect_count, on_complete)
         if conn_err then
             conn:close()
             if current_conn == conn then current_conn = nil end
-            on_complete(nil, conn_err)
+            close_and_delete()
+            on_complete(false, conn_err)
             return
         end
 
         -- Drain remaining
-        while true do
-            local avail = conn:getBytesAvailable()
-            if avail <= 0 then break end
-            local data = conn:read()
-            if not data or #data == 0 then break end
-            if download_total > 0 then
-                local remaining = download_total - download_received
-                if remaining <= 0 then break end
-                if #data > remaining then data = data:sub(1, remaining) end
-            end
-            chunks[#chunks + 1] = data
-            download_received = download_received + #data
-        end
+        drain_to_file()
 
         if http_status and http_status ~= 200 then
             conn:close()
             if current_conn == conn then current_conn = nil end
-            on_complete(nil, "HTTP " .. tostring(http_status))
+            close_and_delete()
+            on_complete(false, "HTTP " .. tostring(http_status))
             return
         end
 
-        -- Voltage-safe write: disconnect WiFi, pause Core 1, slow SPI
+        -- Transfer done; everything is already on disk.
+        if wf then fs.close(wf); wf = nil end
+        fs.setSlowMode(false)
         conn:close()
         if current_conn == conn then current_conn = nil end
+
+        if write_failed then
+            fs.delete(dest_path)
+            on_complete(false, write_failed)
+            return
+        end
         sys.sleep(100)
 
+        -- Voltage-safe verify/extract window: on_complete hashes and unpacks
+        -- on the SD card, so disconnect WiFi, pause Core 1 and slow SPI for
+        -- its duration (same brown-out posture as the old buffered flow).
         picocalc.wifi.disconnect()
         local hw_start = sys.getTimeMs()
         while not picocalc.network.isHwDisconnected() do
@@ -581,11 +612,11 @@ local function download_file_with_redirects(url, redirect_count, on_complete)
         if not fs.ensureReady() then
             fs.setSlowMode(false)
             sys.resumeBackground()
-            on_complete(nil, "SD card not responding")
+            on_complete(false, "SD card not responding")
             return
         end
 
-        on_complete(chunks, nil)
+        on_complete(true, nil)
 
         fs.setSlowMode(false)
         sys.resumeBackground()
@@ -596,7 +627,8 @@ local function download_file_with_redirects(url, redirect_count, on_complete)
         if current_conn == conn then current_conn = nil end
         if download_complete then return end
         if download_stage then
-            on_complete(nil, "Connection closed")
+            close_and_delete()
+            on_complete(false, "Connection closed")
         end
     end)
 
@@ -638,6 +670,15 @@ local function install_app(app)
         return
     end
 
+    -- Integrity: refuse to install anything the catalog doesn't checksum.
+    -- (Catalog generator must publish sha256 for every asset.)
+    if type(app.sha256) ~= "string" or #app.sha256 ~= 64 then
+        error_msg = "No checksum in catalog — install refused"
+        ui.toast(error_msg, ui.TOAST_ERROR)
+        current_screen = SCR_DETAIL
+        return
+    end
+
     current_screen = SCR_DOWNLOADING
     download_stage = "app"
     download_app = app
@@ -649,43 +690,30 @@ local function install_app(app)
     local url = "https://github.com/" .. app.repo ..
                 "/releases/download/" .. app.release_tag .. "/" .. app.asset
 
+    local zip_path = CACHE_DIR .. "/" .. app.id .. ".zip"
+    fs.mkdir(CACHE_DIR)
+
     local function do_download()
-        download_file_with_redirects(url, 0, function(chunks, err)
-            if not chunks then
+        download_file_with_redirects(url, zip_path, 0, function(ok, err)
+            if not ok then
                 print("[STORE] Download failed: " .. tostring(err))
                 download_retry_needed = true
                 return
             end
 
-            -- Write ZIP to staging
-            local zip_path = CACHE_DIR .. "/" .. app.id .. ".zip"
-            fs.mkdir(CACHE_DIR)
-            local zf = fs.open(zip_path, "w")
-            if not zf then
-                error_msg = "Failed to write ZIP"
-                ui.toast(error_msg, ui.TOAST_ERROR)
-                current_screen = SCR_DETAIL
-                return
-            end
-            for _, chunk in ipairs(chunks) do
-                fs.write(zf, chunk)
-            end
-            fs.close(zf)
-            chunks = nil  -- free PSRAM
-
-            -- Verify SHA-256 if provided
-            if app.sha256 and crypto and crypto.sha256 then
-                local file_data = fs.readFile(zip_path)
-                if file_data then
-                    local hash = crypto.sha256(file_data)
-                    file_data = nil
-                    if hash and hash:lower() ~= app.sha256:lower() then
-                        print("[STORE] SHA-256 mismatch!")
-                        fs.delete(zip_path)
-                        download_retry_needed = true
-                        return
-                    end
+            -- Verify SHA-256 (mandatory — hashless entries are refused
+            -- before the download starts). Streamed hash, no whole-file
+            -- read-back. crypto is absent in the simulator only.
+            if crypto and crypto.sha256File then
+                local hash = crypto.sha256File(zip_path)
+                if not hash or hash:lower() ~= app.sha256:lower() then
+                    print("[STORE] SHA-256 mismatch!")
+                    fs.delete(zip_path)
+                    download_retry_needed = true
+                    return
                 end
+            else
+                print("[STORE] WARNING: crypto unavailable (simulator?) — skipping checksum verification")
             end
 
             -- Extract ZIP
@@ -785,26 +813,12 @@ local function start_firmware_update()
 
     if fs.exists(BIN_PATH) then fs.delete(BIN_PATH) end
 
-    download_file_with_redirects(url, 0, function(chunks, err)
-        if not chunks then
+    download_file_with_redirects(url, BIN_PATH, 0, function(ok, err)
+        if not ok then
             print("[STORE] Firmware download failed: " .. tostring(err))
             download_retry_needed = true
             return
         end
-
-        -- Write firmware binary
-        local bf = fs.open(BIN_PATH, "w")
-        if not bf then
-            error_msg = "Failed to write firmware"
-            ui.toast(error_msg, ui.TOAST_ERROR)
-            current_screen = SCR_BROWSE
-            return
-        end
-        for _, chunk in ipairs(chunks) do
-            fs.write(bf, chunk)
-        end
-        fs.close(bf)
-        chunks = nil
 
         -- Verify size
         local actual = fs.size(BIN_PATH)

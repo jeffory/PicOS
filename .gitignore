@@ -54,7 +54,12 @@ apps/tic-80/
 # Simulator user data
 data/
 reference/
-system/
+# system/ is SD-card user data, EXCEPT the shared Lua libraries served by
+# sys.loadlib — those are shipped source and must be version-controlled.
+system/*
+!system/lib/
+system/lib/*
+!system/lib/*.lua
 sim_*.log
 
 tests/e2e/__pycache__/
