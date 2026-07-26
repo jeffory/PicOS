@@ -2,6 +2,15 @@
 
 PicOS supports running native ARM Cortex-M33 (RP2350) applications in addition to Lua scripts. Native apps are Position-Independent ELF32 (PIE) binaries loaded from the SD card into PSRAM at runtime.
 
+
+## Choosing Lua vs native
+
+Both runtimes share the same `PicoCalcAPI`, but the convenience layers differ:
+
+- **Lua** has the full game framework: sprites, spritesheets, tilemaps, camera, scene manager, animation, particles, save files. New games should start here.
+- **Native (C)** gets the raw primitives: display (incl. clip rect, mode-7 `drawPlane`, raycasting columns), images, audio, input, fs. It suits ports and emulators (Doom, C-Dogs, GBC) and CPU-bound renderers. There is no native sprite/tilemap engine — replicate what you need in app code, or drive the game logic in Lua.
+
+
 ## Application Structure
 
 A native application typically consists of:
