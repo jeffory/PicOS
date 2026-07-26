@@ -92,5 +92,9 @@ static const luaL_Reg l_config_lib[] = {
 };
 
 void lua_bridge_appconfig_init(lua_State *L) {
+    // Per-app config (/data/<APP_ID>/config.json). Registered twice:
+    // "config" is the historical name, "appconfig" matches the C API
+    // (g_api.appconfig) and the docs. Both names alias the same store.
     register_subtable(L, "config", l_config_lib);
+    register_subtable(L, "appconfig", l_config_lib);
 }
