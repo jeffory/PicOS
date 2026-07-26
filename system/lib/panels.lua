@@ -13,8 +13,10 @@
 --     local comic = Panels.new(comicData, opts)
 --     while not comic:finished() do
 --         picocalc.input.update()
---         comic:update()                     -- draws; does NOT flush
---         picocalc.display.flush()
+--         comic:update()                     -- draws; does NOT full-flush
+--         if comic.drewThisFrame ~= false then
+--             picocalc.display.flush()       -- false = comic flushed its own
+--         end                                -- strips (hardware scroll path)
 --     end
 --
 -- PicoCalc deltas from Playdate Panels (documented in docs/Library-Panels.md):
@@ -46,6 +48,14 @@ local CAP = {
                 and type(gfx.image.pollPreload) == "function",
     save      = type(pc.game) == "table" and type(pc.game.save) == "table",
     sound     = type(pc.sound) == "table",
+    -- LCD hardware scroll (VSCRDEF/VSCRSADD ring) + partial flush: the
+    -- fast path for rigid vertical scroll sequences.  getScrollOffset is
+    -- the newest of the four — older firmware lacks it and falls back to
+    -- full-frame software scrolling.
+    hwscroll  = type(disp.setScrollArea) == "function"
+                and type(disp.setScrollOffset) == "function"
+                and type(disp.getScrollOffset) == "function"
+                and type(disp.flushRows) == "function",
 }
 
 local function pushClip(x, y, w, h)
@@ -96,6 +106,8 @@ Panels.Settings = {
     choiceColor      = disp.rgb(255, 210, 80),
     transitionMs     = 450,
     idleSkip         = true,       -- skip draw+flush on provably static frames
+    useHwScroll      = true,       -- LCD-register scrolling for rigid vertical
+                                   -- scroll sequences (see Comic:hwEligible)
     volume           = nil,        -- nil = leave system volume alone
 }
 
@@ -448,11 +460,33 @@ end
 -- 0 and 1 stay reachable for the first/last panels (whose leading/trailing
 -- edges never traverse the full viewport).
 
+-- A panel is "rigid" when its pixels depend only on the panel's position —
+-- not on the scroll percentage, time, or randomness.  A sequence of rigid
+-- panels is one static tall strip, which the hardware-scroll fast path can
+-- move in silicon with no redraws.  Anything pct- or time-varying (parallax,
+-- animators, image arrays, scroll triggers, shake/blink, custom render)
+-- disqualifies.  Audio scroll triggers do NOT: they change no pixels and the
+-- fast path evaluates them against the true scroll position every frame.
+local function panelIsRigid(panel)
+    if panel.effect or panel.renderFunction or panel.updateFunction then
+        return false
+    end
+    for _, l in ipairs(panel.layers or {}) do
+        if (l.parallax and l.parallax > 0) or l.animate or l.images
+           or l.effect or l.scrollTrigger then
+            return false
+        end
+    end
+    return true
+end
+
 local function buildLayout(seq)
     local S = Panels.Settings
     local layout = { panels = {}, axis = seq.axis or Panels.ScrollAxis.VERTICAL }
+    layout.rigid = true
     local pos = 0
     for i, panel in ipairs(seq.panels) do
+        if not panelIsRigid(panel) then layout.rigid = false end
         local f = panel.frame or {}
         local size
         if layout.axis == Panels.ScrollAxis.HORIZONTAL then
@@ -646,8 +680,10 @@ local function drawPanel(comic, lp, scrollPos)
         end
     end
 
-    -- Audio trigger: fires once per viewport entry.
-    if panel.audio then
+    -- Audio trigger: fires once per viewport entry.  Suppressed during
+    -- ring-strip draws, whose scroll origin (and therefore pct) is fake —
+    -- the fast path evaluates triggers separately with the true position.
+    if panel.audio and not comic.suppressAudio then
         local rt = layerRuntime(comic, panel)
         local trig = panel.audio.scrollTrigger or 0
         if not rt.sfxFired and pct >= trig and pct < 1 then
@@ -846,6 +882,7 @@ function Comic:nextSequenceIndex()
 end
 
 function Comic:startTransition(targetSeq)
+    self:hwExit()  -- fades and cuts draw full frames; release the ring first
     local kind = self.seq.transition or "fadeToBlack"
     if kind == "cut" then
         self:enterSequence(targetSeq)
@@ -867,6 +904,148 @@ end
 
 function Comic:finished() return self.state == "done" end
 function Comic:currentSequence() return self.seqIndex end
+
+-- ── Hardware-scroll fast path ───────────────────────────────────────────────
+-- Rigid vertical "scroll" sequences render into the LCD's frame memory as a
+-- mod-320 ring — virtual row v lives at GRAM row v % 320 — and scroll by
+-- writing the panel's VSCRSADD register.  Per frame only the newly revealed
+-- strip (a few rows) is drawn and partially flushed, instead of full-screen
+-- blits plus a 205KB DMA: the scroll itself happens in silicon.
+--
+-- OS contract: the system menu and launcher reset the scroll offset to 0
+-- when they take the screen.  hwSync() detects any foreign register write
+-- via getScrollOffset()'s write counter and falls back to a full repaint.
+--
+-- Caveat: on-device screenshots read the draw framebuffer, which holds the
+-- ring layout while the fast path is active — capture tools see a rotated
+-- image.  The simulator composes screenshots through its GRAM emulation, so
+-- sim captures show the true screen.
+
+function Comic:hwEligible()
+    local S = Panels.Settings
+    return CAP.hwscroll and CAP.clip and S.useHwScroll ~= false
+       and self.layout.rigid
+       and self.layout.axis == Panels.ScrollAxis.VERTICAL
+       and (self.seq.scrollType or "scroll") == "scroll"
+       and self.state == "run"
+       and not self.scrollAnim
+end
+
+-- Draw virtual rows [v0, v0+len) into the framebuffer at their GRAM ring
+-- rows (v % 320).  len must not cross a mod-320 boundary (callers split).
+function Comic:drawRingStrip(v0, len)
+    local S = Panels.Settings
+    local fbRow = v0 % SCREEN
+    local fake = v0 - fbRow  -- scroll origin that lands v0 on fbRow
+    local saved = pushClip(0, fbRow, SCREEN, len)
+    disp.fillRect(0, fbRow, SCREEN, len,
+                  self.seq.backgroundColor or S.backgroundColor)
+    self.suppressAudio = true
+    for _, lp in ipairs(self.layout.panels) do
+        if lp.start + lp.size > v0 and lp.start < v0 + len then
+            drawPanel(self, lp, fake)
+        end
+    end
+    self.suppressAudio = false
+    popClip(saved)
+end
+
+function Comic:hwRememberWrite()
+    local off, gen = disp.getScrollOffset()
+    self.hws.offset = off
+    self.hws.gen = gen or 0
+end
+
+function Comic:hwEnter()
+    local sp = math.floor(self.scrollPos)
+    local g0 = sp % SCREEN
+    -- Ring-paint the visible window (two mod-320 spans), then flush without
+    -- a buffer swap so the draw buffer keeps accumulating the ring image.
+    self:drawRingStrip(sp, SCREEN - g0)
+    if g0 > 0 then self:drawRingStrip(sp + SCREEN - g0, g0) end
+    disp.flushRows(0, SCREEN - 1)
+    -- Frame memory is 480 lines; (0, 320, 160) rings the visible panel.
+    disp.setScrollArea(0, SCREEN, 160)
+    disp.setScrollOffset(g0)
+    self.hws = { pos = sp }
+    self:hwRememberWrite()
+    self.dirty = false
+    sys.log("PANELS:HW on")
+end
+
+-- Leave the fast path, repainting in normal screen layout first so the
+-- register reset reveals a correct frame (the setter waits out the DMA).
+function Comic:hwExit()
+    if not self.hws then return end
+    self.hws = nil
+    self:drawFrame()
+    disp.flushRows(0, SCREEN - 1)
+    disp.setScrollOffset(0)
+    self.dirty = true
+    sys.log("PANELS:HW off")
+end
+
+-- Detect a foreign scroll-register write (system menu, launcher): the OS
+-- resets the offset to 0 and leaves GRAM holding whatever it drew, so the
+-- ring is gone.  Drop the fast path; eligibility re-enters it next frame
+-- with a full ring repaint.
+function Comic:hwSync()
+    if not self.hws then return end
+    local off, gen = disp.getScrollOffset()
+    if off ~= self.hws.offset or (gen or 0) ~= self.hws.gen then
+        self.hws = nil
+        self.dirty = true
+    end
+end
+
+-- Move the ring to scroll position np: draw and flush only the newly
+-- revealed strip, then bump the register.
+function Comic:hwScrollTo(np)
+    local hws = self.hws
+    self.scrollPos = np
+    local sp = math.floor(np)
+    local delta = sp - hws.pos
+    if delta == 0 then return end
+    if delta >= SCREEN or delta <= -SCREEN then
+        -- Jumped a whole screen or more: nothing on-screen survives,
+        -- cheaper to repaint the ring outright.
+        self.hws = nil
+        self:hwEnter()
+        return
+    end
+    local v0, len
+    if delta > 0 then v0, len = hws.pos + SCREEN, delta
+    else              v0, len = sp, -delta end
+    while len > 0 do
+        local g0 = v0 % SCREEN
+        local span = math.min(len, SCREEN - g0)
+        self:drawRingStrip(v0, span)
+        disp.flushRows(g0, g0 + span - 1)
+        v0, len = v0 + span, len - span
+    end
+    disp.setScrollOffset(sp % SCREEN)
+    hws.pos = sp
+    self:hwRememberWrite()
+end
+
+-- drawPanel fires audio triggers only when it draws; in the fast path
+-- visible panels are not redrawn, so evaluate triggers here every frame
+-- against the true scroll position.
+function Comic:hwAudioTriggers()
+    local sp = math.floor(self.scrollPos)
+    for _, lp in ipairs(self:visiblePanels()) do
+        local panel = lp.panel
+        if panel.audio then
+            local rt = layerRuntime(self, panel)
+            local trig = panel.audio.scrollTrigger or 0
+            local pct = panelPct(lp, sp)
+            if not rt.sfxFired and pct >= trig and pct < 1 then
+                rt.sfxFired = true
+                self.audio:playSfx(panel.audio)
+            end
+        end
+    end
+end
 
 -- ── Input handling per scroll mode ──────────────────────────────────────────
 
@@ -898,8 +1077,12 @@ function Comic:handleScrollInput(pressed, repeated, dt)
             local delta = dir * S.scrollSpeed * dt / 1000
             local np = clamp(self.scrollPos + delta, 0, self.layout.maxScroll)
             if np ~= self.scrollPos then
-                self.scrollPos = np
-                self.dirty = true
+                if self.hws then
+                    self:hwScrollTo(np)  -- strip draw + register bump
+                else
+                    self.scrollPos = np
+                    self.dirty = true
+                end
             elseif dir > 0 and pressed & fwd ~= 0
                    and self.scrollPos >= self.layout.maxScroll then
                 -- Pushed forward at the end of the sequence: advance.
@@ -966,6 +1149,10 @@ function Comic:update()
     self.audio:update()
 
     if self.state == "done" then return end
+
+    -- If the OS wrote the scroll register since our last write (system
+    -- menu), the GRAM ring is gone — drop the fast path and repaint.
+    self:hwSync()
 
     -- Frame delta for velocity-based scrolling; capped so a stall (modal,
     -- sequence load, system menu) doesn't turn into one giant jump.
@@ -1072,6 +1259,22 @@ function Comic:update()
         self.cache:prefetchPanel(self.layout.panels[nextIdx])
     end
 
+    -- Hardware-scroll fast path: enter or leave as eligibility changes.
+    -- While active, skip the normal draw entirely — hwScrollTo already drew
+    -- and flushed the revealed strips, and the runner must not full-flush
+    -- (the framebuffer holds the ring layout, not the screen layout).
+    if self:hwEligible() then
+        if not self.hws then self:hwEnter() end
+    else
+        self:hwExit()
+    end
+    if self.hws then
+        self:hwAudioTriggers()
+        self.dirty = false
+        self.drewThisFrame = false
+        return
+    end
+
     -- Animators, blinkers and shakes render continuously; only provably
     -- static frames can skip.
     if self:hasLiveMotion() then self.dirty = true end
@@ -1119,6 +1322,10 @@ end
 function Comic:teardown()
     self.audio:teardown()
     self.cache:dropAll()
+    if self.hws then
+        disp.setScrollOffset(0)  -- launcher takes the screen next
+        self.hws = nil
+    end
     if CAP.clip then disp.clearClipRect() end
 end
 

@@ -1,0 +1,7 @@
+{
+  "id": "com.picos.test.panelshw",
+  "name": "PanelsHW Test",
+  "description": "E2E fixture: rigid scroll comic for the panels.lua hardware-scroll fast path.",
+  "version": "1.0.0",
+  "author": "PicOS tests"
+}

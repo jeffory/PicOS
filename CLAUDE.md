@@ -325,7 +325,7 @@ Status constants: `picocalc.network.kStatusNotConnected` (0), `kStatusConnected`
 
 - `picocalc.crypto` is **absent** (Lua and native) — mbedTLS is firmware-only (`simulator/CMakeLists.txt` excludes `lua_bridge_crypto.c`; native crypto trampolines are stubs except `randomBytes`).
 - Display post-effects (`effectInvert`…`effectPosterize`) are no-ops on the native (Unicorn) path; Lua-side effects work.
-- `setScrollArea`/`setScrollOffset` are no-ops (no LCD registers).
+- Hardware vertical scroll (`setScrollArea`/`setScrollOffset`/`getScrollOffset`) is emulated: flushes land in a GRAM analog and presents/screenshots are composed through the scroll registers, mirroring the ST7365P ring semantics for the visible 320 lines (the real chip's extra 160 frame-memory lines are not modelled).
 - The launcher caches the app list at boot — newly staged apps need a sim restart.
 - Everything else (zip including read-in-place archive handles, modplayer, display clip rect, drawPlane, tilemap, sprites) mirrors firmware, including `g_api.version = 5`.
 

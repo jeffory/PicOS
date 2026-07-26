@@ -342,3 +342,78 @@ def test_input_auto_repeat(simulator):
     assert measured != "nil", "never measured a repeat delay"
     # Configured 200ms, sampled on a 16ms frame loop.
     assert 180 <= int(measured) <= 320, f"repeat delay {measured}ms out of range"
+
+
+# ── hardware vertical scroll registers ───────────────────────────────────────
+
+
+SR_BANDS = [
+    0xF800, 0x07E0, 0x001F, 0xFFE0, 0xF81F,
+    0x07FF, 0x8410, 0xFFFF, 0x4208, 0x8000,
+]
+SR_STRIP = 0xFD20
+
+
+def _sr_band(row):
+    return SR_BANDS[(row % 320) // 32]
+
+
+def test_hw_scroll_registers(simulator):
+    """setScrollArea(0,320,160) + setScrollOffset must remap screen rows as a
+    mod-320 ring over the frame memory; flushRows must land in GRAM rows (not
+    screen rows) while scrolled; getScrollOffset's write counter must bump on
+    every register write.  The setters were silent no-ops in the simulator
+    until the GRAM emulation existed — pixel probes, not log markers."""
+    simulator.clear_log()
+    simulator.launch_app("scrollreg_test")
+    simulator.wait_for_log("SR:PHASE 1 flat", timeout=30)
+    time.sleep(0.3)
+
+    # Identity: bands where they were drawn.
+    assert _px(simulator, 160, 8) == _sr_band(8)
+    assert _px(simulator, 160, 168) == _sr_band(168)
+    assert _px(simulator, 160, 264) == _sr_band(264)
+
+    _tap(simulator, "enter")
+    simulator.wait_for_log("SR:PHASE 2 scrolled", timeout=15)
+    time.sleep(0.3)
+
+    # Offset 64: screen row L shows GRAM row (64+L) % 320 — including the
+    # wrap at the bottom of the screen (row 264 -> GRAM row 8).
+    assert _px(simulator, 160, 8) == _sr_band(64 + 8), (
+        "setScrollOffset is a no-op — screen not remapped"
+    )
+    assert _px(simulator, 160, 168) == _sr_band(64 + 168)
+    assert _px(simulator, 160, 264) == _sr_band(64 + 264), (
+        "ring did not wrap mod 320 at the bottom of the screen"
+    )
+
+    # Write counter: two consecutive writes of the SAME value still bump it.
+    lines = "\n".join(_lines(simulator))
+    assert "SR:OFF 64 GENDELTA 1" in lines, (
+        "getScrollOffset write counter did not increment on a same-value write"
+    )
+
+    _tap(simulator, "enter")
+    simulator.wait_for_log("SR:PHASE 3 strip", timeout=15)
+    time.sleep(0.3)
+
+    # flushRows(0,7) wrote GRAM rows 0..7; under offset 64 those display at
+    # screen rows 256..263.  Screen rows 0..7 (GRAM 64..71) keep their band.
+    assert _px(simulator, 160, 258) == SR_STRIP, (
+        "flushRows band did not land at its ring position while scrolled"
+    )
+    assert _px(simulator, 160, 4) == _sr_band(64 + 4), (
+        "flushRows overwrote screen rows instead of GRAM rows"
+    )
+
+    _tap(simulator, "enter")
+    simulator.wait_for_log("SR:PHASE 4 reset", timeout=15)
+    time.sleep(0.3)
+
+    # Identity restored: the strip shows at its GRAM home, rows 0..7.
+    assert _px(simulator, 160, 4) == SR_STRIP
+    assert _px(simulator, 160, 20) == _sr_band(20)
+    assert _px(simulator, 160, 264) == _sr_band(264)
+
+    _tap(simulator, "esc")

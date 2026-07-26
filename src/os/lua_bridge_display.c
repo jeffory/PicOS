@@ -63,6 +63,18 @@ static int l_display_setScrollOffset(lua_State *L) {
   return 0;
 }
 
+// getScrollOffset() -> offset, writeCount
+// Last offset written via setScrollOffset, plus the total number of
+// register writes.  The OS resets the offset to 0 when it takes over the
+// screen (system menu, app switch); apps driving hardware scroll poll both
+// each frame — the count catches a foreign write even when the value
+// happens to match what the app last set.
+static int l_display_getScrollOffset(lua_State *L) {
+  lua_pushinteger(L, display_get_scroll_offset());
+  lua_pushinteger(L, (lua_Integer)display_get_scroll_offset_writes());
+  return 2;
+}
+
 // drawText(x, y, text, fg [, bg])
 //
 // bg == false selects transparent background: only glyph pixels are written, so
@@ -359,6 +371,7 @@ static const luaL_Reg l_display_lib[] = {
     {"fillCircle", l_display_fillCircle},
     {"setScrollArea", l_display_setScrollArea},
     {"setScrollOffset", l_display_setScrollOffset},
+    {"getScrollOffset", l_display_getScrollOffset},
     {"drawText", l_display_drawText},
     {"flush", l_display_flush},
     {"getWidth", l_display_getWidth},

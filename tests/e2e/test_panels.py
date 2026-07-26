@@ -95,3 +95,64 @@ def test_panels_full_lifecycle(simulator, test_sd_card):
 
     _tap(simulator, "esc")
     _wait_for(simulator, "PT EXIT quit")
+
+
+def _wait_for_count(sim, marker, count, timeout=20.0):
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        joined = "\n".join(_lines(sim))
+        if joined.count(marker) >= count:
+            return joined
+        time.sleep(0.2)
+    pytest.fail(f"marker {marker!r} seen fewer than {count} times within "
+                f"{timeout}s:\n" + "\n".join(_lines(sim)[-30:]))
+
+
+def test_panels_hw_scroll(simulator, test_sd_card):
+    """Rigid vertical scroll sequences must engage the LCD hardware-scroll
+    ring (PANELS:HW on), stay pixel-stable when idle, survive a system-menu
+    takeover (foreign register write -> resync -> re-enter), and release the
+    ring cleanly (PANELS:HW off) when the end-of-sequence transition fires."""
+    _stage_panels_lib(test_sd_card)
+    simulator.clear_log()
+    simulator.launch_app("panels_hw_test")
+    joined = _wait_for(simulator, "PANELS:HW on")
+    assert "PHW NOLIB" not in joined
+
+    top = simulator.screenshot()
+
+    # Scroll in: the composed screen must change.
+    _tap(simulator, "down", count=8)
+    time.sleep(0.3)
+    mid = simulator.screenshot()
+    assert mid != top, "hardware scroll did not move the screen"
+
+    # Idle ring: no input, no redraws — frames must be pixel-identical.
+    time.sleep(0.4)
+    assert simulator.screenshot() == mid, "ring not static without input"
+
+    # System menu takeover: the OS resets the scroll register.  panels must
+    # detect the foreign write via the write counter, repaint, and re-enter
+    # the fast path (second "PANELS:HW on"), restoring the exact frame.
+    simulator.keypress("menu")
+    time.sleep(0.5)
+    assert simulator.screenshot() != mid, "system menu did not appear"
+    simulator.keypress("esc")
+    _wait_for_count(simulator, "PANELS:HW on", 2)
+    time.sleep(0.4)
+    assert simulator.screenshot() == mid, (
+        "frame not restored after system-menu takeover"
+    )
+
+    # Drive past maxScroll (446px): the clamped edge press starts the cut
+    # transition (PANELS:HW off), which loops back into sequence 1 and
+    # re-enters the fast path (third "PANELS:HW on").
+    _tap(simulator, "down", count=50)
+    joined = _wait_for_count(simulator, "PANELS:SEQ 1", 2)
+    assert "PANELS:HW off" in joined, (
+        "transition started without releasing the hardware-scroll ring"
+    )
+    _wait_for_count(simulator, "PANELS:HW on", 3)
+
+    _tap(simulator, "esc")
+    _wait_for(simulator, "PHW EXIT quit")

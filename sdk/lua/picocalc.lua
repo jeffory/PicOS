@@ -197,15 +197,25 @@ function picocalc.display.clearClipRect() end
 ---@param scale? number FOV/zoom tuning, larger = further view (default 1.0)
 function picocalc.display.drawPlane(tex, cam_x, cam_y, cam_z, angle, horizon_y, scale) end
 
----Configure the hardware scroll area (for smooth vertical scrolling).
----@param top integer Lines at the top that do not scroll
+---Configure the hardware scroll area (ST7365P VSCRDEF). Frame memory is 480
+---lines (visible panel = 0..319); the three values must sum to 480. The
+---standard ring configuration is setScrollArea(0, 320, 160).
+---@param top integer Fixed rows at the top of frame memory
 ---@param height integer Height of the scrolling region in lines
----@param bottom integer Lines at the bottom that do not scroll
+---@param bottom integer Fixed rows at the bottom of frame memory
 function picocalc.display.setScrollArea(top, height, bottom) end
 
----Set the hardware vertical scroll offset within the scroll region.
----@param offset integer Pixel offset
+---Set the hardware vertical scroll offset within the scroll region. Instant
+---register remap; waits out any in-flight flush DMA. 0 restores identity.
+---@param offset integer Frame-memory row shown at the top of the scroll area
 function picocalc.display.setScrollOffset(offset) end
+
+---Last offset written with setScrollOffset plus a write counter. The OS
+---resets the offset to 0 on screen takeovers (system menu, app switch);
+---poll both values each frame to detect that and repaint.
+---@return integer offset Last written scroll offset
+---@return integer writeCount Total register writes since boot
+function picocalc.display.getScrollOffset() end
 
 ---Draw a text string. Background defaults to BLACK if omitted; pass `false`
 ---for a transparent background (glyph pixels only).

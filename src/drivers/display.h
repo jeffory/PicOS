@@ -180,10 +180,18 @@ uint16_t *display_get_back_buffer(void);
 // the actual displayed frame, not a buffer still being transferred.
 const uint16_t *display_get_screen_buffer(void);
 
-// Hardware vertical scroll (ST7365P VSCRDEF + VSCRSADD).
-// top_fixed + scroll_height + bottom_fixed must equal 320.
+// Hardware vertical scroll (ST7365P VSCRDEF + VSCRSADD).  Frame memory is
+// 480 lines (visible panel = lines 0..319): top_fixed + scroll_height +
+// bottom_fixed must sum to 480, e.g. (0, 320, 160) for a mod-320 ring over
+// the visible panel.  display_get_scroll_offset returns the last offset
+// written (register is write-only); the OS resets it to 0 on screen
+// takeovers, which apps detect by polling.
 void display_set_scroll_area(int top_fixed, int scroll_height, int bottom_fixed);
 void display_set_scroll_offset(int offset);
+int  display_get_scroll_offset(void);
+// Total display_set_scroll_offset calls — lets apps detect a register write
+// by someone else even when the value is unchanged (see the setter's docs).
+uint32_t display_get_scroll_offset_writes(void);
 
 // Clip rect. All pixel-writing primitives respect it EXCEPT display_clear(),
 // display_flush*(), the post-processing effects (whole-buffer by design), and

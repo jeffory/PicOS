@@ -672,8 +672,10 @@ static bool run_app(int idx) {
 
   // ── Dispatch to runner ────────────────────────────────────────────────────
   // Apps inherit global display state: always hand them a full-screen clip
-  // rect so a previous app's setClipRect can't leak into the next one.
+  // rect and an identity scroll offset so a previous app's setClipRect or
+  // hardware-scroll registers can't leak into the next one.
   display_clear_clip_rect();
+  display_set_scroll_offset(0);
 
   bool ok = false;
   for (int i = 0; s_runners[i]; i++) {
@@ -684,7 +686,8 @@ static bool run_app(int idx) {
   }
 
   // ── Shared post-exit cleanup ──────────────────────────────────────────────
-  display_clear_clip_rect();  // don't let an app's clip rect leak back to the launcher
+  display_clear_clip_rect();      // don't let an app's clip rect leak back to the launcher
+  display_set_scroll_offset(0);   // nor its hardware-scroll offset
 
   if (app->system_clock_khz > 0) {
     launcher_apply_clock(200000); // Reset to system default

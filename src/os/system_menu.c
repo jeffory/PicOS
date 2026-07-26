@@ -407,6 +407,13 @@ static bool menu_loop(lua_State *L, int context) {
   display_get_clip_rect(&saved_clip_x, &saved_clip_y, &saved_clip_w, &saved_clip_h);
   display_clear_clip_rect();
 
+  // If the app engaged hardware scroll, its GRAM holds a rotated ring image
+  // the menu's flushes would display scrambled.  Reset the scroll offset and
+  // do NOT restore it on close: apps driving hardware scroll detect the
+  // reset via display_get_scroll_offset() and repaint (panels.lua contract).
+  // The darkened backdrop may show ring-rotated for such apps — cosmetic.
+  display_set_scroll_offset(0);
+
   int sel = 0;
   uint8_t entry_brightness = s_brightness;
   bool running = true;

@@ -42,6 +42,53 @@ static uint16_t* s_last_presented = g_front_buffer;
 static int s_clip_x0 = 0, s_clip_y0 = 0;
 static int s_clip_x1 = 319, s_clip_y1 = 319;
 
+// ── Hardware vertical scroll emulation (ST7365P VSCRDEF/VSCRSADD) ──────────
+// The sim keeps a GRAM analog: every flush writes rows into s_gram, and
+// present_gram() maps GRAM rows to screen rows through the scroll registers
+// before handing the image to the HAL — mirroring how the panel scans its
+// frame memory.  Only the visible 320 lines are emulated (the real chip has
+// 480); scroll areas reaching past line 319 are clamped, so configure a ring
+// that stays within the visible window, e.g. setScrollArea(0, 320, 160).
+static uint16_t s_gram[320 * 320];
+static int s_scroll_tfa = 0;      // top fixed area (rows)
+static int s_scroll_vsa = 480;    // scroll area height (chip reset default)
+static int s_scroll_offset = 0;   // VSCRSADD: GRAM line at top of scroll area
+static uint32_t s_scroll_offset_writes = 0;  // foreign-write detection (see hw)
+
+static bool scroll_identity(void) {
+    return s_scroll_offset == s_scroll_tfa;  // offset==tfa maps every row to itself
+}
+
+// GRAM source row for visible row L under the current scroll registers.
+static int scroll_src_row(int L) {
+    int tfa = s_scroll_tfa;
+    int vsa = s_scroll_vsa;
+    if (tfa < 0) tfa = 0;
+    if (tfa > 319) tfa = 319;
+    if (vsa > 320 - tfa) vsa = 320 - tfa;  // clamp ring to emulated GRAM
+    if (vsa <= 0) return L;
+    if (L < tfa || L >= tfa + vsa) return L;  // fixed areas
+    int rel = (s_scroll_offset - tfa) + (L - tfa);
+    rel %= vsa;
+    if (rel < 0) rel += vsa;
+    return tfa + rel;
+}
+
+// Re-present the whole GRAM through the scroll mapping.
+static void present_gram(void) {
+    uint16_t* hal_fb = hal_display_get_framebuffer();
+    if (!hal_fb) return;
+    if (scroll_identity()) {
+        memcpy(hal_fb, s_gram, 320 * 320 * sizeof(uint16_t));
+    } else {
+        for (int L = 0; L < 320; L++) {
+            memcpy(&hal_fb[L * 320], &s_gram[scroll_src_row(L) * 320],
+                   320 * sizeof(uint16_t));
+        }
+    }
+    hal_display_present();
+}
+
 void display_darken(void) {
     // Copy front buffer to back buffer with darkening
     uint16_t* front = g_current_buffer == 0 ? g_front_buffer : g_back_buffer;
@@ -406,13 +453,11 @@ int display_get_font_height(void) {
 }
 
 void display_flush(void) {
-    // Copy back buffer to HAL framebuffer and present
+    // Copy back buffer into the GRAM analog and present through the scroll
+    // mapping (identity when no hardware scroll is engaged).
     uint16_t* back = display_get_back_buffer();
-    uint16_t* hal_fb = hal_display_get_framebuffer();
-    if (hal_fb) {
-        memcpy(hal_fb, back, 320 * 320 * sizeof(uint16_t));
-        hal_display_present();
-    }
+    memcpy(s_gram, back, 320 * 320 * sizeof(uint16_t));
+    present_gram();
     s_last_presented = back;
     // Swap buffer index
     g_current_buffer = 1 - g_current_buffer;
@@ -428,12 +473,9 @@ void display_flush_rows(int y0, int y1) {
     if (y0 > y1) return;
 
     uint16_t* back = display_get_back_buffer();
-    uint16_t* hal_fb = hal_display_get_framebuffer();
-    if (hal_fb) {
-        memcpy(&hal_fb[y0 * 320], &back[y0 * 320],
-               (size_t)(y1 - y0 + 1) * 320 * sizeof(uint16_t));
-        hal_display_present();
-    }
+    memcpy(&s_gram[y0 * 320], &back[y0 * 320],
+           (size_t)(y1 - y0 + 1) * 320 * sizeof(uint16_t));
+    present_gram();
     s_last_presented = back;
 }
 
@@ -448,12 +490,9 @@ void display_flush_region(int y0, int y1) {
     if (y0 > y1) return;
 
     uint16_t* old_back = display_get_back_buffer();
-    uint16_t* hal_fb = hal_display_get_framebuffer();
-    if (hal_fb) {
-        memcpy(&hal_fb[y0 * 320], &old_back[y0 * 320],
-               (size_t)(y1 - y0 + 1) * 320 * sizeof(uint16_t));
-        hal_display_present();
-    }
+    memcpy(&s_gram[y0 * 320], &old_back[y0 * 320],
+           (size_t)(y1 - y0 + 1) * 320 * sizeof(uint16_t));
+    present_gram();
 
     // Swap, then sync the flushed band front→back (see hardware comment about
     // stale two-frame-old content causing flicker).
@@ -704,9 +743,20 @@ void display_draw_plane(const uint16_t *tex, int tex_w, int tex_h,
 }
 
 void display_set_scroll_area(int top_fixed, int scroll_height, int bottom_fixed) {
-    (void)top_fixed; (void)scroll_height; (void)bottom_fixed;
+    (void)bottom_fixed;  // derived: the emulation only needs tfa + vsa
+    s_scroll_tfa = top_fixed;
+    s_scroll_vsa = scroll_height;
+    present_gram();
 }
-void display_set_scroll_offset(int offset) { (void)offset; }
+void display_set_scroll_offset(int offset) {
+    // On hardware this is the whole scroll: the register write instantly
+    // remaps GRAM lines to screen lines with no pixel transfer.  Re-present.
+    s_scroll_offset = offset;
+    s_scroll_offset_writes++;
+    present_gram();
+}
+int display_get_scroll_offset(void) { return s_scroll_offset; }
+uint32_t display_get_scroll_offset_writes(void) { return s_scroll_offset_writes; }
 void display_set_transparent_color(uint16_t color) { (void)color; }
 uint16_t display_get_transparent_color(void) { return 0; }
 uint16_t* display_get_framebuffer(void) { return display_get_back_buffer(); }
@@ -714,7 +764,19 @@ uint16_t* display_get_screen_buffer(void) {
     // Return the buffer most recently presented — after display_flush() that
     // is the front buffer, but after display_flush_rows() (no swap) it is the
     // current draw buffer.  Matches s_last_presented on hardware.
-    return s_last_presented;
+    //
+    // With hardware scroll engaged the panel no longer shows any framebuffer
+    // directly; compose the scrolled view from the GRAM analog so
+    // screenshots show what the panel shows.  (Hardware screenshots cannot
+    // do this — the register remap happens in the LCD — so on-device
+    // captures of a scrolling app read back the ring-layout draw buffer.)
+    if (scroll_identity()) return s_last_presented;
+    static uint16_t s_screen_out[320 * 320];
+    for (int L = 0; L < 320; L++) {
+        memcpy(&s_screen_out[L * 320], &s_gram[scroll_src_row(L) * 320],
+               320 * sizeof(uint16_t));
+    }
+    return s_screen_out;
 }
 
 void display_draw_image(int x, int y, const uint16_t* data, int w, int h) {

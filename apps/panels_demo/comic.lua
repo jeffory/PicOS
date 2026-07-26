@@ -56,7 +56,49 @@ return {
             },
         },
 
-        -- 2 ── Panel-by-panel advance with a keyframed slide and a blink.
+        -- 2 ── Rigid vertical scroll: no parallax, no animation, no image
+        -- arrays — eligible for the LCD hardware-scroll fast path.  panels.lua
+        -- lays the sequence into the panel's frame memory as a mod-320 ring
+        -- and scrolls by register write; only newly revealed strips are drawn.
+        -- Compare the feel with sequence 1, which parallax forces to redraw
+        -- three full-screen layers every frame.
+        {
+            title = "The Descent",
+            scrollType = "scroll",
+            panels = {
+                {
+                    frame = { height = 420 },
+                    layers = {
+                        { image = "s1_sky.png", y = -40 },
+                        { text = "Down the long stairwell.", x = 30, y = 40 },
+                        { text = "(hardware scroll - hold DOWN)", x = 30, y = 60 },
+                    },
+                },
+                {
+                    frame = { height = 420, marginBefore = 8 },
+                    layers = {
+                        { image = "s1_city.png", y = -20, transparentColor = true },
+                        { text = "Every floor darker.", x = 60, y = 320 },
+                    },
+                },
+                {
+                    frame = { height = 420, marginBefore = 8 },
+                    layers = {
+                        { image = "s1_rail.png", y = 0, transparentColor = true },
+                        { text = "Every step quieter.", x = 90, y = 60 },
+                    },
+                },
+                {
+                    frame = { height = 420, marginBefore = 8 },
+                    layers = {
+                        { image = "s5_stars.png", y = -60 },
+                        { text = "Until the street.", x = 100, y = 200 },
+                    },
+                },
+            },
+        },
+
+        -- 3 ── Panel-by-panel advance with a keyframed slide and a blink.
         {
             title = "The Meeting",
             scrollType = "advance",
@@ -88,7 +130,7 @@ return {
             },
         },
 
-        -- 3 ── Auto-advance, an image frame-array, sfx trigger and looping bgm.
+        -- 4 ── Auto-advance, an image frame-array, sfx trigger and looping bgm.
         {
             title = "Dawn",
             scrollType = "auto",
@@ -116,7 +158,7 @@ return {
             },
         },
 
-        -- 4 ── Branching choice; sets a story var the finale reacts to.
+        -- 5 ── Branching choice; sets a story var the finale reacts to.
         {
             title = "The Choice",
             scrollType = "advance",
@@ -129,16 +171,16 @@ return {
                     },
                     choices = {
                         prompt = "What now?",
-                        { text = "Stay and fight", target = 5,
+                        { text = "Stay and fight", target = 6,
                           setVars = { stayed = true } },
-                        { text = "Walk away",      target = 5,
+                        { text = "Walk away",      target = 6,
                           setVars = { stayed = false } },
                     },
                 },
             },
         },
 
-        -- 5 ── renderCondition payoff + fade transition into credits.
+        -- 6 ── renderCondition payoff + fade transition into credits.
         {
             title = "Epilogue",
             scrollType = "advance",
@@ -159,7 +201,7 @@ return {
             },
         },
 
-        -- 6 ── Credits: text layers over a slow starfield, custom render demo.
+        -- 7 ── Credits: text layers over a slow starfield, custom render demo.
         {
             title = "Credits",
             scrollType = "scroll",

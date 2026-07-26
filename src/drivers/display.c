@@ -33,6 +33,14 @@ static int s_back_buffer_idx = 0;
 // buffer without swapping.  Screenshot/readback must follow this, not the
 // front-buffer index, or flushRows-only apps read back a stale frame.
 static const uint16_t *s_last_presented = s_framebuffers[0];
+
+// Shadow of the write-only VSCRSADD scroll register (see
+// display_get_scroll_offset).  0 = identity (no hardware scroll).
+// The write counter lets apps detect that someone else (system menu,
+// launcher) wrote the register even when the value matches what they last
+// set — e.g. a reset to 0 while the app's own offset was 0.
+static int s_scroll_offset = 0;
+static uint32_t s_scroll_offset_writes = 0;
 static bool s_dma_active = false;
 
 // DMA channel for LCD transfers
@@ -2036,9 +2044,16 @@ const uint16_t *display_get_screen_buffer(void) {
 
 // Hardware vertical scroll using ST7365P VSCRDEF + VSCRSADD registers.
 // top_fixed: fixed rows at top, scroll_height: scrollable area height,
-// bottom_fixed: fixed rows at bottom. top_fixed + scroll_height + bottom_fixed
-// must equal LCD_HEIGHT (320). scroll_offset: row offset within the scroll area.
+// bottom_fixed: fixed rows at bottom. The ST7365P frame memory is 480 lines
+// (the visible panel is lines 0..319), so the three values must sum to 480 —
+// e.g. (0, 320, 160) makes the whole visible panel a mod-320 scroll ring.
+// scroll_offset: absolute frame-memory line shown at the top of the scroll
+// area; wraps within the scroll area.
+//
+// Both setters must wait out any in-flight flush DMA: lcd_write_cmd toggles
+// CS and would interleave command bytes into an active pixel stream.
 void display_set_scroll_area(int top_fixed, int scroll_height, int bottom_fixed) {
+  display_wait_for_flush();
   lcd_write_cmd(0x33); // VSCRDEF
   uint8_t data[6] = {
     (uint8_t)(top_fixed >> 8), (uint8_t)(top_fixed & 0xFF),
@@ -2049,7 +2064,23 @@ void display_set_scroll_area(int top_fixed, int scroll_height, int bottom_fixed)
 }
 
 void display_set_scroll_offset(int offset) {
+  display_wait_for_flush();
   lcd_write_cmd(0x37); // VSCRSADD
   uint8_t data[2] = {(uint8_t)(offset >> 8), (uint8_t)(offset & 0xFF)};
   lcd_write_data(data, 2);
+  s_scroll_offset = offset;
+  s_scroll_offset_writes++;
+}
+
+// Last offset written via display_set_scroll_offset (the panel register is
+// write-only).  The OS resets the offset to 0 whenever it takes over the
+// screen (system menu, app switch), so apps driving hardware scroll must
+// poll this each frame and resynchronise when it no longer matches what
+// they last set.
+int display_get_scroll_offset(void) {
+  return s_scroll_offset;
+}
+
+uint32_t display_get_scroll_offset_writes(void) {
+  return s_scroll_offset_writes;
 }
