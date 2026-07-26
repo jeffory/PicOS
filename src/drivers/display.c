@@ -42,6 +42,12 @@ static uint s_pio_sm = 0;
 // Transparent color key (0 = disabled)
 static uint16_t s_transparent_color = 0;
 
+// Clip rect (inclusive bounds). All pixel-writing primitives respect it
+// except display_clear(), display_flush*(), the post-processing effects
+// (whole-framebuffer by design), and the tgx rotated-blit path.
+static int s_clip_x0 = 0, s_clip_y0 = 0;
+static int s_clip_x1 = FB_WIDTH - 1, s_clip_y1 = FB_HEIGHT - 1;
+
 // ── Built-in 6x8 font (ASCII 0x20–0x7E) ─────────────────────────────────────
 // Minimal 6x8 pixel font data — each character is 6 bytes (columns), 8 rows.
 // This is a standard "font6x8" pattern used widely in embedded projects.
@@ -555,25 +561,25 @@ void display_clear(uint16_t color) {
 }
 
 void display_set_pixel(int x, int y, uint16_t color) {
-  if (x < 0 || x >= FB_WIDTH || y < 0 || y >= FB_HEIGHT)
+  if (x < s_clip_x0 || x > s_clip_x1 || y < s_clip_y0 || y > s_clip_y1)
     return;
   uint16_t be = (color >> 8) | (color << 8);
   s_framebuffer[y * FB_WIDTH + x] = be;
 }
 
 void display_fill_rect(int x, int y, int w, int h, uint16_t color) {
-  if (x < 0) {
-    w += x;
-    x = 0;
+  if (x < s_clip_x0) {
+    w -= (s_clip_x0 - x);
+    x = s_clip_x0;
   }
-  if (y < 0) {
-    h += y;
-    y = 0;
+  if (y < s_clip_y0) {
+    h -= (s_clip_y0 - y);
+    y = s_clip_y0;
   }
-  if (x + w > FB_WIDTH)
-    w = FB_WIDTH - x;
-  if (y + h > FB_HEIGHT)
-    h = FB_HEIGHT - y;
+  if (x + w - 1 > s_clip_x1)
+    w = s_clip_x1 - x + 1;
+  if (y + h - 1 > s_clip_y1)
+    h = s_clip_y1 - y + 1;
   if (w <= 0 || h <= 0)
     return;
 
@@ -668,17 +674,17 @@ void display_fill_circle(int cx, int cy, int r, uint16_t color) {
 
 // Fast vertical line fill — stride-based pointer walk, no Bresenham overhead.
 void display_fill_vline(int x, int y0, int y1, uint16_t color) {
-  if (x < 0 || x >= FB_WIDTH)
+  if (x < s_clip_x0 || x > s_clip_x1)
     return;
   if (y0 > y1) {
     int t = y0;
     y0 = y1;
     y1 = t;
   }
-  if (y0 < 0)
-    y0 = 0;
-  if (y1 >= FB_HEIGHT)
-    y1 = FB_HEIGHT - 1;
+  if (y0 < s_clip_y0)
+    y0 = s_clip_y0;
+  if (y1 > s_clip_y1)
+    y1 = s_clip_y1;
   if (y0 > y1)
     return;
   uint16_t be = (color >> 8) | (color << 8);
@@ -691,7 +697,7 @@ void display_fill_vline(int x, int y0, int y1, uint16_t color) {
 void display_draw_textured_column(int x, int y0, int y1,
                                   const uint16_t *tex, int tex_w, int tex_h,
                                   int tex_x, int tex_y0, int tex_y1) {
-  if (x < 0 || x >= FB_WIDTH || y0 > y1 || !tex)
+  if (x < s_clip_x0 || x > s_clip_x1 || y0 > y1 || !tex)
     return;
   if (tex_x < 0 || tex_x >= tex_w)
     return;
@@ -707,12 +713,12 @@ void display_draw_textured_column(int x, int y0, int y1,
 
   // Clip top
   uint32_t tex_pos = (uint32_t)tex_y0 << 16; // starting texture position
-  if (y0 < 0) {
-    tex_pos += step * (uint32_t)(-y0);
-    y0 = 0;
+  if (y0 < s_clip_y0) {
+    tex_pos += step * (uint32_t)(s_clip_y0 - y0);
+    y0 = s_clip_y0;
   }
-  if (y1 >= FB_HEIGHT)
-    y1 = FB_HEIGHT - 1;
+  if (y1 > s_clip_y1)
+    y1 = s_clip_y1;
   if (y0 > y1)
     return;
 
@@ -732,7 +738,7 @@ void display_draw_textured_column(int x, int y0, int y1,
 // Gradient vertical line — interpolates RGB565 channels using fixed-point.
 void display_fill_vline_gradient(int x, int y0, int y1, uint16_t color_top,
                                  uint16_t color_bottom) {
-  if (x < 0 || x >= FB_WIDTH)
+  if (x < s_clip_x0 || x > s_clip_x1)
     return;
   if (y0 > y1) {
     int t = y0;
@@ -745,10 +751,10 @@ void display_fill_vline_gradient(int x, int y0, int y1, uint16_t color_top,
 
   // Clip
   int orig_y0 = y0;
-  if (y0 < 0)
-    y0 = 0;
-  if (y1 >= FB_HEIGHT)
-    y1 = FB_HEIGHT - 1;
+  if (y0 < s_clip_y0)
+    y0 = s_clip_y0;
+  if (y1 > s_clip_y1)
+    y1 = s_clip_y1;
   if (y0 > y1)
     return;
 
@@ -1026,11 +1032,11 @@ int display_text_width(const char *text) {
 void display_draw_image(int x, int y, int w, int h, const uint16_t *data) {
   for (int row = 0; row < h; row++) {
     int py = y + row;
-    if (py < 0 || py >= FB_HEIGHT)
+    if (py < s_clip_y0 || py > s_clip_y1)
       continue;
     for (int col = 0; col < w; col++) {
       int px = x + col;
-      if (px < 0 || px >= FB_WIDTH)
+      if (px < s_clip_x0 || px > s_clip_x1)
         continue;
       uint16_t c = data[row * w + col];
       s_framebuffer[py * FB_WIDTH + px] = (c >> 8) | (c << 8);
@@ -1067,14 +1073,14 @@ void display_draw_image_partial(int x, int y, int img_w, int img_h,
 
   for (int row = 0; row < sh; row++) {
     int py = draw_y + row;
-    if (py < 0 || py >= FB_HEIGHT)
+    if (py < s_clip_y0 || py > s_clip_y1)
       continue;
 
     int src_row = flip_y ? (sy + sh - 1 - row) : (sy + row);
 
     for (int col = 0; col < sw; col++) {
       int px = draw_x + col;
-      if (px < 0 || px >= FB_WIDTH)
+      if (px < s_clip_x0 || px > s_clip_x1)
         continue;
 
       int src_col = flip_x ? (sx + sw - 1 - col) : (sx + col);
@@ -1171,19 +1177,19 @@ void display_draw_image_nn(int x, int y, const uint16_t *data,
   int dst_w = src_w * scale;
   int dst_h = src_h * scale;
 
-  // Early reject if entirely off-screen
-  if (x >= FB_WIDTH || y >= FB_HEIGHT || x + dst_w <= 0 || y + dst_h <= 0)
+  // Early reject if entirely outside the clip rect
+  if (x > s_clip_x1 || y > s_clip_y1 || x + dst_w - 1 < s_clip_x0 || y + dst_h - 1 < s_clip_y0)
     return;
 
-  // Clamp source region to framebuffer bounds
+  // Clamp source region to the clip rect
   int src_y0 = 0, src_y1 = src_h;
   int src_x0 = 0, src_x1 = src_w;
-  if (y < 0) { src_y0 = (-y) / scale; y += src_y0 * scale; }
-  if (x < 0) { src_x0 = (-x) / scale; x += src_x0 * scale; }
-  if (y + (src_y1 - src_y0) * scale > FB_HEIGHT)
-    src_y1 = src_y0 + (FB_HEIGHT - y) / scale;
-  if (x + (src_x1 - src_x0) * scale > FB_WIDTH)
-    src_x1 = src_x0 + (FB_WIDTH - x) / scale;
+  if (y < s_clip_y0) { src_y0 = (s_clip_y0 - y) / scale; y += src_y0 * scale; }
+  if (x < s_clip_x0) { src_x0 = (s_clip_x0 - x) / scale; x += src_x0 * scale; }
+  if (y + (src_y1 - src_y0) * scale - 1 > s_clip_y1)
+    src_y1 = src_y0 + (s_clip_y1 - y + 1) / scale;
+  if (x + (src_x1 - src_x0) * scale - 1 > s_clip_x1)
+    src_x1 = src_x0 + (s_clip_x1 - x + 1) / scale;
 
   uint16_t *fb = s_framebuffer;
   int clamped_w = (src_x1 - src_x0) * scale;
@@ -1223,8 +1229,8 @@ void display_blit_be(int x, int y, const uint16_t *data, int w, int h) {
   if (!data || w <= 0 || h <= 0)
     return;
 
-  // Early reject if entirely off-screen
-  if (x >= FB_WIDTH || y >= FB_HEIGHT || x + w <= 0 || y + h <= 0)
+  // Early reject if entirely outside the clip rect
+  if (x > s_clip_x1 || y > s_clip_y1 || x + w - 1 < s_clip_x0 || y + h - 1 < s_clip_y0)
     return;
 
   // Clip source region
@@ -1232,10 +1238,10 @@ void display_blit_be(int x, int y, const uint16_t *data, int w, int h) {
   int src_x1 = w, src_y1 = h;
   int dst_x = x, dst_y = y;
 
-  if (dst_x < 0) { src_x0 = -dst_x; dst_x = 0; }
-  if (dst_y < 0) { src_y0 = -dst_y; dst_y = 0; }
-  if (dst_x + (src_x1 - src_x0) > FB_WIDTH)  src_x1 = src_x0 + (FB_WIDTH - dst_x);
-  if (dst_y + (src_y1 - src_y0) > FB_HEIGHT) src_y1 = src_y0 + (FB_HEIGHT - dst_y);
+  if (dst_x < s_clip_x0) { src_x0 = s_clip_x0 - dst_x; dst_x = s_clip_x0; }
+  if (dst_y < s_clip_y0) { src_y0 = s_clip_y0 - dst_y; dst_y = s_clip_y0; }
+  if (dst_x + (src_x1 - src_x0) - 1 > s_clip_x1) src_x1 = src_x0 + (s_clip_x1 - dst_x + 1);
+  if (dst_y + (src_y1 - src_y0) - 1 > s_clip_y1) src_y1 = src_y0 + (s_clip_y1 - dst_y + 1);
 
   int copy_w = src_x1 - src_x0;
   int copy_h = src_y1 - src_y0;
@@ -1260,17 +1266,17 @@ void display_draw_image_scaled_nn(int x, int y, const uint16_t *data,
   int draw_x = x;
   int draw_y = y;
 
-  // Clamp to framebuffer bounds
-  if (draw_x >= FB_WIDTH || draw_y >= FB_HEIGHT)
+  // Early reject if entirely outside the clip rect
+  if (draw_x > s_clip_x1 || draw_y > s_clip_y1)
     return;
-  if (draw_x + dst_w < 0 || draw_y + dst_h < 0)
+  if (draw_x + dst_w - 1 < s_clip_x0 || draw_y + dst_h - 1 < s_clip_y0)
     return;
 
   // Calculate actual drawing bounds
-  int start_x = draw_x < 0 ? -draw_x : 0;
-  int start_y = draw_y < 0 ? -draw_y : 0;
-  int end_x = (draw_x + dst_w > FB_WIDTH) ? FB_WIDTH - draw_x : dst_w;
-  int end_y = (draw_y + dst_h > FB_HEIGHT) ? FB_HEIGHT - draw_y : dst_h;
+  int start_x = draw_x < s_clip_x0 ? s_clip_x0 - draw_x : 0;
+  int start_y = draw_y < s_clip_y0 ? s_clip_y0 - draw_y : 0;
+  int end_x = (draw_x + dst_w - 1 > s_clip_x1) ? s_clip_x1 - draw_x + 1 : dst_w;
+  int end_y = (draw_y + dst_h - 1 > s_clip_y1) ? s_clip_y1 - draw_y + 1 : dst_h;
 
   if (end_x <= start_x || end_y <= start_y)
     return;
@@ -1315,6 +1321,110 @@ void display_set_transparent_color(uint16_t color) {
 
 uint16_t display_get_transparent_color(void) {
   return s_transparent_color;
+}
+
+// ── Clip rect ────────────────────────────────────────────────────────────────
+
+void display_set_clip_rect(int x, int y, int w, int h) {
+  int x1 = x + w - 1;
+  int y1 = y + h - 1;
+  if (x < 0) x = 0;
+  if (y < 0) y = 0;
+  if (x1 > FB_WIDTH - 1) x1 = FB_WIDTH - 1;
+  if (y1 > FB_HEIGHT - 1) y1 = FB_HEIGHT - 1;
+  if (x1 < x || y1 < y) {
+    // Empty rect: clamp to a 1x1 region outside all writes is impossible,
+    // so collapse to a zero-size marker at (0,0)-(-1,-1)
+    x = 0; y = 0; x1 = -1; y1 = -1;
+  }
+  s_clip_x0 = x; s_clip_y0 = y;
+  s_clip_x1 = x1; s_clip_y1 = y1;
+}
+
+void display_get_clip_rect(int *x, int *y, int *w, int *h) {
+  if (x) *x = s_clip_x0;
+  if (y) *y = s_clip_y0;
+  if (w) *w = s_clip_x1 - s_clip_x0 + 1;
+  if (h) *h = s_clip_y1 - s_clip_y0 + 1;
+}
+
+void display_clear_clip_rect(void) {
+  s_clip_x0 = 0; s_clip_y0 = 0;
+  s_clip_x1 = FB_WIDTH - 1; s_clip_y1 = FB_HEIGHT - 1;
+}
+
+// ── Mode 7 (perspective ground plane) ───────────────────────────────────────
+// Renders `tex` as a ground plane seen from a camera at (cam_x, cam_y),
+// `cam_z` units above the plane, facing `angle` radians (0 = toward +Y in
+// texture space, rotating clockwise). Rows below `horizon_y` are filled;
+// `scale` tunes the field of view (larger = further view / smaller texels).
+// Power-of-two texture dimensions wrap seamlessly; other sizes clamp at edges.
+void display_draw_plane(const uint16_t *tex, int tex_w, int tex_h,
+                        float cam_x, float cam_y, float cam_z,
+                        float angle, int horizon_y, float scale) {
+  if (!tex || tex_w <= 0 || tex_h <= 0 || cam_z <= 0.0f) return;
+  if (scale <= 0.0f) scale = 1.0f;
+
+  const bool pow2 = ((tex_w & (tex_w - 1)) == 0) && ((tex_h & (tex_h - 1)) == 0);
+  const uint32_t mask_w = (uint32_t)tex_w - 1;
+  const uint32_t mask_h = (uint32_t)tex_h - 1;
+
+  const float sin_a = sinf(angle);
+  const float cos_a = cosf(angle);
+  // Forward (0 rad → +Y in texture space) and right vectors
+  const float fwd_x = -sin_a, fwd_y = cos_a;
+  const float right_x = cos_a, right_y = sin_a;
+
+  int y0 = horizon_y + 1;
+  if (y0 < s_clip_y0) y0 = s_clip_y0;
+  if (y0 < 0) y0 = 0;
+  int y1 = s_clip_y1;
+  if (y1 > FB_HEIGHT - 1) y1 = FB_HEIGHT - 1;
+  if (y0 > y1) return;
+
+  const int cx0 = s_clip_x0 < 0 ? 0 : s_clip_x0;
+  const int cx1 = s_clip_x1 > FB_WIDTH - 1 ? FB_WIDTH - 1 : s_clip_x1;
+  const int half_w = FB_WIDTH / 2;
+
+  for (int y = y0; y <= y1; y++) {
+    const int p = y - horizon_y;  // > 0
+    // Depth of this scanline along the ground
+    const float z = cam_z * scale / (float)p;
+
+    // World position at the centre of the row
+    const float center_x = cam_x + fwd_x * z;
+    const float center_y = cam_y + fwd_y * z;
+
+    // World-units per screen pixel along the row
+    const float step_x = right_x * z / scale;
+    const float step_y = right_y * z / scale;
+
+    // 16.16 fixed point for the inner loop; start at the clip left edge
+    int32_t fx = (int32_t)((center_x + (cx0 - half_w) * step_x) * 65536.0f);
+    int32_t fy = (int32_t)((center_y + (cx0 - half_w) * step_y) * 65536.0f);
+    const int32_t dx = (int32_t)(step_x * 65536.0f);
+    const int32_t dy = (int32_t)(step_y * 65536.0f);
+
+    uint16_t *row = &s_framebuffer[y * FB_WIDTH + cx0];
+    if (pow2) {
+      for (int x = cx0; x <= cx1; x++) {
+        const uint16_t c = tex[((fy >> 16) & mask_h) * tex_w + ((fx >> 16) & mask_w)];
+        *row++ = (c >> 8) | (c << 8);
+        fx += dx;
+        fy += dy;
+      }
+    } else {
+      for (int x = cx0; x <= cx1; x++) {
+        int tx = fx >> 16, ty = fy >> 16;
+        if (tx < 0) tx = 0; else if (tx >= tex_w) tx = tex_w - 1;
+        if (ty < 0) ty = 0; else if (ty >= tex_h) ty = tex_h - 1;
+        const uint16_t c = tex[ty * tex_w + tx];
+        *row++ = (c >> 8) | (c << 8);
+        fx += dx;
+        fy += dy;
+      }
+    }
+  }
 }
 
 // When true, display_flush() blocks until DMA completes before returning.

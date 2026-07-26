@@ -74,17 +74,21 @@ main()
 - `picocalc.fs` / `g_api.fs` — file open/read/write/close/exists/size/listDir
 - `picocalc.sys` / `g_api.sys` — time, battery, log, reboot, system menu, poll (native apps), shouldExit
 - `picocalc.wifi` / `g_api.wifi` — connect/disconnect/status/IP/SSID/isAvailable
-- `picocalc.config` / `g_api.config` — system-wide key/value config (get/set/save/load)
+- `picocalc.sysconfig` / `g_api.config` — system-wide key/value config (get/set/save/load)
 - `picocalc.audio` / `g_api.audio` — tone generation, PCM streaming (playTone/stopTone/setVolume/startStream/stopStream/pushSamples)
 - `picocalc.tcp` / `g_api.tcp` — raw TCP/TLS sockets (connect/write/read/close/available/getError/getEvents)
 - `picocalc.ui` / `g_api.ui` — modal dialogs (textInput/textInputSimple/confirm)
 - `g_api.http` — HTTP/HTTPS client (Phase 1; Lua exposes as `picocalc.network.http` OO objects)
 - `g_api.soundplayer` — sample/fileplayer/MP3 player (Phase 1; Lua exposes as `picocalc.sound`)
-- `g_api.appconfig` — per-app key/value config (Phase 1; Lua exposes as `picocalc.appconfig`)
+- `g_api.appconfig` — per-app key/value config (Phase 1; Lua exposes as BOTH `picocalc.config` and `picocalc.appconfig` — same store, two names)
 - `g_api.crypto` — crypto primitives: SHA-256/SHA-1/HMAC/AES-CTR/ECDH (Phase 1; Lua exposes as `picocalc.crypto`)
 - `g_api.graphics` — image loading and drawing (Phase 2; Lua exposes as `picocalc.graphics.image`)
 - `g_api.video` — MJPEG video playback (Phase 2; Lua exposes as `picocalc.video`)
-- `g_api.version` — 1 = Phase 1 additions present, 2 = Phase 2 additions present
+- `g_api.modplayer` — MOD tracker music (Phase 2; Lua exposes as `picocalc.modplayer`)
+- `g_api.zip` — ZIP extraction (Lua exposes as `picocalc.zip`)
+- `g_api.version` — 1 = Phase 1, 2 = Phase 2, 3 = `fs->browse`, 4 = clip rect + mode-7 plane
+
+> ⚠️ **Config naming**: in Lua, `picocalc.config` (alias `picocalc.appconfig`) is the **per-app** store (`/data/<APP_ID>/config.json`); `picocalc.sysconfig` is the **system-wide** store (`/system/config.json`). Older docs had these inverted.
 
 ### App Lifecycle (`src/os/launcher.c`)
 1. Scans `/apps/` on SD for dirs containing `main.lua` or `main.elf`
@@ -96,24 +100,31 @@ main()
    - **Native apps** (`src/os/native_loader.c`): ELF32 PIE loader, relocates to PSRAM (code in SRAM if fits), runs on PSP (Process Stack Pointer) via `launch_on_psp()` trampoline
 
 ### Lua Bridge (split across `src/os/lua_bridge_*.c`)
-The Lua bridge is split into 14 module files, coordinated by `lua_bridge.c`:
+The Lua bridge is split into ~20 module files, coordinated by `lua_bridge.c`:
+- `lua_bridge_appconfig.c` — per-app config (registered as both `picocalc.config` and `picocalc.appconfig`)
 - `lua_bridge_audio.c` — tone/PCM streaming
-- `lua_bridge_config.c` — config get/set/save/load
+- `lua_bridge_config.c` — system config (`picocalc.sysconfig`)
 - `lua_bridge_display.c` — drawing primitives
 - `lua_bridge_fs.c` — filesystem operations
-- `lua_bridge_graphics.c` — image loading, sprites, spritesheets, animations, image cache
-- `lua_bridge_input.c` — buttons, keyboard
+- `lua_bridge_game.c` + `lua_bridge_game_camera.c` + `lua_bridge_game_save.c` + `lua_bridge_game_scene.c` — `picocalc.game` (camera, scene manager, save files)
+- `lua_bridge_graphics.c` — image loading, sprites, spritesheets, tilemap, animations
+- `lua_bridge_input.c` — buttons, keyboard, key repeat
+- `lua_bridge_json.c` — `picocalc.json` encode/decode
+- `lua_bridge_mod.c` — `picocalc.modplayer` MOD music
 - `lua_bridge_network.c` — WiFi control, HTTP client (OO connections with `HTTP_MT` metatable)
 - `lua_bridge_perf.c` — performance profiling
 - `lua_bridge_repl.c` — interactive Lua REPL
 - `lua_bridge_sound.c` — sound samples, file player, MP3 player
 - `lua_bridge_sys.c` — system functions, menu items
+- `lua_bridge_terminal.c` — in-app virtual terminal widget
 - `lua_bridge_ui.c` — modal dialogs
 - `lua_bridge_video.c` — MJPEG video playback
+- `lua_bridge_zip.c` — `picocalc.zip` archive extraction
+- `lua_bridge_3d.c` — global `draw3DWireframeEx` software 3D helper
 
 All `picocalc.*` Lua functions are `static int l_<module>_<fn>(lua_State *L)` wrappers. Registered via `luaL_Reg` tables passed to `register_subtable()`. Integer constants (button codes, color names) are pushed with `lua_pushinteger` / `lua_setfield`.
 
-Lua 5.4.7 is embedded with restricted stdlib: `base`, `table`, `string`, `math`, `utf8`, `coroutine`. Blocked: `io`, `os`, `package`. Compile-time config: `LUA_32BITS=1`, `LUA_USE_LONGJMP=1`, `LUAI_MAXSTACK=500`.
+Lua 5.4.7 is embedded with restricted stdlib: `base`, `table`, `string`, `math` only (no `utf8`, no `coroutine` — neither is registered). Blocked: `io`, `os`, `package`, `debug`. Compile-time config: `LUA_32BITS=1`, `LUA_USE_LONGJMP=1`, `LUAI_MAXSTACK=500`.
 
 A debug hook fires every 256 opcodes (`lua_sethook` with `LUA_MASKCOUNT`). The hook checks for the Sym (Menu) key and fires pending HTTP Lua callbacks via `http_lua_fire_pending()`.
 
@@ -173,7 +184,7 @@ A debug hook fires every 256 opcodes (`lua_sethook` with `LUA_MASKCOUNT`). The h
 ### Config (`src/os/config.c`)
 - Flat JSON key/value store persisted at `/system/config.json`
 - `config_load()` at boot; `config_save()` writes back to SD
-- Exposed to Lua as `picocalc.config.get(key)`, `.set(key, value)`, `.save()`, `.load()`
+- Exposed to Lua as `picocalc.sysconfig.get(key)`, `.set(key, value)`, `.save()`, `.load()` (NOT `picocalc.config` — that's the per-app store, see the naming warning above)
 - Well-known keys: `"wifi_ssid"`, `"wifi_pass"`, `"brightness"`, `"dim_timeout_s"` (idle screen-dim timeout in seconds; `"0"` disables; default 60)
 
 ### UI Widgets (`src/os/ui.c`, `text_input.c`)
@@ -304,6 +315,17 @@ conn:setConnectionClosedCallback(fn)  -- connection closed or failed
 
 Status constants: `picocalc.network.kStatusNotConnected` (0), `kStatusConnected` (1), `kStatusNotAvailable` (2).
 
+## Simulator Notes
+
+`make simulator` builds `build_sim/picos_simulator` (SDL2 + Unicorn Engine for native ELF apps). Known divergences from hardware:
+
+- `picocalc.crypto` is **absent** (Lua and native) — mbedTLS is firmware-only (`simulator/CMakeLists.txt` excludes `lua_bridge_crypto.c`; native crypto trampolines are stubs except `randomBytes`).
+- Display post-effects (`effectInvert`…`effectPosterize`) are no-ops on the native (Unicorn) path; Lua-side effects work.
+- `setScrollArea`/`setScrollOffset` are no-ops (no LCD registers).
+- The launcher caches the app list at boot — newly staged apps need a sim restart.
+- Everything else (zip, modplayer, display clip rect, drawPlane, tilemap, sprites) mirrors firmware, including `g_api.version = 4`.
+
 ## Not Yet Implemented
 
 - `picocalc.display.drawBitmap` / raw bitmap blitting (use `picocalc.graphics.image` instead for image loading)
+- Native-app HTTP callbacks (`http_fire_c_pending` is a no-op; native apps must poll `http->isComplete()`)

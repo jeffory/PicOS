@@ -9,6 +9,12 @@ extern "C" {
 #include "umm_malloc.h"
 }
 
+// RGB565 packing macro (same as display.h — kept local to avoid pulling the
+// C display header into C++ where tgx::RGB565 is also a type name).
+#ifndef RGB565
+#define RGB565(r, g, b) ((uint16_t)(((r) & 0xF8) << 8) | (((g) & 0xFC) << 3) | (((b) & 0xF8) >> 3))
+#endif
+
 // --- FatFS Proxy Callbacks for decoders ---
 
 static void *my_file_open(const char *szFilename, int32_t *pFileSize) {
@@ -214,6 +220,73 @@ bool decode_gif_buffer(const uint8_t *data, size_t len,
   }
   umm_free(gif);
   return false;
+}
+
+// Helper: read little-endian values from a buffer (unaligned safe)
+static uint16_t rd_le16(const uint8_t *p) {
+  return (uint16_t)(p[0] | (p[1] << 8));
+}
+static uint32_t rd_le32(const uint8_t *p) {
+  return (uint32_t)p[0] | ((uint32_t)p[1] << 8) | ((uint32_t)p[2] << 16) |
+         ((uint32_t)p[3] << 24);
+}
+
+bool decode_bmp_buffer(const uint8_t *data, size_t len,
+                       image_decode_result_t *result) {
+  if (!data || len < 54 || !result)
+    return false;
+  if (data[0] != 'B' || data[1] != 'M')
+    return false;
+
+  uint32_t data_offset = rd_le32(data + 10);
+  int32_t w_raw = (int32_t)rd_le32(data + 18);
+  int32_t h_raw = (int32_t)rd_le32(data + 22);
+  uint16_t bpp = rd_le16(data + 28);
+  uint32_t compression = rd_le32(data + 30);
+
+  if ((compression != 0 && compression != 3) ||
+      (bpp != 16 && bpp != 24 && bpp != 32))
+    return false;
+
+  bool flip_y = true;
+  int w = w_raw;
+  int h = h_raw;
+  if (h < 0) {
+    h = -h;
+    flip_y = false;
+  }
+  if (w <= 0 || h <= 0 || w > 2048 || h > 2048)
+    return false;
+
+  int row_bytes = ((w * bpp + 31) / 32) * 4;
+  if (data_offset > len || (size_t)row_bytes * (size_t)h > len - data_offset)
+    return false;
+
+  result->w = w;
+  result->h = h;
+  result->data = (uint16_t *)umm_malloc((size_t)w * h * sizeof(uint16_t));
+  if (!result->data)
+    return false;
+
+  const uint8_t *row = data + data_offset;
+  for (int y = 0; y < h; y++, row += row_bytes) {
+    int dest_y = flip_y ? (h - 1 - y) : y;
+    uint16_t *dst = result->data + dest_y * w;
+    for (int x = 0; x < w; x++) {
+      uint16_t color;
+      if (bpp == 24) {
+        uint8_t b = row[x * 3], g = row[x * 3 + 1], r = row[x * 3 + 2];
+        color = RGB565(r, g, b);
+      } else if (bpp == 32) {
+        uint8_t b = row[x * 4], g = row[x * 4 + 1], r = row[x * 4 + 2];
+        color = RGB565(r, g, b);
+      } else { // 16 bpp, already RGB565
+        color = rd_le16(row + x * 2);
+      }
+      dst[x] = color;
+    }
+  }
+  return true;
 }
 
 bool decode_jpeg_file(const char *path, image_decode_result_t *result) {

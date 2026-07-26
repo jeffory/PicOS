@@ -35,6 +35,11 @@ bool decode_png_file(const char *path, image_decode_result_t *result);
 bool decode_gif_buffer(const uint8_t *data, size_t len,
                        image_decode_result_t *result);
 
+// Decodes a BMP buffer (16/24/32 bpp, uncompressed) into the result object
+// Returns true on success, false on failure
+bool decode_bmp_buffer(const uint8_t *data, size_t len,
+                       image_decode_result_t *result);
+
 // Decodes a GIF directly from a file path using FatFS streaming
 bool decode_gif_file(const char *path, image_decode_result_t *result);
 

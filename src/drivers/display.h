@@ -185,6 +185,24 @@ const uint16_t *display_get_screen_buffer(void);
 void display_set_scroll_area(int top_fixed, int scroll_height, int bottom_fixed);
 void display_set_scroll_offset(int offset);
 
+// Clip rect. All pixel-writing primitives respect it EXCEPT display_clear(),
+// display_flush*(), the post-processing effects (whole-buffer by design), and
+// the tgx rotated-blit path (display_draw_image_scaled with angle).
+// Default is the full screen. set clamps to the framebuffer; an empty rect
+// blocks all writes.
+void display_set_clip_rect(int x, int y, int w, int h);
+void display_get_clip_rect(int *x, int *y, int *w, int *h);
+void display_clear_clip_rect(void);
+
+// Mode 7 perspective ground-plane render. Draws `tex` seen from a camera at
+// (cam_x, cam_y), cam_z units above the plane, facing `angle` radians
+// (0 = toward +Y in texture space). Rows below `horizon_y` are filled;
+// `scale` tunes the FOV (larger = further view). Power-of-two texture dims
+// wrap seamlessly; other sizes clamp at edges. Respects the clip rect.
+void display_draw_plane(const uint16_t *tex, int tex_w, int tex_h,
+                        float cam_x, float cam_y, float cam_z,
+                        float angle, int horizon_y, float scale);
+
 // =============================================================================
 // Framebuffer Effects (post-processing shaders)
 //

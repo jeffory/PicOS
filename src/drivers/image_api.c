@@ -169,6 +169,116 @@ pc_image_t *image_load(const char *path) {
     return NULL;
 }
 
+// Header-only probe: returns a static format string ("bmp"/"jpeg"/"png"/"gif")
+// and fills *out_w/*out_h, or NULL if the file isn't a recognized image.
+const char *image_probe(const char *path, int *out_w, int *out_h) {
+    if (!path || !out_w || !out_h) return NULL;
+
+    sdfile_t f = sdcard_fopen(path, "r");
+    if (!f) return NULL;
+
+    uint8_t header[33];
+    int got = sdcard_fread(f, header, sizeof(header));
+    if (got < 10) {
+        sdcard_fclose(f);
+        return NULL;
+    }
+
+    // BMP: 'BM', w/h little-endian int32 at 18/22
+    if (header[0] == 'B' && header[1] == 'M' && got >= 26) {
+        int32_t w, h;
+        memcpy(&w, &header[18], 4);
+        memcpy(&h, &header[22], 4);
+        if (h < 0) h = -h;
+        if (w <= 0 || h <= 0) {
+            sdcard_fclose(f);
+            return NULL;
+        }
+        *out_w = (int)w;
+        *out_h = (int)h;
+        sdcard_fclose(f);
+        return "bmp";
+    }
+
+    // PNG: 8-byte magic, then IHDR length(4)+type(4), w/h big-endian at 16/20
+    if (got >= 24 && header[0] == 0x89 && header[1] == 0x50 &&
+        header[2] == 0x4E && header[3] == 0x47) {
+        uint32_t w = ((uint32_t)header[16] << 24) | ((uint32_t)header[17] << 16) |
+                     ((uint32_t)header[18] << 8) | header[19];
+        uint32_t h = ((uint32_t)header[20] << 24) | ((uint32_t)header[21] << 16) |
+                     ((uint32_t)header[22] << 8) | header[23];
+        if (w == 0 || h == 0) {
+            sdcard_fclose(f);
+            return NULL;
+        }
+        *out_w = (int)w;
+        *out_h = (int)h;
+        sdcard_fclose(f);
+        return "png";
+    }
+
+    // GIF: 'GIF', w/h little-endian uint16 at 6/8
+    if (header[0] == 'G' && header[1] == 'I' && header[2] == 'F') {
+        *out_w = header[6] | (header[7] << 8);
+        *out_h = header[8] | (header[9] << 8);
+        sdcard_fclose(f);
+        return "gif";
+    }
+
+    // JPEG: walk markers to the first SOF (0xC0-0xCF except DHT/DAC/RST)
+    if (header[0] == 0xFF && header[1] == 0xD8) {
+        uint8_t seg[7];
+        for (int guard = 0; guard < 256; guard++) {
+            // Find 0xFF marker prefix (skip fill bytes)
+            uint8_t b = 0;
+            do {
+                if (sdcard_fread(f, &b, 1) != 1) {
+                    sdcard_fclose(f);
+                    return NULL;
+                }
+            } while (b != 0xFF);
+            do {
+                if (sdcard_fread(f, &b, 1) != 1) {
+                    sdcard_fclose(f);
+                    return NULL;
+                }
+            } while (b == 0xFF);
+
+            if (b == 0xD8 || b == 0x01 || (b >= 0xD0 && b <= 0xD7))
+                continue;  // standalone markers (SOI/TEM/RSTn)
+
+            if (b >= 0xC0 && b <= 0xCF && b != 0xC4 && b != 0xC8 && b != 0xCC) {
+                // SOFn: length(2) precision(1) height(2) width(2), big-endian
+                if (sdcard_fread(f, seg, 7) != 7) {
+                    sdcard_fclose(f);
+                    return NULL;
+                }
+                *out_h = (seg[3] << 8) | seg[4];
+                *out_w = (seg[5] << 8) | seg[6];
+                sdcard_fclose(f);
+                return "jpeg";
+            }
+
+            // Other segment: read big-endian length and skip payload
+            if (sdcard_fread(f, seg, 2) != 2) {
+                sdcard_fclose(f);
+                return NULL;
+            }
+            uint16_t seglen = (seg[0] << 8) | seg[1];
+            if (seglen < 2) {
+                sdcard_fclose(f);
+                return NULL;
+            }
+            sdcard_fseek(f, sdcard_ftell(f) + seglen - 2);
+        }
+        sdcard_fclose(f);
+        return NULL;
+    }
+
+    sdcard_fclose(f);
+    return NULL;
+}
+
 pc_image_t *image_new_blank(int width, int height) {
     if (width <= 0 || height <= 0 || width > 2048 || height > 2048)
         return NULL;

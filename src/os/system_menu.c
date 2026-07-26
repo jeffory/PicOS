@@ -402,6 +402,11 @@ static bool menu_loop(lua_State *L, int context) {
   display_darken();
   bg_save();
 
+  // The menu must draw full-screen even if the app set a clip rect.
+  int saved_clip_x, saved_clip_y, saved_clip_w, saved_clip_h;
+  display_get_clip_rect(&saved_clip_x, &saved_clip_y, &saved_clip_w, &saved_clip_h);
+  display_clear_clip_rect();
+
   int sel = 0;
   uint8_t entry_brightness = s_brightness;
   bool running = true;
@@ -609,6 +614,7 @@ static bool menu_loop(lua_State *L, int context) {
   bg_free();
   kbd_clear_state();
   save_brightness_if_changed(entry_brightness);
+  display_set_clip_rect(saved_clip_x, saved_clip_y, saved_clip_w, saved_clip_h);
   return exit_requested;
 }
 

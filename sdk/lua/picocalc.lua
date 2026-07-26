@@ -6,7 +6,9 @@
 -- Place `.luarc.json` at the project root and set:
 --   "Lua.workspace.library": ["sdk/lua"]
 --
--- Generated from src/os/lua_bridge_*.c  (PicOS feature/shared-api-native-lua)
+-- Generated from src/os/lua_bridge_*.c — keep in sync with the bridge sources.
+-- Note: only base/table/string/math stdlib is available (no utf8, no coroutine,
+-- no io/os/package/debug).
 
 -- =============================================================================
 -- App globals (injected by launcher before app starts)
@@ -103,6 +105,98 @@ function picocalc.display.drawCircle(cx, cy, r, color) end
 ---@param color integer RGB565 colour
 function picocalc.display.fillCircle(cx, cy, r, color) end
 
+---Fill a vertical line (fast; useful for raycasting and column effects).
+---@param x integer
+---@param y0 integer Start y
+---@param y1 integer End y
+---@param color integer RGB565
+function picocalc.display.fillVLine(x, y0, y1, color) end
+
+---Fill a horizontal line (fast).
+---@param y integer
+---@param x0 integer Start x
+---@param x1 integer End x
+---@param color integer RGB565
+function picocalc.display.fillHLine(y, x0, x1, color) end
+
+---Fill a solid triangle.
+---@param x0 integer
+---@param y0 integer
+---@param x1 integer
+---@param y1 integer
+---@param x2 integer
+---@param y2 integer
+---@param color integer RGB565
+function picocalc.display.fillTriangle(x0, y0, x1, y1, x2, y2, color) end
+
+---Draw a textured vertical column (raycasting wall slice) from an image.
+---tex_x selects the texture column; tex_y0/tex_y1 select the source row range.
+---@param x integer Destination column
+---@param y0 integer Destination start y
+---@param y1 integer Destination end y
+---@param tex PicOSImage Texture image
+---@param tex_x integer Texture column
+---@param tex_y0 integer Texture start row
+---@param tex_y1 integer Texture end row
+function picocalc.display.drawTexturedColumn(x, y0, y1, tex, tex_x, tex_y0, tex_y1) end
+
+---Fill a vertical line with a two-colour gradient (sky/floor shading).
+---@param x integer
+---@param y0 integer Start y
+---@param y1 integer End y
+---@param color_top integer RGB565 at y0
+---@param color_bottom integer RGB565 at y1
+function picocalc.display.fillVLineGradient(x, y0, y1, color_top, color_bottom) end
+
+---Apply a full-framebuffer post-processing effect.
+---Effects and arguments:
+---  "invert"
+---  "darken"   (factor? 0=black, 255=no change, default 128)
+---  "brighten" (factor? 0=no change, 255=white, default 128)
+---  "tint"     (r, g, b, strength? default 128)
+---  "fade"     (r, g, b, factor? default 128) — tint toward target colour
+---  "grayscale"
+---  "blend"    (image: PicOSImage, alpha? 0-255, default 128)
+---  "palette"  (lut: integer[] 1-256 RGB565 entries — remap each pixel to nearest entry)
+---  "dither"   (levels? default 4)
+---  "scanline" (intensity? 0=none, 255=black lines, default 128)
+---  "posterize"(levels? 2-32 per channel, default 4)
+---@param name string Effect name (see above)
+---@param ... any Effect arguments
+function picocalc.display.applyEffect(name, ...) end
+
+---Restrict all drawing primitives to a rectangle (split-screen, panels,
+---partial redraw). `clear()` and post-effects are NOT clipped.
+---@param x integer
+---@param y integer
+---@param w integer
+---@param h integer
+function picocalc.display.setClipRect(x, y, w, h) end
+
+---Return the current clip rectangle.
+---@return integer x
+---@return integer y
+---@return integer w
+---@return integer h
+function picocalc.display.getClipRect() end
+
+---Restore the clip rectangle to the full screen.
+function picocalc.display.clearClipRect() end
+
+---Render a Mode 7-style perspective ground plane from an image (SNES F-Zero /
+---Mario Kart floor). The camera sits at (cam_x, cam_y) in texture space,
+---`cam_z` units above the plane, facing `angle` radians (0 = toward +Y).
+---Rows below `horizon_y` are filled. Power-of-two texture dimensions wrap
+---seamlessly; other sizes clamp at edges. Respects the clip rect.
+---@param tex PicOSImage Ground texture
+---@param cam_x number Camera x in texture space
+---@param cam_y number Camera y in texture space
+---@param cam_z number Camera height above the plane
+---@param angle? number Facing in radians (default 0)
+---@param horizon_y? integer Horizon scanline (default 120)
+---@param scale? number FOV/zoom tuning, larger = further view (default 1.0)
+function picocalc.display.drawPlane(tex, cam_x, cam_y, cam_z, angle, horizon_y, scale) end
+
 ---Configure the hardware scroll area (for smooth vertical scrolling).
 ---@param top integer Lines at the top that do not scroll
 ---@param height integer Height of the scrolling region in lines
@@ -113,13 +207,14 @@ function picocalc.display.setScrollArea(top, height, bottom) end
 ---@param offset integer Pixel offset
 function picocalc.display.setScrollOffset(offset) end
 
----Draw a text string. Background defaults to BLACK if omitted.
+---Draw a text string. Background defaults to BLACK if omitted; pass `false`
+---for a transparent background (glyph pixels only).
 ---Returns the pixel width of the rendered text.
 ---@param x integer
 ---@param y integer
 ---@param text string
 ---@param fg integer RGB565 foreground colour
----@param bg? integer RGB565 background colour
+---@param bg? integer|false RGB565 background colour, or `false` for transparent
 ---@return integer width Pixel width of the drawn text
 function picocalc.display.drawText(x, y, text, fg, bg) end
 
@@ -221,6 +316,20 @@ function picocalc.input.getChar() end
 ---@return integer
 function picocalc.input.getRawKey() end
 
+---Clear all latched input state (held buttons, pending edges). Useful on
+---scene transitions so stale presses don't leak into the new scene.
+function picocalc.input.clearState() end
+
+---Configure key auto-repeat for menus and lists.
+---@param delay_ms integer Initial hold time before repeat starts (0 = disable repeat)
+---@param rate_ms? integer Interval between repeats once started (default 80, min 1)
+function picocalc.input.setRepeat(delay_ms, rate_ms) end
+
+---Like `getButtonsPressed()`, but held buttons also produce synthetic repeat
+---edges according to `setRepeat()`. Use this for menu navigation.
+---@return integer bitmask
+function picocalc.input.getButtonsRepeated() end
+
 -- =============================================================================
 -- picocalc.sys
 -- =============================================================================
@@ -251,7 +360,7 @@ function picocalc.sys.exit() end
 ---Reboot the device via the watchdog timer. Never returns.
 function picocalc.sys.reboot() end
 
----Returns `false` (stub — USB sense not yet implemented).
+---Return `true` if USB power is connected (GP24 VBUS sense).
 ---@return boolean
 function picocalc.sys.isUSBPowered() end
 
@@ -287,6 +396,62 @@ function picocalc.sys.clearMenuItems() end
 
 ---Deliberately trigger a HardFault for crash-handler testing. **Never call in production.**
 function picocalc.sys.triggerFault() end
+
+---Reset the idle screen-dim timer (call on user activity to keep the screen on).
+function picocalc.sys.resetIdleTimer() end
+
+---Pause Core 1 background work (network polling, audio updates).
+---@return boolean was_paused Previous state
+function picocalc.sys.pauseBackground() end
+
+---Resume Core 1 background work after `pauseBackground()`.
+function picocalc.sys.resumeBackground() end
+
+---Load and run a Lua library file from the SD card (like `require` for a path).
+---Returns the chunk's return value, or `nil, error`.
+---@param name string Module path or name
+---@return any
+function picocalc.sys.loadlib(name) end
+
+---Read bytes from PIO PSRAM (second 8MB chip, if present) into a string.
+---@param addr integer Byte address in PIO PSRAM
+---@param len integer Bytes to read
+---@return string? data nil if PIO PSRAM unavailable
+function picocalc.sys.pioPsramRead(addr, len) end
+
+---Write a string to PIO PSRAM. Returns bytes written (0 if unavailable).
+---@param addr integer Byte address in PIO PSRAM
+---@param data string
+---@return integer bytes_written
+function picocalc.sys.pioPsramWrite(addr, data) end
+
+---Return the PIO PSRAM size in bytes (0 if not present).
+---@return integer
+function picocalc.sys.pioPsramSize() end
+
+---Allocate bytes from the QMI PSRAM (umm_malloc) heap.
+---Returns a light-userdata pointer, or nil on OOM. Free with `qmiPsramFree`.
+---@param size integer Bytes to allocate
+---@return userdata? ptr
+function picocalc.sys.qmiPsramAlloc(size) end
+
+---Free a pointer from `qmiPsramAlloc`.
+---@param ptr userdata
+function picocalc.sys.qmiPsramFree(ptr) end
+
+---Write a string into a QMI PSRAM allocation at `offset`. Returns bytes written.
+---@param ptr userdata Pointer from qmiPsramAlloc
+---@param offset integer Byte offset into the allocation
+---@param data string
+---@return integer bytes_written
+function picocalc.sys.qmiPsramWrite(ptr, offset, data) end
+
+---Read bytes from a QMI PSRAM allocation into a string.
+---@param ptr userdata Pointer from qmiPsramAlloc
+---@param offset integer Byte offset into the allocation
+---@param len integer Bytes to read
+---@return string? data
+function picocalc.sys.qmiPsramRead(ptr, offset, len) end
 
 -- =============================================================================
 -- picocalc.fs
@@ -427,33 +592,12 @@ function picocalc.fs.diskInfo() end
 function picocalc.fs.glob(path, pattern) end
 
 -- =============================================================================
--- picocalc.config  (system-wide, /system/config.json)
+-- picocalc.config / picocalc.appconfig  (per-app, /data/<APP_ID>/config.json)
+-- Two names for the SAME per-app store. System-wide config is picocalc.sysconfig.
 -- =============================================================================
 
 ---@class picocalc.config
 picocalc.config = {}
-
----Read a system config value.
----@param key string
----@return string? value `nil` if key does not exist
-function picocalc.config.get(key) end
-
----Write a system config value (pass `nil` to delete).
----@param key string
----@param value string|nil
-function picocalc.config.set(key, value) end
-
----Persist the config to `/system/config.json`.
----@return boolean ok
-function picocalc.config.save() end
-
----Reload config from `/system/config.json`.
----@return boolean ok
-function picocalc.config.load() end
-
--- =============================================================================
--- picocalc.appconfig  (per-app, /data/<APP_ID>/config.json)
--- =============================================================================
 
 ---@class picocalc.appconfig
 picocalc.appconfig = {}
@@ -462,20 +606,61 @@ picocalc.appconfig = {}
 ---@param key string
 ---@param fallback? string
 ---@return string? value
-function picocalc.appconfig.get(key, fallback) end
+function picocalc.config.get(key, fallback) end
 
 ---Write a per-app config value (in memory only — call `save()` to persist).
 ---@param key string
 ---@param value string
-function picocalc.appconfig.set(key, value) end
+function picocalc.config.set(key, value) end
 
 ---Persist the per-app config to `/data/<APP_ID>/config.json`.
 ---@return boolean ok
-function picocalc.appconfig.save() end
+function picocalc.config.save() end
 
----Delete the config file and clear all keys from memory.
+---Reload the per-app config from `/data/<APP_ID>/config.json`.
 ---@return boolean ok
-function picocalc.appconfig.reset() end
+function picocalc.config.load() end
+
+---Clear all in-memory per-app entries (does not delete the file).
+function picocalc.config.clear() end
+
+---Delete the per-app config file and clear all keys from memory.
+---@return boolean ok
+function picocalc.config.reset() end
+
+-- picocalc.appconfig is an exact alias of picocalc.config (same store):
+picocalc.appconfig.get   = picocalc.config.get
+picocalc.appconfig.set   = picocalc.config.set
+picocalc.appconfig.save  = picocalc.config.save
+picocalc.appconfig.load  = picocalc.config.load
+picocalc.appconfig.clear = picocalc.config.clear
+picocalc.appconfig.reset = picocalc.config.reset
+
+-- =============================================================================
+-- picocalc.sysconfig  (system-wide, /system/config.json)
+-- =============================================================================
+
+---@class picocalc.sysconfig
+picocalc.sysconfig = {}
+
+---Read a system config value. Well-known keys: `"wifi_ssid"`, `"wifi_pass"`,
+---`"brightness"`, `"dim_timeout_s"`.
+---@param key string
+---@return string? value `nil` if key does not exist
+function picocalc.sysconfig.get(key) end
+
+---Write a system config value (pass `nil` to delete the key).
+---@param key string
+---@param value string|nil
+function picocalc.sysconfig.set(key, value) end
+
+---Persist system config to `/system/config.json`.
+---@return boolean ok
+function picocalc.sysconfig.save() end
+
+---Reload system config from `/system/config.json`.
+---@return boolean ok
+function picocalc.sysconfig.load() end
 
 -- =============================================================================
 -- picocalc.audio  (simple tone generation)
@@ -578,6 +763,14 @@ function PicOSSample:decompress() end
 ---@param end_frame integer
 ---@return PicOSSample
 function PicOSSample:getSubsample(start_frame, end_frame) end
+
+---Play this sample immediately. `when` is accepted but ignored (no scheduler
+---on this hardware — playback starts now).
+---@param when? number Reserved; ignored
+---@param vol? integer Left volume 0–255 (default 100)
+---@param rightvol? integer Right volume (ignored — mono PWM)
+---@param rate? number Playback rate multiplier (default 1.0)
+function PicOSSample:playAt(when, vol, rightvol, rate) end
 
 -- ── PicOSSamplePlayer methods ────────────────────────────────────────────────
 
@@ -757,8 +950,9 @@ function PicOSMp3Player:setLoop(loop) end
 ---@class picocalc.wifi
 ---@field STATUS_DISCONNECTED integer
 ---@field STATUS_CONNECTING    integer
----@field STATUS_CONNECTED     integer
+---@field STATUS_CONNECTED     integer IP assigned, internet NOT verified
 ---@field STATUS_FAILED        integer
+---@field STATUS_ONLINE        integer Internet connectivity confirmed
 picocalc.wifi = {}
 
 ---Return `true` if WiFi hardware is present on this device.
@@ -799,10 +993,16 @@ picocalc.network = {}
 ---@return integer
 function picocalc.network.getStatus() end
 
----Enable or disable WiFi. `callback` is called when the operation completes.
+---Enable or disable WiFi. `callback` is fired synchronously with `nil`
+---(reserved for a future async result — do not rely on it receiving a status).
 ---@param flag boolean
----@param callback? fun()
+---@param callback? fun(err: string|nil)
 function picocalc.network.setEnabled(flag, callback) end
+
+---Return `true` if the WiFi hardware has been disconnected/disabled
+---(e.g. by video playback boosting the clock).
+---@return boolean
+function picocalc.network.isHwDisconnected() end
 
 ---@class picocalc.network.http
 picocalc.network.http = {}
@@ -835,7 +1035,7 @@ function PicOSHttpConn:setConnectTimeout(seconds) end
 ---@param seconds number
 function PicOSHttpConn:setReadTimeout(seconds) end
 
----Set the internal read buffer size in bytes (max: 32768).
+---Set the internal read buffer size in bytes (default 4096, max 2097152 / 2 MiB).
 ---@param bytes integer
 ---@return boolean ok
 function PicOSHttpConn:setReadBufferSize(bytes) end
@@ -879,7 +1079,8 @@ function PicOSHttpConn:getProgress() end
 ---@return integer
 function PicOSHttpConn:getBytesAvailable() end
 
----Read up to `length` bytes from the response body. Returns `nil` when done.
+---Read up to `length` bytes from the response body (max 131072 per call).
+---Returns `nil` when done.
 ---@param length? integer Max bytes to read
 ---@return string?
 function PicOSHttpConn:read(length) end
@@ -1083,6 +1284,97 @@ function picocalc.graphics.getTransparentColor() end
 ---@param color? integer RGB565 override
 function picocalc.graphics.clear(color) end
 
+---Draw a grid of `cols`×`rows` cells in one call (replaces many drawRect calls).
+---@param x integer
+---@param y integer
+---@param cell_w integer Cell width
+---@param cell_h integer Cell height
+---@param cols integer
+---@param rows integer
+---@param color integer RGB565
+function picocalc.graphics.drawGrid(x, y, cell_w, cell_h, cols, rows, color) end
+
+---Fill a rect and outline it in one call (dialogue boxes, panels).
+---@param x integer
+---@param y integer
+---@param w integer
+---@param h integer
+---@param fill integer RGB565 fill colour
+---@param border integer RGB565 outline colour
+function picocalc.graphics.fillBorderedRect(x, y, w, h, fill, border) end
+
+---Draw a 2D block-grid playfield (Tetris/Puzzle-style): grid lines plus a
+---filled block for every non-zero cell. `playfield[row][col]` = colour (0 = empty).
+---@param playfield integer[][] 2D array [row][col] of RGB565 colours
+---@param ox integer Origin x
+---@param oy integer Origin y
+---@param block_size integer Pixels per cell
+---@param cols integer
+---@param rows integer
+---@param grid_color integer RGB565 grid line colour
+function picocalc.graphics.drawPlayfield(playfield, ox, oy, block_size, cols, rows, grid_color) end
+
+---Update, draw, and compact a particle system in one C call.
+---`particles` is a flat sequence of 6 numbers per particle:
+---`{ x, y, vx, vy, life_ms, color, ... }`. Each live particle moves by
+---`vx*dt, vy*dt`, loses `dt*1000` ms of life, and is drawn as one pixel.
+---Dead particles are removed in place.
+---@param particles number[] Flat particle array (modified in place)
+---@param dt number Delta time in seconds
+---@return integer live_count Particles still alive
+function picocalc.graphics.updateDrawParticles(particles, dt) end
+
+---Set a global stencil pattern (8 bytes, checkerboard phase).
+---@param pattern integer[] 8 bytes
+function picocalc.graphics.setStencilPattern(pattern) end
+
+---Draw text using the default font. Returns pixel width.
+---@param text string
+---@param x integer
+---@param y integer
+---@param font? PicOSFont
+---@return integer width
+function picocalc.graphics.drawText(text, x, y, font) end
+
+---Draw text with horizontal alignment. alignment: 0=left, 1=centre, 2=right.
+---@param text string
+---@param x integer
+---@param y integer
+---@param alignment integer 0|1|2
+---@param font? PicOSFont
+function picocalc.graphics.drawTextAligned(text, x, y, alignment, font) end
+
+---Word-wrap text within a bounding rect (dialogue boxes).
+---@param text string
+---@param rx integer Rect x
+---@param ry integer Rect y
+---@param rw integer Rect width
+---@param rh integer Rect height
+---@param alignment? integer 0=left (default), 1=centre, 2=right
+---@param font? PicOSFont
+function picocalc.graphics.drawTextInRect(text, rx, ry, rw, rh, alignment, font) end
+
+---Measure a string in the default font.
+---@param text string
+---@return integer width
+---@return integer height
+function picocalc.graphics.getTextSize(text) end
+
+---Word-wrap a string to `max_width` and measure the result.
+---@param text string
+---@param max_width integer
+---@return integer width
+---@return integer height
+function picocalc.graphics.getTextSizeForMaxWidth(text, max_width) end
+
+---Render text into a new image (word-wrapped to max_w × max_h).
+---@param text string
+---@param max_w integer
+---@param max_h integer
+---@return PicOSImage? img
+---@return string? error
+function picocalc.graphics.imageWithText(text, max_w, max_h) end
+
 -- ── Image ────────────────────────────────────────────────────────────────────
 
 ---@class picocalc.graphics.image
@@ -1090,9 +1382,6 @@ picocalc.graphics.image = {}
 
 ---@class PicOSImage : userdata
 local PicOSImage = {}
-
----@class PicOSImageStream : userdata
-local PicOSImageStream = {}
 
 ---Load an image from the SD card (BMP, JPEG, PNG, GIF).
 ---@param path string
@@ -1116,17 +1405,11 @@ function picocalc.graphics.image.loadRegion(path, x, y, w, h) end
 ---@return PicOSImage?
 function picocalc.graphics.image.loadScaled(path, w, h) end
 
----Load an image from a Lua string (in-memory buffer).
+---Load an image from a Lua string (in-memory buffer). Format is auto-detected
+---from magic bytes (BMP, JPEG, PNG, GIF).
 ---@param data string Raw encoded image bytes
----@param format? string `"bmp"`, `"jpeg"`, `"png"`, `"gif"`
 ---@return PicOSImage?
-function picocalc.graphics.image.loadFromBuffer(data, format) end
-
----Load an image from a URL asynchronously.
----@param url string
----@param callback fun(img: PicOSImage?, error: string?)
----@return PicOSImage?
-function picocalc.graphics.image.loadRemote(url, callback) end
+function picocalc.graphics.image.loadFromBuffer(data) end
 
 ---Create a blank (black) image of the given dimensions.
 ---@param width integer
@@ -1134,25 +1417,29 @@ function picocalc.graphics.image.loadRemote(url, callback) end
 ---@return PicOSImage
 function picocalc.graphics.image.new(width, height) end
 
----Return metadata for an image file without fully decoding it.
+---Return metadata for an image file without decoding pixels (header only).
 ---@param path string
 ---@return { width: integer, height: integer, format: string }?
 function picocalc.graphics.image.getInfo(path) end
 
----Create a streaming tile decoder for large images.
----@param path string
----@param tile_w? integer
----@param tile_h? integer
----@return PicOSImageStream?
-function picocalc.graphics.image.newStream(path, tile_w, tile_h) end
-
----Set a placeholder image shown while an async load is pending.
----@param img PicOSImage
-function picocalc.graphics.image.setPlaceholder(img) end
-
----Return a list of supported image format strings (e.g. `{"bmp", "jpeg", ...}`).
+---Return a list of supported image format strings (e.g. `{"BMP", "JPEG", ...}`).
 ---@return string[]
 function picocalc.graphics.image.getSupportedFormats() end
+
+---Start an asynchronous decode of an image on Core 1. Poll with `pollPreload`.
+---Only one preload can be in flight at a time.
+---@param path string
+---@return boolean started
+function picocalc.graphics.image.preload(path) end
+
+---Poll an in-flight preload. Returns `image, ready` — `image` is non-nil when
+---the decode finished (check `ready` to distinguish "still working" from done).
+---@return PicOSImage? image
+---@return boolean ready
+function picocalc.graphics.image.pollPreload() end
+
+---Cancel an in-flight preload.
+function picocalc.graphics.image.cancelPreload() end
 
 -- PicOSImage methods
 
@@ -1209,39 +1496,9 @@ function PicOSImage:setTransparentColor(color) end
 ---@return integer?
 function PicOSImage:getTransparentColor() end
 
----@param location string `"psram"` or `"sram"`
-function PicOSImage:setStorageLocation(location) end
-
----Return metadata for this image (width, height, format, etc.)
----@return table
+---Return metadata for this image.
+---@return { width: integer, height: integer, transparentColor?: integer, storage: string }
 function PicOSImage:getMetadata() end
-
--- PicOSImageStream methods
-
----Decode and return the next tile. Returns `nil` when complete.
----@return PicOSImage?
-function PicOSImageStream:getNextTile() end
-
----Return `true` when all tiles have been decoded.
----@return boolean
-function PicOSImageStream:isComplete() end
-
--- ── Image cache ───────────────────────────────────────────────────────────────
-
----@class picocalc.graphics.cache
-picocalc.graphics.cache = {}
-
----Set the maximum PSRAM memory budget for the image cache.
----@param bytes integer
-function picocalc.graphics.cache.setMaxMemory(bytes) end
-
----Pin an image in the cache by path so it is not evicted.
----@param path string
-function picocalc.graphics.cache.retain(path) end
-
----Unpin a previously retained image.
----@param path string
-function picocalc.graphics.cache.release(path) end
 
 -- ── Sprite ────────────────────────────────────────────────────────────────────
 
@@ -1527,6 +1784,77 @@ function PicOSSprite:setStencilPattern(x, y) end
 ---@return boolean
 function PicOSSprite:alphaCollision(other) end
 
+---Move toward (goalX, goalY), sliding along any collision rects in the way.
+---Returns the actual position reached plus a list of collisions; each
+---collision is `{sprite, other, type, x, y, normal = {x, y}, touch}`.
+---@param goalX integer
+---@param goalY integer
+---@return integer actualX
+---@return integer actualY
+---@return table[] collisions
+function PicOSSprite:moveWithCollisions(goalX, goalY) end
+
+---Return this sprite's collision response mode (default `"slide"`).
+---@return string
+function PicOSSprite:collisionResponse() end
+
+---Set a mask image used as this sprite's stencil (arg 3 reserved).
+---@param image PicOSImage
+function PicOSSprite:setStencilImage(image) end
+
+-- ── Tilemap ─────────────────────────────────────────────────────────────────
+
+---@class picocalc.graphics.tilemap
+picocalc.graphics.tilemap = {}
+
+---@class PicOSTilemap : userdata
+local PicOSTilemap = {}
+
+---Create a tilemap from a tileset image cut into `tile_w`×`tile_h` tiles.
+---Tile indices are 1-based, row-major across the tileset; 0 = empty tile.
+---@param image PicOSImage Tileset image
+---@param tile_w integer Tile width in pixels
+---@param tile_h integer Tile height in pixels
+---@return PicOSTilemap
+function picocalc.graphics.tilemap.new(image, tile_w, tile_h) end
+
+---Allocate the tile grid (in tiles). All cells start as 0 (empty).
+---@param w integer Map width in tiles
+---@param h integer Map height in tiles
+function PicOSTilemap:setSize(w, h) end
+
+---Set the tile index at a map position (1-based into the tileset; 0 = empty).
+---@param x integer Tile column
+---@param y integer Tile row
+---@param tile integer Tile index
+function PicOSTilemap:setTileAtPosition(x, y, tile) end
+
+---Return the tile index at a map position (0 = empty or out of bounds).
+---@param x integer Tile column
+---@param y integer Tile row
+---@return integer tile
+function PicOSTilemap:getTileAtPosition(x, y) end
+
+---Return the map size in tiles.
+---@return integer w
+---@return integer h
+function PicOSTilemap:getSize() end
+
+---Return the tile size in pixels.
+---@return integer tile_w
+---@return integer tile_h
+function PicOSTilemap:getTileSize() end
+
+---Return the map size in pixels.
+---@return integer width
+---@return integer height
+function PicOSTilemap:getPixelSize() end
+
+---Draw the visible portion of the map at the given pixel scroll offset.
+---@param scroll_x? integer
+---@param scroll_y? integer
+function PicOSTilemap:draw(scroll_x, scroll_y) end
+
 -- ── Spritesheet ───────────────────────────────────────────────────────────────
 
 ---@class picocalc.graphics.spritesheet
@@ -1717,6 +2045,26 @@ function picocalc.graphics.font.new(path) end
 ---@param color? integer RGB565
 function PicOSFont:drawText(text, x, y, color) end
 
+---Draw text with horizontal alignment.
+---@param x integer
+---@param y integer
+---@param text string
+---@param alignment integer 0=left, 1=centre, 2=right
+---@param fg integer RGB565
+---@param bg? integer RGB565
+function PicOSFont:drawTextAligned(x, y, text, alignment, fg, bg) end
+
+---Word-wrap text within a bounding rect. Monospace fonts only.
+---@param x integer Rect x
+---@param y integer Rect y
+---@param w integer Rect width
+---@param h integer Rect height
+---@param text string
+---@param alignment? integer 0=left (default), 1=centre, 2=right
+---@param fg? integer RGB565
+---@param bg? integer RGB565
+function PicOSFont:drawTextInRect(x, y, w, h, text, alignment, fg, bg) end
+
 ---Return the character height of this font.
 ---@return integer
 function PicOSFont:getHeight() end
@@ -1744,7 +2092,7 @@ picocalc.video = {}
 ---@class PicOSVideoPlayer : userdata
 local PicOSVideoPlayer = {}
 
----Create a new video player. Destroy with `player:destroy()` when done.
+---Create a new video player. Freed by the garbage collector when unreferenced.
 ---@return PicOSVideoPlayer
 function picocalc.video.player() end
 
@@ -1790,7 +2138,7 @@ function PicOSVideoPlayer:getFPS() end
 function PicOSVideoPlayer:getSize() end
 
 ---Return metadata and playback state.
----@return { width: integer, height: integer, fps: number, frame_count: integer, current_frame: integer, has_audio: boolean }
+---@return { width: integer, height: integer, frames: integer, current_frame: integer, dropped_frames: integer, has_audio: boolean }
 function PicOSVideoPlayer:getInfo() end
 
 ---Return `true` if the loaded AVI file contains an MP3 audio track.
@@ -1825,8 +2173,7 @@ function PicOSVideoPlayer:getDroppedFrames() end
 ---Reset dropped-frame counter.
 function PicOSVideoPlayer:resetStats() end
 
----Free all resources. Also called by the garbage collector.
-function PicOSVideoPlayer:destroy() end
+-- (Resources are freed by the garbage collector — there is no destroy() method.)
 
 -- =============================================================================
 -- picocalc.game  (camera, scene manager, save files)
@@ -2125,12 +2472,12 @@ function PicOSTerminal:getScrollbackOffset() end
 ---@param offset integer
 function PicOSTerminal:setScrollbackOffset(offset) end
 
----Block until any key is pressed. Returns the key constant.
----@return integer
+---Block until any key is pressed (system menu, HTTP callbacks etc. stay responsive).
 function PicOSTerminal:waitForAnyKey() end
 
----Block until a specific key is pressed.
----@param key integer BTN_* constant
+---Block until a specific key is pressed. Returns the button mask.
+---@param key string Key name: `"enter"`, `"left"`, `"right"`, `"up"`, `"down"`, `"esc"`, `"f1"`–`"f5"`, `"tab"`, `"backspace"`
+---@return integer button_mask
 function PicOSTerminal:waitForKey(key) end
 
 ---Return the next key event without blocking, or `nil` if no key is pending.
@@ -2299,3 +2646,136 @@ function PicOSEcdh:computeShared(remote_pubkey) end
 
 ---Release the ECDH context. Also called by the GC.
 function PicOSEcdh:free() end
+
+-- =============================================================================
+-- picocalc.modplayer  (MOD tracker music)
+-- =============================================================================
+
+---@class picocalc.modplayer
+picocalc.modplayer = {}
+
+---@class PicOSModPlayer : userdata
+local PicOSModPlayer = {}
+
+---Create a MOD player instance (freed by GC).
+---@return PicOSModPlayer
+function picocalc.modplayer.create() end
+
+---Load a .mod file.
+---@param path string
+---@return boolean ok
+function PicOSModPlayer:load(path) end
+
+---Start playback.
+---@param loop? boolean Loop when the song ends (default false)
+function PicOSModPlayer:play(loop) end
+
+---Stop playback.
+function PicOSModPlayer:stop() end
+
+---Pause playback.
+function PicOSModPlayer:pause() end
+
+---Resume after pause.
+function PicOSModPlayer:resume() end
+
+---@return boolean
+function PicOSModPlayer:isPlaying() end
+
+---Set volume.
+---@param vol integer 0–100
+function PicOSModPlayer:setVolume(vol) end
+
+---@return integer
+function PicOSModPlayer:getVolume() end
+
+---Enable or disable looping.
+---@param loop boolean
+function PicOSModPlayer:setLoop(loop) end
+
+-- =============================================================================
+-- picocalc.zip  (ZIP archive extraction)
+-- =============================================================================
+
+---@class picocalc.zip
+picocalc.zip = {}
+
+---List a ZIP archive's contents.
+---@param zip_path string
+---@return { name: string, size: integer, compressed_size: integer }[]? entries
+---@return string? error
+function picocalc.zip.list(zip_path) end
+
+---Extract a ZIP archive into a directory. Optional progress callback.
+---@param zip_path string
+---@param dest_dir string
+---@param progress_fn? fun(done: integer, total: integer)
+---@return boolean ok
+---@return string? error
+function picocalc.zip.extract(zip_path, dest_dir, progress_fn) end
+
+-- =============================================================================
+-- picocalc.json  (JSON encode/decode)
+-- =============================================================================
+
+---@class picocalc.json
+---@field null userdata Sentinel representing JSON null (compare with json.isNull)
+picocalc.json = {}
+
+---Encode a Lua value as a JSON string.
+---@param value any
+---@return string
+function picocalc.json.encode(value) end
+
+---Decode a JSON string into Lua values. JSON null decodes to `json.null`.
+---@param text string
+---@return any
+function picocalc.json.decode(text) end
+
+---Return `true` if `v` is the `json.null` sentinel.
+---@param v any
+---@return boolean
+function picocalc.json.isNull(v) end
+
+-- =============================================================================
+-- picocalc.repl  (interactive Lua REPL)
+-- =============================================================================
+
+---@class picocalc.repl
+picocalc.repl = {}
+
+---Read a line of REPL input (non-blocking). Returns the line, or nil if no
+---complete line is ready (also nil on Esc).
+---@return string?
+function picocalc.repl.readline() end
+
+---Print to the REPL output.
+---@param ... any
+function picocalc.repl.print(...) end
+
+---Clear the REPL screen.
+function picocalc.repl.clear() end
+
+---Enable or disable input echo.
+---@param flag boolean
+function picocalc.repl.echo(flag) end
+
+-- =============================================================================
+-- draw3DWireframeEx  (global software-3D helper, not under picocalc.*)
+-- =============================================================================
+
+---Draw a rotating 3D wireframe (optionally filled) model.
+---@param verts number[] Flat vertex array {x,y,z, x,y,z, ...}
+---@param edges integer[] Flat edge index pairs {a,b, a,b, ...} (1-based)
+---@param angleX number Rotation around X (radians)
+---@param angleY number Rotation around Y (radians)
+---@param angleZ number Rotation around Z (radians)
+---@param scx integer Screen centre x
+---@param scy integer Screen centre y
+---@param fov number Field of view / perspective divisor
+---@param edgeColor integer RGB565 line colour
+---@param fillColor? integer RGB565 face fill colour (default 0)
+---@param fillMode? integer 0=wireframe, 1=fill, 2=both (default 0)
+---@param vertSize? integer Vertex dot size (default 3)
+---@param faces? integer[] Flat vertex-index triples for filled triangles
+function draw3DWireframeEx(verts, edges, angleX, angleY, angleZ, scx, scy, fov, edgeColor, fillColor, fillMode, vertSize, faces) end

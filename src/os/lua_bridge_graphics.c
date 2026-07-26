@@ -196,12 +196,20 @@ static int l_graphics_image_drawTiled(lua_State *L) {
   return 0;
 }
 
-static int l_graphics_image_setStorageLocation(lua_State *L) {
-  return luaL_error(L, "setStorageLocation not implemented yet");
-}
-
 static int l_graphics_image_getMetadata(lua_State *L) {
-  return luaL_error(L, "getMetadata not implemented yet");
+  lua_image_t *img = check_image(L, 1);
+  lua_newtable(L);
+  lua_pushinteger(L, img->w);
+  lua_setfield(L, -2, "width");
+  lua_pushinteger(L, img->h);
+  lua_setfield(L, -2, "height");
+  if (img->transparent_color) {
+    lua_pushinteger(L, img->transparent_color);
+    lua_setfield(L, -2, "transparentColor");
+  }
+  lua_pushstring(L, "psram");
+  lua_setfield(L, -2, "storage");
+  return 1;
 }
 
 static int l_graphics_image_drawScaled(lua_State *L) {
@@ -261,7 +269,6 @@ static const luaL_Reg l_graphics_image_methods[] = {
     {"drawScaledNN", l_graphics_image_drawScaledNN},
     {"setTransparentColor", l_graphics_image_setTransparentColor},
     {"getTransparentColor", l_graphics_image_getTransparentColor},
-    {"setStorageLocation", l_graphics_image_setStorageLocation},
     {"getMetadata", l_graphics_image_getMetadata},
     {NULL, NULL}};
 
@@ -288,15 +295,14 @@ static int l_graphics_image_loadFromBuffer(lua_State *L) {
                  data[3] == 0x47);
   bool is_gif = (data[0] == 'G' && data[1] == 'I' && data[2] == 'F');
 
-  if (is_bmp) {
-    return luaL_error(L, "BMP from buffer not supported yet");
-  }
-
   image_decode_result_t res = {0, 0, NULL};
   bool success = false;
   const char *err_msg = "unsupported image format";
 
-  if (is_jpeg) {
+  if (is_bmp) {
+    success = decode_bmp_buffer(data, len, &res);
+    err_msg = "BMP decoding failed";
+  } else if (is_jpeg) {
     success = decode_jpeg_buffer(data, len, &res);
     err_msg = "JPEG decoding failed";
   } else if (is_png) {
@@ -320,28 +326,139 @@ static int l_graphics_image_loadFromBuffer(lua_State *L) {
   return luaL_error(L, err_msg);
 }
 
-static int l_graphics_image_loadRemote(lua_State *L) {
-  return luaL_error(L, "loadRemote not implemented yet");
-}
-
+// getInfo(path) — parse just the image header, no pixel decode.
+// Returns {width=, height=, format=} or nil, error.
 static int l_graphics_image_getInfo(lua_State *L) {
-  return luaL_error(L, "getInfo not implemented yet");
+  const char *path = luaL_checkstring(L, 1);
+  if (!fs_sandbox_check(L, path, false))
+    return luaL_error(L, "access denied");
+
+  int w = 0, h = 0;
+  const char *fmt = image_probe(path, &w, &h);
+  if (!fmt)
+    return luaL_error(L, "unrecognized or truncated image: %s", path);
+
+  lua_newtable(L);
+  lua_pushinteger(L, w);
+  lua_setfield(L, -2, "width");
+  lua_pushinteger(L, h);
+  lua_setfield(L, -2, "height");
+  lua_pushstring(L, fmt);
+  lua_setfield(L, -2, "format");
+  return 1;
 }
 
+// loadRegion(path, x, y, w, h) — load an image and keep only the given
+// sub-rectangle (clamped to the image bounds).
 static int l_graphics_image_loadRegion(lua_State *L) {
-  return luaL_error(L, "loadRegion not implemented yet");
+  const char *path = luaL_checkstring(L, 1);
+  int rx = luaL_checkinteger(L, 2);
+  int ry = luaL_checkinteger(L, 3);
+  int rw = luaL_checkinteger(L, 4);
+  int rh = luaL_checkinteger(L, 5);
+
+  if (!fs_sandbox_check(L, path, false))
+    return luaL_error(L, "access denied");
+
+  pc_image_t *loaded = image_load(path);
+  if (!loaded)
+    return luaL_error(L, "failed to load image: %s", path);
+
+  // Clamp region to image bounds
+  if (rx < 0) { rw += rx; rx = 0; }
+  if (ry < 0) { rh += ry; ry = 0; }
+  if (rx + rw > loaded->w) rw = loaded->w - rx;
+  if (ry + rh > loaded->h) rh = loaded->h - ry;
+  if (rw <= 0 || rh <= 0) {
+    image_free(loaded);
+    return luaL_error(L, "region outside image bounds");
+  }
+
+  uint16_t *crop = (uint16_t *)umm_malloc((size_t)rw * rh * sizeof(uint16_t));
+  if (!crop) {
+    image_free(loaded);
+    return luaL_error(L, "out of memory");
+  }
+  for (int y = 0; y < rh; y++)
+    memcpy(&crop[y * rw], &loaded->data[(ry + y) * loaded->w + rx],
+           (size_t)rw * sizeof(uint16_t));
+  image_free(loaded);
+
+  lua_image_t *img = (lua_image_t *)lua_newuserdata(L, sizeof(lua_image_t));
+  img->w = rw;
+  img->h = rh;
+  img->data = crop;
+  img->transparent_color = 0;
+  luaL_setmetatable(L, GRAPHICS_IMAGE_MT);
+  return 1;
 }
 
+// loadScaled(path, w, h) — load an image and resample it to w×h (bilinear).
 static int l_graphics_image_loadScaled(lua_State *L) {
-  return luaL_error(L, "loadScaled not implemented yet");
-}
+  const char *path = luaL_checkstring(L, 1);
+  int dw = luaL_checkinteger(L, 2);
+  int dh = luaL_checkinteger(L, 3);
 
-static int l_graphics_image_newStream(lua_State *L) {
-  return luaL_error(L, "newStream not implemented yet");
-}
+  if (!fs_sandbox_check(L, path, false))
+    return luaL_error(L, "access denied");
+  if (dw <= 0 || dh <= 0 || dw > 2048 || dh > 2048)
+    return luaL_error(L, "invalid target size");
 
-static int l_graphics_image_setPlaceholder(lua_State *L) {
-  return luaL_error(L, "setPlaceholder not implemented yet");
+  pc_image_t *loaded = image_load(path);
+  if (!loaded)
+    return luaL_error(L, "failed to load image: %s", path);
+
+  uint16_t *out = (uint16_t *)umm_malloc((size_t)dw * dh * sizeof(uint16_t));
+  if (!out) {
+    image_free(loaded);
+    return luaL_error(L, "out of memory");
+  }
+
+  const int sw = loaded->w, sh = loaded->h;
+  for (int y = 0; y < dh; y++) {
+    // Source coordinate (half-pixel centred), clamped to edge pixels
+    float fy = ((float)y + 0.5f) * (float)sh / (float)dh - 0.5f;
+    if (fy < 0) fy = 0;
+    int y0 = (int)fy;
+    int y1 = (y0 + 1 < sh) ? y0 + 1 : y0;
+    float wy = fy - (float)y0;
+
+    for (int x = 0; x < dw; x++) {
+      float fx = ((float)x + 0.5f) * (float)sw / (float)dw - 0.5f;
+      if (fx < 0) fx = 0;
+      int x0 = (int)fx;
+      int x1 = (x0 + 1 < sw) ? x0 + 1 : x0;
+      float wx = fx - (float)x0;
+
+      uint16_t c00 = loaded->data[y0 * sw + x0];
+      uint16_t c10 = loaded->data[y0 * sw + x1];
+      uint16_t c01 = loaded->data[y1 * sw + x0];
+      uint16_t c11 = loaded->data[y1 * sw + x1];
+
+      float w00 = (1.0f - wx) * (1.0f - wy);
+      float w10 = wx * (1.0f - wy);
+      float w01 = (1.0f - wx) * wy;
+      float w11 = wx * wy;
+
+      int r = (int)(w00 * ((c00 >> 11) & 0x1F) + w10 * ((c10 >> 11) & 0x1F) +
+                    w01 * ((c01 >> 11) & 0x1F) + w11 * ((c11 >> 11) & 0x1F) + 0.5f);
+      int g = (int)(w00 * ((c00 >> 5) & 0x3F) + w10 * ((c10 >> 5) & 0x3F) +
+                    w01 * ((c01 >> 5) & 0x3F) + w11 * ((c11 >> 5) & 0x3F) + 0.5f);
+      int b = (int)(w00 * (c00 & 0x1F) + w10 * (c10 & 0x1F) +
+                    w01 * (c01 & 0x1F) + w11 * (c11 & 0x1F) + 0.5f);
+
+      out[y * dw + x] = (uint16_t)((r << 11) | (g << 5) | b);
+    }
+  }
+  image_free(loaded);
+
+  lua_image_t *img = (lua_image_t *)lua_newuserdata(L, sizeof(lua_image_t));
+  img->w = dw;
+  img->h = dh;
+  img->data = out;
+  img->transparent_color = 0;
+  luaL_setmetatable(L, GRAPHICS_IMAGE_MT);
+  return 1;
 }
 
 static int l_graphics_image_getSupportedFormats(lua_State *L) {
@@ -396,59 +513,13 @@ static const luaL_Reg l_graphics_image_lib[] = {
     {"new", l_graphics_image_new},
     {"load", l_graphics_image_load},
     {"loadFromBuffer", l_graphics_image_loadFromBuffer},
-    {"loadRemote", l_graphics_image_loadRemote},
     {"getInfo", l_graphics_image_getInfo},
     {"loadRegion", l_graphics_image_loadRegion},
     {"loadScaled", l_graphics_image_loadScaled},
-    {"newStream", l_graphics_image_newStream},
-    {"setPlaceholder", l_graphics_image_setPlaceholder},
     {"getSupportedFormats", l_graphics_image_getSupportedFormats},
     {"preload", l_graphics_image_preload},
     {"pollPreload", l_graphics_image_poll_preload},
     {"cancelPreload", l_graphics_image_cancel_preload},
-    {NULL, NULL}};
-
-#define GRAPHICS_IMAGESTREAM_MT "picocalc.graphics.imagestream"
-
-typedef struct {
-  void *stream_ptr; // Stub data
-} lua_image_stream_t;
-
-static int l_graphics_imagestream_gc(lua_State *L) {
-  (void)L;
-  return 0;
-}
-
-static int l_graphics_imagestream_getNextTile(lua_State *L) {
-  return luaL_error(L, "getNextTile not implemented yet");
-}
-
-static int l_graphics_imagestream_isComplete(lua_State *L) {
-  lua_pushboolean(L, false); // stub
-  return 1;
-}
-
-static const luaL_Reg l_graphics_imagestream_methods[] = {
-    {"getNextTile", l_graphics_imagestream_getNextTile},
-    {"isComplete", l_graphics_imagestream_isComplete},
-    {NULL, NULL}};
-
-static int l_graphics_cache_setMaxMemory(lua_State *L) {
-  return luaL_error(L, "setMaxMemory not implemented yet");
-}
-
-static int l_graphics_cache_retain(lua_State *L) {
-  return luaL_error(L, "retain not implemented yet");
-}
-
-static int l_graphics_cache_release(lua_State *L) {
-  return luaL_error(L, "release not implemented yet");
-}
-
-static const luaL_Reg l_graphics_cache_lib[] = {
-    {"setMaxMemory", l_graphics_cache_setMaxMemory},
-    {"retain", l_graphics_cache_retain},
-    {"release", l_graphics_cache_release},
     {NULL, NULL}};
 
 // drawGrid(x, y, cell_w, cell_h, cols, rows, color)
@@ -725,9 +796,9 @@ static void tilemap_draw(lua_tilemap_t *tm, int scroll_x, int scroll_y) {
       int dst_x = col * tw - scroll_x;
       int dst_y = row * th - scroll_y;
 
-      display_draw_image_partial(dst_x, dst_y, tw, th,
+      display_draw_image_partial(dst_x, dst_y, tm->tileset->w, tm->tileset->h,
                                   tm->tileset->data, src_x, src_y,
-                                  tm->tileset->w, tm->tileset->h,
+                                  tw, th,
                                   false, false, 0);
     }
   }
@@ -4114,15 +4185,6 @@ void lua_bridge_graphics_init(lua_State *L) {
   lua_setfield(L, -2, "__gc");
   lua_pop(L, 1);
 
-  // Install Graphics Image Stream metatable
-  luaL_newmetatable(L, GRAPHICS_IMAGESTREAM_MT);
-  lua_pushvalue(L, -1);
-  lua_setfield(L, -2, "__index");
-  luaL_setfuncs(L, l_graphics_imagestream_methods, 0);
-  lua_pushcfunction(L, l_graphics_imagestream_gc);
-  lua_setfield(L, -2, "__gc");
-  lua_pop(L, 1);
-
   // Install Graphics Sprite metatable
   luaL_newmetatable(L, GRAPHICS_SPRITE_MT);
   lua_pushcfunction(L, l_sprite_index);
@@ -4205,10 +4267,6 @@ void lua_bridge_graphics_init(lua_State *L) {
   lua_newtable(L);
   luaL_setfuncs(L, l_tilemap_lib, 0);
   lua_setfield(L, -2, "tilemap");
-
-  lua_newtable(L);
-  luaL_setfuncs(L, l_graphics_cache_lib, 0);
-  lua_setfield(L, -2, "cache");
 
   lua_newtable(L);  // animation parent table
 

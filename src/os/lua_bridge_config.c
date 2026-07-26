@@ -1,6 +1,8 @@
 #include "lua_bridge_internal.h"
 
-// ── picocalc.config.*
+// ── picocalc.sysconfig.*  (system-wide, /system/config.json)
+// NOTE: per-app config lives in lua_bridge_appconfig.c and is registered as
+// BOTH picocalc.config and picocalc.appconfig. Don't add to the confusion.
 // ─────────────────────────────────────────────────────────
 
 static int l_config_get(lua_State *L) {
