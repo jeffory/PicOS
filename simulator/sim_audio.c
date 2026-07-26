@@ -317,6 +317,16 @@ static bool sim_parse_wav_header(sound_sample_t *sample, uint8_t *data, uint32_t
 
 void sound_init(void) {
     pthread_mutex_lock(&s_sound_mutex);
+    // Reclaim any loaded sample data before dropping the pointers (mirrors
+    // firmware sound_init; sim sample data is malloc/calloc'd, so plain free).
+    for (int i = 0; i < SOUND_MAX_SAMPLES; i++) {
+        sound_sample_t *s = s_sound_ctx.samples[i];
+        if (s) {
+            if (s->data) free(s->data);
+            free(s);
+            s_sound_ctx.samples[i] = NULL;
+        }
+    }
     memset(&s_sound_ctx, 0, sizeof(s_sound_ctx));
     s_sound_time_us = 0;
     pthread_mutex_unlock(&s_sound_mutex);
@@ -506,8 +516,14 @@ void sound_player_destroy(sound_player_t *player) {
     if (!player) return;
     pthread_mutex_lock(&s_sound_mutex);
     sound_player_stop(player);
+    // Detach under the lock, destroy after unlocking — sound_sample_destroy
+    // takes s_sound_mutex itself and the mutex is non-recursive.
+    sound_sample_t *owned = (player->owns_sample) ? player->sample : NULL;
     player->sample = NULL;
+    player->owns_sample = false;
     pthread_mutex_unlock(&s_sound_mutex);
+    if (owned)
+        sound_sample_destroy(owned);
 }
 
 bool sound_player_set_sample(sound_player_t *player, sound_sample_t *sample) {

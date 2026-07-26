@@ -290,6 +290,8 @@ static int l_sound_sampleplayer_new(lua_State *L) {
 
     if (sample)
         g_api.soundplayer->playerSetSample(player, sample);
+    if (sample && lua_isstring(L, 1))
+        ((sound_player_t *)player)->owns_sample = true;   // GC reclaims it (path-constructed only; userdata samples are owned by their userdata)
 
     sound_player_t **ud = lua_newuserdata(L, sizeof(sound_player_t *));
     *ud = player;

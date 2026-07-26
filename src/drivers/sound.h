@@ -3,7 +3,7 @@
 #include <stdint.h>
 #include <stdbool.h>
 
-#define SOUND_MAX_SAMPLES 4
+#define SOUND_MAX_SAMPLES 8
 #define SOUND_MAX_SAMPLE_SIZE (64 * 1024)
 
 typedef struct {
@@ -17,6 +17,7 @@ typedef struct {
 
 typedef struct {
     sound_sample_t *sample;
+    bool owns_sample;   // path-constructed players free their sample on destroy
     bool playing;
     bool paused;
     uint32_t position;
