@@ -311,7 +311,8 @@ load_sprite("hawk_dive", "hawk_dive.png")          -- 48x32
 load_sprite("snail", "snail.png")
 load_sprite("broccoli", "broccoli.png")            -- 32x40
 load_sprite("spicy_pepper", "spicy_pepper.png")    -- 32x40
-load_sprite("hose_nozzle", "hose_nozzle.png")
+load_sprite("sprinkler_body", "sprinkler_body.png") -- 32x32 brass head on spike
+load_sprite("water_arc", "water_arc.png")           -- 5 frames, 320x32
 load_sprite("house", "house.png")                  -- 64x64
 load_sprite("hay_pile", "hay_pile.png")            -- 48x32
 load_sprite("cloud_large", "cloud_large.png")      -- 64x32
@@ -486,21 +487,31 @@ local function draw_spicy_pepper(sx, sy)
     end
 end
 
-local function draw_hose_nozzle(sx, sy, dir)
-    if sprites.hose_nozzle then
-        sprites.hose_nozzle:draw(sx - 8, sy - 8, {flipX = (dir < 0)})
+local function draw_sprinkler(sx, sy, sweep, active, t)
+    if sprites.sprinkler_body then
+        sprites.sprinkler_body:draw(sx - 8, sy - 16)
     else
         disp.fillRect(sx + 4, sy + 4, 8, 8, GREEN)
-        disp.fillRect(sx + 2, sy + 6, 12, 4, DARK_GREEN)
     end
-end
-
--- Water spray stays procedural (animated particle effect)
-local function draw_water_spray(sx, sy, w, dir)
-    for i = 0, w - 4, 6 do
-        local ix = dir > 0 and (sx + i) or (sx + w - i - 4)
-        disp.fillRect(ix, sy + 1 + (i % 3), 4, 3, WATER_BLUE)
-        disp.fillRect(ix + 2, sy + (i % 2), 2, 2, WATER_LIGHT)
+    if not active then return end
+    if sprites.water_arc then
+        -- 320x32 strip, 5 frames of 64x32, arc always sprays right; flip for left
+        local frame = math.floor(t * 12) % 5
+        local ax = math.floor(sx - 56 + sweep * 48)   -- arc pivots over the body with the sweep
+        sprites.water_arc:draw(ax, sy - 16, {flipX = sweep < 0.5},
+            {x = frame * 64, y = 0, w = 64, h = 32})
+        -- droplets at the arc's landing point, following the sweep
+        local dx = sweep >= 0.5 and (ax + 60) or (ax + 3)
+        for i = 0, 2 do
+            local dy = math.floor(math.sin(t * 10 + i * 2) * 3)
+            disp.fillRect(dx + i * 3 - 3, sy + 5 + dy + i * 2, 2, 2, WATER_LIGHT)
+        end
+    else
+        local jet_w = 24
+        local jx = math.floor(sx - jet_w + sweep * (jet_w - 8) + 8)
+        for i = 0, jet_w - 4, 6 do
+            disp.fillRect(jx + i, sy + 1 + (i % 3), 4, 3, WATER_BLUE)
+        end
     end
 end
 
@@ -601,11 +612,11 @@ local function build_level()
     end
 
     -- Enemies
-    table.insert(enemies, {type = "hose", x = 750, y = GROUND_Y - 16, dir = 1, timer = 0, active = false, spray_w = 48, alive = true})
+    table.insert(enemies, {type = "hose", x = 750, y = GROUND_Y - 16, sweep = 0.5, timer = 0, active = false, spray_w = 48, alive = true})
     table.insert(enemies, {type = "hawk", x = 1100, y = 30, patrol_x1 = 900, patrol_x2 = 1400, state = "patrol", vx = 80, target_x = 0, target_y = 0, timer = 0, alive = true, w = 28, h = 16})
     table.insert(enemies, {type = "snail", x = 1060, y = 210 - 12, vx = 30, flipped = false, flip_timer = 0, w = 16, h = 12, alive = true})
     table.insert(enemies, {type = "broccoli", x = 1200, y = GROUND_Y - 18, w = 14, h = 18, alive = true, hit_timer = 0})
-    table.insert(enemies, {type = "hose", x = 1500, y = GROUND_Y - 16, dir = -1, timer = 2.0, active = false, spray_w = 48, alive = true})
+    table.insert(enemies, {type = "hose", x = 1500, y = GROUND_Y - 16, sweep = 0.5, timer = 2.0, active = false, spray_w = 48, alive = true})
     table.insert(enemies, {type = "snail", x = 1770, y = 180 - 12, vx = 30, flipped = false, flip_timer = 0, w = 16, h = 12, alive = true})
     table.insert(enemies, {type = "pepper", x = 1870, y = GROUND_Y - 14, w = 10, h = 14, alive = true, fire_timer = 1.5})
     table.insert(enemies, {type = "hawk", x = 2300, y = 30, patrol_x1 = 2050, patrol_x2 = 2600, state = "patrol", vx = 80, target_x = 0, target_y = 0, timer = 0, alive = true, w = 28, h = 16})
@@ -1056,13 +1067,20 @@ local function update_enemies(dt)
         elseif e.type == "hose" then
             e.timer = e.timer + dt
             if e.active then
-                if e.timer > 2.0 then e.active = false; e.timer = 0 end
-                local spray_x = e.dir > 0 and (e.x + 16) or (e.x - e.spray_w)
+                if e.timer > 4.8 then e.active = false; e.timer = 0 end
+                -- sweep: phase 0..1 across the active window, dwell at extremes
+                local phase = clamp(e.timer / 4.8, 0, 1)
+                local swing = math.sin(phase * math.pi * 2 - math.pi / 2) * 0.5 + 0.5
+                e.sweep = swing                       -- 0=left .. 1=right
+                e.dir = swing >= 0.5 and 1 or -1
+                local spray_x = e.x - e.spray_w + swing * (e.spray_w - 8) + 8
                 if not player.dead and not player.hiding and
-                   aabb_overlap(player.x, player.y, player.w, player.h, spray_x, e.y - 4, e.spray_w, 16) then
+                   aabb_overlap(player.x, player.y, player.w, player.h, spray_x, e.y - 4, 24, 16) then
                     player.vx = player.vx + e.dir * 2000 * dt
                 end
+                if not e.burst_done then sfx.play("water_burst"); e.burst_done = true end
             else
+                e.burst_done = false
                 if e.timer > 3.0 then e.active = true; e.timer = 0 end
             end
 
@@ -1365,11 +1383,7 @@ local function draw_world(ox, oy)
             local sy = math.floor(e.y + oy)
             if sx > -50 and sx < SCREEN_W + 50 then
                 if e.type == "hose" then
-                    draw_hose_nozzle(sx, sy, e.dir)
-                    if e.active then
-                        local spx = e.dir > 0 and (sx + 16) or (sx - e.spray_w)
-                        draw_water_spray(spx, sy, e.spray_w, e.dir)
-                    end
+                    draw_sprinkler(sx, sy, e.sweep or 0.5, e.active, game_time)
                 elseif e.type == "hawk" then
                     draw_hawk(sx, sy, e.vx < 0 and -1 or 1, e.state == "diving")
                 elseif e.type == "snail" then

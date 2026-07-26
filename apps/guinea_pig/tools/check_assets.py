@@ -11,7 +11,7 @@ SPRITES = {  # name -> (w, h) or None to skip size check
     "bg_trees_far_1.png": None, "bg_trees_far_2.png": None,
     "bg_fence_mid_1.png": None, "bg_fence_mid_2.png": None,
     "bg_garden_near_1.png": None, "bg_garden_near_2.png": None,
-    "sprinkler_body.png": (32, 32), "water_arc.png": (256, 24),
+    "sprinkler_body.png": (32, 32), "water_arc.png": (320, 32),
     "title_logo.png": None, "heart.png": (32, 32),
 }
 OPAQUE = {"tile_grass_top.png", "tile_earth.png",
