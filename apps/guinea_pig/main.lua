@@ -144,18 +144,102 @@ local function draw_particles_at(ox, oy)
     end
 end
 
--- Sound helpers
-local function snd_jump() pc.audio.playTone(440, 80) end
-local function snd_popcorn() pc.audio.playTone(660, 60) end
-local function snd_collect_carrot() pc.audio.playTone(880, 100) end
-local function snd_collect_capsicum() pc.audio.playTone(660, 100) end
-local function snd_collect_zucchini() pc.audio.playTone(550, 100) end
-local function snd_collect_powerup() pc.audio.playTone(440, 80) end
-local function snd_dash() pc.audio.playTone(330, 60) end
-local function snd_squeak() pc.audio.playTone(1200, 200) end
-local function snd_damage() pc.audio.playTone(220, 150) end
-local function snd_hawk() pc.audio.playTone(1000, 120) end
-local function snd_win() pc.audio.playTone(440, 150) end
+-- Sound engine: SFX bank (play ranges) + playTone fallback
+local sfx = { ok = false, banks = {}, players = {}, pbank = {}, ranges = {}, busy = {} }
+local SFX_PRIORITY = {  -- higher wins when stealing a busy player
+    damage = 100, game_over = 95, win_jingle = 90, collect_powerup = 60,
+    enemy_defeat = 55, collect_carrot = 50, collect_capsicum = 50,
+    collect_zucchini = 50, popcorn = 40, jump = 30, dash = 30,
+    squeak = 30, hawk_screech = 20, water_burst = 10,
+    menu_move = 80, menu_select = 85,
+}
+
+local function sfx_init()
+    -- dofile is blocked on PicOS (no host fopen for the SD FATFS);
+    -- load the ranges module via pc.fs + load() like picoforge does.
+    local src = pc.fs.readFile(APP_DIR .. "/sfx/sfx_ranges.lua")
+    if not src then return end
+    local fn = load(src, "@sfx_ranges.lua")
+    if not fn then return end
+    local ok, ranges = pcall(fn)
+    if not ok or type(ranges) ~= "table" then return end
+    sfx.ranges = ranges
+    for b = 1, 2 do
+        local path = APP_DIR .. "/sfx/bank" .. b .. ".wav"
+        if pc.fs.exists(path) then
+            local s = pc.sound.sample(path)   -- sample userdata: GC-safe load
+            if s then sfx.banks[b] = s end
+        end
+    end
+    if not sfx.banks[1] then return end
+    for i = 1, 4 do
+        local p = pc.sound.sampleplayer(sfx.banks[1])
+        if not p then break end
+        sfx.players[i] = p
+        sfx.pbank[i] = 1
+        sfx.busy[i] = 0
+    end
+    sfx.ok = #sfx.players > 0
+end
+
+local SFX_FALLBACK = {  -- name -> {freq, ms} for playTone when bank missing
+    jump = {440, 80}, popcorn = {660, 60}, collect_carrot = {880, 100},
+    collect_capsicum = {660, 100}, collect_zucchini = {550, 100},
+    collect_powerup = {440, 80}, dash = {330, 60}, squeak = {1200, 200},
+    damage = {220, 150}, hawk_screech = {1000, 120}, win_jingle = {440, 150},
+    water_burst = {300, 120}, enemy_defeat = {480, 100},
+    menu_move = {800, 30}, menu_select = {1000, 60}, game_over = {220, 250},
+}
+
+function sfx.play(name)
+    local fb = SFX_FALLBACK[name]
+    if not sfx.ok then
+        if fb then pc.audio.playTone(fb[1], fb[2]) end
+        return
+    end
+    local r = sfx.ranges[name]
+    local bank = r and (r.bank or 1) or 1
+    if not r or not sfx.banks[bank] then
+        if fb then pc.audio.playTone(fb[1], fb[2]) end
+        return
+    end
+    local my_pri = SFX_PRIORITY[name] or 10
+    local slot, lowest, lowest_i = nil, math.huge, 1
+    for i, p in ipairs(sfx.players) do
+        if not p:isPlaying() then slot = i break end
+        if sfx.busy[i] < lowest then lowest = sfx.busy[i] lowest_i = i end
+    end
+    if not slot then
+        if lowest >= my_pri then return end  -- keep higher-priority sound
+        slot = lowest_i
+    end
+    local p = sfx.players[slot]
+    p:stop()
+    if sfx.pbank[slot] ~= bank then
+        -- owns_sample=false for userdata samples: reseat is safe
+        p:setSample(sfx.banks[bank])
+        sfx.pbank[slot] = bank
+    end
+    p:setPlayRange(r.first, r.last)
+    p:setVolume(100)
+    p:play(1)
+    sfx.busy[slot] = my_pri
+end
+
+sfx_init()
+
+-- Thin wrappers (same names as before: zero call-site churn)
+local function snd_jump() sfx.play("jump") end
+local function snd_popcorn() sfx.play("popcorn") end
+local function snd_collect_carrot() sfx.play("collect_carrot") end
+local function snd_collect_capsicum() sfx.play("collect_capsicum") end
+local function snd_collect_zucchini() sfx.play("collect_zucchini") end
+local function snd_collect_powerup() sfx.play("collect_powerup") end
+local function snd_dash() sfx.play("dash") end
+local function snd_squeak() sfx.play("squeak") end
+local function snd_damage() sfx.play("damage") end
+local function snd_hawk() sfx.play("hawk_screech") end
+local function snd_win() sfx.play("win_jingle") end
 
 -- ============================================================
 -- [3] SPRITE LOADING & DRAWING
@@ -706,6 +790,7 @@ local function damage_player(amount)
     if camera_obj then camera_obj:shake(6, 0.3) end
     if player.hp <= 0 then
         player.dead = true
+        sfx.play("game_over")
         spawn_burst(player.x + player.w / 2, player.y + player.h / 2, RED, 10)
     end
 end
@@ -1541,8 +1626,6 @@ local win_scene = {
         win_time = win_time + dt
         game_time = game_time + dt
         update_particles(dt)
-        if win_time > 0.2 and win_time < 0.25 then pc.audio.playTone(660, 150) end
-        if win_time > 0.5 and win_time < 0.55 then pc.audio.playTone(880, 200) end
         local pressed = input.getButtonsPressed()
         if pressed & input.BTN_ENTER ~= 0 then game.scene.switch("play") end
         if pressed & input.BTN_ESC ~= 0 then game.scene.switch("menu") end
