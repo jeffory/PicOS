@@ -1,8 +1,29 @@
 # Guinea Pig Run — Presentation Polish Pass
 
 Date: 2026-07-26
-Status: Approved by user (2026-07-26)
+Status: Implemented (2026-07-27, v1.1.0). All sections landed; full sim verification
+passed (title, gameplay, HUD, parallax, both sprinkler sweeps, game-over panel,
+fallback-free log). Hardware listen/screenshot pass deferred to user.
 Scope: `apps/guinea_pig/` only (Lua app, sprites, new sfx). No firmware changes.
+
+### Plan-time refinements (deviations from this doc, ratified in review)
+
+- **Discrete parallax clusters** instead of wrapped strips: two cluster sets per
+  layer sprinkled over the 3200 px world (`bg_trees_far/fence_mid/garden_near`
+  ×2 each), speeds −17/−42/−84 (ratios 0.10/0.25/0.50).
+- **Composed title screen** instead of a flat `title_bg.png`: sky + drifting
+  clouds + `draw_title_strip` garden band + running pig + footer panel;
+  `title_logo.png` ("guinea pig RUN") drawn on top.
+- **Water arc as a 5-frame 320×32 strip** (`water_arc.png`, built by
+  `tools/build_water_strip.py`) replacing procedural rectangles; sweep
+  oscillates with dwell at extremes.
+- **`water_drop.png` dropped** — procedural droplet particles instead.
+  **`veggie_icon.png` dropped** — HUD reuses `carrot.png`.
+- **Sim parity fix landed alongside**: `simulator/stubs/driver_stubs.c`
+  `display_effect_darken` now matches firmware (needed for the game-over dim).
+- **Verification-found fix (Task 12)**: checkpoint respawns 550/950 sat exactly
+  on gap lips (AABB strict-overlap) causing fall→respawn→fall loops and
+  guaranteed death; respawns moved onto solid ground (620/900).
 
 ## Context
 
