@@ -3,6 +3,7 @@
 #include "app_runner.h"
 #include "lua_runner.h"
 #include "native_loader.h"
+#include "zip_archive.h"
 #include "../drivers/audio.h"
 #include "../drivers/display.h"
 #include "../drivers/image_api.h"
@@ -690,6 +691,10 @@ static bool run_app(int idx) {
   }
 
   system_menu_clear_items();
+
+  // Native apps have no GC — reclaim any archive handles they leaked so the
+  // fixed pool is whole for the next app.
+  zip_archive_close_all();
 
   s_running_app_name = NULL;
   s_app_launch_time_ms = 0;

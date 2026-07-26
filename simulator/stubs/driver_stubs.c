@@ -1,5 +1,6 @@
 // driver_stubs.c - Stubs for PicOS driver functions
 #define _XOPEN_SOURCE 500  // for nftw()
+#include <errno.h>
 #include <ftw.h>
 #include <stdint.h>
 #include <stdbool.h>
@@ -13,6 +14,10 @@
 #include <sys/statvfs.h>
 #include "../hal/hal_display.h"
 #include "../sim_socket.h"
+// Real driver header — pulled in so the stub definitions below are checked
+// against the hardware signatures at compile time (any drift is an error).
+// "pico/mutex.h" inside it resolves to the simulator stub in stubs/pico/.
+#include "sdcard.h"
 
 // External base path from hal_sdcard.c
 extern char g_base_path[512];
@@ -785,15 +790,6 @@ char* sdcard_read_file(const char* path, int* out_len) {
     if (out_len) *out_len = (int)size;
     return buf;
 }
-// Define sdcard_entry_t locally to avoid including pico headers
-typedef struct {
-    char     name[256];
-    bool     is_dir;
-    uint32_t size;
-    uint16_t fdate;
-    uint16_t ftime;
-} sdcard_entry_t;
-
 int sdcard_list_dir(const char* path,
                     void (*callback)(const sdcard_entry_t* entry, void* user),
                     void* user) {
@@ -875,28 +871,43 @@ int sdcard_list_dir(const char* path,
 // Include HAL for file operations
 #include "../hal/hal_sdcard.h"
 
-// SD card file handle stubs - now use HAL functions
-void* sdcard_fopen(const char* path, const char* mode) { return hal_sdcard_open(path, mode); }
-void sdcard_fclose(void* f) { hal_sdcard_close(f); }
-int sdcard_fread(void* f, void* buf, int len) { return (int)hal_sdcard_read(f, buf, (size_t)len); }
-int sdcard_fseek(void* f, long offset, int whence) { 
-    (void)whence; // HAL only supports SEEK_SET
-    return hal_sdcard_seek(f, offset); 
+// SD card file handle stubs — use HAL functions.
+// Signatures/semantics must match src/drivers/sdcard.h exactly (the header is
+// #included at the top of this file, so any drift is a compile error):
+//   sdcard_fseek        → bool, true on success
+//   sdcard_ftell        → uint32_t position (0 for NULL handle)
+//   sdcard_fsize        → int, -1 on error
+//   sdcard_fsize_handle → int, -1 on error
+sdfile_t sdcard_fopen(const char* path, const char* mode) { return hal_sdcard_open(path, mode); }
+void sdcard_fclose(sdfile_t f) { hal_sdcard_close(f); }
+int sdcard_fread(sdfile_t f, void* buf, int len) { return (int)hal_sdcard_read(f, buf, (size_t)len); }
+bool sdcard_fseek(sdfile_t f, uint32_t offset) {
+    if (!f) return false;
+    return hal_sdcard_seek(f, (long)offset) == 0;
 }
-long sdcard_ftell(void* f) { return hal_sdcard_tell(f); }
-size_t sdcard_fsize_handle(void* f) {
+uint32_t sdcard_ftell(sdfile_t f) {
     if (!f) return 0;
+    long pos = hal_sdcard_tell(f);
+    return pos > 0 ? (uint32_t)pos : 0;
+}
+int sdcard_fsize_handle(sdfile_t f) {
+    if (!f) return -1;
     /* hal_sdcard_seek only supports SEEK_SET, so use fseek/ftell directly */
     FILE *fp = (FILE *)f;
     long pos = ftell(fp);
-    fseek(fp, 0, SEEK_END);
+    if (fseek(fp, 0, SEEK_END) != 0) return -1;
     long size = ftell(fp);
     fseek(fp, pos, SEEK_SET);
-    return (size_t)(size > 0 ? size : 0);
+    return size >= 0 ? (int)size : -1;
 }
-int sdcard_fwrite(void* f, const void* buf, int len) { return (int)hal_sdcard_write(f, buf, (size_t)len); }
-size_t sdcard_fsize(const char* path) { return (size_t)hal_sdcard_size(path); }
-bool sdcard_mkdir(const char* path) { return hal_sdcard_mkdir(path) == 0; }
+int sdcard_fwrite(sdfile_t f, const void* buf, int len) { return (int)hal_sdcard_write(f, buf, (size_t)len); }
+int sdcard_fsize(const char* path) { return hal_sdcard_size(path); }
+bool sdcard_mkdir(const char* path) {
+    // Match hardware semantics: f_mkdir is single-level (no parent creation)
+    // and FR_EXIST counts as success.
+    if (hal_sdcard_mkdir(path) == 0) return true;
+    return errno == EEXIST;
+}
 bool sdcard_delete(const char* path) {
     extern char g_base_path[512];
     char full[1024];
@@ -931,7 +942,7 @@ bool sdcard_copy(const char* src, const char* dst,
                  void* user) {
     (void)src; (void)dst; (void)progress_cb; (void)user; return false;
 }
-bool sdcard_stat(const char* path, void* st_out) {
+bool sdcard_stat(const char* path, sdcard_stat_t* out) {
     extern char g_base_path[512];
     char full_path[1024];
     if (path[0] == '/') {
@@ -941,9 +952,6 @@ bool sdcard_stat(const char* path, void* st_out) {
     }
     struct stat host_st;
     if (stat(full_path, &host_st) != 0) return false;
-    // sdcard_stat_t layout: uint32_t size, bool is_dir, uint16_t fdate, uint16_t ftime
-    typedef struct { uint32_t size; bool is_dir; uint16_t fdate; uint16_t ftime; } sim_stat_t;
-    sim_stat_t *out = (sim_stat_t *)st_out;
     out->size = (uint32_t)host_st.st_size;
     out->is_dir = S_ISDIR(host_st.st_mode);
     out->fdate = 0;

@@ -7,6 +7,7 @@
 #include "drivers/wifi.h"
 #include "os/launcher.h"
 #include "os/os.h"
+#include "os/zip_util.h"
 #include "tusb.h"
 #include "pico/stdlib.h"
 #include "hardware/watchdog.h"
@@ -15,11 +16,24 @@
 #include <stdlib.h>
 #include <stdint.h>
 
-#define CMD_BUF_SIZE 64
+// Sized for two absolute SD paths on one line (e.g. "unzip <zip> <dest>").
+#define CMD_BUF_SIZE 300
 
 static char s_cmd_buf[CMD_BUF_SIZE];
 static size_t s_cmd_len = 0;
 static bool s_cmd_ready = false;
+
+// Progress for the "unzip" command: periodic status lines for the host tool
+// and a watchdog feed — extraction of a big archive easily outlasts the 10s
+// window and nothing else runs on Core 0 while we're in here.
+static bool dev_unzip_progress(int done, int total, const char *name,
+                               void *user) {
+    (void)name; (void)user;
+    watchdog_update();
+    if (done % 25 == 0 || done == total)
+        printf("[DEV] UNZIP %d/%d\n", done, total);
+    return true;
+}
 
 static bool s_cmd_exit = false;
 static bool s_cmd_usb = false;
@@ -651,6 +665,43 @@ bool dev_commands_process(void) {
         }
         int count = sdcard_list_dir(path, dev_ls_callback, NULL);
         printf("[DEV] %d items in %s\n", count < 0 ? 0 : count, path);
+    } else if (strncmp(s_cmd_buf, "unzip ", 6) == 0) {
+        // unzip <zip> <dest> — extract an archive on-device.  Blocks Core 0
+        // for the duration (same contract as putb64: audio decoded on Core 1
+        // will starve).  The engine validates entry names and feeds the
+        // watchdog through the progress callback below.
+        char *zip_path = s_cmd_buf + 6;
+        char *dest = strchr(zip_path, ' ');
+        if (!dest || zip_path[0] != '/' || dest[1] != '/') {
+            printf("[DEV] Usage: unzip /path/to.zip /dest/dir\n");
+        } else {
+            *dest++ = '\0';
+            zip_reader_t zr;
+            char err[ZIP_ERR_MAX];
+            if (!zip_reader_open(&zr, zip_path, err)) {
+                printf("[DEV] Error: unzip failed: %s\n", err);
+            } else {
+                zip_extract_result_t result;
+                bool ok = zip_reader_extract_all(&zr, dest, NULL,
+                                                 dev_unzip_progress, NULL,
+                                                 &result, err);
+                zip_reader_close(&zr);
+                if (ok)
+                    printf("[DEV] Unzipped %d files (%d skipped)\n",
+                           result.files_done, result.skipped_names);
+                else
+                    printf("[DEV] Error: unzip failed: %s\n", err);
+            }
+        }
+    } else if (strncmp(s_cmd_buf, "rm ", 3) == 0) {
+        const char *path = s_cmd_buf + 3;
+        if (path[0] != '/' || strcmp(path, "/") == 0) {
+            printf("[DEV] Usage: rm /absolute/path (file or directory)\n");
+        } else if (sdcard_delete(path) || sdcard_delete_recursive(path)) {
+            printf("[DEV] Deleted: %s\n", path);
+        } else {
+            printf("[DEV] Error: rm failed: %s\n", path);
+        }
     } else if (strcmp(s_cmd_buf, "help") == 0) {
         printf("[DEV] Available commands:\n");
         printf("[DEV]   ping           - Check device is responding\n");
@@ -672,6 +723,8 @@ bool dev_commands_process(void) {
         printf("[DEV]   crashlog       - Print /system/crashlog.txt ('crashlog clear' deletes)\n");
         printf("[DEV]   ls <dir>       - List directory contents\n");
         printf("[DEV]   mkdir <path>   - Create directory (recursive)\n");
+        printf("[DEV]   unzip <zip> <dest> - Extract a ZIP archive on-device\n");
+        printf("[DEV]   rm <path>      - Delete a file or directory (recursive)\n");
         printf("[DEV]   status         - Show app/uptime/wifi/sd/battery\n");
         printf("[DEV]   help           - Show this help\n");
         printf("[DEV] Valid keys: up, down, left, right, enter, esc, menu, f1-f10, backspace, tab, del, shift, a-z, A-Z, 0-9, punctuation\n");

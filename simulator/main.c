@@ -385,7 +385,7 @@ static void sim_wire_g_api(void) {
     g_api.soundplayer = &s_soundplayer_impl;
     g_api.http        = &s_http_impl;
     g_api.appconfig   = &s_appconfig_impl;
-    g_api.version     = 4;
+    g_api.version     = 5;  // 5 = zip read-in-place handles (matches src/main.c)
 }
 
 int main(int argc, char** argv) {

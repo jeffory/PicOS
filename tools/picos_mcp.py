@@ -21,6 +21,7 @@ import argparse
 import asyncio
 import base64
 import hashlib
+import io
 import json
 import os
 import platform
@@ -34,6 +35,7 @@ import sys
 import tempfile
 import threading
 import time
+import zipfile
 from collections import deque
 from contextlib import contextmanager
 from pathlib import Path, PurePosixPath
@@ -308,6 +310,7 @@ class SimulatorManager:
         self.process: subprocess.Popen | None = None
         self.port: int = 0
         self.project_root = project_root or _default_project_root()
+        self.sd_card_path: str | None = None  # SD dir of the running sim
         # Bounded tails of the child's stdout/stderr. The pipes MUST be
         # drained continuously (see _start_pipe_drains) or the simulator
         # deadlocks once the 64KB kernel pipe buffer fills — the sim's own
@@ -351,6 +354,7 @@ class SimulatorManager:
             cmd += ["--sd-card", sd_card_path]
         else:
             cmd += ["--sd-card", str(self.project_root)]
+        self.sd_card_path = sd_card_path or str(self.project_root)
 
         env = os.environ.copy()
         if headless:
@@ -679,7 +683,7 @@ class HardwareMonitor:
 
 # Response lines that terminate a dev command exchange.
 _CMD_END_MARKERS = ["pong", "Total:", "Error:", "Launching", "Rebooting",
-                    "Unknown", "Status:", "Created:"]
+                    "Unknown", "Status:", "Created:", "Unzipped", "Deleted:"]
 
 _hw_monitors: dict[str, HardwareMonitor] = {}
 _hw_monitors_lock = threading.Lock()
@@ -1976,6 +1980,103 @@ async def get_file(remote_path: str, local_path: str, device: str | None = None)
         data = await asyncio.to_thread(do_get_file_b64, port, remote_path)
         Path(local_path).write_bytes(data)
         return f"Downloaded {len(data)} bytes: {remote_path} -> {local_path}"
+    except Exception as e:
+        return f"Error: {e}"
+
+
+# Files never worth shipping to the device.
+_PUSH_APP_EXCLUDE = shutil.ignore_patterns(
+    ".git", ".git*", "__pycache__", "*.pyc", ".DS_Store")
+
+
+def _push_app_wanted(rel_posix: str, name: str) -> bool:
+    """Filter for the hardware ZIP: mirror _PUSH_APP_EXCLUDE."""
+    parts = rel_posix.split("/")
+    for p in parts:
+        if p == "__pycache__" or p == ".DS_Store" or p.startswith(".git"):
+            return False
+        if p.endswith(".pyc"):
+            return False
+    return True
+
+
+@mcp.tool()
+async def push_app(local_dir: str, app_name: str = "",
+                   device: str | None = None) -> str:
+    """Push a whole app directory to /apps/<name> in one operation.
+
+    Simulator: copies the tree into the simulated SD card.
+    Hardware: zips the directory in memory, uploads one file over serial,
+    extracts it on-device with the `unzip` dev command and deletes the
+    temporary archive — orders of magnitude faster than per-file transfers
+    for asset-heavy apps.
+
+    app_name defaults to the basename of local_dir.
+    """
+    src = Path(local_dir).expanduser().resolve()
+    if not src.is_dir():
+        return f"Error: {local_dir} is not a directory"
+    name = app_name or src.name
+    if "/" in name or name in (".", ".."):
+        return f"Error: invalid app name: {name}"
+    if not any((src / probe).exists()
+               for probe in ("app.json", "main.lua", "main.elf")):
+        return (f"Error: {src} has no app.json/main.lua/main.elf — "
+                "not an app directory")
+
+    try:
+        port = resolve_port(device)
+    except Exception as e:
+        return f"Error: {e}"
+
+    if port is None:
+        # Simulator: straight copy into the SD directory the sim is using.
+        sd = (_sim_manager.sd_card_path if _sim_manager else None) \
+            or os.environ.get("PICOS_SIMULATOR_SD", ".")
+        dest = Path(sd) / "apps" / name
+        try:
+            if dest.exists():
+                shutil.rmtree(dest)
+            shutil.copytree(src, dest, ignore=_PUSH_APP_EXCLUDE)
+            n = sum(1 for p in dest.rglob("*") if p.is_file())
+            return (f"Copied {n} files to simulator: {dest}\n"
+                    "Note: the launcher caches the app list at boot — restart "
+                    "the simulator if this is a new app.")
+        except Exception as e:
+            return f"Error: {e}"
+
+    if not HAS_SERIAL:
+        return "pyserial not installed: pip install pyserial"
+
+    # Hardware: single ZIP over serial + on-device extraction.
+    buf = io.BytesIO()
+    count = 0
+    with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as zf:
+        for p in sorted(src.rglob("*")):
+            if not p.is_file():
+                continue
+            rel = p.relative_to(src).as_posix()
+            if not _push_app_wanted(rel, p.name):
+                continue
+            zf.write(p, rel)
+            count += 1
+    if count == 0:
+        return f"Error: nothing to push from {src}"
+    data = buf.getvalue()
+
+    tmp_zip = "/data/tmp/push_app.zip"
+    try:
+        upload = await asyncio.to_thread(do_put_file_b64, port, data, tmp_zip)
+        # Extraction is SD-bound: allow generous headroom for slow cards.
+        timeout = max(30.0, 10.0 + count * 0.5 + len(data) / (64 * 1024))
+        lines = await asyncio.to_thread(
+            do_command_hardware, f"unzip {tmp_zip} /apps/{name}", port, timeout)
+        result = "\n".join(lines[-3:]) if lines else "(no response)"
+        await asyncio.to_thread(do_command_hardware, f"rm {tmp_zip}", port, 10.0)
+        if any("Unzipped" in ln for ln in lines):
+            return (f"Pushed {count} files ({len(data)} bytes zipped) to "
+                    f"/apps/{name}\n{result}")
+        return f"Error: extraction did not complete:\n{result}\n({upload})"
     except Exception as e:
         return f"Error: {e}"
 

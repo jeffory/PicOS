@@ -1,29 +1,20 @@
 // lua_bridge_zip.c — picocalc.zip.extract() and picocalc.zip.list()
-// Uses miniz for ZIP decompression. Extracts archives to SD card directories.
+// Thin wrappers over the shared hardened ZIP engine (zip_util.c). Sandbox
+// checks stay here; all miniz access, streaming and path hardening live in
+// the engine.
 
 #include "lua_bridge_zip.h"
 #include "lauxlib.h"
-#include "sdcard.h"
-#include "umm_malloc.h"
+#include "zip_util.h"
 
-#include <stdio.h>
 #include <string.h>
-#include <stdlib.h>
 
-#define MINIZ_NO_STDIO
-#define MINIZ_NO_ARCHIVE_WRITING_APIS
-#define MINIZ_NO_ZLIB_COMPATIBLE_NAMES
-// Redirect miniz allocations to PSRAM (umm_malloc), not tiny SRAM heap
-#define MZ_MALLOC(x)     umm_malloc(x)
-#define MZ_FREE(x)       umm_free(x)
-#define MZ_REALLOC(p, x) umm_realloc(p, x)
-#include "miniz.h"
+#ifndef PICOS_SIMULATOR
+#include "hardware/watchdog.h"
+#endif
 
 // Forward declaration for sandbox check (defined in lua_bridge_fs.c)
 extern bool fs_sandbox_check(lua_State *L, const char *path, bool write);
-
-// Maximum path length for extracted files
-#define MAX_EXTRACT_PATH 256
 
 // ── picocalc.zip.list(zip_path) → array of {name, size, compressed_size} ─────
 static int l_zip_list(lua_State *L) {
@@ -35,71 +26,61 @@ static int l_zip_list(lua_State *L) {
         return 2;
     }
 
-    // Read the entire ZIP file into PSRAM (sdcard_read_file uses umm_malloc)
-    int zip_len = 0;
-    char *zip_data = sdcard_read_file(zip_path, &zip_len);
-    if (!zip_data) {
+    zip_reader_t zr;
+    char err[ZIP_ERR_MAX];
+    if (!zip_reader_open(&zr, zip_path, err)) {
         lua_pushnil(L);
-        lua_pushstring(L, "failed to read ZIP file");
+        lua_pushstring(L, err);
         return 2;
     }
 
-    mz_zip_archive zip;
-    memset(&zip, 0, sizeof(zip));
-
-    if (!mz_zip_reader_init_mem(&zip, zip_data, (size_t)zip_len, 0)) {
-        umm_free(zip_data);
-        lua_pushnil(L);
-        lua_pushstring(L, "invalid ZIP file");
-        return 2;
-    }
-
-    int num_files = (int)mz_zip_reader_get_num_files(&zip);
+    int num_files = zip_reader_num_entries(&zr);
     lua_createtable(L, num_files, 0);
 
     for (int i = 0; i < num_files; i++) {
-        mz_zip_archive_file_stat stat;
-        if (!mz_zip_reader_file_stat(&zip, (mz_uint)i, &stat))
+        zip_entry_info_t info;
+        if (!zip_reader_stat_index(&zr, i, &info))
             continue;
 
         // Skip directories
-        if (mz_zip_reader_is_file_a_directory(&zip, (mz_uint)i))
+        if (info.is_dir)
             continue;
 
         lua_createtable(L, 0, 3);
-        lua_pushstring(L, stat.m_filename);
+        lua_pushstring(L, info.name);
         lua_setfield(L, -2, "name");
-        lua_pushinteger(L, (lua_Integer)stat.m_uncomp_size);
+        lua_pushinteger(L, (lua_Integer)info.size);
         lua_setfield(L, -2, "size");
-        lua_pushinteger(L, (lua_Integer)stat.m_comp_size);
+        lua_pushinteger(L, (lua_Integer)info.comp_size);
         lua_setfield(L, -2, "compressed_size");
 
         lua_rawseti(L, -2, lua_rawlen(L, -2) + 1);
     }
 
-    mz_zip_reader_end(&zip);
-    umm_free(zip_data);
+    zip_reader_close(&zr);
     return 1;
 }
 
-// Helper: ensure all parent directories exist for a path (like mkdir -p)
-static bool ensure_parent_dirs(const char *full_path) {
-    char tmp[MAX_EXTRACT_PATH];
-    snprintf(tmp, sizeof(tmp), "%s", full_path);
+// ── Progress trampoline: pump the watchdog, then fire the Lua callback ───────
 
-    // Walk forward through path, creating each directory component
-    for (char *p = tmp + 1; *p; p++) {
-        if (*p == '/') {
-            *p = '\0';
-            sdcard_stat_t st;
-            if (!sdcard_stat(tmp, &st)) {
-                if (!sdcard_mkdir(tmp)) {
-                    *p = '/';
-                    return false;
-                }
-            }
-            *p = '/';
-        }
+typedef struct {
+    lua_State *L;
+    bool       has_cb;  // Lua callback sitting at stack index 3
+} lua_zip_progress_t;
+
+static bool lua_zip_progress(int done, int total, const char *name, void *user) {
+    (void)name;
+    lua_zip_progress_t *p = (lua_zip_progress_t *)user;
+#ifndef PICOS_SIMULATOR
+    // Extraction can far outlast the 10s watchdog window; the only other
+    // feeder (sys->poll) never runs while we're inside this call.
+    watchdog_update();
+#endif
+    if (p->has_cb) {
+        lua_pushvalue(p->L, 3);  // the callback
+        lua_pushinteger(p->L, done);
+        lua_pushinteger(p->L, total);
+        lua_pcall(p->L, 2, 0, 0);  // errors in the callback are ignored
     }
     return true;
 }
@@ -121,131 +102,275 @@ static int l_zip_extract(lua_State *L) {
         return 2;
     }
 
-    // Ensure destination directory exists
-    sdcard_mkdir(dest_dir);
-
-    // Read the entire ZIP file into PSRAM (sdcard_read_file uses umm_malloc)
-    int zip_len = 0;
-    char *zip_data = sdcard_read_file(zip_path, &zip_len);
-    if (!zip_data) {
+    zip_reader_t zr;
+    char err[ZIP_ERR_MAX];
+    if (!zip_reader_open(&zr, zip_path, err)) {
         lua_pushboolean(L, false);
-        lua_pushstring(L, "failed to read ZIP file");
+        lua_pushstring(L, err);
         return 2;
     }
 
-    mz_zip_archive zip;
-    memset(&zip, 0, sizeof(zip));
+    lua_zip_progress_t prog = { .L = L, .has_cb = has_progress };
+    zip_extract_result_t result;
+    bool ok = zip_reader_extract_all(&zr, dest_dir, NULL,
+                                     lua_zip_progress, &prog, &result, err);
+    zip_reader_close(&zr);
 
-    if (!mz_zip_reader_init_mem(&zip, zip_data, (size_t)zip_len, 0)) {
-        umm_free(zip_data);
+    if (!ok) {
         lua_pushboolean(L, false);
-        lua_pushstring(L, "invalid ZIP file");
+        lua_pushstring(L, err);
         return 2;
     }
-
-    int num_files = (int)mz_zip_reader_get_num_files(&zip);
-    // Count actual files (not directories) for progress reporting
-    int actual_files = 0;
-    for (int i = 0; i < num_files; i++) {
-        if (!mz_zip_reader_is_file_a_directory(&zip, (mz_uint)i))
-            actual_files++;
-    }
-
-    int files_done = 0;
-    char full_path[MAX_EXTRACT_PATH];
-
-    for (int i = 0; i < num_files; i++) {
-        mz_zip_archive_file_stat stat;
-        if (!mz_zip_reader_file_stat(&zip, (mz_uint)i, &stat))
-            continue;
-
-        // Skip directories (they'll be created as needed)
-        if (mz_zip_reader_is_file_a_directory(&zip, (mz_uint)i))
-            continue;
-
-        // Security: reject paths with ".." to prevent directory traversal
-        if (strstr(stat.m_filename, "..")) {
-            printf("[ZIP] skipping suspicious path: %s\n", stat.m_filename);
-            continue;
-        }
-
-        // Build full output path
-        size_t dest_len = strlen(dest_dir);
-        bool needs_slash = dest_dir[dest_len - 1] != '/';
-        snprintf(full_path, sizeof(full_path), "%s%s%s",
-                 dest_dir, needs_slash ? "/" : "", stat.m_filename);
-
-        // Ensure parent dirs exist (walks all path components)
-        if (!ensure_parent_dirs(full_path)) {
-            printf("[ZIP] failed to create parent dirs for: %s\n", full_path);
-            continue;
-        }
-
-        // Extract file — miniz extracts to a heap buffer, then we write to SD
-        // Note: mz_zip_reader_extract_to_heap uses MZ_MALLOC which we redirect
-        // to umm_malloc (PSRAM) via compile definitions
-        size_t uncomp_size = 0;
-        void *file_data = mz_zip_reader_extract_to_heap(&zip, (mz_uint)i,
-                                                         &uncomp_size, 0);
-        if (!file_data) {
-            printf("[ZIP] failed to extract: %s\n", stat.m_filename);
-            mz_zip_reader_end(&zip);
-            umm_free(zip_data);
-            lua_pushboolean(L, false);
-            lua_pushfstring(L, "failed to extract: %s", stat.m_filename);
-            return 2;
-        }
-
-        // Write extracted data to SD card
-        sdfile_t f = sdcard_fopen(full_path, "w");
-        if (!f) {
-            mz_free(file_data);
-            mz_zip_reader_end(&zip);
-            umm_free(zip_data);
-            lua_pushboolean(L, false);
-            lua_pushfstring(L, "failed to write: %s", full_path);
-            return 2;
-        }
-
-        int written = sdcard_fwrite(f, file_data, (int)uncomp_size);
-        sdcard_fclose(f);
-        mz_free(file_data);
-
-        if (written != (int)uncomp_size) {
-            mz_zip_reader_end(&zip);
-            umm_free(zip_data);
-            lua_pushboolean(L, false);
-            lua_pushfstring(L, "incomplete write: %s", full_path);
-            return 2;
-        }
-
-        files_done++;
-
-        // Call progress callback if provided
-        if (has_progress) {
-            lua_pushvalue(L, 3);  // push the callback
-            lua_pushinteger(L, files_done);
-            lua_pushinteger(L, actual_files);
-            lua_pcall(L, 2, 0, 0);
-        }
-    }
-
-    mz_zip_reader_end(&zip);
-    umm_free(zip_data);
 
     lua_pushboolean(L, true);
     return 1;
 }
+
+// ── Read-in-place archive handles: picocalc.zip.open(path) ───────────────────
+// Full userdata with a metatable (__gc + __close + closed-handle checks) — a
+// deliberate contrast to fs.open's bare lightuserdata, which cannot free
+// itself when an app errors out mid-file.
+
+#define ZIP_MT "picocalc.zip.archive"
+#define ZIP_LUA_MAX_OPEN 4
+
+typedef struct {
+    zip_reader_t zr;    // inline: Lua never moves userdata memory
+    bool         open;
+} lua_zip_archive_t;
+
+// Open-archive budget for the running app; reset in lua_bridge_zip_init.
+static int s_lua_zip_open_count = 0;
+
+static lua_zip_archive_t *check_archive(lua_State *L) {
+    lua_zip_archive_t *ar =
+        (lua_zip_archive_t *)luaL_checkudata(L, 1, ZIP_MT);
+    if (!ar->open)
+        luaL_error(L, "archive is closed");
+    return ar;
+}
+
+static void archive_do_close(lua_zip_archive_t *ar) {
+    if (ar->open) {
+        zip_reader_close(&ar->zr);
+        ar->open = false;
+        s_lua_zip_open_count--;
+    }
+}
+
+// ── zip.open(path) → archive [, err] ─────────────────────────────────────────
+static int l_zip_open(lua_State *L) {
+    const char *path = luaL_checkstring(L, 1);
+
+    if (!fs_sandbox_check(L, path, false)) {
+        lua_pushnil(L);
+        lua_pushstring(L, "permission denied");
+        return 2;
+    }
+    if (s_lua_zip_open_count >= ZIP_LUA_MAX_OPEN) {
+        lua_pushnil(L);
+        lua_pushstring(L, "too many open archives (max 4)");
+        return 2;
+    }
+
+    lua_zip_archive_t *ar =
+        (lua_zip_archive_t *)lua_newuserdatauv(L, sizeof(*ar), 0);
+    ar->open = false;
+
+    char err[ZIP_ERR_MAX];
+    if (!zip_reader_open(&ar->zr, path, err)) {
+        lua_pop(L, 1);  // the userdata (never opened, __gc is a no-op)
+        lua_pushnil(L);
+        lua_pushstring(L, err);
+        return 2;
+    }
+    ar->open = true;
+    s_lua_zip_open_count++;
+
+    luaL_getmetatable(L, ZIP_MT);
+    lua_setmetatable(L, -2);
+    return 1;
+}
+
+// ── ar:list() → array of {name, size, compressed_size} ───────────────────────
+static int l_ar_list(lua_State *L) {
+    lua_zip_archive_t *ar = check_archive(L);
+    int n = zip_reader_num_entries(&ar->zr);
+    lua_createtable(L, n, 0);
+    for (int i = 0; i < n; i++) {
+        zip_entry_info_t info;
+        if (!zip_reader_stat_index(&ar->zr, i, &info) || info.is_dir)
+            continue;
+        lua_createtable(L, 0, 3);
+        lua_pushstring(L, info.name);
+        lua_setfield(L, -2, "name");
+        lua_pushinteger(L, (lua_Integer)info.size);
+        lua_setfield(L, -2, "size");
+        lua_pushinteger(L, (lua_Integer)info.comp_size);
+        lua_setfield(L, -2, "compressed_size");
+        lua_rawseti(L, -2, lua_rawlen(L, -2) + 1);
+    }
+    return 1;
+}
+
+// ── ar:exists(name) → bool ───────────────────────────────────────────────────
+static int l_ar_exists(lua_State *L) {
+    lua_zip_archive_t *ar = check_archive(L);
+    const char *name = luaL_checkstring(L, 2);
+    lua_pushboolean(L, zip_reader_locate(&ar->zr, name) >= 0);
+    return 1;
+}
+
+// ── ar:size(name) → bytes | nil ──────────────────────────────────────────────
+static int l_ar_size(lua_State *L) {
+    lua_zip_archive_t *ar = check_archive(L);
+    const char *name = luaL_checkstring(L, 2);
+    int idx = zip_reader_locate(&ar->zr, name);
+    zip_entry_info_t info;
+    if (idx < 0 || !zip_reader_stat_index(&ar->zr, idx, &info)) {
+        lua_pushnil(L);
+        return 1;
+    }
+    lua_pushinteger(L, (lua_Integer)info.size);
+    return 1;
+}
+
+// ── ar:read(name [, max_len]) → string | nil, err ────────────────────────────
+static int l_ar_read(lua_State *L) {
+    lua_zip_archive_t *ar = check_archive(L);
+    const char *name = luaL_checkstring(L, 2);
+    lua_Integer max_len = luaL_optinteger(L, 3, 0);
+
+    int idx = zip_reader_locate(&ar->zr, name);
+    if (idx < 0) {
+        lua_pushnil(L);
+        lua_pushstring(L, "no such entry");
+        return 2;
+    }
+
+    void *data = NULL;
+    size_t len = 0;
+    char err[ZIP_ERR_MAX];
+    if (!zip_reader_read_to_heap(&ar->zr, idx, &data, &len,
+                                 max_len > 0 ? (size_t)max_len : 0, err)) {
+        lua_pushnil(L);
+        lua_pushstring(L, err);
+        return 2;
+    }
+    lua_pushlstring(L, (const char *)data, len);
+    mz_free(data);
+    return 1;
+}
+
+// ── ar:extract(name, dest_path) → ok [, err] ─────────────────────────────────
+static int l_ar_extract(lua_State *L) {
+    lua_zip_archive_t *ar = check_archive(L);
+    const char *name = luaL_checkstring(L, 2);
+    const char *dest = luaL_checkstring(L, 3);
+
+    if (!fs_sandbox_check(L, dest, true)) {
+        lua_pushboolean(L, false);
+        lua_pushstring(L, "permission denied (destination)");
+        return 2;
+    }
+    // Single-entry extraction to a caller-chosen path: the entry name only
+    // selects the data, it never becomes a filesystem path, so no name
+    // validation is needed here.
+    int idx = zip_reader_locate(&ar->zr, name);
+    if (idx < 0) {
+        lua_pushboolean(L, false);
+        lua_pushstring(L, "no such entry");
+        return 2;
+    }
+    char err[ZIP_ERR_MAX];
+    if (!zip_reader_extract_entry(&ar->zr, idx, dest, err)) {
+        lua_pushboolean(L, false);
+        lua_pushstring(L, err);
+        return 2;
+    }
+    lua_pushboolean(L, true);
+    return 1;
+}
+
+// ── ar:extractAll(dest_dir [, progress_fn]) → ok [, err] ─────────────────────
+static int l_ar_extract_all(lua_State *L) {
+    lua_zip_archive_t *ar = check_archive(L);
+    const char *dest = luaL_checkstring(L, 2);
+    bool has_progress = lua_isfunction(L, 3);
+
+    if (!fs_sandbox_check(L, dest, true)) {
+        lua_pushboolean(L, false);
+        lua_pushstring(L, "permission denied (destination)");
+        return 2;
+    }
+
+    lua_zip_progress_t prog = { .L = L, .has_cb = has_progress };
+    zip_extract_result_t result;
+    char err[ZIP_ERR_MAX];
+    bool ok = zip_reader_extract_all(&ar->zr, dest, NULL,
+                                     lua_zip_progress, &prog, &result, err);
+    if (!ok) {
+        lua_pushboolean(L, false);
+        lua_pushstring(L, err);
+        return 2;
+    }
+    lua_pushboolean(L, true);
+    return 1;
+}
+
+// ── ar:close() ───────────────────────────────────────────────────────────────
+static int l_ar_close(lua_State *L) {
+    lua_zip_archive_t *ar =
+        (lua_zip_archive_t *)luaL_checkudata(L, 1, ZIP_MT);
+    archive_do_close(ar);  // double-close is a no-op, not an error
+    return 0;
+}
+
+// __gc / __close — release the SD file handle when the archive is collected
+// or leaves a <close> scope.
+static int l_ar_gc(lua_State *L) {
+    lua_zip_archive_t *ar =
+        (lua_zip_archive_t *)luaL_checkudata(L, 1, ZIP_MT);
+    archive_do_close(ar);
+    return 0;
+}
+
+static const luaL_Reg archive_methods[] = {
+    {"list",       l_ar_list},
+    {"exists",     l_ar_exists},
+    {"size",       l_ar_size},
+    {"read",       l_ar_read},
+    {"extract",    l_ar_extract},
+    {"extractAll", l_ar_extract_all},
+    {"close",      l_ar_close},
+    {NULL, NULL}
+};
 
 // ── Module registration ──────────────────────────────────────────────────────
 
 static const luaL_Reg zip_funcs[] = {
     {"extract", l_zip_extract},
     {"list",    l_zip_list},
+    {"open",    l_zip_open},
     {NULL, NULL}
 };
 
 void lua_bridge_zip_init(lua_State *L) {
+    // Fresh per-app budget. Archives from the previous app were closed by
+    // lua_close() running their __gc; this is the safety net.
+    s_lua_zip_open_count = 0;
+
+    if (luaL_newmetatable(L, ZIP_MT)) {
+        lua_newtable(L);
+        luaL_setfuncs(L, archive_methods, 0);
+        lua_setfield(L, -2, "__index");
+        lua_pushcfunction(L, l_ar_gc);
+        lua_setfield(L, -2, "__gc");
+        lua_pushcfunction(L, l_ar_gc);
+        lua_setfield(L, -2, "__close");
+    }
+    lua_pop(L, 1);
+
     // Assumes the `picocalc` table is on top of the stack
     lua_newtable(L);
     luaL_setfuncs(L, zip_funcs, 0);

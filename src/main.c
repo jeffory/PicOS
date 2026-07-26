@@ -1261,20 +1261,24 @@ static const picocalc_modplayer_t s_modplayer_impl = {
 };
 
 // ── ZIP extraction (thin wrappers for g_api — Lua bridge has its own richer API) ──
+// zip_archive.c delegates to the shared hardened engine (os/zip_util.c): the
+// archive is streamed from SD (no whole-file PSRAM copy), entry names are
+// validated (the old native path had NO traversal guard), parent directories
+// are created, and size/entry-count caps are enforced. The simulator's Unicorn
+// trampolines link the same zip_archive.c, so both worlds get the same engine.
 
-#define MINIZ_NO_STDIO
-#define MINIZ_NO_ARCHIVE_WRITING_APIS
-#define MINIZ_NO_ZLIB_COMPATIBLE_NAMES
-// Redirect miniz allocations to PSRAM (umm_malloc), not tiny SRAM heap
-#define MZ_MALLOC(x)     umm_malloc(x)
-#define MZ_FREE(x)       umm_free(x)
-#define MZ_REALLOC(p, x) umm_realloc(p, x)
-#include "miniz.h"
 #include "os/zip_archive.h"
 
 static const picocalc_zip_t s_zip_impl = {
-    .extract = zip_archive_extract,
-    .list    = zip_archive_list,
+    .extract      = zip_archive_extract,
+    .list         = zip_archive_list,
+    .open         = zip_archive_open,
+    .close        = zip_archive_close,
+    .numEntries   = zip_archive_num_entries,
+    .locate       = zip_archive_locate,
+    .statIndex    = zip_archive_stat_index,
+    .read         = zip_archive_read,
+    .extractEntry = zip_archive_extract_entry,
 };
 
 // ── Core 1 entry — background WiFi polling ──────��─────────────────────────────
@@ -1652,7 +1656,7 @@ int main(void) {
   g_api.video       = &s_video_impl;
   g_api.modplayer   = &s_modplayer_impl;
   g_api.zip         = &s_zip_impl;
-  g_api.version     = 4;  // 4 = clip rect + mode-7 plane + native display parity
+  g_api.version     = 5;  // 5 = zip read-in-place handles
   // fs wired after SD card init
 
   // Bring up the QMI PSRAM in quad (QPI) mode before any PSRAM pointers are

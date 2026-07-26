@@ -387,3 +387,34 @@ cleanup_ec:
     mbedtls_ecp_group_free(&grp);
     return result;
 }
+
+// --- File hashing ------------------------------------------------------------
+
+#include "../drivers/sdcard.h"
+#ifndef PICOS_SIMULATOR
+#include "hardware/watchdog.h"
+#endif
+
+bool crypto_sha256_file(const char *path, uint8_t out_hash[32]) {
+    sdfile_t f = sdcard_fopen(path, "r");
+    if (!f) return false;
+
+    mbedtls_sha256_context ctx;
+    mbedtls_sha256_init(&ctx);
+    mbedtls_sha256_starts(&ctx, 0); // 0 = SHA-256 (not SHA-224)
+
+    // Stack buffer — SRAM only, no PSRAM
+    uint8_t buf[512];
+    int n;
+    while ((n = sdcard_fread(f, buf, sizeof(buf))) > 0) {
+        mbedtls_sha256_update(&ctx, buf, (size_t)n);
+#ifndef PICOS_SIMULATOR
+        watchdog_update();
+#endif
+    }
+
+    sdcard_fclose(f);
+    mbedtls_sha256_finish(&ctx, out_hash);
+    mbedtls_sha256_free(&ctx);
+    return true;
+}

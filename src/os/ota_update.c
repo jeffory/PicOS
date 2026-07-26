@@ -93,29 +93,10 @@ static void ota_show_status(const char *line1, const char *line2, uint16_t color
 }
 
 // ── SHA-256 file verification ───────────────────────────────────────────────
-
-// Compute SHA-256 of a file on SD card. Returns true on success.
-static bool ota_sha256_file(const char *path, uint8_t out_hash[32]) {
-    sdfile_t f = sdcard_fopen(path, "r");
-    if (!f) return false;
-
-    mbedtls_sha256_context ctx;
-    mbedtls_sha256_init(&ctx);
-    mbedtls_sha256_starts(&ctx, 0); // 0 = SHA-256 (not SHA-224)
-
-    // Use a stack buffer for hashing — SRAM only, no PSRAM
-    uint8_t buf[512];
-    int n;
-    while ((n = sdcard_fread(f, buf, sizeof(buf))) > 0) {
-        mbedtls_sha256_update(&ctx, buf, (size_t)n);
-        watchdog_update();
-    }
-
-    sdcard_fclose(f);
-    mbedtls_sha256_finish(&ctx, out_hash);
-    mbedtls_sha256_free(&ctx);
-    return true;
-}
+// Generalised to crypto_sha256_file() in crypto.c so the store and the Lua
+// bridge share the same streamed hasher.
+#include "crypto.h"
+#define ota_sha256_file crypto_sha256_file
 
 // Parse a hex SHA-256 hash file (64 hex chars). Returns true on success.
 static bool ota_parse_hash_file(const char *path, uint8_t out_hash[32]) {
