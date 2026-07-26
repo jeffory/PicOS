@@ -550,10 +550,35 @@ typedef struct {
 
 // --- ZIP Archive Extraction ------------------------------------------------
 
+// Opaque read-in-place archive handle (API version 5).
+typedef void *pczip_t;
+
+typedef struct {
+    char     name[256];   // entry name, NUL-terminated
+    uint32_t size;        // uncompressed bytes
+    uint32_t comp_size;   // compressed bytes
+    bool     is_dir;
+} pczip_stat_t;
+
 typedef struct {
     bool (*extract)(const char *zip_path, const char *dest_dir);
     // Returns number of files in archive, -1 on error.
     int  (*list)(const char *zip_path);
+    // --- API version 5 additions: read-in-place archive handles ------------
+    // Open an archive for random access without extracting it. At most 4
+    // archives may be open at once; handles are force-closed when the app
+    // exits. Returns NULL on error.
+    pczip_t (*open)(const char *zip_path);
+    void    (*close)(pczip_t z);
+    int     (*numEntries)(pczip_t z);                 // files + dirs, -1 on error
+    int     (*locate)(pczip_t z, const char *name);   // entry index, -1 if absent
+    bool    (*statIndex)(pczip_t z, int idx, pczip_stat_t *out);
+    // Decompress entry idx into a caller-supplied buffer. Returns bytes
+    // written, or -1 on error (including "entry larger than buf_cap" —
+    // statIndex first to size the buffer).
+    int     (*read)(pczip_t z, int idx, void *buf, uint32_t buf_cap);
+    // Stream entry idx to dest_path on the SD card (constant memory).
+    bool    (*extractEntry)(pczip_t z, int idx, const char *dest_path);
 } picocalc_zip_t;
 
 // --- The complete OS API struct ---------------------------------------------
@@ -583,6 +608,7 @@ typedef struct PicoCalcAPI {
     const picocalc_zip_t         *zip;         // ZIP extraction
     uint32_t                      version;     // 1=Phase1, 2=Phase2, 3=fs->browse,
                                              // 4=clip rect + mode-7 plane + display parity
+                                             // 5=zip read-in-place handles
 } PicoCalcAPI;
 
 // The global API instance, populated during os_init()

@@ -106,6 +106,11 @@ bool zip_reader_read_to_heap(zip_reader_t *zr, int idx, void **out_data,
                              size_t *out_len, size_t max_len,
                              char err[ZIP_ERR_MAX]);
 
+// Decompress one entry into a caller-supplied buffer. Returns the number of
+// bytes written, or -1 on error (including "entry larger than buf_cap").
+int zip_reader_read_to_buf(zip_reader_t *zr, int idx, void *buf,
+                           size_t buf_cap, char err[ZIP_ERR_MAX]);
+
 // Stream one entry to dest_path on the SD card (constant memory). Parent
 // directories are created as needed. Directory entries just create the dir.
 // NOTE: does not validate the entry name — callers extracting untrusted

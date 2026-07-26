@@ -157,6 +157,29 @@ bool zip_reader_read_to_heap(zip_reader_t *zr, int idx, void **out_data,
     return true;
 }
 
+int zip_reader_read_to_buf(zip_reader_t *zr, int idx, void *buf,
+                           size_t buf_cap, char err[ZIP_ERR_MAX]) {
+    if (!zr || !zr->open || !buf || idx < 0) {
+        zip_set_err(err, "bad zip");
+        return -1;
+    }
+    mz_zip_archive_file_stat st;
+    if (!mz_zip_reader_file_stat(&zr->mz, (mz_uint)idx, &st)) {
+        zip_set_err(err, "bad zip");
+        return -1;
+    }
+    if (st.m_uncomp_size > (mz_uint64)buf_cap) {
+        zip_set_err(err, "buffer too small (%u needed)",
+                    (unsigned)st.m_uncomp_size);
+        return -1;
+    }
+    if (!mz_zip_reader_extract_to_mem(&zr->mz, (mz_uint)idx, buf, buf_cap, 0)) {
+        zip_set_err(err, "extract failed");
+        return -1;
+    }
+    return (int)st.m_uncomp_size;
+}
+
 // ── Streamed extraction ──────────────────────────────────────────────────────
 
 typedef struct {

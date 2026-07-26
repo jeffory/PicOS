@@ -622,9 +622,16 @@ enum {
     SLOT_MODPLAYER_SET_LOOP,
     SLOT_MODPLAYER_END,
 
-    // picocalc_zip_t (2 functions) — stub only, same rationale as above.
+    // picocalc_zip_t (9 functions) — order MUST match the struct in os.h.
     SLOT_ZIP_EXTRACT = SLOT_MODPLAYER_END,
     SLOT_ZIP_LIST,
+    SLOT_ZIP_OPEN,
+    SLOT_ZIP_CLOSE,
+    SLOT_ZIP_NUM_ENTRIES,
+    SLOT_ZIP_LOCATE,
+    SLOT_ZIP_STAT_INDEX,
+    SLOT_ZIP_READ,
+    SLOT_ZIP_EXTRACT_ENTRY,
     SLOT_ZIP_END,
 
     SLOT_TOTAL_COUNT = SLOT_ZIP_END,
@@ -2864,6 +2871,74 @@ static void tramp_zip_list(uc_engine *uc) {
               zip_path ? (uint32_t)zip_archive_list(zip_path) : (uint32_t)-1);
 }
 
+// Read-in-place handles (API v5). Host-side pczip_t pointers travel to the
+// emulated app as opaque uint32 handles via handle_wrap/handle_unwrap.
+
+static void tramp_zip_open(uc_engine *uc) {
+    char *zip_path = uc_read_string(uc, read_reg(uc, UC_ARM_REG_R0));
+    pczip_t z = zip_path ? zip_archive_open(zip_path) : NULL;
+    write_reg(uc, UC_ARM_REG_R0, handle_wrap(z));
+}
+
+static void tramp_zip_close(uc_engine *uc) {
+    uint32_t h = read_reg(uc, UC_ARM_REG_R0);
+    zip_archive_close(handle_unwrap(h));
+    handle_free(h);
+}
+
+static void tramp_zip_num_entries(uc_engine *uc) {
+    pczip_t z = handle_unwrap(read_reg(uc, UC_ARM_REG_R0));
+    write_reg(uc, UC_ARM_REG_R0, (uint32_t)zip_archive_num_entries(z));
+}
+
+static void tramp_zip_locate(uc_engine *uc) {
+    pczip_t z = handle_unwrap(read_reg(uc, UC_ARM_REG_R0));
+    char *name = uc_read_string(uc, read_reg(uc, UC_ARM_REG_R1));
+    write_reg(uc, UC_ARM_REG_R0,
+              name ? (uint32_t)zip_archive_locate(z, name) : (uint32_t)-1);
+}
+
+static void tramp_zip_stat_index(uc_engine *uc) {
+    pczip_t z = handle_unwrap(read_reg(uc, UC_ARM_REG_R0));
+    int idx = (int)read_reg(uc, UC_ARM_REG_R1);
+    uint32_t out_addr = read_reg(uc, UC_ARM_REG_R2);
+    // pczip_stat_t is layout-identical on ARM32 and the host (char[256] +
+    // 2×uint32 + bool: every member ≤4-byte aligned, no pointers) so a raw
+    // struct copy into emulated memory is safe.
+    pczip_stat_t st;
+    bool ok = out_addr && zip_archive_stat_index(z, idx, &st);
+    if (ok) uc_mem_write(uc, out_addr, &st, sizeof(st));
+    write_reg(uc, UC_ARM_REG_R0, ok ? 1u : 0u);
+}
+
+static void tramp_zip_read(uc_engine *uc) {
+    pczip_t z = handle_unwrap(read_reg(uc, UC_ARM_REG_R0));
+    int idx = (int)read_reg(uc, UC_ARM_REG_R1);
+    uint32_t buf_addr = read_reg(uc, UC_ARM_REG_R2);
+    uint32_t buf_cap = read_reg(uc, UC_ARM_REG_R3);
+    if (!z || !buf_addr || !buf_cap) {
+        write_reg(uc, UC_ARM_REG_R0, (uint32_t)-1);
+        return;
+    }
+    void *tmp = malloc(buf_cap);
+    if (!tmp) {
+        write_reg(uc, UC_ARM_REG_R0, (uint32_t)-1);
+        return;
+    }
+    int n = zip_archive_read(z, idx, tmp, buf_cap);
+    if (n > 0) uc_mem_write(uc, buf_addr, tmp, (size_t)n);
+    free(tmp);
+    write_reg(uc, UC_ARM_REG_R0, (uint32_t)n);
+}
+
+static void tramp_zip_extract_entry(uc_engine *uc) {
+    pczip_t z = handle_unwrap(read_reg(uc, UC_ARM_REG_R0));
+    int idx = (int)read_reg(uc, UC_ARM_REG_R1);
+    char *dest = uc_read_string(uc, read_reg(uc, UC_ARM_REG_R2));
+    write_reg(uc, UC_ARM_REG_R0,
+              (dest && zip_archive_extract_entry(z, idx, dest)) ? 1u : 0u);
+}
+
 // =============================================================================
 // Dispatch table
 // =============================================================================
@@ -3199,6 +3274,13 @@ void unicorn_tramp_init(uc_engine *uc) {
     // ZIP (shared zip_archive.c)
     s_dispatch[SLOT_ZIP_EXTRACT]          = tramp_zip_extract;
     s_dispatch[SLOT_ZIP_LIST]             = tramp_zip_list;
+    s_dispatch[SLOT_ZIP_OPEN]             = tramp_zip_open;
+    s_dispatch[SLOT_ZIP_CLOSE]            = tramp_zip_close;
+    s_dispatch[SLOT_ZIP_NUM_ENTRIES]      = tramp_zip_num_entries;
+    s_dispatch[SLOT_ZIP_LOCATE]           = tramp_zip_locate;
+    s_dispatch[SLOT_ZIP_STAT_INDEX]       = tramp_zip_stat_index;
+    s_dispatch[SLOT_ZIP_READ]             = tramp_zip_read;
+    s_dispatch[SLOT_ZIP_EXTRACT_ENTRY]    = tramp_zip_extract_entry;
 }
 
 void unicorn_tramp_dispatch(uc_engine *uc, uint32_t slot) {
@@ -3340,7 +3422,7 @@ void unicorn_build_api_struct(uc_engine *uc, uint32_t api_base, uint32_t tramp_b
     uint32_t modplayer_count = SLOT_MODPLAYER_END - SLOT_MODPLAYER_CREATE;
     sub_base = write_func_table(uc, sub_base, tramp_base, SLOT_MODPLAYER_CREATE, modplayer_count);
 
-    // picocalc_zip_t (2 function pointers, stubs)
+    // picocalc_zip_t (9 function pointers, stubs)
     uint32_t zip_addr = sub_base;
     uint32_t zip_count = SLOT_ZIP_END - SLOT_ZIP_EXTRACT;
     sub_base = write_func_table(uc, sub_base, tramp_base, SLOT_ZIP_EXTRACT, zip_count);
@@ -3397,7 +3479,7 @@ void unicorn_build_api_struct(uc_engine *uc, uint32_t api_base, uint32_t tramp_b
     write32(uc, api_base + 64, video_addr);
     write32(uc, api_base + 68, modplayer_addr);
     write32(uc, api_base + 72, zip_addr);
-    write32(uc, api_base + 76, 4);  // version = 4 (clip rect + mode-7 plane)
+    write32(uc, api_base + 76, 5);  // version = 5 (zip read-in-place handles)
 
-    printf("[UNICORN] PicoCalcAPI struct at 0x%08x, version=4\n", api_base);
+    printf("[UNICORN] PicoCalcAPI struct at 0x%08x, version=5\n", api_base);
 }
