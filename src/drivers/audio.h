@@ -5,10 +5,21 @@
 #include "../os/os.h"
 
 void audio_init(void);
-void audio_pwm_setup(uint32_t sample_rate);
+
+/* Fixed ultrasonic output rate: everything (PCM stream, sound samples,
+ * tone synth) is mixed into a single stream running at this rate, so the
+ * PWM pulse repetition frequency is always inaudible (was: content rate —
+ * 11025 Hz content whistled at 11 kHz, 22050 Hz content at 22 kHz). */
+#define AUDIO_OUT_RATE 44100
+
 void audio_play_tone(uint32_t freq_hz, uint32_t duration_ms);
 void audio_stop_tone(void);
 void audio_set_volume(uint8_t volume);
+
+// Starts the PCM stream (fixed AUDIO_OUT_RATE) only if not already running.
+// Called by tone/sample playback so they mix in without disturbing an
+// active stream (e.g. BGM fileplayer).
+void audio_stream_ensure_running(void);
 
 // Must be called from Core 1 before any audio playback.
 // Creates an alarm pool whose timer ISRs fire on Core 1, keeping

@@ -21,6 +21,7 @@ typedef struct {
     bool playing;
     bool paused;
     uint32_t position;
+    uint32_t phase;     // rate-conversion accumulator (Hz units at AUDIO_OUT_RATE)
     uint8_t volume;
     uint8_t repeat_count;
     uint8_t repeats_played;
@@ -31,6 +32,8 @@ typedef struct {
     void *finish_callback_arg;
     int (*loop_callback)(void *);
     void *loop_callback_arg;
+    volatile bool finish_pending;  // set by mixer (Core 1 ISR), fired by pump
+    volatile bool loop_pending;
 } sound_player_t;
 
 typedef struct {
@@ -41,7 +44,14 @@ typedef struct {
 } sound_context_t;
 
 void sound_init(void);
-void sound_update(void);
+
+/* The mixer is driven from audio.c's DMA refill hook (Core 1 ISR) — no
+ * playback timer exists anymore. sound_mixer_process adds up to
+ * SOUND_MAX_SAMPLES players' PCM into out_l/out_r (int32 accumulation,
+ * clipped by the caller) at AUDIO_OUT_RATE frames. sound_pump_callbacks
+ * fires deferred finish/loop callbacks from the Core 1 work pump. */
+void sound_mixer_process(int32_t *out_l, int32_t *out_r, int frames);
+void sound_pump_callbacks(void);
 
 sound_sample_t *sound_sample_create(void);
 void sound_sample_destroy(sound_sample_t *sample);

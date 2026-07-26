@@ -1,4 +1,5 @@
 #include "audio.h"
+#include "sound.h"
 #include "../hardware.h"
 #include "hardware/gpio.h"
 #include "hardware/pwm.h"
@@ -23,18 +24,11 @@ static unsigned int s_pwm_slice_r = 0;
 static uint8_t s_volume = 100;
 static uint32_t s_volume_scale = 256; // 256 = 100%, precomputed for fast scaling
 static bool s_playing = false;
-static repeating_timer_t s_timer;
 
 static uint64_t s_end_time_us = 0;
-
-static bool audio_timer_callback(repeating_timer_t *rt) {
-  (void)rt;
-  if (s_end_time_us > 0 && time_us_64() >= s_end_time_us) {
-    audio_stop_tone();
-    return false;
-  }
-  return true;
-}
+static uint32_t s_tone_freq = 440;   // square synth frequency (mixed into stream)
+static uint32_t s_tone_phase = 0;    // synth phase accumulator
+static uint8_t  s_tone_level = 0;    // synth amplitude (0..128 → ±(level<<7))
 
 void audio_init(void) {
   gpio_set_function(AUDIO_PIN_L, GPIO_FUNC_PWM);
@@ -64,49 +58,9 @@ alarm_pool_t *audio_get_core1_alarm_pool(void) {
   return s_core1_alarm_pool;
 }
 
-void audio_pwm_setup(uint32_t sample_rate) {
-  gpio_set_function(AUDIO_PIN_L, GPIO_FUNC_PWM);
-  gpio_set_function(AUDIO_PIN_R, GPIO_FUNC_PWM);
-
-  s_pwm_slice_l = pwm_gpio_to_slice_num(AUDIO_PIN_L);
-  s_pwm_slice_r = pwm_gpio_to_slice_num(AUDIO_PIN_R);
-
-  pwm_config cfg = pwm_get_default_config();
-  pwm_config_set_wrap(&cfg, TONE_PWM_WRAP);
-
-  uint32_t sys_clk = clock_get_hz(clk_sys);
-  uint32_t div = sys_clk / (sample_rate * (TONE_PWM_WRAP + 1));
-  if (div < 1) div = 1;
-  if (div > 255) div = 255;
-  pwm_config_set_clkdiv(&cfg, div);
-
-  pwm_init(s_pwm_slice_l, &cfg, true);
-  pwm_init(s_pwm_slice_r, &cfg, true);
-
-  pwm_set_gpio_level(AUDIO_PIN_L, 0);
-  pwm_set_gpio_level(AUDIO_PIN_R, 0);
-}
-
-static void audio_configure_freq(uint32_t freq_hz) {
-  if (freq_hz < MIN_FREQ)
-    freq_hz = MIN_FREQ;
-  if (freq_hz > MAX_FREQ)
-    freq_hz = MAX_FREQ;
-
-  uint32_t sys_clk = clock_get_hz(clk_sys);
-  uint32_t div = sys_clk / (freq_hz * (TONE_PWM_WRAP + 1));
-  if (div < 1)
-    div = 1;
-  if (div > 255)
-    div = 255;
-
-  uint16_t level = (TONE_PWM_WRAP + 1) / 2;
-
-  pwm_set_clkdiv(s_pwm_slice_l, div);
-  pwm_set_clkdiv(s_pwm_slice_r, div);
-  pwm_set_gpio_level(AUDIO_PIN_L, level);
-  pwm_set_gpio_level(AUDIO_PIN_R, level);
-}
+/* audio_pwm_setup() was removed with the mixer refactor: nothing drives
+ * the PWM slices directly anymore — tone, samples and the PCM stream are
+ * all mixed into the single 44.1 kHz stream path. */
 
 // Logarithmic volume curve: lut[i] = round((10^(i/100) - 1) / 9 * 128), i=0..100
 // Replaces runtime exp()/log() with a compile-time table (~5 cycles vs ~100+).
@@ -126,16 +80,10 @@ static const uint8_t s_log_volume_lut[101] = {
 };
 
 static void audio_apply_volume(void) {
-  if (!s_playing)
-    return;
-
   if (s_volume == 0) {
-    pwm_set_gpio_level(AUDIO_PIN_L, 0);
-    pwm_set_gpio_level(AUDIO_PIN_R, 0);
+    s_tone_level = 0;
   } else {
-    uint16_t level = s_log_volume_lut[s_volume];
-    pwm_set_gpio_level(AUDIO_PIN_L, level);
-    pwm_set_gpio_level(AUDIO_PIN_R, level);
+    s_tone_level = (uint8_t)s_log_volume_lut[s_volume];
   }
 }
 
@@ -145,35 +93,22 @@ void audio_play_tone(uint32_t freq_hz, uint32_t duration_ms) {
   if (freq_hz > MAX_FREQ)
     freq_hz = MAX_FREQ;
 
-  audio_stop_tone();
-  audio_stop_stream(); // tones and streaming are mutually exclusive
-
-  audio_configure_freq(freq_hz);
+  s_tone_freq = freq_hz;
+  s_tone_phase = 0;
   audio_apply_volume();
 
-  pwm_set_enabled(s_pwm_slice_l, true);
-  pwm_set_enabled(s_pwm_slice_r, true);
-
   s_playing = true;
+  s_end_time_us = duration_ms > 0 ? time_us_64() + (duration_ms * 1000) : 0;
 
-  if (duration_ms > 0) {
-    s_end_time_us = time_us_64() + (duration_ms * 1000);
-    /* Default alarm pool (Core 0): tone play/stop/cancel are all called from
-     * Core 0 — keeping the timer on the same core avoids cross-core
-     * cancel/state races. */
-    add_repeating_timer_us(-1000, audio_timer_callback, NULL, &s_timer);
-  } else {
-    s_end_time_us = 0;
-  }
+  // Tones are mixed into the PCM stream by the DMA refill hook — no
+  // exclusive PWM takeover, no timer. Stream must be running.
+  audio_stream_ensure_running();
 }
 
 void audio_stop_tone(void) {
-  cancel_repeating_timer(&s_timer);
   s_end_time_us = 0;
-
-  pwm_set_enabled(s_pwm_slice_l, false);
-  pwm_set_enabled(s_pwm_slice_r, false);
   s_playing = false;
+  s_tone_level = 0;
 }
 
 void audio_set_volume(uint8_t volume) {
@@ -195,6 +130,8 @@ void audio_set_volume(uint8_t volume) {
 #define STREAM_PWM_MID    ((STREAM_PWM_WRAP + 1) / 2)  // 850
 #define STREAM_DMA_SAMPLES 128
 
+// AUDIO_OUT_RATE is defined in audio.h (shared with sound.c's mixer).
+
 #define AUDIO_RING_SIZE 4096 // must be power of 2
 #define AUDIO_RING_MASK (AUDIO_RING_SIZE - 1)
 
@@ -203,6 +140,8 @@ static uint8_t s_ring_r[AUDIO_RING_SIZE];
 static volatile uint32_t s_ring_write = 0;
 static volatile uint32_t s_ring_read = 0;
 static bool s_streaming = false;
+static uint32_t s_stream_content_rate = AUDIO_OUT_RATE;  // rate of ring data
+static uint32_t s_ring_phase = 0;                        // rate-convert accumulator
 
 static int          s_stream_dma_chan = -1;
 static uint32_t     s_stream_dma_buf[2][STREAM_DMA_SAMPLES];
@@ -216,31 +155,81 @@ static volatile uint32_t s_stream_dma_isr_count = 0;
 static volatile uint32_t s_stream_underrun_count = 0;
 
 // Fill one DMA buffer from the ring buffer (called from DMA ISR on Core 1)
+// This is THE mixer: PCM stream (ring) + sound.c sample players + tone synth
+// are summed per frame, so all three play simultaneously through one path.
+// Mix chunks of 32 frames to keep SRAM buffers small (RAM is ~full).
+#define MIX_CHUNK 32
+static int32_t s_mix_l[MIX_CHUNK];
+static int32_t s_mix_r[MIX_CHUNK];
+
 static void __time_critical_func(audio_fill_dma_buffer)(uint32_t *buf, int count) {
   uint32_t vol = s_volume_scale;
-  for (int i = 0; i < count; i++) {
-    uint32_t w = s_ring_write;
-    uint32_t r = s_ring_read;
-    int32_t lv, rv;
 
-    if (r == w) {
-      // Underrun: output silence (midpoint)
-      s_stream_underrun_count++;
-      lv = STREAM_PWM_MID;
-      rv = STREAM_PWM_MID;
-    } else {
-      uint32_t idx = r & AUDIO_RING_MASK;
-      // uint8 [0,255] -> PWM range [0,STREAM_PWM_WRAP] with volume
-      lv = ((uint32_t)s_ring_l[idx] * (STREAM_PWM_WRAP + 1)) >> 8;
-      rv = ((uint32_t)s_ring_r[idx] * (STREAM_PWM_WRAP + 1)) >> 8;
+  // Tone end-time check once per buffer (ISR-safe read)
+  if (s_playing && s_end_time_us > 0 && time_us_64() >= s_end_time_us) {
+    s_playing = false;
+    s_tone_level = 0;
+  }
+  uint32_t tone_phase = s_tone_phase;
+
+  for (int base_i = 0; base_i < count; base_i += MIX_CHUNK) {
+    int chunk = count - base_i < MIX_CHUNK ? count - base_i : MIX_CHUNK;
+
+    // Sample players (sound.c) — zero-fills when nothing is playing
+    sound_mixer_process(s_mix_l, s_mix_r, chunk);
+
+    for (int i = 0; i < chunk; i++) {
+      uint32_t w = s_ring_write;
+      uint32_t r = s_ring_read;
+      int32_t ml, mr;
+
+      if (r == w) {
+        // Stream underrun: base is silent (samples/tone may still sound)
+        s_stream_underrun_count++;
+        ml = 0;
+        mr = 0;
+      } else {
+        uint32_t idx = r & AUDIO_RING_MASK;
+        // uint8 [0,255] -> centered int16
+        ml = ((int32_t)s_ring_l[idx] - 128) << 8;
+        mr = ((int32_t)s_ring_r[idx] - 128) << 8;
+        // Advance the source at the content's own rate (nearest-neighbor
+        // resample to AUDIO_OUT_RATE; e.g. 11025 Hz content emits each frame 4x).
+        s_ring_phase += s_stream_content_rate;
+        while (s_ring_phase >= AUDIO_OUT_RATE) {
+          s_ring_phase -= AUDIO_OUT_RATE;
+          if (s_ring_read != s_ring_write) s_ring_read++;
+        }
+      }
+
+      // + sound.c sample players
+      ml += s_mix_l[i];
+      mr += s_mix_r[i];
+
+      // + tone (square synth at the configured frequency)
+      if (s_playing) {
+        tone_phase += s_tone_freq;
+        if (tone_phase >= AUDIO_OUT_RATE) tone_phase -= AUDIO_OUT_RATE;
+        int32_t t = (tone_phase < AUDIO_OUT_RATE / 2) ? s_tone_level : -(int32_t)s_tone_level;
+        ml += t << 7;
+        mr += t << 7;
+      }
+
+      // clip to int16
+      if (ml > 32767) ml = 32767; else if (ml < -32768) ml = -32768;
+      if (mr > 32767) mr = 32767; else if (mr < -32768) mr = -32768;
+
+      // int16 -> PWM range [0,STREAM_PWM_WRAP] with master volume
+      uint32_t lv = ((uint32_t)(ml + 32768) * (STREAM_PWM_WRAP + 1)) >> 16;
+      uint32_t rv = ((uint32_t)(mr + 32768) * (STREAM_PWM_WRAP + 1)) >> 16;
       lv = (lv * vol) >> 8;
       rv = (rv * vol) >> 8;
       if (lv > STREAM_PWM_WRAP) lv = STREAM_PWM_WRAP;
       if (rv > STREAM_PWM_WRAP) rv = STREAM_PWM_WRAP;
-      s_ring_read = r + 1;
+      buf[base_i + i] = (rv << 16) | lv;
     }
-    buf[i] = ((uint32_t)rv << 16) | (uint32_t)lv;
   }
+  s_tone_phase = tone_phase;
 }
 
 // DMA completion ISR: swap ping-pong buffers and refill
@@ -265,17 +254,20 @@ static void __time_critical_func(audio_stream_dma_isr)(void) {
 }
 
 void audio_start_stream(uint32_t sample_rate) {
-  audio_stop_tone();
   if (s_streaming)
     audio_stop_stream();
 
-  // Configure PWM with fractional divider for accurate sample rate
+  // Configure PWM at the FIXED ultrasonic output rate; content rate only
+  // drives the resample accumulator in audio_fill_dma_buffer.
   gpio_set_function(AUDIO_PIN_L, GPIO_FUNC_PWM);
   gpio_set_function(AUDIO_PIN_R, GPIO_FUNC_PWM);
   s_stream_pwm_slice = pwm_gpio_to_slice_num(AUDIO_PIN_L);
 
+  s_stream_content_rate = sample_rate;
+  s_ring_phase = 0;
+
   uint32_t sys_clk = clock_get_hz(clk_sys);
-  uint32_t target = sample_rate * (uint32_t)(STREAM_PWM_WRAP + 1);
+  uint32_t target = (uint32_t)AUDIO_OUT_RATE * (uint32_t)(STREAM_PWM_WRAP + 1);
   uint32_t div_int = sys_clk / target;
   uint32_t remainder = sys_clk - div_int * target;
   uint32_t div_frac = (remainder * 16 + target / 2) / target;
@@ -316,6 +308,14 @@ void audio_start_stream(uint32_t sample_rate) {
 
   // Signal Core 1 to register IRQ handler and start DMA
   s_stream_dma_start_pending = true;
+}
+
+/* Start the stream only if it isn't already running (ring untouched).
+ * Used by tone/sample playback so they can mix in without disturbing an
+ * active stream (e.g. BGM fileplayer). */
+void audio_stream_ensure_running(void) {
+  if (!s_streaming)
+    audio_start_stream(AUDIO_OUT_RATE);
 }
 
 void audio_stop_stream(void) {

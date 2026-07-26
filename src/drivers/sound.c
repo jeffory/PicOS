@@ -2,7 +2,6 @@
 #include "audio.h"
 #include "../hardware.h"
 #include "sdcard.h"
-#include "hardware/pwm.h"
 #include "pico/time.h"
 #include "pico/stdlib.h"
 #include "umm_malloc.h"
@@ -12,9 +11,6 @@
 #include <stdio.h>
 
 static sound_context_t s_context;
-static repeating_timer_t s_playback_timer;
-static bool s_timer_active = false;
-static uint32_t s_timer_interval_us = 0;
 
 static bool parse_wav_header(sound_sample_t *sample, uint8_t *data, uint32_t size) {
     if (size < 44)
@@ -69,12 +65,6 @@ static bool parse_wav_header(sound_sample_t *sample, uint8_t *data, uint32_t siz
 }
 
 void sound_init(void) {
-    if (s_timer_active) {
-        cancel_repeating_timer(&s_playback_timer);
-        s_timer_active = false;
-    }
-    pwm_set_gpio_level(AUDIO_PIN_L, 0);
-    pwm_set_gpio_level(AUDIO_PIN_R, 0);
     // Reclaim any loaded sample data before dropping the pointers (app exit
     // must not leak PSRAM, even for path-constructed samples).
     for (int i = 0; i < SOUND_MAX_SAMPLES; i++) {
@@ -88,102 +78,90 @@ void sound_init(void) {
     memset(&s_context, 0, sizeof(s_context));
 }
 
-void sound_update(void) {
-    if (!s_timer_active)
-        return;
+/* Mixer entry point: called from audio.c's DMA refill hook (Core 1 ISR) to
+ * produce `frames` frames of mixed sample audio at AUDIO_OUT_RATE. Each
+ * active player advances through its sample data via a phase accumulator
+ * (nearest-neighbor rate conversion). Accumulates into out_l/out_r (int32)
+ * — the caller clips to int16 when mixing with other sources. */
+void sound_mixer_process(int32_t *out_l, int32_t *out_r, int frames) {
+    memset(out_l, 0, frames * sizeof(*out_l));
+    memset(out_r, 0, frames * sizeof(*out_r));
 
-    for (int i = 0; i < SOUND_MAX_SAMPLES; i++) {
-        sound_player_t *player = &s_context.players[i];
+    for (int p = 0; p < SOUND_MAX_SAMPLES; p++) {
+        sound_player_t *player = &s_context.players[p];
         if (!player->playing || player->paused || !player->sample || !player->sample->loaded)
             continue;
 
         sound_sample_t *sample = player->sample;
-        uint32_t pos = player->position;
+        uint32_t bpf = (sample->bits_per_sample / 8) * sample->channels;
 
         uint32_t effective_end = sample->length;
         if (player->play_end > 0) {
-            uint32_t bytes_per_sample = sample->bits_per_sample / 8;
-            uint32_t bytes_per_frame = bytes_per_sample * sample->channels;
-            uint32_t end_bytes = player->play_end * bytes_per_frame;
+            uint32_t end_bytes = player->play_end * bpf;
             if (end_bytes < effective_end)
                 effective_end = end_bytes;
         }
-
-        uint32_t effective_start = 0;
-        if (player->play_start > 0) {
-            uint32_t bytes_per_sample = sample->bits_per_sample / 8;
-            uint32_t bytes_per_frame = bytes_per_sample * sample->channels;
-            effective_start = player->play_start * bytes_per_frame;
-        }
-
-        if (pos < effective_start) {
+        uint32_t effective_start = player->play_start > 0 ? player->play_start * bpf : 0;
+        if (player->position < effective_start)
             player->position = effective_start;
-            pos = effective_start;
-        }
 
-        if (pos >= effective_end) {
-            player->repeats_played++;
-            if (player->repeat_count > 0 && player->repeats_played >= player->repeat_count) {
-                player->playing = false;
+        uint32_t step = (uint32_t)(sample->sample_rate * player->rate);
+
+        for (int i = 0; i < frames; i++) {
+            if (!player->playing)
+                break;
+            uint32_t pos = player->position;
+            if (pos >= effective_end) {
+                player->repeats_played++;
+                if (player->repeat_count > 0 && player->repeats_played >= player->repeat_count) {
+                    player->playing = false;
+                    player->position = effective_start;
+                    player->finish_pending = true;
+                    break;
+                }
+                player->loop_pending = true;
                 player->position = effective_start;
-                if (player->finish_callback)
-                    player->finish_callback(player->finish_callback_arg);
-                continue;
+                pos = effective_start;
             }
-            if (player->loop_callback)
-                player->loop_callback(player->loop_callback_arg);
-            player->position = effective_start;
-            pos = effective_start;
-        }
 
-        uint32_t bytes_per_sample = sample->bits_per_sample / 8;
-        uint32_t bytes_per_frame = bytes_per_sample * sample->channels;
-
-        if (pos + bytes_per_frame > sample->length) {
-            player->position = sample->length;
-            continue;
-        }
-
-        uint8_t left_8, right_8;
-        if (sample->bits_per_sample == 16) {
-            int16_t left_16 = *(int16_t *)(sample->data + pos);
-            left_8 = (uint8_t)((left_16 + 32768) >> 8);
-            if (sample->channels >= 2) {
-                int16_t right_16 = *(int16_t *)(sample->data + pos + 2);
-                right_8 = (uint8_t)((right_16 + 32768) >> 8);
+            int16_t l16, r16;
+            if (sample->bits_per_sample == 16) {
+                l16 = *(int16_t *)(sample->data + pos);
+                r16 = sample->channels >= 2 ? *(int16_t *)(sample->data + pos + 2) : l16;
             } else {
-                right_8 = left_8;
+                l16 = ((int16_t)sample->data[pos] - 128) << 8;
+                r16 = sample->channels >= 2 ? ((int16_t)sample->data[pos + 1] - 128) << 8 : l16;
             }
-        } else {
-            left_8 = sample->data[pos];
-            if (sample->channels >= 2) {
-                right_8 = sample->data[pos + 1];
-            } else {
-                right_8 = left_8;
+            out_l[i] += (l16 * player->volume) / 100;
+            out_r[i] += (r16 * player->volume) / 100;
+
+            player->phase += step;
+            while (player->phase >= AUDIO_OUT_RATE) {
+                player->phase -= AUDIO_OUT_RATE;
+                player->position += bpf;
             }
         }
-
-        uint32_t volume = player->volume;
-        uint32_t left_level = (left_8 * volume) / 100;
-        uint32_t right_level = (right_8 * volume) / 100;
-        left_level = (left_level * 128) / 255;
-        right_level = (right_level * 128) / 255;
-
-        pwm_set_gpio_level(AUDIO_PIN_L, left_level);
-        pwm_set_gpio_level(AUDIO_PIN_R, right_level);
-
-        int advance = (int)(bytes_per_frame * player->rate);
-        if (advance < 1) advance = 1;
-        player->position += advance;
     }
-
-    s_context.time_offset_us += s_timer_interval_us;
+    // Keep the public time base advancing (~us of audio mixed)
+    s_context.time_offset_us += (uint32_t)(((uint64_t)frames * 1000000) / AUDIO_OUT_RATE);
 }
 
-static bool playback_timer_callback(repeating_timer_t *rt) {
-    (void)rt;
-    sound_update();
-    return true;
+/* Fires deferred finish/loop callbacks — call from the Core 1 work pump
+ * (NOT from the mixer ISR; callbacks trampoline into Lua). */
+void sound_pump_callbacks(void) {
+    for (int p = 0; p < SOUND_MAX_SAMPLES; p++) {
+        sound_player_t *player = &s_context.players[p];
+        if (player->finish_pending) {
+            player->finish_pending = false;
+            if (player->finish_callback)
+                player->finish_callback(player->finish_callback_arg);
+        }
+        if (player->loop_pending) {
+            player->loop_pending = false;
+            if (player->loop_callback)
+                player->loop_callback(player->loop_callback_arg);
+        }
+    }
 }
 
 sound_sample_t *sound_sample_create(void) {
@@ -274,6 +252,13 @@ sound_player_t *sound_player_create(void) {
             player->play_end = 0;
             player->rate = 1.0f;
             player->owns_sample = false;
+            player->phase = 0;
+            player->finish_pending = false;
+            player->loop_pending = false;
+            player->finish_callback = NULL;
+            player->finish_callback_arg = NULL;
+            player->loop_callback = NULL;
+            player->loop_callback_arg = NULL;
             return player;
         }
     }
@@ -308,24 +293,13 @@ void sound_player_play(sound_player_t *player, uint8_t repeat_count) {
     player->repeat_count = repeat_count;
     player->repeats_played = 0;
     player->position = 0;
+    player->phase = 0;
+    player->finish_pending = false;
+    player->loop_pending = false;
 
-    uint32_t sample_rate = player->sample->sample_rate;
-    if (sample_rate > 0) {
-        s_timer_interval_us = 1000000 / sample_rate;
-        if (!s_timer_active) {
-            audio_pwm_setup(sample_rate);
-            /* Default alarm pool (Core 0): play/stop/cancel/update then all
-             * run on the same core as the Lua/native callers — no cross-core
-             * timer or state races. NOTE: interval must be cast to a signed
-             * type — negating the uint32_t wraps to ~71 minutes instead of
-             * -90us, and the timer simply never fires. */
-            bool add_ok = add_repeating_timer_us(-(int32_t)s_timer_interval_us,
-                                   playback_timer_callback, NULL,
-                                   &s_playback_timer);
-            s_timer_active = true;
-            (void)add_ok;
-        }
-    }
+    // Samples are mixed into the PCM stream by audio.c's DMA refill hook —
+    // the stream must be running. No PWM re-init, no playback timer.
+    audio_stream_ensure_running();
 }
 
 void sound_player_stop(sound_player_t *player) {
@@ -336,23 +310,6 @@ void sound_player_stop(sound_player_t *player) {
     player->position = 0;
     player->repeat_count = 0;
     player->repeats_played = 0;
-
-    pwm_set_gpio_level(AUDIO_PIN_L, 0);
-    pwm_set_gpio_level(AUDIO_PIN_R, 0);
-
-    bool any_playing = false;
-    for (int i = 0; i < SOUND_MAX_SAMPLES; i++) {
-        if (s_context.players[i].playing) {
-            any_playing = true;
-            break;
-        }
-    }
-    if (!any_playing && s_timer_active) {
-        cancel_repeating_timer(&s_playback_timer);
-        s_timer_active = false;
-        pwm_set_enabled(pwm_gpio_to_slice_num(AUDIO_PIN_L), false);
-        pwm_set_enabled(pwm_gpio_to_slice_num(AUDIO_PIN_R), false);
-    }
 }
 
 void sound_player_set_volume(sound_player_t *player, uint8_t volume) {

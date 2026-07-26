@@ -1361,6 +1361,7 @@ static void core1_entry(void) {
       audio_stream_poll();
       mp3_player_update();
       fileplayer_update();
+      sound_pump_callbacks();
       mod_player_update();
       void (*audio_cb)(void) = atomic_load(&g_native_audio_callback);
       if (audio_cb)

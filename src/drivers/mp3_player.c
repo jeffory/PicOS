@@ -69,6 +69,8 @@ static uint32_t s_pio_psram_base = 0;
 static uint8_t  s_staging_buf[STAGING_BUF_SIZE] __attribute__((aligned(4)));
 static size_t   s_staging_avail = 0;
 static size_t   s_staging_pos   = 0;
+static uint32_t s_out_phase     = 0;  // rate-convert accumulator (AUDIO_OUT_RATE)
+static volatile uint32_t s_last_fill_consumed = 0;  // source frames consumed by last fill
 
 // Diagnostics (declared early: used by the ring/refill/decode paths below).
 static volatile uint32_t s_staging_underruns = 0;
@@ -248,6 +250,7 @@ void mp3_player_reset_diag(void) {
 static void __time_critical_func(fill_dma_buffer)(uint32_t *buf, int count) {
     size_t bytes_per_pair = (s_pcm_channels > 1) ? 4 : 2;
     uint32_t vol_scale = s_vol_scale;
+    s_last_fill_consumed = 0;
 
     for (int i = 0; i < count; i++) {
         int32_t lv, rv;
@@ -259,8 +262,18 @@ static void __time_critical_func(fill_dma_buffer)(uint32_t *buf, int count) {
         } else {
             uint8_t raw[4];
             memcpy(raw, s_staging_buf + s_staging_pos, bytes_per_pair);
-            s_staging_pos   += bytes_per_pair;
-            s_staging_avail -= bytes_per_pair;
+            s_last_fill_consumed++;
+
+            // Advance the source at the content's own rate (nearest-neighbor
+            // resample to AUDIO_OUT_RATE; 22050 Hz content emits each frame 2x).
+            s_out_phase += s_player.sample_rate;
+            while (s_out_phase >= AUDIO_OUT_RATE) {
+                s_out_phase -= AUDIO_OUT_RATE;
+                if (s_staging_avail >= bytes_per_pair) {
+                    s_staging_pos   += bytes_per_pair;
+                    s_staging_avail -= bytes_per_pair;
+                }
+            }
 
             int16_t left, right;
             memcpy(&left, raw, 2);
@@ -321,7 +334,7 @@ static void dma_audio_irq_handler(void) {
 
     // Refill the buffer that just finished playing
     fill_dma_buffer(s_dma_buf[s_dma_active_buf], DMA_BUF_SAMPLES);
-    s_player.position += DMA_BUF_SAMPLES;
+    s_player.position += s_last_fill_consumed;
     s_dma_active_buf = next_buf;
 }
 
@@ -729,8 +742,12 @@ static void setup_playback_hw(void) {
     gpio_set_function(AUDIO_PIN_R, GPIO_FUNC_PWM);
     s_pwm_slice = pwm_gpio_to_slice_num(AUDIO_PIN_L);
 
+    // Fixed ultrasonic output rate (AUDIO_OUT_RATE); the content's own rate
+    // only drives the resample accumulator in fill_dma_buffer. This keeps the
+    // PWM pulse repetition frequency inaudible (22050 Hz content used to
+    // whistle at 22 kHz).
     uint32_t sys_clk = clock_get_hz(clk_sys);
-    uint32_t target = s_player.sample_rate * (uint32_t)(PWM_WRAP + 1);
+    uint32_t target = (uint32_t)AUDIO_OUT_RATE * (uint32_t)(PWM_WRAP + 1);
     uint32_t div_int = sys_clk / target;
     uint32_t remainder = sys_clk - div_int * target;
     uint32_t div_frac = (remainder * 16 + target / 2) / target;
@@ -766,6 +783,7 @@ static void setup_playback_hw(void) {
     s_stop_after_fade = false;
 
     // Pre-fill both DMA ping-pong buffers
+    s_out_phase = 0;
     fill_dma_buffer(s_dma_buf[0], DMA_BUF_SAMPLES);
     fill_dma_buffer(s_dma_buf[1], DMA_BUF_SAMPLES);
     s_dma_active_buf = 0;
