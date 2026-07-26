@@ -94,6 +94,7 @@ def main():
         banks[bank] += smp + gap
         ranges[name] = (bank, first, first + len(smp) - 1)
     for b, data in banks.items():
+        assert 2 * len(data) <= 65536, f"bank{b} overflow: {2*len(data)} bytes"
         if data:
             write_wav(os.path.join(OUT, f"bank{b}.wav"), data)
             print(f"bank{b}.wav: {len(data)*2} bytes data")

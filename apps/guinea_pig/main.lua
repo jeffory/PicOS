@@ -510,7 +510,9 @@ local function draw_sprinkler(sx, sy, sweep, active, t)
         end
     else
         local jet_w = 24
-        local jx = math.floor(sx - jet_w + sweep * (jet_w - 8) + 8)
+        -- mirror the sprite path: sweep<0.5 sprays left of the nozzle, >=0.5 right;
+        -- travel the same 48px envelope as the hitbox swing
+        local jx = math.floor(sx - jet_w + sweep * 48 + 8)
         for i = 0, jet_w - 4, 6 do
             disp.fillRect(jx + i, sy + 1 + (i % 3), 4, 3, WATER_BLUE)
         end
@@ -1155,6 +1157,7 @@ local function update_enemies(dt)
             end
             if player.dashing and aabb_overlap(player.x, player.y, player.w, player.h, e.x, e.y + 9, e.w, 9) then
                 e.alive = false
+                sfx.play("enemy_defeat")
                 spawn_burst(e.x + 7, e.y + 9, GREEN, 6)
                 player.score = player.score + 50
             end
@@ -1187,6 +1190,7 @@ local function update_enemies(dt)
             end
             if player.dashing and aabb_overlap(player.x, player.y, player.w, player.h, e.x, e.y, e.w, e.h) then
                 e.alive = false
+                sfx.play("enemy_defeat")
                 spawn_burst(e.x + 5, e.y + 7, RED, 6)
                 player.score = player.score + 50
             end
@@ -1540,6 +1544,7 @@ end
 -- the screen. The gameplay cluster sets are sprinkled over a 3200px world —
 -- far too sparse to fill a static 320px title frame.
 local function draw_title_strip(imgs, base_y, tile_w)
+    if #imgs == 0 then return end
     local n = 0
     for x = 0, SCREEN_W - 1, tile_w do
         local img = imgs[(n % #imgs) + 1]

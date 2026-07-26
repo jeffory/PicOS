@@ -41,9 +41,11 @@ def main():
             errors.append(f"{name}: size {img.size} != {dims}")
         if name in OPAQUE and any(px == (255, 0, 255) for px in img.getdata()):
             errors.append(f"{name}: has transparent pixels (tile gap bug)")
-    for name in ("bank1.wav", "bgm.wav"):
+    for name in ("bank1.wav", "bgm.wav", "bank2.wav"):
         p = os.path.join(APP, "sfx", name)
         if not os.path.exists(p):
+            if name == "bank2.wav":
+                continue  # optional: only exists when bank1 overflows
             errors.append(f"missing sfx {name}"); continue
         err = check_wav(p)
         if err: errors.append(err)
