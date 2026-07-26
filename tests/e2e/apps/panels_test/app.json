@@ -1,0 +1,7 @@
+{
+  "id": "com.test.panelstest",
+  "name": "PanelsTest",
+  "description": "E2E fixture: panels.lua framework lifecycle",
+  "version": "1.0.0",
+  "author": "e2e"
+}
