@@ -50,14 +50,13 @@ local DARK_BROWN = disp.rgb(90, 55, 25)
 local LIGHT_BROWN = disp.rgb(180, 130, 70)
 local GRAY = disp.rgb(128, 128, 128)
 local DARK_GRAY = disp.rgb(64, 64, 64)
-local SKY_LIGHT = disp.rgb(135, 206, 235)
-local SKY_MID = disp.rgb(100, 170, 220)
-local SKY_DARK = disp.rgb(70, 130, 200)
+local SKY_LIGHT = disp.rgb(255, 224, 160)   -- golden horizon glow
+local SKY_MID = disp.rgb(150, 200, 235)
+local SKY_DARK = disp.rgb(90, 160, 215)
 local GRASS_GREEN = disp.rgb(80, 180, 50)
 local GRASS_DARK = disp.rgb(50, 130, 30)
 local CLOUD_WHITE = disp.rgb(240, 245, 255)
 local CLOUD_SHADOW = disp.rgb(200, 210, 230)
-local HILL_FAR = disp.rgb(40, 90, 40)
 local PINK = disp.rgb(255, 180, 180)
 local GOLD = disp.rgb(255, 215, 0)
 local MAGENTA = disp.rgb(255, 0, 255)
@@ -321,9 +320,12 @@ load_sprite("tile_grass", "tile_grass_top.png")     -- 16x16 grass top
 load_sprite("tile_earth", "tile_earth.png")         -- 16x16 solid earth
 load_sprite("tile_edge_l", "tile_edge_l.png")     -- 16x16 left end cap
 load_sprite("tile_edge_r", "tile_edge_r.png")     -- 16x16 right end cap
-load_sprite("mountain_far", "mountain_far.png")     -- 128x64 far mountain
-load_sprite("mountain_mid", "mountain_mid.png")     -- 96x80 mid mountain
-load_sprite("island_distant", "island_distant.png") -- 64x48 distant island
+load_sprite("bg_trees_far_1", "bg_trees_far_1.png")     -- 160x72 dense tree line
+load_sprite("bg_trees_far_2", "bg_trees_far_2.png")     -- 160x72 orchard + shed
+load_sprite("bg_fence_mid_1", "bg_fence_mid_1.png")     -- 160x56 picket fence + hedge
+load_sprite("bg_fence_mid_2", "bg_fence_mid_2.png")     -- 160x56 weathered fence + flowers
+load_sprite("bg_garden_near_1", "bg_garden_near_1.png") -- 128x32 carrot/radish bed
+load_sprite("bg_garden_near_2", "bg_garden_near_2.png") -- 128x32 tulip bed
 
 -- Guinea pig animation: sprite sheet frame drawing
 -- Sheets are horizontal strips: frame N is at x=N*32, y=0, w=32, h=32
@@ -708,26 +710,18 @@ local clouds_near = {
     {x = 3000, y = 70, w = 32},
 }
 
-local hills = {
-    {cx = 150, h = 60},
-    {cx = 550, h = 50},
-    {cx = 950, h = 55},
-    {cx = 1350, h = 45},
-    {cx = 1850, h = 60},
-    {cx = 2250, h = 50},
-    {cx = 2750, h = 55},
+local bg_trees_far = {
+    {x = 80, img = 1}, {x = 620, img = 2}, {x = 1180, img = 1},
+    {x = 1760, img = 2}, {x = 2340, img = 1}, {x = 2920, img = 2},
 }
-
-local mountains_far = {
-    {x = 100, y = 185}, {x = 600, y = 175}, {x = 1200, y = 190},
-    {x = 1800, y = 180}, {x = 2400, y = 185}, {x = 3000, y = 175},
+local bg_fence_mid = {
+    {x = 260, img = 1}, {x = 900, img = 2}, {x = 1540, img = 1},
+    {x = 2180, img = 2}, {x = 2820, img = 1},
 }
-local mountains_mid = {
-    {x = 350, y = 195}, {x = 900, y = 200}, {x = 1500, y = 190},
-    {x = 2100, y = 200}, {x = 2700, y = 195},
-}
-local islands_distant = {
-    {x = 700, y = 160}, {x = 2000, y = 150},
+local bg_garden_near = {
+    {x = 40, img = 1}, {x = 480, img = 2}, {x = 980, img = 1},
+    {x = 1520, img = 2}, {x = 2060, img = 1}, {x = 2560, img = 2},
+    {x = 2980, img = 1},
 }
 
 local function parallax_x(world_x, ox, factor)
@@ -735,53 +729,28 @@ local function parallax_x(world_x, ox, factor)
 end
 
 local function draw_sky()
-    disp.fillRect(0, 0, SCREEN_W, 80, SKY_LIGHT)
-    disp.fillRect(0, 80, SCREEN_W, 80, SKY_MID)
-    disp.fillRect(0, 160, SCREEN_W, 160, SKY_DARK)
+    disp.fillRect(0, 0, SCREEN_W, 120, SKY_DARK)
+    disp.fillRect(0, 120, SCREEN_W, 120, SKY_MID)
+    disp.fillRect(0, 240, SCREEN_W, 80, SKY_LIGHT)
 end
 
-local function draw_hills(ox)
-    for _, h in ipairs(hills) do
-        local sx = parallax_x(h.cx, ox, 0.15)
-        local hw = 120
-        for row = 0, h.h - 1 do
-            local ratio = (h.h - row) / h.h
-            local rw = math.floor(hw * ratio)
-            if sx - rw < SCREEN_W and sx + rw > 0 then
-                disp.fillRect(sx - rw, GROUND_Y - h.h + row, rw * 2, 1, HILL_FAR)
+local function draw_cluster_set(set, imgs, base_y, ox, factor)
+    for _, c in ipairs(set) do
+        local img = imgs[c.img]
+        if img then
+            local _, ih = img:getSize()
+            local sx = parallax_x(c.x, ox, factor)
+            if sx > -170 and sx < SCREEN_W + 10 then
+                img:draw(sx, base_y - ih)
             end
         end
     end
 end
 
-local function draw_mountains(ox)
-    -- Far mountains: parallax 0.1 (slowest, most distant)
-    if sprites.mountain_far then
-        for _, m in ipairs(mountains_far) do
-            local sx = parallax_x(m.x, ox, 0.1)
-            if sx > -130 and sx < SCREEN_W + 10 then
-                sprites.mountain_far:draw(sx, m.y)
-            end
-        end
-    end
-    -- Mid mountains: parallax 0.2
-    if sprites.mountain_mid then
-        for _, m in ipairs(mountains_mid) do
-            local sx = parallax_x(m.x, ox, 0.2)
-            if sx > -100 and sx < SCREEN_W + 10 then
-                sprites.mountain_mid:draw(sx, m.y)
-            end
-        end
-    end
-    -- Distant islands: parallax 0.15
-    if sprites.island_distant then
-        for _, isl in ipairs(islands_distant) do
-            local sx = parallax_x(isl.x, ox, 0.15)
-            if sx > -70 and sx < SCREEN_W + 10 then
-                sprites.island_distant:draw(sx, isl.y)
-            end
-        end
-    end
+local function draw_garden_layers(ox)
+    draw_cluster_set(bg_trees_far,  {sprites.bg_trees_far_1, sprites.bg_trees_far_2},  GROUND_Y + 8, ox, 0.10)
+    draw_cluster_set(bg_fence_mid,  {sprites.bg_fence_mid_1, sprites.bg_fence_mid_2},  GROUND_Y + 4, ox, 0.25)
+    draw_cluster_set(bg_garden_near,{sprites.bg_garden_near_1, sprites.bg_garden_near_2}, GROUND_Y + 2, ox, 0.50)
 end
 
 local function draw_cloud(sx, sy, w)
@@ -1561,7 +1530,7 @@ local menu_scene = {
     end,
     draw = function()
         draw_sky()
-        disp.drawText(68, 50, "GUINEA PIG RUN", YELLOW, SKY_LIGHT)
+        disp.drawText(68, 50, "GUINEA PIG RUN", YELLOW, SKY_DARK)
         -- Big guinea pig (scaled sprite or fallback)
         local cx, cy = 140, 100
         local menu_img = sprites.gp_east
@@ -1574,17 +1543,17 @@ local menu_scene = {
             disp.fillRect(cx + 34, cy + 6, 12, 16, BROWN)
             disp.fillRect(cx + 42, cy + 12, 4, 4, PINK)
         end
-        disp.drawText(50, 160, "Arrows: Move   Up: Jump", DARK_GREEN, SKY_DARK)
-        disp.drawText(50, 175, "F1: Sonic Squeak (hold)", DARK_GREEN, SKY_DARK)
-        disp.drawText(50, 190, "F2: Dash Attack", DARK_GREEN, SKY_DARK)
-        disp.drawText(50, 205, "Down: Hide in hay", DARK_GREEN, SKY_DARK)
+        disp.drawText(50, 160, "Arrows: Move   Up: Jump", DARK_GREEN, SKY_MID)
+        disp.drawText(50, 175, "F1: Sonic Squeak (hold)", DARK_GREEN, SKY_MID)
+        disp.drawText(50, 190, "F2: Dash Attack", DARK_GREEN, SKY_MID)
+        disp.drawText(50, 205, "Down: Hide in hay", DARK_GREEN, SKY_MID)
         if high_score > 0 then
-            disp.drawText(80, 240, "High Score: " .. high_score, GOLD, SKY_DARK)
+            disp.drawText(80, 240, "High Score: " .. high_score, DARK_RED, SKY_LIGHT)
         end
         if math.floor(game_time * 2) % 2 == 0 then
-            disp.drawText(60, 275, "Press ENTER to Start", WHITE, SKY_DARK)
+            disp.drawText(60, 275, "Press ENTER to Start", BLACK, SKY_LIGHT)
         end
-        disp.drawText(84, 300, "ESC to Exit", GRAY, SKY_DARK)
+        disp.drawText(84, 300, "ESC to Exit", DARK_GRAY, SKY_LIGHT)
     end
 }
 
@@ -1636,8 +1605,7 @@ local play_scene = {
     draw = function()
         local ox, oy = camera_obj:getOffset()
         draw_sky()
-        draw_mountains(ox)
-        draw_hills(ox)
+        draw_garden_layers(ox)
         draw_parallax(ox)
         draw_world(ox, oy)
         draw_hud()
@@ -1670,7 +1638,7 @@ local win_scene = {
     draw = function()
         draw_sky()
         draw_house(136, 60)
-        disp.drawText(68, 110, "HOME SWEET HOME!", GOLD, SKY_MID)
+        disp.drawText(68, 110, "HOME SWEET HOME!", GOLD, SKY_DARK)
         disp.drawText(100, 140, "Score: " .. player.score, WHITE, SKY_MID)
         disp.drawText(80, 160, "Veggies: " .. veggies_collected .. "/" .. total_veggies, GREEN, SKY_MID)
         if veggies_collected >= total_veggies then
@@ -1681,8 +1649,8 @@ local win_scene = {
         else
             disp.drawText(76, 200, "Best: " .. high_score, GRAY, SKY_MID)
         end
-        disp.drawText(70, 240, "ENTER: Play Again", WHITE, SKY_DARK)
-        disp.drawText(88, 260, "ESC: Menu", GRAY, SKY_DARK)
+        disp.drawText(70, 240, "ENTER: Play Again", BLACK, SKY_LIGHT)
+        disp.drawText(88, 260, "ESC: Menu", DARK_GRAY, SKY_LIGHT)
         draw_particles_at(0, 0)
     end
 }
