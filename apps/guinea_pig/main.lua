@@ -201,6 +201,8 @@ load_sprite("cloud_large", "cloud_large.png")      -- 64x32
 load_sprite("cloud_small", "cloud_small.png")      -- 48x32
 load_sprite("tile_grass", "tile_grass_top.png")     -- 16x16 grass top
 load_sprite("tile_earth", "tile_earth.png")         -- 16x16 solid earth
+load_sprite("tile_edge_l", "tile_edge_l.png")     -- 16x16 left end cap
+load_sprite("tile_edge_r", "tile_edge_r.png")     -- 16x16 right end cap
 load_sprite("mountain_far", "mountain_far.png")     -- 128x64 far mountain
 load_sprite("mountain_mid", "mountain_mid.png")     -- 96x80 mid mountain
 load_sprite("island_distant", "island_distant.png") -- 64x48 distant island
@@ -1182,6 +1184,33 @@ end
 -- [11] DRAWING
 -- ============================================================
 
+local function draw_tiled_platform(sx, sy, w, h)
+    if not (sprites.tile_grass and sprites.tile_earth) then
+        disp.fillRect(sx, sy + 3, w, h - 3, BROWN)
+        disp.fillRect(sx, sy, w, 4, GRASS_GREEN)
+        return
+    end
+    local body_x, body_w = sx, w
+    if sprites.tile_edge_l and w >= 16 then
+        sprites.tile_edge_l:draw(sx, sy)
+        body_x = body_x + 16
+        body_w = body_w - 16
+    end
+    if sprites.tile_edge_r and w >= 32 then
+        sprites.tile_edge_r:draw(sx + w - 16, sy)
+        body_w = body_w - 16
+    end
+    if body_w > 0 then
+        sprites.tile_grass:drawTiled(body_x, sy, body_w, 16)
+        if h > 16 then
+            sprites.tile_earth:drawTiled(body_x, sy + 16, body_w, h - 16)
+            -- fill strip under the caps too
+            sprites.tile_earth:drawTiled(sx, sy + 16, 16, h - 16)
+            sprites.tile_earth:drawTiled(sx + w - 16, sy + 16, 16, h - 16)
+        end
+    end
+end
+
 local function draw_world(ox, oy)
     -- Platforms
     for _, plat in ipairs(platforms) do
@@ -1190,30 +1219,12 @@ local function draw_world(ox, oy)
         if sx > SCREEN_W or sx + plat.w < 0 or sy > SCREEN_H or sy + plat.h < 0 then
             -- skip off-screen
         elseif plat.ground then
-            if sprites.tile_grass and sprites.tile_earth then
-                sprites.tile_grass:drawTiled(sx, sy, plat.w, 16)
-                if plat.h > 16 then
-                    sprites.tile_earth:drawTiled(sx, sy + 16, plat.w, plat.h - 16)
-                end
-            else
-                disp.fillRect(sx, sy + 4, plat.w, plat.h - 4, BROWN)
-                disp.fillRect(sx, sy, plat.w, 4, GRASS_GREEN)
-                disp.fillRect(sx, sy + 3, plat.w, 2, GRASS_DARK)
-            end
+            draw_tiled_platform(sx, sy, plat.w, plat.h)
         elseif plat.wall then
             disp.fillRect(sx, sy, plat.w, plat.h, GRAY)
             disp.drawRect(sx, sy, plat.w, plat.h, DARK_GRAY)
         else
-            if sprites.tile_grass and sprites.tile_earth then
-                sprites.tile_grass:drawTiled(sx, sy, plat.w, 16)
-                if plat.h > 16 then
-                    sprites.tile_earth:drawTiled(sx, sy + 16, plat.w, plat.h - 16)
-                end
-            else
-                disp.fillRect(sx, sy + 3, plat.w, plat.h - 3, BROWN)
-                disp.fillRect(sx, sy, plat.w, 4, GRASS_GREEN)
-                disp.fillRect(sx, sy + 3, plat.w, 1, GRASS_DARK)
-            end
+            draw_tiled_platform(sx, sy, plat.w, plat.h)
         end
     end
 
