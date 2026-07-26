@@ -327,6 +327,7 @@ load_sprite("bg_fence_mid_1", "bg_fence_mid_1.png")     -- 160x56 picket fence +
 load_sprite("bg_fence_mid_2", "bg_fence_mid_2.png")     -- 160x56 weathered fence + flowers
 load_sprite("bg_garden_near_1", "bg_garden_near_1.png") -- 128x32 carrot/radish bed
 load_sprite("bg_garden_near_2", "bg_garden_near_2.png") -- 128x32 tulip bed
+load_sprite("title_logo", "title_logo.png")             -- 256x64 title logo
 
 -- Guinea pig animation: sprite sheet frame drawing
 -- Sheets are horizontal strips: frame N is at x=N*32, y=0, w=32, h=32
@@ -1525,6 +1526,21 @@ local function save_high_score()
     game.save.set("guineapig", {high_score = high_score})
 end
 
+-- Title backdrop helper: tile a garden layer's sprites edge-to-edge across
+-- the screen. The gameplay cluster sets are sprinkled over a 3200px world —
+-- far too sparse to fill a static 320px title frame.
+local function draw_title_strip(imgs, base_y, tile_w)
+    local n = 0
+    for x = 0, SCREEN_W - 1, tile_w do
+        local img = imgs[(n % #imgs) + 1]
+        if img then
+            local _, ih = img:getSize()
+            img:draw(x, base_y - ih)
+        end
+        n = n + 1
+    end
+end
+
 -- MENU
 local menu_scene = {
     enter = function()
@@ -1536,6 +1552,7 @@ local menu_scene = {
         game_time = game_time + dt
         local pressed = input.getButtonsPressed()
         if pressed & input.BTN_ENTER ~= 0 then
+            sfx.play("menu_select")
             game.scene.switch("play")
         end
         if pressed & input.BTN_ESC ~= 0 then
@@ -1543,31 +1560,45 @@ local menu_scene = {
         end
     end,
     draw = function()
+        local FOOTER_TOP = 236
         draw_sky()
-        disp.drawText(68, 50, "GUINEA PIG RUN", YELLOW, SKY_DARK)
-        -- Big guinea pig (scaled sprite or fallback)
-        local cx, cy = 140, 100
-        local menu_img = sprites.gp_east
-        if menu_img then
-            menu_img:drawScaledNN(cx, cy, 3)
-        else
-            disp.fillRect(cx, cy + 8, 40, 20, BROWN)
-            disp.fillRect(cx + 4, cy + 4, 32, 28, BROWN)
-            disp.fillRect(cx + 8, cy + 16, 24, 12, LIGHT_BROWN)
-            disp.fillRect(cx + 34, cy + 6, 12, 16, BROWN)
-            disp.fillRect(cx + 42, cy + 12, 4, 4, PINK)
+        for _, c in ipairs(clouds_near) do
+            draw_cloud(c.x % SCREEN_W, c.y * 0.6, c.w)
         end
-        disp.drawText(50, 160, "Arrows: Move   Up: Jump", DARK_GREEN, SKY_MID)
-        disp.drawText(50, 175, "F1: Sonic Squeak (hold)", DARK_GREEN, SKY_MID)
-        disp.drawText(50, 190, "F2: Dash Attack", DARK_GREEN, SKY_MID)
-        disp.drawText(50, 205, "Down: Hide in hay", DARK_GREEN, SKY_MID)
+        if sprites.title_logo then
+            local lw = sprites.title_logo:getSize()
+            sprites.title_logo:drawScaled((SCREEN_W - lw * 0.75) / 2, 40, 0.75)
+        else
+            disp.drawText(66, 48, "GUINEA PIG RUN", DARK_BROWN, SKY_DARK)
+            disp.drawText(64, 46, "GUINEA PIG RUN", YELLOW, SKY_DARK)
+        end
+        -- Garden backdrop composed from the game's own layer sprites,
+        -- grounded on the footer panel
+        draw_title_strip({sprites.bg_trees_far_1, sprites.bg_trees_far_2}, FOOTER_TOP, 160)
+        draw_title_strip({sprites.bg_fence_mid_1, sprites.bg_fence_mid_2}, FOOTER_TOP, 160)
+        draw_title_strip({sprites.bg_garden_near_1, sprites.bg_garden_near_2}, FOOTER_TOP, 128)
+        -- Pig runs home along the footer top; the house occludes it at the
+        -- end of each pass
+        local run_x = math.floor((game_time * 60) % (SCREEN_W + 80)) - 60
+        local rf = math.floor(game_time * 10) % GP_RUN_FRAMES
+        if sprites.gp_run_east then
+            sprites.gp_run_east:draw(run_x, FOOTER_TOP - GP_FRAME_H, nil,
+                {x = rf * GP_FRAME_W, y = 0, w = GP_FRAME_W, h = GP_FRAME_H})
+        end
+        draw_house(250, FOOTER_TOP - 50)
+        -- Footer panel
+        local panel = disp.rgb(30, 60, 30)
+        disp.fillRect(0, FOOTER_TOP, SCREEN_W, SCREEN_H - FOOTER_TOP, panel)
+        disp.drawText(12, 244, "Arrows: Move   Up/Enter: Jump", WHITE, panel)
+        disp.drawText(12, 258, "F1: Sonic Squeak (hold)", WHITE, panel)
+        disp.drawText(12, 272, "F2: Dash   Down: Hide in hay", WHITE, panel)
         if high_score > 0 then
-            disp.drawText(80, 240, "High Score: " .. high_score, DARK_RED, SKY_LIGHT)
+            disp.drawText(12, 288, "Best: " .. high_score, GOLD, panel)
         end
         if math.floor(game_time * 2) % 2 == 0 then
-            disp.drawText(60, 275, "Press ENTER to Start", BLACK, SKY_LIGHT)
+            disp.drawText(196, 288, "Press ENTER", YELLOW, panel)
         end
-        disp.drawText(84, 300, "ESC to Exit", DARK_GRAY, SKY_LIGHT)
+        disp.drawText(196, 302, "ESC to Exit", GRAY, panel)
     end
 }
 
