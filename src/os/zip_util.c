@@ -27,6 +27,43 @@ static void zip_set_err(char err[ZIP_ERR_MAX], const char *fmt, ...) {
 // ── Seek-based miniz read bridge ─────────────────────────────────────────────
 
 // miniz m_pRead callback: stream the archive straight from the SD card.
+// ── Heap plumbing ────────────────────────────────────────────────────────────
+// miniz_common.h defines MZ_MALLOC unconditionally (no #ifndef guard), which
+// silently overrides the build's attempted umm redirect in miniz_picos.h —
+// miniz's DEFAULT allocator is therefore newlib malloc on the ~28KB SRAM
+// heap, far too small for the ~11KB inflate state plus I/O buffers. Every
+// archive gets explicit allocators instead: umm_malloc (8MB PSRAM) on
+// firmware, plain malloc on the host/simulator.
+
+#ifndef PICOS_SIMULATOR
+#include "umm_malloc.h"
+#define ZIP_HEAP_ALLOC(n)      umm_malloc(n)
+#define ZIP_HEAP_FREE(p)       umm_free(p)
+#define ZIP_HEAP_REALLOC(p, n) umm_realloc(p, n)
+#else
+#include <stdlib.h>
+#define ZIP_HEAP_ALLOC(n)      malloc(n)
+#define ZIP_HEAP_FREE(p)       free(p)
+#define ZIP_HEAP_REALLOC(p, n) realloc(p, n)
+#endif
+
+static void *zip_alloc_cb(void *opaque, size_t items, size_t size) {
+    (void)opaque;
+    return ZIP_HEAP_ALLOC(items * size);
+}
+static void zip_free_cb(void *opaque, void *p) {
+    (void)opaque;
+    ZIP_HEAP_FREE(p);
+}
+static void *zip_realloc_cb(void *opaque, void *p, size_t items, size_t size) {
+    (void)opaque;
+    return ZIP_HEAP_REALLOC(p, items * size);
+}
+
+void zip_reader_free(void *p) {
+    if (p) ZIP_HEAP_FREE(p);
+}
+
 // Sequential reads (the common case while inflating) skip the redundant seek.
 static size_t zip_read_cb(void *opaque, mz_uint64 file_ofs, void *buf, size_t n) {
     zip_reader_t *zr = (zip_reader_t *)opaque;
@@ -72,6 +109,9 @@ bool zip_reader_open(zip_reader_t *zr, const char *zip_path, char err[ZIP_ERR_MA
     mz_zip_zero_struct(&zr->mz);
     zr->mz.m_pRead      = zip_read_cb;
     zr->mz.m_pIO_opaque = zr;
+    zr->mz.m_pAlloc     = zip_alloc_cb;
+    zr->mz.m_pFree      = zip_free_cb;
+    zr->mz.m_pRealloc   = zip_realloc_cb;
 
     if (!mz_zip_reader_init(&zr->mz, (mz_uint64)zr->file_size, 0)) {
         sdcard_fclose(f);
@@ -120,6 +160,34 @@ int zip_reader_locate(zip_reader_t *zr, const char *name) {
     return mz_zip_reader_locate_file(&zr->mz, name, NULL, 0);
 }
 
+// ── Iterator-based decompression core ────────────────────────────────────────
+// miniz's one-shot extract paths (extract_to_mem / _to_heap / _to_callback)
+// declare an ~11KB tinfl_decompressor ON THE STACK. Core 0's main stack is
+// 4KB of SCRATCH memory, so on hardware any DEFLATED entry silently smashed
+// the stack and failed with a corrupted inflate state — the simulator's 8MB
+// host stack hid it completely (stored entries worked, which is what made
+// the sim tests green). Everything below therefore uses the iterator API,
+// whose state — decompressor included — is heap-allocated through the
+// archive's allocator (umm_malloc/PSRAM on firmware via miniz_picos.h).
+
+// Decompress entry idx into dst (which must hold st.m_uncomp_size bytes).
+// Returns true only when the entry decompressed completely with a good CRC
+// (mz_zip_reader_extract_iter_free performs both checks).
+static bool iter_read_full(zip_reader_t *zr, int idx, uint8_t *dst,
+                           size_t dst_cap) {
+    mz_zip_reader_extract_iter_state *it =
+        mz_zip_reader_extract_iter_new(&zr->mz, (mz_uint)idx, 0);
+    if (!it) return false;
+    size_t total = 0;
+    while (total < dst_cap) {
+        size_t n = mz_zip_reader_extract_iter_read(it, dst + total,
+                                                   dst_cap - total);
+        if (n == 0) break;
+        total += n;
+    }
+    return mz_zip_reader_extract_iter_free(it) == MZ_TRUE;
+}
+
 // ── In-memory read ───────────────────────────────────────────────────────────
 
 bool zip_reader_read_to_heap(zip_reader_t *zr, int idx, void **out_data,
@@ -145,14 +213,21 @@ bool zip_reader_read_to_heap(zip_reader_t *zr, int idx, void **out_data,
         return false;
     }
 
-    size_t len = 0;
-    void *data = mz_zip_reader_extract_to_heap(&zr->mz, (mz_uint)idx, &len, 0);
+    // Allocated with the archive's (umm-backed) allocator — free with
+    // zip_reader_free(), NOT mz_free() (which is the std-malloc pair).
+    size_t len = (size_t)st.m_uncomp_size;
+    void *data = zr->mz.m_pAlloc(zr->mz.m_pAlloc_opaque, 1, len ? len : 1);
     if (!data) {
+        zip_set_err(err, "out of memory");
+        return false;
+    }
+    if (!iter_read_full(zr, idx, (uint8_t *)data, len)) {
+        zr->mz.m_pFree(zr->mz.m_pAlloc_opaque, data);
         zip_set_err(err, "extract failed");
         return false;
     }
 
-    *out_data = data;  // free with mz_free()
+    *out_data = data;  // free with zip_reader_free()
     *out_len  = len;
     return true;
 }
@@ -173,7 +248,7 @@ int zip_reader_read_to_buf(zip_reader_t *zr, int idx, void *buf,
                     (unsigned)st.m_uncomp_size);
         return -1;
     }
-    if (!mz_zip_reader_extract_to_mem(&zr->mz, (mz_uint)idx, buf, buf_cap, 0)) {
+    if (!iter_read_full(zr, idx, (uint8_t *)buf, (size_t)st.m_uncomp_size)) {
         zip_set_err(err, "extract failed");
         return -1;
     }
@@ -182,23 +257,11 @@ int zip_reader_read_to_buf(zip_reader_t *zr, int idx, void *buf,
 
 // ── Streamed extraction ──────────────────────────────────────────────────────
 
-typedef struct {
-    sdfile_t f;
-    bool     write_failed;
-} zip_write_ctx_t;
-
-static size_t zip_write_cb(void *opaque, mz_uint64 file_ofs, const void *buf, size_t n) {
-    (void)file_ofs;  // extract_to_callback writes strictly sequentially
-    zip_write_ctx_t *ctx = (zip_write_ctx_t *)opaque;
-    int written = sdcard_fwrite(ctx->f, buf, (int)n);
-    if (written != (int)n) {
-        ctx->write_failed = true;
-        return 0;  // abort the extraction
-    }
-    return n;
-}
+// Chunk size for SD writes during streamed extraction (heap, not stack).
+#define ZIP_STREAM_CHUNK (16u * 1024u)
 
 // Core streamed extract — no entry-name validation (callers do that).
+// Iterator API for the same stack-size reason as iter_read_full above.
 static bool extract_streamed(zip_reader_t *zr, int idx, const char *dest_path,
                              char err[ZIP_ERR_MAX]) {
     if (!zip_ensure_parent_dirs(dest_path)) {
@@ -206,20 +269,43 @@ static bool extract_streamed(zip_reader_t *zr, int idx, const char *dest_path,
         return false;
     }
 
+    uint8_t *chunk = (uint8_t *)zr->mz.m_pAlloc(zr->mz.m_pAlloc_opaque, 1,
+                                                ZIP_STREAM_CHUNK);
+    if (!chunk) {
+        zip_set_err(err, "out of memory");
+        return false;
+    }
+
     sdfile_t f = sdcard_fopen(dest_path, "w");
     if (!f) {
+        zr->mz.m_pFree(zr->mz.m_pAlloc_opaque, chunk);
         zip_set_err(err, "write failed");
         return false;
     }
 
-    zip_write_ctx_t ctx = { .f = f, .write_failed = false };
-    mz_bool ok = mz_zip_reader_extract_to_callback(&zr->mz, (mz_uint)idx,
-                                                   zip_write_cb, &ctx, 0);
-    sdcard_fclose(f);
+    mz_zip_reader_extract_iter_state *it =
+        mz_zip_reader_extract_iter_new(&zr->mz, (mz_uint)idx, 0);
+    bool write_failed = false;
+    if (it) {
+        for (;;) {
+            size_t n = mz_zip_reader_extract_iter_read(it, chunk,
+                                                       ZIP_STREAM_CHUNK);
+            if (n == 0) break;
+            if (sdcard_fwrite(f, chunk, (int)n) != (int)n) {
+                write_failed = true;
+                break;
+            }
+        }
+    }
+    bool ok = it && mz_zip_reader_extract_iter_free(it) == MZ_TRUE &&
+              !write_failed;
 
-    if (!ok || ctx.write_failed) {
+    sdcard_fclose(f);
+    zr->mz.m_pFree(zr->mz.m_pAlloc_opaque, chunk);
+
+    if (!ok) {
         sdcard_delete(dest_path);  // don't leave a truncated file behind
-        zip_set_err(err, ctx.write_failed ? "write failed" : "extract failed");
+        zip_set_err(err, write_failed ? "write failed" : "extract failed");
         return false;
     }
     return true;

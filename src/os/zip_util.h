@@ -98,10 +98,10 @@ int  zip_reader_locate(zip_reader_t *zr, const char *name);
 
 // ── Extraction ───────────────────────────────────────────────────────────────
 
-// Decompress one entry into a single heap buffer. The buffer comes from
-// miniz's allocator (MZ_MALLOC → umm_malloc on firmware, malloc on the
-// simulator); free it with mz_free(). max_len of 0 means "engine default";
-// either way the read is capped at ZIP_MAX_READ_MEM.
+// Decompress one entry into a single heap buffer allocated from the ZIP
+// heap (umm_malloc/PSRAM on firmware, malloc on the simulator); free it
+// with zip_reader_free(). max_len of 0 means "engine default"; either way
+// the read is capped at ZIP_MAX_READ_MEM.
 bool zip_reader_read_to_heap(zip_reader_t *zr, int idx, void **out_data,
                              size_t *out_len, size_t max_len,
                              char err[ZIP_ERR_MAX]);
@@ -137,6 +137,9 @@ bool zip_reader_extract_all(zip_reader_t *zr, const char *dest_dir,
 // allowed. Note: unlike the old substring check, "foo..bar" is ACCEPTED —
 // only exact "." / ".." components are traversal hazards.
 bool zip_entry_name_valid(const char *name);
+
+// Free a buffer returned by zip_reader_read_to_heap().
+void zip_reader_free(void *p);
 
 // mkdir -p for every directory component of full_path (the final component
 // is treated as a file name and not created).

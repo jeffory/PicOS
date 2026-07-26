@@ -258,7 +258,7 @@ static int l_ar_read(lua_State *L) {
         return 2;
     }
     lua_pushlstring(L, (const char *)data, len);
-    mz_free(data);
+    zip_reader_free(data);
     return 1;
 }
 
