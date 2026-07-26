@@ -1,0 +1,7 @@
+{
+  "id": "com.test.ziptest",
+  "name": "ZipTest",
+  "description": "E2E fixture: hardened ZIP engine + archive handles",
+  "version": "1.0.0",
+  "author": "e2e"
+}
