@@ -1029,11 +1029,14 @@ local function update_player(dt)
         end
     end
 
-    -- Checkpoint
+    -- Checkpoint (respawn x must sit ON solid ground: AABB overlap needs
+    -- player.x + w > plat.x, so the old gap-lip values 550/950 respawned the
+    -- pig over the void -> fall loop -> guaranteed death. 620/900 are safely
+    -- inside ground segments 600-950.)
     if player.x > 2050 then player.checkpoint_x = 2050
     elseif player.x > 1450 then player.checkpoint_x = 1450
-    elseif player.x > 950 then player.checkpoint_x = 950
-    elseif player.x > 550 then player.checkpoint_x = 550 end
+    elseif player.x > 950 then player.checkpoint_x = 900
+    elseif player.x > 550 then player.checkpoint_x = 620 end
 
     -- Animation
     if not player.on_ground then
