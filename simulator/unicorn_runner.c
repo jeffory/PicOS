@@ -49,7 +49,7 @@
 #define EMU_REVCALL_SIZE    (4u * 1024)           // 4KB for reverse-call stubs
 
 // Maximum number of trampoline slots (API functions)
-#define MAX_TRAMP_SLOTS     256
+#define MAX_TRAMP_SLOTS     512
 
 // Flag set when uc_emu_stop was called during nested emulation (SVC #254).
 // The outer emulation loop checks this to know it should restart.
@@ -304,15 +304,22 @@ static void trampoline_hook(uc_engine *uc, uint32_t intno, void *user_data) {
             return;
         }
 
-        uint32_t slot = insn & 0xFF;
-
-        // SVC #254: nested callback return sentinel. Stop emulation.
-        // Set flag so outer loop knows to restart after the trampoline returns.
-        if (slot == 254) {
+        // SVC #254 at REVCALL_BASE: nested callback return sentinel.
+        // (Checked by address, not SVC number, so slot 254 stays usable.)
+        if (pc == EMU_REVCALL_BASE) {
             g_emu_nested_stop = 1;
             uc_emu_stop(uc);
             return;
         }
+
+        // Derive the slot from the PC, not the SVC immediate: SVC #imm8
+        // wraps at 256, but slot count has grown past that.
+        if (pc < EMU_TRAMP_BASE || pc >= EMU_TRAMP_BASE + MAX_TRAMP_SLOTS * 4) {
+            fprintf(stderr, "[UNICORN] SVC outside trampoline region at 0x%08x\n", pc);
+            uc_emu_stop(uc);
+            return;
+        }
+        uint32_t slot = (pc - EMU_TRAMP_BASE) / 4;
 
         // Dispatch the API call
         unicorn_tramp_dispatch(uc, slot);
@@ -701,9 +708,10 @@ bool unicorn_run_app(const char *elf_path, const char *app_dir,
     // The interrupt hook dispatches the API call, then BX LR returns to caller.
     {
         for (uint32_t i = 0; i < MAX_TRAMP_SLOTS; i++) {
-            // SVC #imm8: encoding = 0xDF00 | (imm8 & 0xFF)
-            // For slots > 255, we use SVC #0 and encode the slot differently,
-            // but we have < 256 slots so this works.
+            // SVC #imm8: encoding = 0xDF00 | (imm8 & 0xFF). The immediate
+            // wraps past 255, but the hook derives the slot from the PC,
+            // so any slot count works — the encoding just needs to be an
+            // SVC. Keep imm = slot & 0xFF for debug readability.
             uint16_t svc = 0xDF00 | (i & 0xFF);  // SVC #i
             uint16_t bx_lr = 0x4770;              // BX LR
             uc_mem_write(uc, EMU_TRAMP_BASE + i * 4, &svc, 2);

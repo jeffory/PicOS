@@ -2800,6 +2800,80 @@ static void tramp_stub(uc_engine *uc, uint32_t slot) {
 }
 
 // =============================================================================
+// MOD player trampoline handlers (host mod_player_* compiled into the sim)
+// =============================================================================
+#include "../src/drivers/mod_player.h"
+#include "../src/os/zip_archive.h"
+
+static void tramp_modplayer_create(uc_engine *uc) {
+    mod_player_init();  // idempotent; sim main.c never calls it
+    void *p = mod_player_create();
+    write_reg(uc, UC_ARM_REG_R0, p ? handle_wrap(p) : 0);
+}
+static void tramp_modplayer_destroy(uc_engine *uc) {
+    uint32_t h = read_reg(uc, UC_ARM_REG_R0);
+    void *p = handle_unwrap(h);
+    if (p) mod_player_destroy(p);
+    handle_free(h);
+}
+static void tramp_modplayer_load(uc_engine *uc) {
+    void *p = handle_unwrap(read_reg(uc, UC_ARM_REG_R0));
+    char *path = uc_read_string(uc, read_reg(uc, UC_ARM_REG_R1));
+    write_reg(uc, UC_ARM_REG_R0, (p && path) ? (uint32_t)mod_player_load(p, path) : 0);
+}
+static void tramp_modplayer_play(uc_engine *uc) {
+    void *p = handle_unwrap(read_reg(uc, UC_ARM_REG_R0));
+    bool loop = (bool)read_reg(uc, UC_ARM_REG_R1);
+    if (p) mod_player_play(p, loop);
+}
+static void tramp_modplayer_stop(uc_engine *uc) {
+    void *p = handle_unwrap(read_reg(uc, UC_ARM_REG_R0));
+    if (p) mod_player_stop(p);
+}
+static void tramp_modplayer_pause(uc_engine *uc) {
+    void *p = handle_unwrap(read_reg(uc, UC_ARM_REG_R0));
+    if (p) mod_player_pause(p);
+}
+static void tramp_modplayer_resume(uc_engine *uc) {
+    void *p = handle_unwrap(read_reg(uc, UC_ARM_REG_R0));
+    if (p) mod_player_resume(p);
+}
+static void tramp_modplayer_is_playing(uc_engine *uc) {
+    void *p = handle_unwrap(read_reg(uc, UC_ARM_REG_R0));
+    write_reg(uc, UC_ARM_REG_R0, (p && mod_player_is_playing(p)) ? 1u : 0u);
+}
+static void tramp_modplayer_set_volume(uc_engine *uc) {
+    void *p = handle_unwrap(read_reg(uc, UC_ARM_REG_R0));
+    uint8_t vol = (uint8_t)read_reg(uc, UC_ARM_REG_R1);
+    if (p) mod_player_set_volume(p, vol);
+}
+static void tramp_modplayer_get_volume(uc_engine *uc) {
+    void *p = handle_unwrap(read_reg(uc, UC_ARM_REG_R0));
+    write_reg(uc, UC_ARM_REG_R0, p ? (uint32_t)mod_player_get_volume(p) : 0u);
+}
+static void tramp_modplayer_set_loop(uc_engine *uc) {
+    void *p = handle_unwrap(read_reg(uc, UC_ARM_REG_R0));
+    bool loop = (bool)read_reg(uc, UC_ARM_REG_R1);
+    if (p) mod_player_set_loop(p, loop);
+}
+
+// =============================================================================
+// ZIP trampoline handlers (shared zip_archive.c, miniz + host FS)
+// =============================================================================
+
+static void tramp_zip_extract(uc_engine *uc) {
+    char *zip_path = uc_read_string(uc, read_reg(uc, UC_ARM_REG_R0));
+    char *dest_dir = uc_read_string(uc, read_reg(uc, UC_ARM_REG_R1));
+    write_reg(uc, UC_ARM_REG_R0,
+              (zip_path && dest_dir && zip_archive_extract(zip_path, dest_dir)) ? 1u : 0u);
+}
+static void tramp_zip_list(uc_engine *uc) {
+    char *zip_path = uc_read_string(uc, read_reg(uc, UC_ARM_REG_R0));
+    write_reg(uc, UC_ARM_REG_R0,
+              zip_path ? (uint32_t)zip_archive_list(zip_path) : (uint32_t)-1);
+}
+
+// =============================================================================
 // Dispatch table
 // =============================================================================
 
@@ -3115,19 +3189,25 @@ void unicorn_tramp_init(uc_engine *uc) {
     // sub-tables exist purely to keep byte offsets in this struct aligned
     // with os.h's PicoCalcAPI — without them, `version` (the very next
     // field) is read from the wrong offset by native apps.
-    s_stub_names[SLOT_MODPLAYER_CREATE]     = "modplayer.create";
-    s_stub_names[SLOT_MODPLAYER_DESTROY]    = "modplayer.destroy";
-    s_stub_names[SLOT_MODPLAYER_LOAD]       = "modplayer.load";
-    s_stub_names[SLOT_MODPLAYER_PLAY]       = "modplayer.play";
-    s_stub_names[SLOT_MODPLAYER_STOP]       = "modplayer.stop";
-    s_stub_names[SLOT_MODPLAYER_PAUSE]      = "modplayer.pause";
-    s_stub_names[SLOT_MODPLAYER_RESUME]     = "modplayer.resume";
-    s_stub_names[SLOT_MODPLAYER_IS_PLAYING] = "modplayer.isPlaying";
-    s_stub_names[SLOT_MODPLAYER_SET_VOLUME] = "modplayer.setVolume";
-    s_stub_names[SLOT_MODPLAYER_GET_VOLUME] = "modplayer.getVolume";
-    s_stub_names[SLOT_MODPLAYER_SET_LOOP]   = "modplayer.setLoop";
-    s_stub_names[SLOT_ZIP_EXTRACT]          = "zip.extract";
-    s_stub_names[SLOT_ZIP_LIST]             = "zip.list";
+    // modplayer and zip are now fully implemented (see dispatch entries below);
+    // stub names kept for any future slot additions.
+
+    // MOD player (host mod_player_*)
+    s_dispatch[SLOT_MODPLAYER_CREATE]     = tramp_modplayer_create;
+    s_dispatch[SLOT_MODPLAYER_DESTROY]    = tramp_modplayer_destroy;
+    s_dispatch[SLOT_MODPLAYER_LOAD]       = tramp_modplayer_load;
+    s_dispatch[SLOT_MODPLAYER_PLAY]       = tramp_modplayer_play;
+    s_dispatch[SLOT_MODPLAYER_STOP]       = tramp_modplayer_stop;
+    s_dispatch[SLOT_MODPLAYER_PAUSE]      = tramp_modplayer_pause;
+    s_dispatch[SLOT_MODPLAYER_RESUME]     = tramp_modplayer_resume;
+    s_dispatch[SLOT_MODPLAYER_IS_PLAYING] = tramp_modplayer_is_playing;
+    s_dispatch[SLOT_MODPLAYER_SET_VOLUME] = tramp_modplayer_set_volume;
+    s_dispatch[SLOT_MODPLAYER_GET_VOLUME] = tramp_modplayer_get_volume;
+    s_dispatch[SLOT_MODPLAYER_SET_LOOP]   = tramp_modplayer_set_loop;
+
+    // ZIP (shared zip_archive.c)
+    s_dispatch[SLOT_ZIP_EXTRACT]          = tramp_zip_extract;
+    s_dispatch[SLOT_ZIP_LIST]             = tramp_zip_list;
 }
 
 void unicorn_tramp_dispatch(uc_engine *uc, uint32_t slot) {

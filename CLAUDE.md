@@ -315,6 +315,17 @@ conn:setConnectionClosedCallback(fn)  -- connection closed or failed
 
 Status constants: `picocalc.network.kStatusNotConnected` (0), `kStatusConnected` (1), `kStatusNotAvailable` (2).
 
+## Simulator Notes
+
+`make simulator` builds `build_sim/picos_simulator` (SDL2 + Unicorn Engine for native ELF apps). Known divergences from hardware:
+
+- `picocalc.crypto` is **absent** (Lua and native) — mbedTLS is firmware-only (`simulator/CMakeLists.txt` excludes `lua_bridge_crypto.c`; native crypto trampolines are stubs except `randomBytes`).
+- Display post-effects (`effectInvert`…`effectPosterize`) are no-ops on the native (Unicorn) path; Lua-side effects work.
+- `setScrollArea`/`setScrollOffset` are no-ops (no LCD registers).
+- The launcher caches the app list at boot — newly staged apps need a sim restart.
+- Everything else (zip, modplayer, display clip rect, drawPlane, tilemap, sprites) mirrors firmware, including `g_api.version = 4`.
+
 ## Not Yet Implemented
 
 - `picocalc.display.drawBitmap` / raw bitmap blitting (use `picocalc.graphics.image` instead for image loading)
+- Native-app HTTP callbacks (`http_fire_c_pending` is a no-op; native apps must poll `http->isComplete()`)
