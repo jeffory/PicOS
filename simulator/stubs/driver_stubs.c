@@ -825,24 +825,7 @@ void crashlog_write_lua_error(const char *app_name, const char *context, const c
 
 // Display effects (no-op stubs for simulator)
 void display_effect_invert(void) {}
-// Faithful port of firmware display_effect_darken: per-channel scale by
-// factor/256 on the active back buffer (host-endian RGB565, no byte-swap).
-void display_effect_darken(uint8_t factor) {
-    uint16_t *fb = display_get_back_buffer();
-    size_t n = 320 * 320;
-    if (factor == 0) {
-        memset(fb, 0, n * sizeof(uint16_t));
-        return;
-    }
-    if (factor >= 255) return;
-    for (size_t i = 0; i < n; i++) {
-        uint16_t p = fb[i];
-        uint16_t r = (uint16_t)(((p >> 11) & 0x1F) * factor / 256);
-        uint16_t g = (uint16_t)(((p >> 5) & 0x3F) * factor / 256);
-        uint16_t b = (uint16_t)((p & 0x1F) * factor / 256);
-        fb[i] = (uint16_t)((r << 11) | (g << 5) | b);
-    }
-}
+void display_effect_darken(uint8_t factor) { (void)factor; }
 void display_effect_brighten(uint8_t factor) { (void)factor; }
 void display_effect_tint(uint8_t r, uint8_t g, uint8_t b, uint8_t strength) { (void)r; (void)g; (void)b; (void)strength; }
 void display_effect_grayscale(void) {}
