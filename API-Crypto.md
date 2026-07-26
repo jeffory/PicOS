@@ -2,6 +2,8 @@
 
 Cryptographic primitives for hashing, encryption, key exchange, and signature verification. All functions operate on binary strings.
 
+> **Simulator note:** `picocalc.crypto` is absent in the simulator (mbedTLS is firmware-only). Test crypto code on hardware.
+
 ## picocalc.crypto
 
 ### Functions
@@ -43,6 +45,22 @@ Compute the SHA-1 hash of the input data.
 ```lua
 local hash = picocalc.crypto.sha1("hello world")
 -- hash is 20 bytes
+```
+
+---
+
+#### `picocalc.crypto.sha256File(path)`
+Compute the SHA-256 hash of a file, streamed from the SD card in small chunks (the file is never loaded whole into memory). Unlike `sha256`, which returns a 32-byte binary string, `sha256File` returns a lowercase hex digest, ready to compare against published checksums.
+
+- **Parameters:**
+  - `path` (string): Path to the file to hash
+- **Returns:** (string or nil, string) 64-character lowercase hex digest, or `nil, errorString` if the file cannot be read
+
+```lua
+local hex, err = picocalc.crypto.sha256File("/data/com.example.mygame/levels.zip")
+if hex ~= expected_checksum then
+    error("checksum mismatch")
+end
 ```
 
 ---

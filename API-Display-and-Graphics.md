@@ -128,6 +128,42 @@ picocalc.display.flush()
 
 ---
 
+#### `picocalc.display.flushRows(y0, y1)`
+Pushes rows `y0`–`y1` (inclusive) of the **current draw buffer** to the LCD via non-blocking DMA, **without swapping buffers**. Rows are clamped to 0–319; the band always spans the full screen width.
+
+Because there is no swap, subsequent drawing continues into the same buffer — ideal for repeatedly updating a small horizontal band (status bar, HUD, terminal line) while the rest of the screen keeps its last presented contents. Mixing `flushRows` with the normal double-buffered `flush()` cycle is the job of `flushRegion()` instead.
+
+- **Parameters:**
+  - `y0` (number): First row (inclusive)
+  - `y1` (number): Last row (inclusive)
+- **Returns:** None
+
+```lua
+-- Redraw just a score bar without touching the play field
+picocalc.display.fillRect(0, 0, 320, 16, picocalc.display.BLACK)
+picocalc.display.drawText(4, 4, "SCORE " .. score, picocalc.display.WHITE, false)
+picocalc.display.flushRows(0, 15)
+```
+
+---
+
+#### `picocalc.display.flushRegion(y0, y1)`
+Like `flush()`, but transfers only rows `y0`–`y1` (inclusive): the front/back buffers are **swapped**, and the flushed band is then copied back into the new back buffer so both buffers stay in sync for that region. Rows are clamped to 0–319.
+
+Use this when your app follows the normal draw-then-flush double-buffered cycle but only a horizontal band changed — cheaper than a full-screen transfer, and later full `flush()` calls will not flicker. Costs one extra band-sized copy compared to `flushRows()`.
+
+- **Parameters:**
+  - `y0` (number): First row (inclusive)
+  - `y1` (number): Last row (inclusive)
+- **Returns:** None
+
+```lua
+-- Only the animation strip in the middle changed this frame
+picocalc.display.flushRegion(120, 200)
+```
+
+---
+
 #### `picocalc.display.getWidth()`
 Returns the display width in pixels.
 
@@ -291,7 +327,7 @@ picocalc.display.drawTexturedColumn(x, wallTop, wallBottom, wallTexture, texCol,
 ---
 
 #### `picocalc.display.setClipRect(x, y, w, h)`
-Restrict all drawing primitives to a rectangle. Useful for split-screen, UI panels, and partial redraws. `clear()` and the framebuffer effects are NOT clipped (they are whole-buffer by design).
+Restrict all drawing primitives to a rectangle. Useful for split-screen, UI panels, and partial redraws. `clear()` and the framebuffer effects are NOT clipped (they are whole-buffer by design). The rectangle is clamped to the 320×320 screen. The clip rect is reset to full screen automatically at app launch and exit, so apps always start (and leave the launcher) unclipped.
 
 - **Parameters:**
   - `x` (number): Clip rect left

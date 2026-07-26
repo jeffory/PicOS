@@ -7,6 +7,10 @@
 ### System
 * [[Crash Logging and Watchdog]]
 
+### Libraries
+* [[Library Download]]
+* [[Library Panels]]
+
 ### API Reference
 * [[Global Variables and Permissions]]
 * [[API Audio and Sound]]
