@@ -1,0 +1,9 @@
+{
+  "id": "com.picos.panelsdemo",
+  "name": "Panels Demo",
+  "description": "Interactive comic showcasing the panels.lua framework: parallax scrolling, animation, audio cues, branching.",
+  "version": "1.0.0",
+  "author": "PicOS",
+  "category": "demos",
+  "requirements": ["audio"]
+}

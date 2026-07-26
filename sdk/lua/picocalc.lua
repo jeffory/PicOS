@@ -221,6 +221,22 @@ function picocalc.display.drawText(x, y, text, fg, bg) end
 ---Flush the framebuffer to the LCD (non-blocking DMA). Call once per frame.
 function picocalc.display.flush() end
 
+---Present only rows y0..y1 (inclusive) of the current draw buffer to the LCD
+---WITHOUT swapping buffers (non-blocking DMA). Rows clamp to 0-319. Drawing
+---continues into the same buffer — ideal for repeated band updates (HUD,
+---status line) while the rest of the screen keeps its last contents.
+---@param y0 integer First row (inclusive)
+---@param y1 integer Last row (inclusive)
+function picocalc.display.flushRows(y0, y1) end
+
+---Like `flush()` but transfers only rows y0..y1 (inclusive): swaps buffers,
+---then re-syncs the flushed band into the new back buffer so both buffers
+---match. Rows clamp to 0-319. Use in a normal double-buffered loop when only
+---a horizontal band changed.
+---@param y0 integer First row (inclusive)
+---@param y1 integer Last row (inclusive)
+function picocalc.display.flushRegion(y0, y1) end
+
 ---Returns the display width in pixels (320).
 ---@return integer
 function picocalc.display.getWidth() end

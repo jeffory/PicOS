@@ -192,6 +192,125 @@ def test_transparent_text_and_primitives(simulator):
     assert 0 < tri < 256, f"fillTriangle filled {tri}/256 pixels"
 
 
+# ── clip rect + partial flush ────────────────────────────────────────────────
+
+
+CR_PHASES = [
+    "backdrop", "clipped_fill", "clip_cleared",
+    "flush_setup", "flush_partial", "flush_full", "flush_region",
+]
+
+CR_RED, CR_BLUE, CR_GREEN = 0xF800, 0x001F, 0x07E0
+CR_BLACK, CR_MAGENTA = 0x0000, 0xF81F
+
+# Fixed probe points, sampled at every phase.  The fixture's clip rect is
+# (64,64,32,32) and its fill rect (48,48,64,64) crosses all four clip edges.
+CR_PROBES = {
+    "in_clip":      (80, 80),    # inside clip AND inside fill rect
+    "left_of_clip": (56, 80),    # inside fill rect, left of the clip
+    "below_clip":   (80, 100),   # inside fill rect, below the clip
+    "outside_fill": (200, 200),  # outside everything
+    "rows_above":   (160, 50),   # above the flushRows band (100..131)
+    "rows_mid":     (160, 110),  # inside the flushRows band
+    "rows_below":   (160, 200),  # below the flushRows band
+    "region_top":   (160, 25),   # inside the flushRegion band (0..49)
+}
+
+
+def test_clip_rect_and_partial_flush(simulator):
+    """setClipRect must confine draws; flushRows/flushRegion must present only
+    their rows.  All three were prime candidates for silent sim no-ops (the
+    stub re-implements the whole display driver), hence the pixel probes
+    against the PRESENTED framebuffer rather than log markers alone."""
+    simulator.clear_log()
+    simulator.launch_app("cliprect_test")
+    simulator.wait_for_log("CR:PHASE 1 backdrop", timeout=30)
+    time.sleep(0.3)
+
+    seen = {}
+    for i in range(len(CR_PHASES)):
+        phase = None
+        for line in reversed(_lines(simulator)):
+            if "CR:PHASE" in line:
+                phase = line.split("CR:PHASE", 1)[1].strip()
+                break
+        assert phase, "no CR:PHASE marker"
+        name = phase.split(None, 1)[1]
+        seen[name] = {
+            label: _px(simulator, px, py)
+            for label, (px, py) in CR_PROBES.items()
+        }
+        if i < len(CR_PHASES) - 1:
+            _tap(simulator, "enter")
+            time.sleep(0.25)
+
+    for name in CR_PHASES:
+        assert name in seen, f"phase {name} missing"
+
+    # getClipRect: an oversized rect clamps to the framebuffer, a normal one
+    # round-trips exactly.
+    lines = _lines(simulator)
+    assert any("CR:CLIPFULL 0 0 320 320" in l for l in lines), (
+        "setClipRect(-16,-16,400,400) did not clamp to 0,0,320,320"
+    )
+    assert any("CR:CLIP 64 64 32 32" in l for l in lines), (
+        "getClipRect did not round-trip the set clip"
+    )
+
+    assert seen["backdrop"]["in_clip"] == CR_RED, "backdrop not a clean fill"
+    assert seen["backdrop"]["left_of_clip"] == CR_RED
+
+    # Clipped fill: blue only inside the clip; the parts of the fill rect
+    # outside the clip stay red.
+    cf = seen["clipped_fill"]
+    assert cf["in_clip"] == CR_BLUE, (
+        "fillRect inside the clip did not draw — clip suppressed everything?"
+    )
+    assert cf["left_of_clip"] == CR_RED, (
+        "fillRect leaked LEFT of the clip — setClipRect is a no-op?"
+    )
+    assert cf["below_clip"] == CR_RED, (
+        "fillRect leaked BELOW the clip — setClipRect is a no-op?"
+    )
+    assert cf["outside_fill"] == CR_RED
+
+    # After clearClipRect, the same fill paints the whole rect.
+    cc = seen["clip_cleared"]
+    assert cc["in_clip"] == CR_BLUE
+    assert cc["left_of_clip"] == CR_BLUE, (
+        "clearClipRect did not restore full drawing"
+    )
+    assert cc["below_clip"] == CR_BLUE
+
+    # flushRows: draw buffer is all green, but only rows 100..131 were
+    # flushed — everything else must still show the black setup frame.
+    assert seen["flush_setup"]["rows_mid"] == CR_BLACK
+    fp = seen["flush_partial"]
+    assert fp["rows_mid"] == CR_GREEN, (
+        "flushRows did not present the requested rows"
+    )
+    assert fp["rows_above"] == CR_BLACK, (
+        "flushRows presented rows ABOVE the requested band"
+    )
+    assert fp["rows_below"] == CR_BLACK, (
+        "flushRows presented rows BELOW the requested band"
+    )
+
+    # flushRows must not swap: the very next flush() presents the same
+    # all-green draw buffer.
+    ff = seen["flush_full"]
+    assert ff["rows_above"] == CR_GREEN and ff["rows_below"] == CR_GREEN, (
+        "flush after flushRows lost the draw buffer — flushRows swapped?"
+    )
+
+    # flushRegion: only rows 0..49 change; the rest keeps the green frame.
+    fr = seen["flush_region"]
+    assert fr["region_top"] == CR_MAGENTA, "flushRegion did not present its band"
+    assert fr["rows_mid"] == CR_GREEN and fr["rows_below"] == CR_GREEN, (
+        "flushRegion presented rows outside its band"
+    )
+
+
 # ── input auto-repeat ────────────────────────────────────────────────────────
 
 

@@ -31,6 +31,13 @@ static uint16_t g_front_buffer[320 * 320];
 static uint16_t g_back_buffer[320 * 320];
 static int g_current_buffer = 0;
 
+// Buffer most recently presented to the HAL framebuffer.  display_flush()
+// presents the old back buffer (then swaps); display_flush_rows() presents the
+// current draw buffer without swapping.  display_get_screen_buffer() must
+// follow this, not the swap index, or flushRows-only apps read back a stale
+// frame (mirrors s_last_presented in src/drivers/display.c).
+static uint16_t* s_last_presented = g_front_buffer;
+
 // Clip rect state (mirrors src/drivers/display.c)
 static int s_clip_x0 = 0, s_clip_y0 = 0;
 static int s_clip_x1 = 319, s_clip_y1 = 319;
@@ -303,10 +310,10 @@ static int sim_draw_text_impl(int x, int y, const char* text, uint16_t fg,
             for (int row = 0; row < FONT8X12_H; row++) {
                 uint8_t rowdata = glyph[row];
                 int py = y + row;
-                if (py < 0 || py >= 320) continue;
+                if (py < s_clip_y0 || py > s_clip_y1) continue;
                 for (int col = 0; col < FONT8X12_W; col++) {
                     int px = x + col;
-                    if (px >= 0 && px < 320) {
+                    if (px >= s_clip_x0 && px <= s_clip_x1) {
                         bool on = (rowdata & (0x80 >> col)) != 0;
                         if (on) fb[py * 320 + px] = fg;
                         else if (!transparent) fb[py * 320 + px] = bg;
@@ -326,10 +333,10 @@ static int sim_draw_text_impl(int x, int y, const char* text, uint16_t fg,
             for (int row = 0; row < FONT_SCI_HEIGHT; row++) {
                 uint8_t rowdata = glyph[row];
                 int py = y + row;
-                if (py < 0 || py >= 320) continue;
+                if (py < s_clip_y0 || py > s_clip_y1) continue;
                 for (int col = 0; col < FONT_SCI_WIDTH; col++) {
                     int px = x + col;
-                    if (px >= 0 && px < 320) {
+                    if (px >= s_clip_x0 && px <= s_clip_x1) {
                         bool on = (rowdata & (0x80 >> col)) != 0;
                         if (on) fb[py * 320 + px] = fg;
                         else if (!transparent) fb[py * 320 + px] = bg;
@@ -349,7 +356,8 @@ static int sim_draw_text_impl(int x, int y, const char* text, uint16_t fg,
                 for (int row = 0; row < FONT_H; row++) {
                     int px = x + col;
                     int py = y + row;
-                    if (px >= 0 && px < 320 && py >= 0 && py < 320) {
+                    if (px >= s_clip_x0 && px <= s_clip_x1 &&
+                        py >= s_clip_y0 && py <= s_clip_y1) {
                         bool on = (coldata & (1 << row)) != 0;
                         if (on) fb[py * 320 + px] = fg;
                         else if (!transparent) fb[py * 320 + px] = bg;
@@ -405,13 +413,61 @@ void display_flush(void) {
         memcpy(hal_fb, back, 320 * 320 * sizeof(uint16_t));
         hal_display_present();
     }
+    s_last_presented = back;
     // Swap buffer index
     g_current_buffer = 1 - g_current_buffer;
 }
 
+// Mirror of display_flush_rows in src/drivers/display.c: present rows y0..y1
+// (inclusive) of the CURRENT draw buffer.  Does NOT swap buffers — the rest of
+// the HAL framebuffer keeps whatever was presented previously, exactly like
+// the LCD panel keeps its RAM outside the partial window.
+void display_flush_rows(int y0, int y1) {
+    if (y0 < 0) y0 = 0;
+    if (y1 >= 320) y1 = 319;
+    if (y0 > y1) return;
+
+    uint16_t* back = display_get_back_buffer();
+    uint16_t* hal_fb = hal_display_get_framebuffer();
+    if (hal_fb) {
+        memcpy(&hal_fb[y0 * 320], &back[y0 * 320],
+               (size_t)(y1 - y0 + 1) * 320 * sizeof(uint16_t));
+        hal_display_present();
+    }
+    s_last_presented = back;
+}
+
+// Mirror of display_flush_region (flush_region_impl with sync_back=true):
+// SWAPS buffers like display_flush, presents only rows y0..y1 of the old draw
+// buffer, then copies that band into the new back buffer so both buffers stay
+// in sync.  Note the hardware version does not update s_last_presented — that
+// quirk is mirrored deliberately.
+void display_flush_region(int y0, int y1) {
+    if (y0 < 0) y0 = 0;
+    if (y1 >= 320) y1 = 319;
+    if (y0 > y1) return;
+
+    uint16_t* old_back = display_get_back_buffer();
+    uint16_t* hal_fb = hal_display_get_framebuffer();
+    if (hal_fb) {
+        memcpy(&hal_fb[y0 * 320], &old_back[y0 * 320],
+               (size_t)(y1 - y0 + 1) * 320 * sizeof(uint16_t));
+        hal_display_present();
+    }
+
+    // Swap, then sync the flushed band front→back (see hardware comment about
+    // stale two-frame-old content causing flicker).
+    g_current_buffer = 1 - g_current_buffer;
+    uint16_t* new_back = display_get_back_buffer();
+    memcpy(&new_back[y0 * 320], &old_back[y0 * 320],
+           (size_t)(y1 - y0 + 1) * 320 * sizeof(uint16_t));
+}
+
 void display_apply_clock(void) {}
 
-void display_clear(uint16_t color) { 
+void display_clear(uint16_t color) {
+    // Deliberately IGNORES the clip rect — whole-framebuffer reset, matching
+    // the hardware driver.  Use display_fill_rect for a clipped fill.
     uint16_t* fb = display_get_back_buffer();
     for (int i = 0; i < 320 * 320; i++) fb[i] = color;
 }
@@ -655,15 +711,17 @@ void display_set_transparent_color(uint16_t color) { (void)color; }
 uint16_t display_get_transparent_color(void) { return 0; }
 uint16_t* display_get_framebuffer(void) { return display_get_back_buffer(); }
 uint16_t* display_get_screen_buffer(void) {
-    // Return the front buffer (what's currently on screen), not the back buffer
-    return g_current_buffer == 0 ? g_front_buffer : g_back_buffer;
+    // Return the buffer most recently presented — after display_flush() that
+    // is the front buffer, but after display_flush_rows() (no swap) it is the
+    // current draw buffer.  Matches s_last_presented on hardware.
+    return s_last_presented;
 }
 
 void display_draw_image(int x, int y, const uint16_t* data, int w, int h) {
     uint16_t* fb = display_get_back_buffer();
-    for (int dy = 0; dy < h && y + dy < 320; dy++) {
-        for (int dx = 0; dx < w && x + dx < 320; dx++) {
-            if (x + dx >= 0 && y + dy >= 0) {
+    for (int dy = 0; dy < h && y + dy <= s_clip_y1; dy++) {
+        for (int dx = 0; dx < w && x + dx <= s_clip_x1; dx++) {
+            if (x + dx >= s_clip_x0 && y + dy >= s_clip_y0) {
                 fb[(y + dy) * 320 + (x + dx)] = data[dy * w + dx];
             }
         }
@@ -685,11 +743,11 @@ void display_draw_image_partial(int x, int y, int img_w, int img_h,
     uint16_t* fb = display_get_back_buffer();
     for (int row = 0; row < sh; row++) {
         int py = y + row;
-        if (py < 0 || py >= 320) continue;
+        if (py < s_clip_y0 || py > s_clip_y1) continue;
         int src_row = flip_y ? (sy + sh - 1 - row) : (sy + row);
         for (int col = 0; col < sw; col++) {
             int px = x + col;
-            if (px < 0 || px >= 320) continue;
+            if (px < s_clip_x0 || px > s_clip_x1) continue;
             int src_col = flip_x ? (sx + sw - 1 - col) : (sx + col);
             uint16_t c = data[src_row * img_w + src_col];
             if (transparent_color != 0 && c == transparent_color) continue;
@@ -703,9 +761,9 @@ void display_draw_image_scaled_nn(int x, int y, const uint16_t *data,
                                   uint16_t transparent_color) {
     if (!data || dst_w <= 0 || dst_h <= 0 || src_w <= 0 || src_h <= 0) return;
     uint16_t* fb = display_get_back_buffer();
-    for (int dy = 0; dy < dst_h && y + dy < 320; dy++) {
-        for (int dx = 0; dx < dst_w && x + dx < 320; dx++) {
-            if (x + dx >= 0 && y + dy >= 0) {
+    for (int dy = 0; dy < dst_h && y + dy <= s_clip_y1; dy++) {
+        for (int dx = 0; dx < dst_w && x + dx <= s_clip_x1; dx++) {
+            if (x + dx >= s_clip_x0 && y + dy >= s_clip_y0) {
                 int sx = dx * src_w / dst_w;
                 int sy = dy * src_h / dst_h;
                 if (sx < src_w && sy < src_h) {

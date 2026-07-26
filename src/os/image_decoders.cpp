@@ -444,26 +444,53 @@ bool decode_gif_file(const char *path, image_decode_result_t *result) {
   return false;
 }
 
+// Builds a tgx sub-image view of dst_fb covering the half-open clip rect.
+// The sub-image shares the framebuffer memory with stride == dst_w, so tgx
+// physically cannot write pixels outside the clip.  Returns an invalid image
+// (isValid() == false, all draws no-op) when the clip is empty.
+static tgx::Image<tgx::RGB565> tgx_clip_view(uint16_t *dst_fb, int dst_w,
+                                             int dst_h, int clip_x0,
+                                             int clip_y0, int clip_x1,
+                                             int clip_y1) {
+  tgx::Image<tgx::RGB565> full(dst_fb, dst_w, dst_h);
+  // iBox2 takes inclusive bounds; the sub-image ctor intersects with the
+  // image box, so an oversized clip degrades to the full framebuffer.
+  return tgx::Image<tgx::RGB565>(
+      full, tgx::iBox2(clip_x0, clip_x1 - 1, clip_y0, clip_y1 - 1));
+}
+
 extern "C" void tgx_draw_image_scaled(uint16_t *dst_fb, int dst_w, int dst_h,
+                                      int clip_x0, int clip_y0, int clip_x1,
+                                      int clip_y1,
                                       const uint16_t *src_data, int src_w,
                                       int src_h, int dst_x, int dst_y,
                                       float scale, float angle) {
   if (!dst_fb || !src_data)
     return;
 
-  tgx::Image<tgx::RGB565> dst_im(dst_fb, dst_w, dst_h);
+  // Clamp the clip origin so the anchor translation below matches the actual
+  // sub-view origin (the sub-image ctor clamps the box the same way).
+  if (clip_x0 < 0) clip_x0 = 0;
+  if (clip_y0 < 0) clip_y0 = 0;
+
+  tgx::Image<tgx::RGB565> dst_im =
+      tgx_clip_view(dst_fb, dst_w, dst_h, clip_x0, clip_y0, clip_x1, clip_y1);
   // Since tgx::Image requires non-const pointer for its constructor, we cast
   // away const. The blitScaledRotated method takes the source image by value or
   // const reference, so it won't modify the source pixels.
   tgx::Image<tgx::RGB565> src_im((uint16_t *)src_data, src_w, src_h);
 
   // Anchor at the center of the source image to draw it at the (dst_x, dst_y)
-  // center point
+  // center point.  The anchor is in sub-image coordinates, hence the clip
+  // origin subtraction.
   dst_im.blitScaledRotated(src_im, {src_w / 2.0f, src_h / 2.0f},
-                           {(float)dst_x, (float)dst_y}, scale, angle);
+                           {(float)(dst_x - clip_x0), (float)(dst_y - clip_y0)},
+                           scale, angle);
 }
 
 extern "C" void tgx_draw_image_scaled_masked(uint16_t *dst_fb, int dst_w, int dst_h,
+                                            int clip_x0, int clip_y0,
+                                            int clip_x1, int clip_y1,
                                             const uint16_t *src_data, int src_w,
                                             int src_h, int dst_x, int dst_y,
                                             float scale, float angle,
@@ -471,7 +498,11 @@ extern "C" void tgx_draw_image_scaled_masked(uint16_t *dst_fb, int dst_w, int ds
   if (!dst_fb || !src_data)
     return;
 
-  tgx::Image<tgx::RGB565> dst_im(dst_fb, dst_w, dst_h);
+  if (clip_x0 < 0) clip_x0 = 0;
+  if (clip_y0 < 0) clip_y0 = 0;
+
+  tgx::Image<tgx::RGB565> dst_im =
+      tgx_clip_view(dst_fb, dst_w, dst_h, clip_x0, clip_y0, clip_x1, clip_y1);
   tgx::Image<tgx::RGB565> src_im((uint16_t *)src_data, src_w, src_h);
 
   // Anchor at the center of the source image to draw it at the (dst_x, dst_y)
@@ -479,5 +510,7 @@ extern "C" void tgx_draw_image_scaled_masked(uint16_t *dst_fb, int dst_w, int ds
   tgx::RGB565 mask_color(transparent_color);
   dst_im.blitScaledRotatedMasked(src_im, mask_color,
                                  {src_w / 2.0f, src_h / 2.0f},
-                                 {(float)dst_x, (float)dst_y}, scale, angle);
+                                 {(float)(dst_x - clip_x0),
+                                  (float)(dst_y - clip_y0)},
+                                 scale, angle);
 }
