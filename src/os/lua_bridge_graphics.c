@@ -3936,11 +3936,12 @@ static int l_graphics_getTextSize(lua_State *L) {
   return 2;
 }
 
+typedef struct { const pc_font_t *f; int max_w; } emit_measure_t;
 static void emit_measure(int x, int y, const char *line, void *user) {
   (void)x; (void)y;
-  int *max_w = (int *)user;
-  int w = font_text_width(display_get_active_font(), line);
-  if (w > *max_w) *max_w = w;
+  emit_measure_t *e = (emit_measure_t *)user;
+  int w = font_text_width(e->f, line);
+  if (w > e->max_w) e->max_w = w;
 }
 
 // graphics.getTextSizeForMaxWidth(text, maxWidth, [font]) -> width, height
@@ -3948,9 +3949,10 @@ static int l_graphics_getTextSizeForMaxWidth(lua_State *L) {
   const char *text = luaL_checkstring(L, 1);
   int max_width = luaL_checkinteger(L, 2);
   const pc_font_t *f = font_for_arg(L, 3);
-  int widest = 0, lines = 0;
-  WITH_FONT_ARG(L, 3, lines = wrap_lines(f, text, 0, 0, max_width, 0x7FFF, 0, emit_measure, &widest));
-  lua_pushinteger(L, widest);
+  emit_measure_t e = { f, 0 };
+  int lines = 0;
+  WITH_FONT_ARG(L, 3, lines = wrap_lines(f, text, 0, 0, max_width, 0x7FFF, 0, emit_measure, &e));
+  lua_pushinteger(L, e.max_w);
   lua_pushinteger(L, lines * f->height);
   return 2;
 }
@@ -3959,11 +3961,14 @@ static int l_graphics_getTextSizeForMaxWidth(lua_State *L) {
 // a fresh PSRAM image. Returns the pixel buffer or NULL when out of memory.
 static uint16_t *render_text_image(lua_State *L, const char *text, int w, int h,
                                    uint16_t bg, int font_idx) {
+  // Resolve the font FIRST: font_for_arg -> check_font -> luaL_checkudata
+  // longjmps on a wrong-type font argument, and anything allocated before
+  // that point would be orphaned (up to 200KB of PSRAM).
+  const pc_font_t *f = font_for_arg(L, font_idx);
   uint16_t *pixels = (uint16_t *)umm_malloc((size_t)w * h * sizeof(uint16_t));
   if (!pixels) return NULL;
   for (int i = 0; i < w * h; i++) pixels[i] = bg;
   emit_buf_t e = { pixels, w, h, s_graphics_color, bg };
-  const pc_font_t *f = font_for_arg(L, font_idx);
   WITH_FONT_ARG(L, font_idx, wrap_lines(f, text, 0, 0, w, h, 0, emit_to_buffer, &e));
   return pixels;
 }
