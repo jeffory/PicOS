@@ -278,7 +278,10 @@ set(PICOS_CORE_SOURCES
     ${PICOS_ROOT}/src/os/ui_widgets.c
     ${PICOS_ROOT}/src/os/text_wrap.c
     ${CMAKE_CURRENT_SOURCE_DIR}/stubs/dev_commands_stub.c
-    ${PICOS_ROOT}/src/fonts/font_6x11.c
+    ${PICOS_ROOT}/src/fonts/font.c
+    ${PICOS_ROOT}/src/fonts/font_registry.c
+    ${PICOS_ROOT}/src/fonts/font_6x8.c
+    ${PICOS_ROOT}/src/fonts/font_8x12.c
     ${PICOS_ROOT}/src/fonts/font_scientifica.c
     ${PICOS_ROOT}/src/os/image_decoders.cpp
     ${PICOS_ROOT}/src/drivers/image_api.c

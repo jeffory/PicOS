@@ -261,7 +261,10 @@ add_executable(picocalc_os
     src/os/zip_util.c
     src/os/lua_bridge_json.c
     src/os/ota_update.c
-    src/fonts/font_6x11.c
+    src/fonts/font.c
+    src/fonts/font_registry.c
+    src/fonts/font_6x8.c
+    src/fonts/font_8x12.c
     src/fonts/font_scientifica.c
     src/os/text_input.c
     src/os/file_browser.c
