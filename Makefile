@@ -1,7 +1,7 @@
 # PicOS Makefile
 # Automated setup, build, and deployment for ClockworkPi PicoCalc
 
-.PHONY: help setup build clean flash flash-ota rebuild check-env test-lua simulator simulator-run simulator-clean
+.PHONY: help setup build clean flash flash-ota rebuild check-env test-lua test-unit simulator simulator-run simulator-clean
 
 # ── Configuration ─────────────────────────────────────────────────────────────
 
@@ -287,3 +287,11 @@ simulator-clean:
 	@echo "Cleaning simulator build..."
 	@rm -rf $(SIM_BUILD_DIR)
 	@echo "✓ Simulator clean complete"
+
+# ── Host unit tests ──────────────────────────────────────────────────────────
+
+test-unit:
+	@mkdir -p build_sim
+	@gcc -std=c11 -Wall -Wextra -Werror -Isrc/fonts \
+		tests/unit/test_font.c src/fonts/font.c -o build_sim/test_font
+	@./build_sim/test_font
