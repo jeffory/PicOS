@@ -2,6 +2,7 @@
 #include "launcher_types.h"
 #include "lua_bridge.h"
 #include "lua_psram_alloc.h"
+#include "crashlog.h"
 #include "config.h"
 #include "system_menu.h"
 #include "../drivers/audio.h"
@@ -24,6 +25,25 @@
 
 #define C_BG COLOR_BLACK
 
+// Launch-time failure before the VM exists: show it, log it, pause so it can
+// be read, then hand control back to the launcher.
+static void lua_show_launch_failure(const app_entry_t *app, const char *line1,
+                                    const char *line2) {
+  char heap[96];
+  crashlog_describe_heap(heap, sizeof(heap));
+  crashlog_write("LUA ERROR", app->name, line1, line2);
+
+  display_clear(C_BG);
+  display_draw_text(8, 8, line1, COLOR_RED, C_BG);
+  if (line2) display_draw_text(8, 20, line2, COLOR_WHITE, C_BG);
+  display_draw_text(8, 36, heap, COLOR_GRAY, C_BG);
+  display_flush();
+  for (int i = 0; i < 30; i++) {
+    watchdog_update();
+    sleep_ms(100);
+  }
+}
+
 static bool lua_run(const app_entry_t *app) {
   printf("[LUA] Starting app '%s', PSRAM free: %zu\n",
          app->name, lua_psram_alloc_free_size());
@@ -35,12 +55,9 @@ static bool lua_run(const app_entry_t *app) {
   int lua_len = 0;
   char *lua_src = sdcard_read_file(main_path, &lua_len);
   if (!lua_src) {
-    display_clear(C_BG);
-    display_draw_text(8, 8, "Failed to load app:", COLOR_RED, C_BG);
-    display_draw_text(8, 20, main_path, COLOR_WHITE, C_BG);
-    display_flush();
-    watchdog_update();
-    sleep_ms(2000);
+    // sdcard_read_file returns NULL for both a missing file and a failed
+    // PSRAM allocation for its contents; the heap line tells them apart.
+    lua_show_launch_failure(app, "Failed to load app:", main_path);
     return false;
   }
 
@@ -50,8 +67,9 @@ static bool lua_run(const app_entry_t *app) {
   // ── Create Lua VM ─────────────────────────────────────────────────────────
   lua_State *L = lua_psram_newstate();
   if (!L) {
-    printf("[LUA] FAILED: lua_psram_newstate returned NULL\n");
     umm_free(lua_src);
+    lua_show_launch_failure(app, "Failed to start app:",
+                            "cannot create Lua state (out of PSRAM)");
     return false;
   }
 
@@ -92,7 +110,8 @@ static bool lua_run(const app_entry_t *app) {
   umm_free(lua_src);
 
   if (load_err != LUA_OK) {
-    lua_bridge_show_error(L, "Load error:");
+    lua_bridge_show_error(L, load_err == LUA_ERRMEM ? "Out of memory loading app:"
+                                                    : "Load error:");
     lua_close(L);
     return false;
   }
@@ -100,7 +119,8 @@ static bool lua_run(const app_entry_t *app) {
   int run_err = lua_pcall(L, 0, 0, 0);
   if (run_err != LUA_OK) {
     if (!lua_bridge_is_exit_sentinel(L, -1)) {
-      lua_bridge_show_error(L, "Runtime error:");
+      lua_bridge_show_error(L, run_err == LUA_ERRMEM ? "Out of memory:"
+                                                     : "Runtime error:");
     } else {
       lua_pop(L, 1); // discard exit sentinel
     }

@@ -8,6 +8,8 @@
 #include "../os/os.h"
 
 #include "umm_malloc.h"
+#include "crashlog.h"
+#include "lua_psram_alloc.h"
 #include "pico/stdlib.h"
 #include "hardware/watchdog.h"
 #include "hardware/xip_cache.h"
@@ -123,14 +125,26 @@ typedef struct {
 
 extern PicoCalcAPI g_api;
 
+// Name of the app currently being loaded, for error records.
+static const char *s_loading_app_name = NULL;
+
+// Loader failure: show it with the heap state, log it to /system/error.log,
+// and pause so it can be read before the launcher repaints.
 static void show_error(const char *line1, const char *line2) {
+  char heap[96];
+  crashlog_describe_heap(heap, sizeof(heap));
+  crashlog_write("NATIVE ERROR", s_loading_app_name, line1, line2);
+
   display_clear(C_BG);
   display_draw_text(8, 8, line1, COLOR_RED, C_BG);
   if (line2)
     display_draw_text(8, 20, line2, COLOR_WHITE, C_BG);
+  display_draw_text(8, 36, heap, COLOR_GRAY, C_BG);
   display_flush();
-  watchdog_update();
-  sleep_ms(3000);
+  for (int i = 0; i < 30; i++) {
+    watchdog_update();
+    sleep_ms(100);
+  }
 }
 
 // =============================================================================
@@ -273,6 +287,7 @@ static bool native_run(const app_entry_t *app) {
 #else
 static bool native_run(const app_entry_t *app) {
   printf("[NATIVE] Loading '%s'\n", app->name);
+  s_loading_app_name = app->name;
 
   // Pause Core 1 to eliminate PSRAM heap contention during ELF loading.
   // Core 1 runs umm_malloc/umm_free every 5ms for Mongoose; those allocations
@@ -424,7 +439,11 @@ static bool native_run(const app_entry_t *app) {
     load_base = (uint8_t *)umm_malloc(psram_size);
     if (!load_base) {
       if (split_mode) { free(code_buf); code_buf = NULL; }
-      show_error("ELF: out of PSRAM", NULL);
+      char detail[80];
+      snprintf(detail, sizeof(detail), "image needs %luK, largest free block %luK",
+               (unsigned long)(psram_size / 1024u),
+               (unsigned long)(lua_psram_alloc_largest_block() / 1024u));
+      show_error("ELF: out of PSRAM", detail);
       goto out;
     }
   }
@@ -766,7 +785,10 @@ static bool native_run(const app_entry_t *app) {
     stack_buf = (uint8_t *)umm_malloc(NATIVE_STACK_SIZE);
   }
   if (!stack_buf) {
-    show_error("Out of memory for app stack", NULL);
+    char detail[64];
+    snprintf(detail, sizeof(detail), "no %luK SRAM and no %luK PSRAM block",
+             (unsigned long)(8u), (unsigned long)(NATIVE_STACK_SIZE / 1024u));
+    show_error("Out of memory for app stack", detail);
     goto out;
   }
   printf("[NATIVE] App stack: %lu KB in %s @ %p\n",
@@ -791,6 +813,13 @@ static bool native_run(const app_entry_t *app) {
       printf("[NATIVE] ERROR: stack overflow detected in '%s' "
              "(canary[%d] = 0x%08lx)\n",
              app->name, i, (unsigned long)guard[i]);
+      char detail[96];
+      snprintf(detail, sizeof(detail),
+               "guard canary[%d] = 0x%08lx after return (%luK %s stack)",
+               i, (unsigned long)guard[i], (unsigned long)(stack_size / 1024u),
+               stack_in_sram ? "SRAM" : "PSRAM");
+      crashlog_write("NATIVE ERROR", app->name,
+                     "stack overflow detected after app returned", detail);
       ok = false;
       break;
     }

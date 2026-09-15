@@ -79,12 +79,14 @@ static void menu_lua_hook(lua_State *L, lua_Debug *ar) {
   }
   if (dev_commands_wants_reboot()) {
     printf("[DEV] Rebooting...\n");
+    crashlog_clear_running(); // intentional — not an unclean exit
     stdio_flush();
     sleep_ms(100);
     watchdog_reboot(0, 0, 0);
   }
   if (dev_commands_wants_reboot_flash()) {
     printf("[DEV] Rebooting to BOOTSEL mode...\n");
+    crashlog_clear_running();
     stdio_flush();
     sleep_ms(100);
     reset_usb_boot(0, 0);
@@ -213,6 +215,17 @@ void lua_bridge_show_error(lua_State *L, const char *context) {
   char buf[256];
   snprintf(buf, sizeof(buf), "%s", err ? err : "unknown error");
 
+  // Lua's own memory error is just "not enough memory" — attach the heap
+  // state so the on-screen message says how much was free and whether the
+  // failure was fragmentation rather than exhaustion.
+  if (err && strstr(err, "not enough memory")) {
+    size_t n = strlen(buf);
+    if (n < sizeof(buf) - 2) {
+      buf[n++] = '\n';
+      crashlog_describe_heap(buf + n, sizeof(buf) - n);
+    }
+  }
+
   // Log to /system/error.log on SD card
   lua_getglobal(L, "APP_NAME");
   const char *app = lua_isstring(L, -1) ? lua_tostring(L, -1) : "unknown";
@@ -226,7 +239,7 @@ void lua_bridge_show_error(lua_State *L, const char *context) {
   int col = 0, row = 1;
   char line[54] = {0};
   for (int i = 0; buf[i] && row < 38; i++) {
-    line[col++] = buf[i];
+    if (buf[i] != '\n') line[col++] = buf[i];
     if (col >= 52 || buf[i] == '\n') {
       line[col] = '\0';
       display_draw_text(4, 4 + row * 9, line, COLOR_WHITE, COLOR_BLACK);

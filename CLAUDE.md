@@ -283,6 +283,14 @@ When `"http"` is granted, WiFi will remain connected after initial time sync (fo
 
 SD card auto-creates `/data/` and `/system/` on first mount.
 
+Optional `"min_psram_kb": N` in `app.json` makes the launcher refuse to start the app (with an on-screen reason and an error.log entry) unless the PSRAM heap has a single free block of at least N KB. Use it for apps that need one large contiguous allocation; total free bytes are not the test, the largest block is.
+
+### Error and crash records (`src/os/crashlog.c`)
+- `/system/error.log` — app-level failures written while the OS is alive: Lua runtime errors, Lua panics, native loader errors (ELF too big, out of PSRAM, stack overflow), launch refusals. Every entry ends with a `Heap:` line (free / largest block / fragmentation).
+- `/system/crashlog.txt` — OS-level records written at boot: HardFault dumps decoded from watchdog scratch (now with the app name) and `UNCLEAN EXIT` entries when an app hung until the watchdog fired.
+- `/system/running.txt` — dirty-exit marker written at launch and deleted when the runner returns. If it survives to the next boot the app never came back to the launcher; the boot code names it on screen for hardfault/watchdog cases. A plain power-off mid-app also leaves it, but that is normal use and is only echoed to serial. Intentional reboots (system menu, `sys.reboot`, dev `reboot`) clear it first.
+- `picocalc.sys.getMemInfo()` returns `psram_largest_block` and `psram_fragmentation` alongside the totals.
+
 ## Lua API Reference
 
 System Lua libraries live in `/system/lib/` and load via `picocalc.sys.loadlib(name)`: `system/lib/download.lua` provides `download.toFile(url, dest, opts)` (blocking HTTP(S)-to-SD streaming download), and `picocalc.crypto.sha256File(path)` returns a file's SHA-256 as lowercase hex for checksum verification.

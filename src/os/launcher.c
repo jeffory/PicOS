@@ -1,5 +1,6 @@
 #include "launcher.h"
 #include "launcher_types.h"
+#include "crashlog.h"
 #include "app_runner.h"
 #include "lua_runner.h"
 #include "native_loader.h"
@@ -138,6 +139,7 @@ static void on_app_dir(const sdcard_entry_t *entry, void *user) {
   app->has_http            = false;
   app->has_audio           = false;
   app->system_clock_khz    = 0;
+  app->min_psram_kb        = 0;
 
   // Try to load app.json for display name / description / id / requirements
   char json_path[160];
@@ -159,6 +161,7 @@ static void on_app_dir(const sdcard_entry_t *entry, void *user) {
     app->has_http            = json_has_requirement(json, "http");
     app->has_audio           = json_has_requirement(json, "audio");
     json_get_int(json, "system_clock_khz", &app->system_clock_khz);
+    json_get_int(json, "min_psram_kb", &app->min_psram_kb);
     if (!json_get_string(json, "category", app->category, sizeof(app->category)))
       app->category[0] = '\0';
 
@@ -632,10 +635,44 @@ static bool run_app(int idx) {
   // so we have maximum memory for the next app.
   mp3_player_deinit();
 
-  printf("[LAUNCHER] Starting app %d '%s' (type=%s), PSRAM free: %zu\n",
-         idx, app->name,
-         app->type == APP_TYPE_NATIVE ? "native" : "lua",
-         lua_psram_alloc_free_size());
+  const char *type_str = app->type == APP_TYPE_NATIVE ? "native" : "lua";
+  char heap[96];
+  crashlog_describe_heap(heap, sizeof(heap));
+  printf("[LAUNCHER] Starting app %d '%s' (type=%s), PSRAM %s\n",
+         idx, app->name, type_str, heap);
+
+  // Refuse up front when the app declares a contiguous-PSRAM requirement the
+  // heap cannot meet.  Total free bytes are not the test: a native image or
+  // a big asset arena needs ONE block, and a fragmented heap fails that with
+  // plenty free.  Failing here gives a readable reason instead of the app
+  // dying part-way through its own init.
+  if (app->min_psram_kb > 0) {
+    size_t largest_kb = lua_psram_alloc_largest_block() / 1024u;
+    if (largest_kb < app->min_psram_kb) {
+      char detail[96];
+      snprintf(detail, sizeof(detail),
+               "needs %luK contiguous, largest block %luK",
+               (unsigned long)app->min_psram_kb, (unsigned long)largest_kb);
+      crashlog_write("APP FAILED", app->name, "not enough PSRAM to launch",
+                     detail);
+      display_clear(COLOR_BLACK);
+      display_draw_text(8, 8, "Not enough memory to launch:", COLOR_RED,
+                        COLOR_BLACK);
+      display_draw_text(8, 20, app->name, COLOR_WHITE, COLOR_BLACK);
+      display_draw_text(8, 36, detail, COLOR_WHITE, COLOR_BLACK);
+      display_draw_text(8, 52, heap, COLOR_GRAY, COLOR_BLACK);
+      display_draw_text(8, 76, "Reboot to defragment the heap.", COLOR_GRAY,
+                        COLOR_BLACK);
+      display_flush();
+      for (int i = 0; i < 30; i++) {
+        watchdog_update();
+        sleep_ms(100);
+      }
+      s_running_app_name = NULL;
+      s_app_launch_time_ms = 0;
+      return false;
+    }
+  }
 
   // ── Shared pre-launch setup ───────────────────────────────────────────────
 
@@ -677,6 +714,11 @@ static bool run_app(int idx) {
   display_clear_clip_rect();
   display_set_scroll_offset(0);
 
+  // Dirty-exit marker: if this file still exists at the next boot, the app
+  // never returned to the launcher (hang → watchdog, hardfault, panic, or
+  // power loss) and the boot code reports it with the app's name.
+  crashlog_mark_running(app->id, app->name, type_str);
+
   bool ok = false;
   for (int i = 0; s_runners[i]; i++) {
     if (s_runners[i]->can_handle(app)) {
@@ -684,6 +726,9 @@ static bool run_app(int idx) {
       break;
     }
   }
+
+  // The runner returned, so whatever happened has been reported already.
+  crashlog_clear_running();
 
   // ── Shared post-exit cleanup ──────────────────────────────────────────────
   display_clear_clip_rect();      // don't let an app's clip rect leak back to the launcher
@@ -702,8 +747,8 @@ static bool run_app(int idx) {
   s_running_app_name = NULL;
   s_app_launch_time_ms = 0;
 
-  printf("[LAUNCHER] App '%s' exited (ok=%d), PSRAM free: %zu\n",
-         app->name, ok, lua_psram_alloc_free_size());
+  crashlog_describe_heap(heap, sizeof(heap));
+  printf("[LAUNCHER] App '%s' exited (ok=%d), PSRAM %s\n", app->name, ok, heap);
 
   return ok;
 }
@@ -766,9 +811,6 @@ static void handle_input(uint32_t pressed, bool *dirty) {
   if (pressed & BTN_ENTER) {
     if (count > 0 && s_selected < count) {
       int app_idx = list_app_idx(s_selected);
-      size_t free_mem = lua_psram_alloc_free_size();
-      printf("[LAUNCHER] PSRAM free before launch: %zu bytes\n", free_mem);
-
       int saved_tab = s_active_tab;
 
       run_app(app_idx);

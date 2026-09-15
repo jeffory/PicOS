@@ -1,10 +1,16 @@
 #include "lua_psram_alloc.h"
+#include "crashlog.h"
+#include "launcher.h"
+#include "../drivers/display.h"
 #include "umm_malloc.h"
 #include "umm_malloc_cfg.h"
+#include "hardware/watchdog.h"
 #include "pico/critical_section.h"
+#include "pico/stdlib.h"
 #include <stdbool.h>
 #include <stdint.h>
 #include <stdio.h>
+#include <string.h>
 
 // Hardware spinlock protecting all umm_malloc heap operations across both cores.
 // Referenced by UMM_CRITICAL_ENTRY/EXIT in umm_malloc_cfgport.h.
@@ -34,12 +40,64 @@ void *UMM_MALLOC_CFG_HEAP_ADDR = NULL; // We initialize umm_malloc manually
 void *UMM_MALLOC_CFG_HEAP_ADDR = NULL; // Initialized in lua_psram_alloc_init
 #endif
 
+// Unprotected Lua error (an error raised outside any pcall — typically an
+// allocation failure inside lua_newstate/lua_close or a bridge bug).  Lua
+// would call abort() when this returns, which halts the core until the 10s
+// watchdog fires and reboots with no record of what happened.  Instead:
+// record the error and heap state to /system/error.log, show it on screen,
+// then reboot deliberately.
 static int l_panic(lua_State *L) {
   const char *msg = (lua_type(L, -1) == LUA_TSTRING)
                         ? lua_tostring(L, -1)
                         : "error object is not a string";
-  printf("PANIC: unprotected error in call to Lua API (%s)\n", msg);
-  return 0; /* return to Lua to abort */
+  const char *app = launcher_get_running_app_name();
+  char heap[96];
+  crashlog_describe_heap(heap, sizeof(heap));
+  printf("PANIC: unprotected error in call to Lua API (%s) [%s]\n", msg, heap);
+
+  crashlog_write("LUA PANIC", app, "unprotected error in call to Lua API", msg);
+  // The panic is now on record with its app name; drop the dirty-exit marker
+  // so the next boot does not report the same event a second time.
+  crashlog_clear_running();
+
+  display_clear(COLOR_BLACK);
+  display_draw_text(4, 4, "Lua panic (unprotected error):", COLOR_RED, COLOR_BLACK);
+  // Word-wrap the message at 52 columns.
+  int col = 0, row = 1;
+  char line[54] = {0};
+  for (int i = 0; msg[i] && row < 30; i++) {
+    if (msg[i] != '\n') line[col++] = msg[i];
+    if (col >= 52 || msg[i] == '\n') {
+      line[col] = '\0';
+      display_draw_text(4, 4 + row * 9, line, COLOR_WHITE, COLOR_BLACK);
+      row++;
+      col = 0;
+      memset(line, 0, sizeof(line));
+    }
+  }
+  if (col > 0) {
+    line[col] = '\0';
+    display_draw_text(4, 4 + row * 9, line, COLOR_WHITE, COLOR_BLACK);
+    row++;
+  }
+  row++;
+  display_draw_text(4, 4 + row * 9, heap, COLOR_GRAY, COLOR_BLACK);
+  if (app) {
+    row++;
+    display_draw_text(4, 4 + row * 9, app, COLOR_GRAY, COLOR_BLACK);
+  }
+  display_draw_text(4, FB_HEIGHT - 12, "Logged to /system/error.log - rebooting",
+                    COLOR_GRAY, COLOR_BLACK);
+  display_flush();
+
+  for (int i = 0; i < 40; i++) {
+    watchdog_update();
+    sleep_ms(100);
+  }
+  stdio_flush();
+  watchdog_reboot(0, 0, 0);
+  for (;;) tight_loop_contents();
+  return 0;
 }
 
 static void l_warnfoff(void *ud, const char *message, int tocont) {
@@ -80,8 +138,9 @@ void *lua_psram_alloc(void *ud, void *ptr, size_t osize, size_t nsize) {
 
   void *result = umm_realloc(ptr, nsize);
   if (!result) {
-    printf("[PSRAM] OOM: failed to allocate %zu bytes, %zu free\n",
-           nsize, umm_free_heap_size());
+    printf("[PSRAM] OOM: failed to allocate %zu bytes (free=%zu largest=%zu frag=%d%%)\n",
+           nsize, umm_free_heap_size(), lua_psram_alloc_largest_block(),
+           lua_psram_alloc_fragmentation());
   }
   return result;
 }
@@ -96,6 +155,14 @@ bool lua_psram_alloc_is_low(void) {
 
 size_t lua_psram_alloc_total_size(void) {
   return (size_t)UMM_MALLOC_CFG_HEAP_SIZE;
+}
+
+size_t lua_psram_alloc_largest_block(void) {
+  return umm_max_free_block_size();
+}
+
+int lua_psram_alloc_fragmentation(void) {
+  return umm_fragmentation_metric();
 }
 
 lua_State *lua_psram_newstate(void) {

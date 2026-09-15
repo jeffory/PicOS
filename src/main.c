@@ -341,6 +341,7 @@ void __attribute__((naked)) isr_hardfault(void) {
 #include "os/appconfig.h"
 #include "os/config.h"
 #include "os/core1_alloc.h"
+#include "os/crashlog.h"
 #include "os/crypto.h"
 #include "os/file_browser.h"
 #include "os/idle_dim.h"
@@ -438,6 +439,7 @@ static uint64_t sys_getTimeUs(void) {
   return time_us_64();
 }
 static void sys_reboot(void) {
+  crashlog_clear_running(); // intentional — not an unclean exit
   watchdog_enable(1, true);
   for (;;)
     tight_loop_contents();
@@ -489,12 +491,14 @@ static void sys_poll(void) {
   }
   if (dev_commands_wants_reboot()) {
     printf("[DEV] Rebooting...\n");
+    crashlog_clear_running(); // intentional — not an unclean exit
     stdio_flush();
     sleep_ms(100);
     watchdog_reboot(0, 0, 0);
   }
   if (dev_commands_wants_reboot_flash()) {
     printf("[DEV] Rebooting to BOOTSEL mode...\n");
+    crashlog_clear_running();
     stdio_flush();
     sleep_ms(100);
     reset_usb_boot(0, 0);
@@ -1477,7 +1481,7 @@ static void core1_entry(void) {
 static uint32_t s_crash_data[8];
 static bool s_had_crash = false;
 
-static void crash_log_save(void) {
+static void crash_log_save(const char *app_name) {
   if (!s_had_crash) return;
 
   // Truncate if log is too large (>64KB)
@@ -1502,6 +1506,7 @@ static void crash_log_save(void) {
   int n = snprintf(line, sizeof(line),
     "--- HARDFAULT ---\n"
     "  Uptime: %lum %lus\n"
+    "  App: %s\n"
     "  PC   = 0x%08lx\n"
     "  LR   = 0x%08lx\n"
     "  SP   = 0x%08lx\n"
@@ -1510,6 +1515,7 @@ static void crash_log_save(void) {
     "  SFSR = 0x%08lx\n"
     "  Stack: %s\n",
     (unsigned long)(crash_uptime_sec / 60u), (unsigned long)(crash_uptime_sec % 60u),
+    (app_name && app_name[0]) ? app_name : "(none -- OS/launcher)",
     (unsigned long)s_crash_data[1], (unsigned long)s_crash_data[2],
     (unsigned long)s_crash_data[3], (unsigned long)cfsr,
     (unsigned long)hfsr, (unsigned long)sfsr,
@@ -1572,6 +1578,7 @@ int main(void) {
   #define BOOT_MAX_RETRIES 3
 
   uint32_t scratch0 = watchdog_hw->scratch[0];
+  bool wdt_reset = watchdog_caused_reboot();
   int boot_attempt = 0;
   bool skip_boot_watchdog = false;
 
@@ -1773,16 +1780,6 @@ int main(void) {
 
   watchdog_update();
 
-  if (s_had_crash) {
-    display_clear(COLOR_BLACK);
-    display_draw_text(8, 8, "Recovered from crash", COLOR_YELLOW, COLOR_BLACK);
-    display_draw_text(8, 24, "See /system/crashlog.txt", COLOR_GRAY, COLOR_BLACK);
-    display_flush();
-    watchdog_update();
-    sleep_ms(2000);
-    watchdog_update();
-  }
-
   // Initialize the PSRAM allocator BEFORE anything that uses it
   // (SD card file ops use umm_malloc for FIL/FILINFO structs, config_load,
   // WiFi, Lua, OTA update, etc.)
@@ -1832,7 +1829,50 @@ int main(void) {
 
   // Write crash log from previous boot (if any) — must be after PSRAM init
   // because sdcard_fopen() uses umm_malloc() for the FIL struct.
-  crash_log_save();
+  //
+  // The dirty-exit marker (/system/running.txt) survives whatever ended the
+  // previous session and names the app that was running.  It feeds the
+  // HardFault record, and on its own it identifies a hang the watchdog had
+  // to break.  A plain power-off mid-app leaves the marker too; that is
+  // normal use, so it is echoed to serial only and not logged.
+  {
+    // Scratch buffers come from the PSRAM heap: main() runs on the 4KB MSP
+    // and the SRAM image is full to the last few bytes, so neither the
+    // stack nor .bss can spare 400 bytes.
+    char *prev_app = (char *)umm_malloc(64 + 320 + 56);
+    char *prev_detail = prev_app ? prev_app + 64 : NULL;
+    char *ln = prev_app ? prev_detail + 320 : NULL;
+    bool dirty = prev_app && crashlog_read_running(prev_app, 64,
+                                                   prev_detail, 320);
+    crash_log_save(dirty ? prev_app : NULL);
+    if (dirty) {
+      const char *reason = s_had_crash ? "hardfault (see entry above)"
+                         : wdt_reset   ? "watchdog timeout (Core 0 hung)"
+                                       : "power loss or reset";
+      printf("[BOOT] Previous app '%s' did not exit cleanly: %s\n%s",
+             prev_app, reason, prev_detail);
+      if (!s_had_crash && wdt_reset)
+        crashlog_write_unclean_exit(reason, prev_detail);
+      crashlog_clear_running();
+    }
+    if (s_had_crash || (dirty && wdt_reset)) {
+      display_clear(COLOR_BLACK);
+      display_draw_text(8, 8,
+                        s_had_crash ? "Recovered from crash"
+                                    : "App hung - watchdog reset",
+                        COLOR_YELLOW, COLOR_BLACK);
+      if (dirty) {
+        snprintf(ln, 56, "App: %.48s", prev_app);
+        display_draw_text(8, 24, ln, COLOR_WHITE, COLOR_BLACK);
+      }
+      display_draw_text(8, 40, "See /system/crashlog.txt", COLOR_GRAY, COLOR_BLACK);
+      display_flush();
+      watchdog_update();
+      sleep_ms(2000);
+      watchdog_update();
+    }
+    if (prev_app) umm_free(prev_app);
+  }
   watchdog_update();
 
   // Load persisted settings from /system/config.json

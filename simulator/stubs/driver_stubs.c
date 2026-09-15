@@ -1028,6 +1028,8 @@ bool sdcard_mkdir(const char* path) {
     if (hal_sdcard_mkdir(path) == 0) return true;
     return errno == EEXIST;
 }
+bool sdcard_is_mounted(void) { return true; }
+
 bool sdcard_delete(const char* path) {
     extern char g_base_path[512];
     char full[1024];
@@ -1089,12 +1091,6 @@ bool sdcard_disk_info(uint32_t* out_free_kb, uint32_t* out_total_kb) {
     if (out_total_kb) *out_total_kb = (uint32_t)((st.f_blocks * st.f_frsize) / 1024);
     if (out_free_kb)  *out_free_kb  = (uint32_t)((st.f_bavail * st.f_frsize) / 1024);
     return true;
-}
-
-// Crashlog stub
-void crashlog_write_lua_error(const char *app_name, const char *context, const char *message) {
-    (void)app_name; (void)context;
-    if (message) fprintf(stderr, "[CRASHLOG] %s\n", message);
 }
 
 // ── Display effects ──────────────────────────────────────────────────────────
@@ -1365,6 +1361,8 @@ void audio_stream_debug(uint32_t *isr_count, uint32_t *underruns, uint32_t *ring
 
 // umm_malloc stubs (simulator maps to standard malloc)
 size_t umm_free_heap_size(void) { return 8 * 1024 * 1024; }
+size_t umm_max_free_block_size(void) { return 8 * 1024 * 1024; }
+int umm_fragmentation_metric(void) { return 0; }
 void* umm_malloc(size_t size) {
     return malloc(size);
 }

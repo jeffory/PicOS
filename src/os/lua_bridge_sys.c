@@ -1,5 +1,6 @@
 #include "lua_bridge_internal.h"
 #include "lua_psram_alloc.h"
+#include "crashlog.h"
 #include "idle_dim.h"
 #include "ota_update.h"
 #include "version.h"
@@ -76,6 +77,7 @@ static int l_sys_sleep(lua_State *L) {
 
 static int l_sys_reboot(lua_State *L) {
   (void)L;
+  crashlog_clear_running(); // intentional — not an unclean exit
   watchdog_enable(1, true);
   for (;;)
     tight_loop_contents();
@@ -184,6 +186,10 @@ static int l_sys_getMemInfo(lua_State *L) {
   lua_setfield(L, -2, "psram_used");
   lua_pushinteger(L, (lua_Integer)psram_total);
   lua_setfield(L, -2, "psram_total");
+  lua_pushinteger(L, (lua_Integer)lua_psram_alloc_largest_block());
+  lua_setfield(L, -2, "psram_largest_block");
+  lua_pushinteger(L, (lua_Integer)lua_psram_alloc_fragmentation());
+  lua_setfield(L, -2, "psram_fragmentation");
   lua_pushinteger(L, (lua_Integer)mi.fordblks);
   lua_setfield(L, -2, "sram_free");
   lua_pushinteger(L, (lua_Integer)mi.uordblks);

@@ -1,4 +1,5 @@
 #include "system_menu.h"
+#include "crashlog.h"
 #include "lua_bridge.h"
 #include "lua_psram_alloc.h"
 #include "../dev_commands.h"
@@ -569,12 +570,14 @@ static bool menu_loop(lua_State *L, int context) {
         break;
       case ITEM_REBOOT:
         save_brightness_if_changed(entry_brightness);
+        crashlog_clear_running(); // intentional — not an unclean exit
         watchdog_enable(1, true);
         for (;;)
           tight_loop_contents();
         break; /* unreachable */
       case ITEM_REBOOT_FLASH:
         save_brightness_if_changed(entry_brightness);
+        crashlog_clear_running();
         reset_usb_boot(0, 0);
         break; /* unreachable */
       case ITEM_WIFI_AUTO_DISCONNECT:

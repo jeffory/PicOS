@@ -13,6 +13,11 @@
 #define umm_realloc(ptr, size) realloc(ptr, size)
 #define umm_calloc(num, size) calloc(num, size)
 
+// Heap metrics (simulator has a host heap; report an untouched 8MB)
+size_t umm_free_heap_size(void);
+size_t umm_max_free_block_size(void);
+int umm_fragmentation_metric(void);
+
 // Heap info structure (dummy)
 struct umm_heap_info {
     size_t total_size;

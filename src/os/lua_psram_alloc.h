@@ -15,6 +15,12 @@ lua_State *lua_psram_newstate(void);
 // Memory stats for the PSRAM Lua heap
 size_t lua_psram_alloc_free_size(void);
 size_t lua_psram_alloc_total_size(void);
+// Largest single allocation that would currently succeed.  Total free bytes
+// can be large while this is small (fragmentation) — this is the number that
+// decides whether a big app image or buffer will load.
+size_t lua_psram_alloc_largest_block(void);
+// umm_malloc fragmentation metric, 0 (contiguous) .. 100 (shattered).
+int    lua_psram_alloc_fragmentation(void);
 
 // Returns true when free heap has fallen below PSRAM_LOW_WATERMARK.
 // Used by the Lua debug hook to trigger GC before allocations start failing.
