@@ -86,7 +86,7 @@ picocalc.display.drawLine(0, 0, 319, 319, picocalc.display.GREEN)
 ---
 
 #### `picocalc.display.drawText(x, y, text, fg_color [, bg_color])`
-Draws text using the built-in 6×8 pixel bitmap font (ASCII 0x20–0x7E).
+Draws text using the active font (default 6×8, ASCII 0x20–0x7E). Set the active font with `picocalc.display.setFont`. Pass `bg_color = false` to draw with a transparent background — only glyph pixels are written, so the text can sit over existing art.
 
 - **Parameters:**
   - `x` (number): Top-left X coordinate
@@ -386,7 +386,7 @@ end
 Set the active bitmap font for `drawText` and `textWidth`.
 
 - **Parameters:**
-  - `fontId` (number): One of the `FONT_*` constants
+  - `fontId` (number): One of the `FONT_*` constants, or an id returned by `loadFont`. An id that is not currently loaded (unknown, unloaded, or never loaded) is ignored and the active font is left unchanged.
 - **Returns:** None
 
 ```lua
@@ -409,10 +409,10 @@ local currentFont = picocalc.display.getFont()
 ---
 
 #### `picocalc.display.getFontWidth()`
-Get the character width in pixels of the current font.
+Get the maximum glyph advance in pixels of the current font. For a proportional font this is the widest glyph, not every glyph's width — use `textWidth` to measure a specific string.
 
 - **Parameters:** None
-- **Returns:** (number) Width in pixels
+- **Returns:** (number) Max advance in pixels
 
 ```lua
 local charWidth = picocalc.display.getFontWidth()
@@ -428,6 +428,36 @@ Get the character height in pixels of the current font.
 
 ```lua
 local charHeight = picocalc.display.getFontHeight()
+```
+
+---
+
+#### `picocalc.display.loadFont(path)`
+Loads a `.pfn` bitmap font from an absolute SD path and returns a font id for use with `setFont`. The path is sandbox-checked exactly like image loading. Loaded fonts occupy ids 4..11 (at most 8 loaded at a time, on top of the 4 built-ins) and each may be up to roughly 128 KB in PSRAM. Every font loaded by an app is automatically freed when the app exits, or earlier via `unloadFont`. See [Custom fonts](#custom-fonts) below for the `.pfn` format and the `tools/mkfont.py` build tool.
+
+- **Parameters:**
+  - `path` (string): Absolute path to a `.pfn` file
+- **Returns:** (number or nil) Font id (4-11) on success, `nil` on sandbox denial or load failure (missing file, bad magic, size mismatch, no free slot). Never raises.
+
+```lua
+local id = picocalc.display.loadFont(APP_DIR .. "/fonts/custom.pfn")
+if id then
+    picocalc.display.setFont(id)
+    picocalc.display.drawText(10, 10, "Custom!", picocalc.display.WHITE)
+end
+```
+
+---
+
+#### `picocalc.display.unloadFont(id)`
+Frees a font previously returned by `loadFont`. If `id` is the currently active font, the active font falls back to `FONT_6X8` (id 0) first. No-op for built-in font ids (0-3) or an id that is not currently loaded.
+
+- **Parameters:**
+  - `id` (number): Font id returned by `loadFont`
+- **Returns:** None
+
+```lua
+picocalc.display.unloadFont(id)
 ```
 
 ---
@@ -504,8 +534,12 @@ end
 |----------|-------|-------------|
 | `picocalc.display.FONT_6X8` | 0 | Built-in 6x8 pixel bitmap font (default) |
 | `picocalc.display.FONT_8X12` | 1 | Larger 8x12 pixel bitmap font |
-| `picocalc.display.FONT_SCIENTIFICA` | 2 | Scientifica proportional font |
-| `picocalc.display.FONT_SCIENTIFICA_BOLD` | 3 | Scientifica bold proportional font |
+| `picocalc.display.FONT_SCIENTIFICA` | 2 | Scientifica: monospace 6x12, includes box-drawing glyphs 0x80-0x9F |
+| `picocalc.display.FONT_SCIENTIFICA_BOLD` | 3 | Scientifica Bold: monospace 6x12, includes box-drawing glyphs 0x80-0x9F |
+
+Ids 4-11 are reserved for fonts loaded at runtime with `loadFont`/`graphics.font.new` — see [Custom fonts](#custom-fonts).
+
+A byte outside a font's `first..last` range draws as a hollow box rather than a substitute glyph.
 
 ---
 
@@ -748,6 +782,26 @@ API version 4 (`api->version >= 4`) adds the clip rect, mode-7 plane, and the pr
 | `setScrollOffset` | `void (*)(int offset)` |
 | `drawPlane` | `void (*)(const uint16_t *tex, int tex_w, int tex_h, float cam_x, float cam_y, float cam_z, float angle, int horizon_y, float scale)` |
 
+API version 6 (`api->version >= 6`) adds the font system to the same vtable. `PC_FONT_6X8`..`PC_FONT_SCIENTIFICA_BOLD` (0-3) name the built-in fonts; `loadFont` returns ids >= 4, up to 8 loaded at a time. Every font a native app loads is freed automatically when the app exits.
+
+| Function | Signature |
+|----------|-----------|
+| `setFont` | `void (*)(int font_id)` |
+| `getFont` | `int (*)(void)` |
+| `getFontWidth` | `int (*)(void)` — max advance of the active font |
+| `getFontHeight` | `int (*)(void)` |
+| `textWidth` | `int (*)(const char *text)` — real width in the active font |
+| `loadFont` | `int (*)(const char *path)` — slot id, or -1 on failure |
+| `unloadFont` | `void (*)(int font_id)` |
+| `drawTextTransparent` | `int (*)(int x, int y, const char *text, uint16_t fg)` |
+
+```c
+#define PC_FONT_6X8               0
+#define PC_FONT_8X12              1
+#define PC_FONT_SCIENTIFICA       2
+#define PC_FONT_SCIENTIFICA_BOLD  3
+```
+
 ---
 
 ## picocalc.graphics
@@ -970,7 +1024,7 @@ local width = picocalc.graphics.drawText("Hello!", 10, 10)
 ---
 
 #### `picocalc.graphics.drawTextAligned(text, x, y, alignment [, font])`
-Draws text with alignment. For center/right, text is positioned relative to `x`.
+Draws text with alignment. For center/right, text is positioned relative to `x` using the real measured width of `text` in the given font (proportional-aware, not `font width * length`).
 
 - **Parameters:**
   - `text` (string): Text to draw
@@ -988,7 +1042,7 @@ picocalc.graphics.drawTextAligned("Centered", 160, 10, 1)
 ---
 
 #### `picocalc.graphics.drawTextInRect(text, x, y, w, h [, alignment [, font]])`
-Draws word-wrapped text within a bounding rectangle. Line breaks at word boundaries for monospace fonts.
+Draws word-wrapped text within a bounding rectangle. Wrapping breaks at spaces and uses each glyph's real advance in the active font, so it wraps correctly for both monospace and proportional fonts.
 
 - **Parameters:**
   - `text` (string): Text to draw
@@ -1013,7 +1067,7 @@ picocalc.graphics.drawTextInRect(
 ---
 
 #### `picocalc.graphics.getTextSize(text [, font])`
-Returns pixel dimensions for a single line of text.
+Returns pixel dimensions for a single line of text, using the real per-glyph advances of the given font (proportional-aware).
 
 - **Parameters:**
   - `text` (string): Text to measure
@@ -1027,7 +1081,7 @@ local w, h = picocalc.graphics.getTextSize("Hello!")
 ---
 
 #### `picocalc.graphics.getTextSizeForMaxWidth(text, maxWidth [, font])`
-Returns pixel dimensions of word-wrapped text within `maxWidth`.
+Returns pixel dimensions of word-wrapped text within `maxWidth`. Wrapping breaks at spaces using real per-glyph advances, matching `drawTextInRect`.
 
 - **Parameters:**
   - `text` (string): Text to measure
@@ -2276,15 +2330,18 @@ Custom font loading and text rendering. Font objects can be passed to text rende
 
 ### Constructor Functions
 
-#### `picocalc.graphics.font.new(fontId)`
-Creates a new font object from a built-in font ID.
+#### `picocalc.graphics.font.new(nameOrPath)`
+Creates a new font object, either from one of the four built-in fonts or by loading a custom `.pfn` file from the SD card.
 
 - **Parameters:**
-  - `fontId` (number): One of the `FONT_*` constants (e.g., `picocalc.display.FONT_6X8`)
-- **Returns:** (userdata) Font object
+  - `nameOrPath` (string): One of the built-in names `"6x8"`, `"8x12"`, `"scientifica"`, `"scientifica-bold"`, or an absolute path to a `.pfn` file inside the app's sandbox
+- **Returns:** (userdata) Font object. **Raises a Lua error** (never returns `nil`) if the path is outside the sandbox or the file fails to load (missing, bad magic, size mismatch, no free slot).
+
+A font object created from a path owns a loaded font slot (see [Custom fonts](#custom-fonts)) and frees it automatically when the object is garbage-collected. Every font an app has loaded, whether via `font.new(path)` or `picocalc.display.loadFont`, is also freed when the app exits, so leaving objects to the garbage collector is safe.
 
 ```lua
-local font = picocalc.graphics.font.new(picocalc.display.FONT_8X12)
+local font = picocalc.graphics.font.new("8x12")
+local custom = picocalc.graphics.font.new(APP_DIR .. "/fonts/custom.pfn")
 ```
 
 ---
@@ -2327,7 +2384,7 @@ font:drawTextAligned(160, 10, "Centered", 1, picocalc.display.WHITE)
 ---
 
 #### `font:drawTextInRect(x, y, w, h, text [, alignment [, fg [, bg]]])`
-Draws word-wrapped text within a bounding rectangle using this font. **Monospace fonts only.**
+Draws word-wrapped text within a bounding rectangle using this font. Wrapping breaks at spaces and uses each glyph's real advance, so it works correctly for both monospace and proportional fonts.
 
 - **Parameters:**
   - `x` (number): Left edge of bounding rectangle
@@ -2341,7 +2398,7 @@ Draws word-wrapped text within a bounding rectangle using this font. **Monospace
 - **Returns:** None
 
 ```lua
-local font = picocalc.graphics.font.new(picocalc.display.FONT_SCIENTIFICA)
+local font = picocalc.graphics.font.new("scientifica")
 font:drawTextInRect(10, 10, 200, 100, "This text will wrap within the rectangle.", 0,
     picocalc.display.WHITE, picocalc.display.BLACK)
 ```
@@ -2349,16 +2406,16 @@ font:drawTextInRect(10, 10, 200, 100, "This text will wrap within the rectangle.
 ---
 
 #### `font:getHeight()`
-Returns the font's character height in pixels.
+Returns the font's glyph height in pixels.
 
 - **Returns:** (number) Height in pixels
 
 ---
 
 #### `font:getWidth()`
-Returns the font's character width in pixels.
+Returns the font's maximum glyph advance in pixels. For a proportional font this is the widest glyph, not every glyph's width — use `font:getTextWidth` to measure a specific string.
 
-- **Returns:** (number) Width in pixels
+- **Returns:** (number) Max advance in pixels
 
 ---
 
@@ -2376,9 +2433,62 @@ local w = font:getTextWidth("Hello")
 ---
 
 #### `font:getName()`
-Returns the name of the font.
+Returns the string the font was created with: one of the built-in names, or the `.pfn` path for a loaded font.
 
-- **Returns:** (string) Font name
+- **Returns:** (string) Font name or path
+
+---
+
+### Custom fonts
+
+`picocalc.graphics.font.new(path)` and `picocalc.display.loadFont(path)` both load fonts from a `.pfn` file — a small, little-endian, proportional-capable bitmap font container built by `tools/mkfont.py`.
+
+#### `.pfn` file format
+
+12-byte header followed by two arrays:
+
+| Offset | Size | Field |
+|---|---|---|
+| 0 | 4 | magic `"PFNT"` |
+| 4 | 1 | version, must be 1 |
+| 5 | 1 | flags, bit0 = proportional (widths array is meaningful) |
+| 6 | 1 | first |
+| 7 | 1 | last (>= first) |
+| 8 | 1 | height, 1..64 |
+| 9 | 1 | max_width, 1..64 |
+| 10 | 1 | stride, must equal `(max_width + 7) / 8` |
+| 11 | 1 | reserved, 0 |
+| 12 | count | widths, u8 each, `count = last - first + 1` |
+| 12 + count | count * height * stride | bitmaps |
+
+The widths array is always present so the loader never branches on `flags`; a monospace file simply repeats `max_width` for every glyph. Total file length must equal `12 + count + count*height*stride` exactly. The largest legal file is `12 + 256 + 256*64*8 = 131,340` bytes (~128 KB), which is also the effective per-font PSRAM budget for a loaded font.
+
+A byte outside `first..last` draws as a hollow box rather than a substitute glyph.
+
+#### `tools/mkfont.py`
+
+Builds a `.pfn` from a BDF font, a TTF/OTF font, or a fixed-grid PNG sheet:
+
+```
+python3 tools/mkfont.py SRC OUT.pfn [--size N] [--cell WxH] [--range FIRST-LAST]
+                                     [--proportional] [--spacing N] [--dump]
+```
+
+- `SRC` ending `.bdf`: parsed by a built-in BDF reader; each glyph's `DWIDTH` gives its advance, and `--proportional` is implied automatically when advances vary.
+- `SRC` ending `.ttf` / `.otf`: rasterised with Pillow's `ImageFont` at `--size` pixels, thresholded at 50%; advance comes from the font's own metrics. (Requires Pillow; BDF and PNG sources need only the standard library.)
+- `SRC` ending `.png`: a fixed grid sheet, cell size given by `--cell WxH`, glyphs read left to right then top to bottom starting at `first`; a pixel is set when its luminance is above 50%.
+- `--proportional` on a monospace source trims each glyph's advance down to its ink extent plus `--spacing` (default 1) and packs it to the left of its cell. Space keeps half the cell width, minimum 2 px.
+- `--range` selects the codepoint range to emit, default `0x20-0x7E`.
+- `--dump` prints every glyph as ASCII art with its advance, for eyeballing before shipping the file.
+
+This version of the tool emits fonts up to 8 px wide (one byte of stride per row); the on-device `.pfn` format and renderer support glyphs up to 64 px wide, but wider fonts need a newer build of `mkfont.py`.
+
+```lua
+-- Loaded on the app's SD card at fonts/custom.pfn, built with:
+--   python3 tools/mkfont.py fonts/custom.bdf apps/myapp/fonts/custom.pfn --proportional
+local font = picocalc.graphics.font.new(APP_DIR .. "/fonts/custom.pfn")
+font:drawText(10, 10, "Loaded from SD!", picocalc.display.WHITE)
+```
 
 ---
 
