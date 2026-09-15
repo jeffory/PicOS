@@ -53,8 +53,8 @@ picocalc = {}
 ---@field GRAY    integer RGB565 gray
 ---@field FONT_6X8            integer Built-in 6×8 bitmap font
 ---@field FONT_8X12           integer Built-in 8×12 bitmap font
----@field FONT_SCIENTIFICA    integer Scientifica bitmap font
----@field FONT_SCIENTIFICA_BOLD integer Scientifica bold bitmap font
+---@field FONT_SCIENTIFICA    integer Scientifica: monospace 6×12, includes box-drawing glyphs 0x80-0x9F
+---@field FONT_SCIENTIFICA_BOLD integer Scientifica Bold: monospace 6×12, includes box-drawing glyphs 0x80-0x9F
 picocalc.display = {}
 
 ---Clear the display to a solid colour (default: BLACK).
@@ -265,20 +265,37 @@ function picocalc.display.setBrightness(brightness) end
 function picocalc.display.textWidth(text) end
 
 ---Select the active font for subsequent drawText/textWidth calls.
----@param font_id integer One of the FONT_* constants
+---@param font_id integer One of the FONT_* constants, or an id returned by loadFont. An id that is not currently loaded is ignored.
 function picocalc.display.setFont(font_id) end
 
 ---Return the currently active font ID.
 ---@return integer
 function picocalc.display.getFont() end
 
----Return the character cell width of the current font in pixels.
+---Return the maximum glyph advance of the current font in pixels. For a
+---proportional font this is the widest glyph, not every glyph's width; use
+---textWidth to measure a specific string.
 ---@return integer
 function picocalc.display.getFontWidth() end
 
----Return the character cell height of the current font in pixels.
+---Return the glyph height of the current font in pixels.
 ---@return integer
 function picocalc.display.getFontHeight() end
+
+---Load a `.pfn` bitmap font from an absolute SD path (sandbox-checked, like
+---image loading). Returns an id (4-11, at most 8 loaded at once) for use
+---with setFont, or nil on sandbox denial or load failure. Never raises.
+---Every font an app loads is freed automatically when it exits, or earlier
+---via unloadFont.
+---@param path string Absolute path to a `.pfn` file
+---@return integer? id Font id (4-11), or nil on failure
+function picocalc.display.loadFont(path) end
+
+---Free a font previously returned by loadFont. If it is the active font,
+---the active font falls back to FONT_6X8 first. No-op for built-in ids
+---(0-3) or an id that is not currently loaded.
+---@param id integer Font id returned by loadFont
+function picocalc.display.unloadFont(id) end
 
 ---Convert 8-bit R/G/B components to a packed RGB565 colour integer.
 ---@param r integer 0–255
@@ -2059,17 +2076,22 @@ picocalc.graphics.font = {}
 ---@class PicOSFont : userdata
 local PicOSFont = {}
 
----Load a bitmap font from the SD card.
----@param path string
----@return PicOSFont?
-function picocalc.graphics.font.new(path) end
+---Create a font, either one of the built-in names or a `.pfn` path.
+---A path is sandbox-checked and loaded; the returned object frees its
+---loaded slot when garbage-collected. Every font an app loads is also
+---freed automatically when the app exits.
+---@param name_or_path string One of "6x8", "8x12", "scientifica", "scientifica-bold", or a `.pfn` path
+---@return PicOSFont font Errors (never returns nil) on access denied or load failure
+function picocalc.graphics.font.new(name_or_path) end
 
----Draw text using this font.
----@param text string
+---Draw text at (x, y) using this font. bg defaults to BLACK if omitted.
 ---@param x integer
 ---@param y integer
----@param color? integer RGB565
-function PicOSFont:drawText(text, x, y, color) end
+---@param text string
+---@param fg integer RGB565 foreground colour
+---@param bg? integer RGB565 background colour
+---@return integer width Pixel width of the drawn text
+function PicOSFont:drawText(x, y, text, fg, bg) end
 
 ---Draw text with horizontal alignment.
 ---@param x integer
@@ -2080,7 +2102,9 @@ function PicOSFont:drawText(text, x, y, color) end
 ---@param bg? integer RGB565
 function PicOSFont:drawTextAligned(x, y, text, alignment, fg, bg) end
 
----Word-wrap text within a bounding rect. Monospace fonts only.
+---Word-wrap text within a bounding rect. Wrapping breaks at spaces and uses
+---each glyph's real advance, so it works for both monospace and
+---proportional fonts.
 ---@param x integer Rect x
 ---@param y integer Rect y
 ---@param w integer Rect width
@@ -2091,20 +2115,23 @@ function PicOSFont:drawTextAligned(x, y, text, alignment, fg, bg) end
 ---@param bg? integer RGB565
 function PicOSFont:drawTextInRect(x, y, w, h, text, alignment, fg, bg) end
 
----Return the character height of this font.
+---Return the glyph height of this font.
 ---@return integer
 function PicOSFont:getHeight() end
 
----Return the character width (for monospaced fonts).
+---Return the maximum glyph advance of this font in pixels. For a
+---proportional font this is the widest glyph, not every glyph's width;
+---use getTextWidth to measure a specific string.
 ---@return integer
 function PicOSFont:getWidth() end
 
----Return the pixel width of a string in this font.
+---Return the pixel width of a string in this font (real per-glyph advances).
 ---@param text string
 ---@return integer
 function PicOSFont:getTextWidth(text) end
 
----Return the font's name string.
+---Return the string this font was created with: a built-in name, or the
+---`.pfn` path for a loaded font.
 ---@return string
 function PicOSFont:getName() end
 

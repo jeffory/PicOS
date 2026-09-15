@@ -349,14 +349,14 @@ The Menu/Sym key (`BTN_MENU`) pauses the running app and shows an OS-level overl
 - [x] graphics.font.new(path) — loads .pfn fonts from SD (tools/mkfont.py builds them from BDF/TTF/PNG); display.loadFont/unloadFont; native API v6
 - [dropped] ~~graphics.font.newFamily / setFontFamily / setFontTracking / getFontTracking / getSystemFont~~ — font family/tracking system deferred
 - [dropped] ~~graphics.font:setTracking / getTracking / setLeading / getLeading / getGlyph~~ — advanced font metrics deferred
-- [x] graphics.font:drawText(text, x, y, [width, height], [wrapMode], [alignment])
-- [x] graphics.font:drawTextAligned(text, x, y, alignment, fg, [bg])
+- [x] graphics.font:drawText(x, y, text, fg, [bg])
+- [x] graphics.font:drawTextAligned(x, y, text, alignment, fg, [bg])
 - [x] graphics.font:drawTextInRect(x, y, w, h, text, [alignment], [fg], [bg])
 - [x] graphics.font:getHeight() — already implemented
 - [x] graphics.font:getTextWidth(text) — already implemented
 - [x] graphics.drawText(text, x, y, [font]) — uses graphics color state
 - [x] graphics.drawTextAligned(text, x, y, alignment, [font])
-- [x] graphics.drawTextInRect(text, x, y, width, height, [alignment], [font]) — word-wrapping monospace
+- [x] graphics.drawTextInRect(text, x, y, width, height, [alignment], [font]) — word-wraps at spaces using real per-glyph advances
 - [x] graphics.getTextSize(str, [font]) → width, height
 - [x] graphics.getTextSizeForMaxWidth(text, maxWidth, [font]) → width, height
 - [x] graphics.imageWithText(text, maxWidth, maxHeight, [bgColor], [font]) — renders text to PSRAM image
