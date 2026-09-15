@@ -28,6 +28,7 @@
 #include "terminal.h"
 #include "appconfig.h"
 #include "image_api.h"
+#include "font_registry.h"
 
 // From unicorn_runner.c
 extern uc_engine *g_uc;
@@ -78,6 +79,12 @@ extern void display_clear_clip_rect(void);
 extern void display_set_scroll_area(int top_fixed, int scroll_height, int bottom_fixed);
 extern void display_set_scroll_offset(int offset);
 extern void display_draw_plane(const uint16_t *tex, int tex_w, int tex_h, float cam_x, float cam_y, float cam_z, float angle, int horizon_y, float scale);
+extern void display_set_font(int font_id);
+extern int  display_get_font(void);
+extern int  display_get_font_width(void);
+extern int  display_get_font_height(void);
+extern int  display_text_width(const char *text);
+extern int  display_draw_text_transparent(int x, int y, const char *text, uint16_t fg);
 
 // Input functions (from keyboard stub)
 extern uint32_t kbd_get_buttons(void);
@@ -300,7 +307,7 @@ static uint32_t read_stack_arg(uc_engine *uc, int index) {
 // Each sub-table's first slot. Slots within a sub-table are sequential.
 // The offsets here define the struct layout in emulated memory.
 enum {
-    // picocalc_display_t (36 functions incl. API v4 clip-rect/mode-7 slots)
+    // picocalc_display_t (45 functions incl. API v6 font slots)
     SLOT_DISPLAY_CLEAR = 0,
     SLOT_DISPLAY_SET_PIXEL,
     SLOT_DISPLAY_FILL_RECT,
@@ -340,6 +347,15 @@ enum {
     SLOT_DISPLAY_SET_SCROLL_AREA,
     SLOT_DISPLAY_SET_SCROLL_OFFSET,
     SLOT_DISPLAY_DRAW_PLANE,
+    // API v6 fonts — order must match picocalc_display_t in src/os/os.h
+    SLOT_DISPLAY_SET_FONT,
+    SLOT_DISPLAY_GET_FONT,
+    SLOT_DISPLAY_GET_FONT_WIDTH,
+    SLOT_DISPLAY_GET_FONT_HEIGHT,
+    SLOT_DISPLAY_TEXT_WIDTH,
+    SLOT_DISPLAY_LOAD_FONT,
+    SLOT_DISPLAY_UNLOAD_FONT,
+    SLOT_DISPLAY_DRAW_TEXT_TRANSPARENT,
     SLOT_DISPLAY_END,
 
     // picocalc_input_t (4 functions)
@@ -722,6 +738,42 @@ static void tramp_display_draw_text(uc_engine *uc) {
     uint16_t bg = (uint16_t)read_stack_arg(uc, 0);
     char *text = uc_read_string(uc, text_addr);
     int result = display_draw_text(x, y, text ? text : "", fg, bg);
+    write_reg(uc, UC_ARM_REG_R0, (uint32_t)result);
+    s_back_buffer_dirty = 1;
+}
+
+// --- API v6 font trampolines ---
+// uc_read_string() returns a pointer into a rotating static buffer in
+// unicorn_runner.c; it must not be freed (see tramp_display_draw_text).
+static void tramp_display_set_font(uc_engine *uc) {
+    display_set_font((int)read_reg(uc, UC_ARM_REG_R0));
+}
+static void tramp_display_get_font(uc_engine *uc) {
+    write_reg(uc, UC_ARM_REG_R0, (uint32_t)display_get_font());
+}
+static void tramp_display_get_font_width(uc_engine *uc) {
+    write_reg(uc, UC_ARM_REG_R0, (uint32_t)display_get_font_width());
+}
+static void tramp_display_get_font_height(uc_engine *uc) {
+    write_reg(uc, UC_ARM_REG_R0, (uint32_t)display_get_font_height());
+}
+static void tramp_display_text_width(uc_engine *uc) {
+    char *text = uc_read_string(uc, read_reg(uc, UC_ARM_REG_R0));
+    write_reg(uc, UC_ARM_REG_R0, (uint32_t)display_text_width(text ? text : ""));
+}
+static void tramp_display_load_font(uc_engine *uc) {
+    char *path = uc_read_string(uc, read_reg(uc, UC_ARM_REG_R0));
+    write_reg(uc, UC_ARM_REG_R0, (uint32_t)font_registry_load(path ? path : ""));
+}
+static void tramp_display_unload_font(uc_engine *uc) {
+    font_registry_unload((int)read_reg(uc, UC_ARM_REG_R0));
+}
+static void tramp_display_draw_text_transparent(uc_engine *uc) {
+    int x = (int)read_reg(uc, UC_ARM_REG_R0);
+    int y = (int)read_reg(uc, UC_ARM_REG_R1);
+    char *text = uc_read_string(uc, read_reg(uc, UC_ARM_REG_R2));
+    uint16_t fg = (uint16_t)read_reg(uc, UC_ARM_REG_R3);
+    int result = display_draw_text_transparent(x, y, text ? text : "", fg);
     write_reg(uc, UC_ARM_REG_R0, (uint32_t)result);
     s_back_buffer_dirty = 1;
 }
@@ -3007,6 +3059,14 @@ void unicorn_tramp_init(uc_engine *uc) {
     s_dispatch[SLOT_DISPLAY_SET_SCROLL_AREA] = tramp_display_set_scroll_area;
     s_dispatch[SLOT_DISPLAY_SET_SCROLL_OFFSET] = tramp_display_set_scroll_offset;
     s_dispatch[SLOT_DISPLAY_DRAW_PLANE]      = tramp_display_draw_plane;
+    s_dispatch[SLOT_DISPLAY_SET_FONT]        = tramp_display_set_font;
+    s_dispatch[SLOT_DISPLAY_GET_FONT]        = tramp_display_get_font;
+    s_dispatch[SLOT_DISPLAY_GET_FONT_WIDTH]  = tramp_display_get_font_width;
+    s_dispatch[SLOT_DISPLAY_GET_FONT_HEIGHT] = tramp_display_get_font_height;
+    s_dispatch[SLOT_DISPLAY_TEXT_WIDTH]      = tramp_display_text_width;
+    s_dispatch[SLOT_DISPLAY_LOAD_FONT]       = tramp_display_load_font;
+    s_dispatch[SLOT_DISPLAY_UNLOAD_FONT]     = tramp_display_unload_font;
+    s_dispatch[SLOT_DISPLAY_DRAW_TEXT_TRANSPARENT] = tramp_display_draw_text_transparent;
 
     // Input
     s_dispatch[SLOT_INPUT_GET_BUTTONS]         = tramp_input_get_buttons;
@@ -3479,7 +3539,7 @@ void unicorn_build_api_struct(uc_engine *uc, uint32_t api_base, uint32_t tramp_b
     write32(uc, api_base + 64, video_addr);
     write32(uc, api_base + 68, modplayer_addr);
     write32(uc, api_base + 72, zip_addr);
-    write32(uc, api_base + 76, 5);  // version = 5 (zip read-in-place handles)
+    write32(uc, api_base + 76, 6);  // version = 6 (fonts; matches src/main.c g_api.version)
 
-    printf("[UNICORN] PicoCalcAPI struct at 0x%08x, version=5\n", api_base);
+    printf("[UNICORN] PicoCalcAPI struct at 0x%08x, version=6\n", api_base);
 }

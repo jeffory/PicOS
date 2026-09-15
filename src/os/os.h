@@ -95,6 +95,12 @@ typedef struct {
 #define BTN_ALT       (1 << 21)   // Alt modifier
 #define BTN_FN        (1 << 22)   // Fn/Symbol modifier
 
+// Built-in font ids for display->setFont (API version 6)
+#define PC_FONT_6X8               0
+#define PC_FONT_8X12              1
+#define PC_FONT_SCIENTIFICA       2
+#define PC_FONT_SCIENTIFICA_BOLD  3
+
 typedef struct {
     // Returns current bitmask of held buttons (BTN_* flags)
     uint32_t (*getButtons)(void);
@@ -176,6 +182,19 @@ typedef struct {
     void (*drawPlane)(const uint16_t *tex, int tex_w, int tex_h,
                       float cam_x, float cam_y, float cam_z,
                       float angle, int horizon_y, float scale);
+    // --- API version 6 additions: fonts ---------------------------------
+    // Font ids: PC_FONT_6X8 .. PC_FONT_SCIENTIFICA_BOLD are built in;
+    // loadFont returns ids >= 4. Every loaded font is freed when the app
+    // exits. setFont ignores ids that are not live.
+    void (*setFont)(int font_id);
+    int  (*getFont)(void);
+    int  (*getFontWidth)(void);            // max advance of the active font
+    int  (*getFontHeight)(void);
+    int  (*textWidth)(const char *text);   // real width, proportional-aware
+    int  (*loadFont)(const char *path);    // slot id, or -1 on failure
+    void (*unloadFont)(int font_id);
+    // Draw text leaving background pixels untouched.
+    int  (*drawTextTransparent)(int x, int y, const char *text, uint16_t fg);
 } picocalc_display_t;
 
 // --- Filesystem (SD card) ---------------------------------------------------

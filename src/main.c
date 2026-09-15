@@ -337,6 +337,7 @@ void __attribute__((naked)) isr_hardfault(void) {
 #include "drivers/keyboard.h"
 #include "drivers/sdcard.h"
 #include "drivers/wifi.h"
+#include "fonts/font_registry.h"
 #include "hardware.h"
 #include "os/appconfig.h"
 #include "os/config.h"
@@ -430,6 +431,14 @@ static picocalc_display_t s_display_impl = {
     .setScrollArea = display_set_scroll_area,
     .setScrollOffset = display_set_scroll_offset,
     .drawPlane = display_draw_plane,
+    .setFont = display_set_font,
+    .getFont = display_get_font,
+    .getFontWidth = display_get_font_width,
+    .getFontHeight = display_get_font_height,
+    .textWidth = display_text_width,
+    .loadFont = font_registry_load,
+    .unloadFont = font_registry_unload,
+    .drawTextTransparent = display_draw_text_transparent,
 };
 
 static uint32_t sys_getTimeMs(void) {
@@ -1664,7 +1673,7 @@ int main(void) {
   g_api.video       = &s_video_impl;
   g_api.modplayer   = &s_modplayer_impl;
   g_api.zip         = &s_zip_impl;
-  g_api.version     = 5;  // 5 = zip read-in-place handles
+  g_api.version     = 6;  // 6 = fonts (setFont/loadFont/textWidth), 5 = zip read-in-place handles
   // fs wired after SD card init
 
   // Bring up the QMI PSRAM in quad (QPI) mode before any PSRAM pointers are
