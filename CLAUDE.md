@@ -88,7 +88,7 @@ main()
 - `g_api.video` — MJPEG video playback (Phase 2; Lua exposes as `picocalc.video`)
 - `g_api.modplayer` — MOD tracker music (Phase 2; Lua exposes as `picocalc.modplayer`)
 - `g_api.zip` — ZIP extraction plus read-in-place archive handles (Lua exposes as `picocalc.zip`)
-- `g_api.version` — 1 = Phase 1, 2 = Phase 2, 3 = `fs->browse`, 4 = clip rect + mode-7 plane, 5 = zip read-in-place handles
+- `g_api.version` — 1 = Phase 1, 2 = Phase 2, 3 = `fs->browse`, 4 = clip rect + mode-7 plane, 5 = zip read-in-place handles, 6 = video time seek/position, progress OSD, `hasEnded`
 
 > ⚠️ **Config naming**: in Lua, `picocalc.config` (alias `picocalc.appconfig`) is the **per-app** store (`/data/<APP_ID>/config.json`); `picocalc.sysconfig` is the **system-wide** store (`/system/config.json`). Older docs had these inverted.
 
@@ -167,10 +167,11 @@ A debug hook fires every 256 opcodes (`lua_sethook` with `LUA_MASKCOUNT`). The h
 - `mp3_player_update()` and `fileplayer_update()` called on Core 1 every 5ms
 
 ### Video Player (`src/drivers/video_player.cpp`)
-- MJPEG video playback with JPEGDEC decoding
-- Frame buffer pool (3×96KB JPEG buffers) staged in PIO PSRAM at offset 0x8000
-- SD → PIO PSRAM → QMI buffer → JPEGDEC → framebuffer
-- Exposed as `picocalc.video` in Lua
+- MJPEG video playback with JPEGDEC decoding (JPEGDEC state lives in static SRAM)
+- Frame buffer pool (3×96KB JPEG buffers) in QMI PSRAM; Core 1 prefetches frame N+1 from SD into the pool while Core 0 decodes frame N
+- Frame + audio chunk indices sized from the AVI header (cap `VIDEO_MAX_FRAME_INDEX`); beyond the cap playback/seek fall back to sequential chunk scanning
+- Seeks clamp and never wrap; with loop off the last frame is held (`ended`). Built-in progress OSD drawn into the frame after decode
+- Exposed as `picocalc.video` in Lua; hardware-only (the simulator stubs it)
 
 ### PIO PSRAM (`src/drivers/pio_psram.c`)
 - Second 8MB PSRAM on the PicoCalc v2.0 mainboard, accessed via PIO1 SPI
@@ -335,7 +336,8 @@ Status constants: `picocalc.network.kStatusNotConnected` (0), `kStatusConnected`
 - Display post-effects (`effectInvert`…`effectPosterize`) are no-ops on the native (Unicorn) path; Lua-side effects work.
 - Hardware vertical scroll (`setScrollArea`/`setScrollOffset`/`getScrollOffset`) is emulated: flushes land in a GRAM analog and presents/screenshots are composed through the scroll registers, mirroring the ST7365P ring semantics for the visible 320 lines (the real chip's extra 160 frame-memory lines are not modelled).
 - The launcher caches the app list at boot — newly staged apps need a sim restart.
-- Everything else (zip including read-in-place archive handles, modplayer, display clip rect, drawPlane, tilemap, sprites) mirrors firmware, including `g_api.version = 5`.
+- `picocalc.video` is stubbed (no decoder): `player()` returns nil-backed handles; every video trampoline is a no-op.
+- Everything else (zip including read-in-place archive handles, modplayer, display clip rect, drawPlane, tilemap, sprites) mirrors firmware, including `g_api.version = 6`.
 
 ## Not Yet Implemented
 

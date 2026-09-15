@@ -103,7 +103,64 @@ static int l_video_getInfo(lua_State *L) {
     lua_pushinteger(L, player->current_frame); lua_setfield(L, -2, "current_frame");
     lua_pushinteger(L, video_player_get_dropped_frames(player)); lua_setfield(L, -2, "dropped_frames");
     lua_pushboolean(L, video_player_has_audio(player)); lua_setfield(L, -2, "has_audio");
+    lua_pushinteger(L, video_player_get_duration_ms(player)); lua_setfield(L, -2, "duration_ms");
+    lua_pushinteger(L, video_player_get_position_ms(player)); lua_setfield(L, -2, "position_ms");
+    lua_pushboolean(L, video_player_has_ended(player)); lua_setfield(L, -2, "ended");
+    if (player->fps_den) {
+        lua_pushnumber(L, (lua_Number)player->fps_num / (lua_Number)player->fps_den);
+        lua_setfield(L, -2, "fps");
+    }
     return 1;
+}
+
+static int l_video_getFrameCount(lua_State *L) {
+    lua_pushinteger(L, video_player_get_frame_count(check_video(L, 1)));
+    return 1;
+}
+
+static int l_video_getDurationMs(lua_State *L) {
+    lua_pushinteger(L, video_player_get_duration_ms(check_video(L, 1)));
+    return 1;
+}
+
+static int l_video_getPositionMs(lua_State *L) {
+    lua_pushinteger(L, video_player_get_position_ms(check_video(L, 1)));
+    return 1;
+}
+
+static int l_video_seekMs(lua_State *L) {
+    video_player_t *player = check_video(L, 1);
+    lua_Integer ms = luaL_checkinteger(L, 2);
+    video_player_seek_ms(player, ms < 0 ? 0 : (uint32_t)ms);
+    return 0;
+}
+
+static int l_video_seekRelativeMs(lua_State *L) {
+    video_player_t *player = check_video(L, 1);
+    video_player_seek_relative_ms(player, (int32_t)luaL_checkinteger(L, 2));
+    return 0;
+}
+
+static int l_video_hasEnded(lua_State *L) {
+    lua_pushboolean(L, video_player_has_ended(check_video(L, 1)));
+    return 1;
+}
+
+static int l_video_setOSD(lua_State *L) {
+    video_player_set_osd(check_video(L, 1), lua_toboolean(L, 2));
+    return 0;
+}
+
+static int l_video_showOSD(lua_State *L) {
+    video_player_show_osd(check_video(L, 1));
+    return 0;
+}
+
+static int l_video_setOSDTimeout(lua_State *L) {
+    video_player_t *player = check_video(L, 1);
+    lua_Integer ms = luaL_checkinteger(L, 2);
+    video_player_set_osd_timeout(player, ms < 0 ? 0 : (uint32_t)ms);
+    return 0;
 }
 
 static int l_video_hasAudio(lua_State *L) {
@@ -175,6 +232,15 @@ static const luaL_Reg video_methods[] = {
     {"stop", l_video_stop},
     {"update", l_video_update},
     {"seek", l_video_seek},
+    {"seekMs", l_video_seekMs},
+    {"seekRelativeMs", l_video_seekRelativeMs},
+    {"getFrameCount", l_video_getFrameCount},
+    {"getDurationMs", l_video_getDurationMs},
+    {"getPositionMs", l_video_getPositionMs},
+    {"hasEnded", l_video_hasEnded},
+    {"setOSD", l_video_setOSD},
+    {"showOSD", l_video_showOSD},
+    {"setOSDTimeout", l_video_setOSDTimeout},
     {"isPlaying", l_video_isPlaying},
     {"isPaused", l_video_isPaused},
     {"getFPS", l_video_getFPS},

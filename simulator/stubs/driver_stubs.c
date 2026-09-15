@@ -1401,6 +1401,15 @@ void video_player_set_audio_volume(void* player, uint8_t volume) { (void)player;
 uint8_t video_player_get_audio_volume(void* player) { (void)player; return 100; }
 void video_player_set_audio_muted(void* player, bool muted) { (void)player; (void)muted; }
 bool video_player_get_audio_muted(void* player) { (void)player; return false; }
+uint32_t video_player_get_frame_count(void* player) { (void)player; return 0; }
+uint32_t video_player_get_duration_ms(void* player) { (void)player; return 0; }
+uint32_t video_player_get_position_ms(void* player) { (void)player; return 0; }
+void video_player_seek_ms(void* player, uint32_t ms) { (void)player; (void)ms; }
+void video_player_seek_relative_ms(void* player, int32_t delta_ms) { (void)player; (void)delta_ms; }
+bool video_player_has_ended(void* player) { (void)player; return false; }
+void video_player_set_osd(void* player, bool enabled) { (void)player; (void)enabled; }
+void video_player_show_osd(void* player) { (void)player; }
+void video_player_set_osd_timeout(void* player, uint32_t ms) { (void)player; (void)ms; }
 
 // ── g_api global ────────────────────────────────────────────────────────────
 #include "os.h"

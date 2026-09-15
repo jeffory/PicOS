@@ -4,6 +4,10 @@ FILE="$1"
 CROP_VIDEO=false
 VIDEO_QUALITY=8
 AUDIO_MUTED=false
+# 4:2:0 chroma halves the decoder's chroma work on the RP2350 (ffmpeg only
+# picks it by itself when the source is already 4:2:0); --chroma444 keeps
+# full-resolution colour at roughly 2x decode time.
+PIX_FMT=yuvj420p
 
 # Check if ffmpeg is installed
 if ! command -v ffmpeg &> /dev/null; then
@@ -29,6 +33,10 @@ while [[ "$1" == -* ]]; do
             ;;
         --mute)
             AUDIO_MUTED=true
+            shift
+            ;;
+        --chroma444)
+            PIX_FMT=yuvj444p
             shift
             ;;
         *)
@@ -82,6 +90,7 @@ if [ "$CROP_VIDEO" = true ]; then
     ffmpeg -i "$FILE" \
         -vf "fps=25,scale=320:320:force_original_aspect_ratio=increase,crop=320:320" \
         -vcodec mjpeg \
+        -pix_fmt $PIX_FMT \
         -q:v $VIDEO_QUALITY \
         -huffman optimal \
         $AUDIO_OPTS \
@@ -90,6 +99,7 @@ else
     ffmpeg -i "$FILE" \
         -vf "fps=25,scale=320:-1" \
         -vcodec mjpeg \
+        -pix_fmt $PIX_FMT \
         -q:v $VIDEO_QUALITY \
         -huffman optimal \
         $AUDIO_OPTS \
