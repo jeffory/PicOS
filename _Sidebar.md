@@ -1,6 +1,7 @@
 ### Documentation
 * [[Home]]
 * [[Creating your first app]]
+* [[Publishing Apps]]
 * [[Native Loading]]
 * [[Lua SDK Reference]]
 
