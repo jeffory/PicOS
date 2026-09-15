@@ -1220,6 +1220,33 @@ static uint32_t video_get_dropped_w(pcvideo_t vp) {
 static void video_reset_stats_w(pcvideo_t vp) {
     video_player_reset_stats((video_player_t *)vp);
 }
+static uint32_t video_get_frame_count_w(pcvideo_t vp) {
+    return video_player_get_frame_count((video_player_t *)vp);
+}
+static uint32_t video_get_duration_ms_w(pcvideo_t vp) {
+    return video_player_get_duration_ms((video_player_t *)vp);
+}
+static uint32_t video_get_position_ms_w(pcvideo_t vp) {
+    return video_player_get_position_ms((video_player_t *)vp);
+}
+static void video_seek_ms_w(pcvideo_t vp, uint32_t ms) {
+    video_player_seek_ms((video_player_t *)vp, ms);
+}
+static void video_seek_relative_ms_w(pcvideo_t vp, int32_t delta_ms) {
+    video_player_seek_relative_ms((video_player_t *)vp, delta_ms);
+}
+static bool video_has_ended_w(pcvideo_t vp) {
+    return video_player_has_ended((video_player_t *)vp);
+}
+static void video_set_osd_w(pcvideo_t vp, bool enabled) {
+    video_player_set_osd((video_player_t *)vp, enabled);
+}
+static void video_show_osd_w(pcvideo_t vp) {
+    video_player_show_osd((video_player_t *)vp);
+}
+static void video_set_osd_timeout_w(pcvideo_t vp, uint32_t ms) {
+    video_player_set_osd_timeout((video_player_t *)vp, ms);
+}
 
 static const picocalc_video_t s_video_impl = {
     .newPlayer       = video_new_player,
@@ -1244,6 +1271,15 @@ static const picocalc_video_t s_video_impl = {
     .getMuted        = video_get_muted_w,
     .getDroppedFrames = video_get_dropped_w,
     .resetStats      = video_reset_stats_w,
+    .getFrameCount   = video_get_frame_count_w,
+    .getDurationMs   = video_get_duration_ms_w,
+    .getPositionMs   = video_get_position_ms_w,
+    .seekMs          = video_seek_ms_w,
+    .seekRelativeMs  = video_seek_relative_ms_w,
+    .hasEnded        = video_has_ended_w,
+    .setOSD          = video_set_osd_w,
+    .showOSD         = video_show_osd_w,
+    .setOSDTimeout   = video_set_osd_timeout_w,
 };
 
 // ── MOD player wrappers (opaque void* API) ───────────────────────────────────
@@ -1673,7 +1709,7 @@ int main(void) {
   g_api.video       = &s_video_impl;
   g_api.modplayer   = &s_modplayer_impl;
   g_api.zip         = &s_zip_impl;
-  g_api.version     = 6;  // 6 = fonts (setFont/loadFont/textWidth), 5 = zip read-in-place handles
+  g_api.version     = 7;  // 7 = video time seek/position, OSD, hasEnded; 6 = fonts; 5 = zip read-in-place handles
   // fs wired after SD card init
 
   // Bring up the QMI PSRAM in quad (QPI) mode before any PSRAM pointers are

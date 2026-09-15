@@ -596,7 +596,7 @@ enum {
     SLOT_GFX_DRAW_SCALED,
     SLOT_GRAPHICS_END,
 
-    // picocalc_video_t (22 functions)
+    // picocalc_video_t (31 functions)
     SLOT_VIDEO_NEW_PLAYER = SLOT_GRAPHICS_END,
     SLOT_VIDEO_FREE,
     SLOT_VIDEO_LOAD,
@@ -619,6 +619,16 @@ enum {
     SLOT_VIDEO_GET_MUTED,
     SLOT_VIDEO_GET_DROPPED_FRAMES,
     SLOT_VIDEO_RESET_STATS,
+    // API v7 additions (stubs: the sim has no video decoder)
+    SLOT_VIDEO_GET_FRAME_COUNT,
+    SLOT_VIDEO_GET_DURATION_MS,
+    SLOT_VIDEO_GET_POSITION_MS,
+    SLOT_VIDEO_SEEK_MS,
+    SLOT_VIDEO_SEEK_RELATIVE_MS,
+    SLOT_VIDEO_HAS_ENDED,
+    SLOT_VIDEO_SET_OSD,
+    SLOT_VIDEO_SHOW_OSD,
+    SLOT_VIDEO_SET_OSD_TIMEOUT,
     SLOT_VIDEO_END,
 
     // picocalc_modplayer_t (11 functions) — stubs only; MOD playback is not
@@ -2808,6 +2818,13 @@ static void tramp_video_reset_stats(uc_engine *uc) {
     void *vp = handle_unwrap(read_reg(uc, UC_ARM_REG_R0));
     if (vp) video_player_reset_stats(vp);
 }
+// API v7: returns 0 / false / no-op on the sim (video_player_create is NULL).
+static void tramp_video_ret_zero(uc_engine *uc) {
+    write_reg(uc, UC_ARM_REG_R0, 0);
+}
+static void tramp_video_noop(uc_engine *uc) {
+    (void)uc;
+}
 
 // =============================================================================
 // Crypto trampoline handlers (stubs — crypto not yet in simulator)
@@ -3308,6 +3325,15 @@ void unicorn_tramp_init(uc_engine *uc) {
     s_dispatch[SLOT_VIDEO_GET_MUTED]       = tramp_video_get_muted;
     s_dispatch[SLOT_VIDEO_GET_DROPPED_FRAMES] = tramp_video_get_dropped_frames;
     s_dispatch[SLOT_VIDEO_RESET_STATS]     = tramp_video_reset_stats;
+    s_dispatch[SLOT_VIDEO_GET_FRAME_COUNT]  = tramp_video_ret_zero;
+    s_dispatch[SLOT_VIDEO_GET_DURATION_MS]  = tramp_video_ret_zero;
+    s_dispatch[SLOT_VIDEO_GET_POSITION_MS]  = tramp_video_ret_zero;
+    s_dispatch[SLOT_VIDEO_SEEK_MS]          = tramp_video_noop;
+    s_dispatch[SLOT_VIDEO_SEEK_RELATIVE_MS] = tramp_video_noop;
+    s_dispatch[SLOT_VIDEO_HAS_ENDED]        = tramp_video_ret_zero;
+    s_dispatch[SLOT_VIDEO_SET_OSD]          = tramp_video_noop;
+    s_dispatch[SLOT_VIDEO_SHOW_OSD]         = tramp_video_noop;
+    s_dispatch[SLOT_VIDEO_SET_OSD_TIMEOUT]  = tramp_video_noop;
 
     // MOD player + ZIP (stubs — unicorn_tramp_dispatch() falls back to the
     // generic tramp_stub() for any slot with no s_dispatch entry; these
@@ -3539,7 +3565,7 @@ void unicorn_build_api_struct(uc_engine *uc, uint32_t api_base, uint32_t tramp_b
     write32(uc, api_base + 64, video_addr);
     write32(uc, api_base + 68, modplayer_addr);
     write32(uc, api_base + 72, zip_addr);
-    write32(uc, api_base + 76, 6);  // version = 6 (fonts; matches src/main.c g_api.version)
+    write32(uc, api_base + 76, 7);  // version = 7 (video seek/OSD; 6 = fonts; matches src/main.c g_api.version)
 
-    printf("[UNICORN] PicoCalcAPI struct at 0x%08x, version=6\n", api_base);
+    printf("[UNICORN] PicoCalcAPI struct at 0x%08x, version=7\n", api_base);
 }

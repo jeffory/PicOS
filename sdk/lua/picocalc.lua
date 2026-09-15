@@ -2171,9 +2171,50 @@ function PicOSVideoPlayer:stop() end
 ---@return boolean playing
 function PicOSVideoPlayer:update() end
 
----Seek to a specific frame index.
+---Seek to a specific frame index. Clamps to the file and never wraps: seeking
+---to/past the last frame ends the video on the next update (hold or loop).
+---A seek while paused presents the target frame immediately; a seek after
+---the end restarts playback from the target.
 ---@param frame integer
 function PicOSVideoPlayer:seek(frame) end
+
+---Seek to an absolute time in milliseconds (same clamping rules as `seek`).
+---@param ms integer
+function PicOSVideoPlayer:seekMs(ms) end
+
+---Seek relative to the current position (negative = backwards). Clamps at both ends.
+---@param delta_ms integer
+function PicOSVideoPlayer:seekRelativeMs(delta_ms) end
+
+---Total number of video frames.
+---@return integer
+function PicOSVideoPlayer:getFrameCount() end
+
+---Total duration in milliseconds.
+---@return integer
+function PicOSVideoPlayer:getDurationMs() end
+
+---Position of the frame currently on screen, in milliseconds.
+---@return integer
+function PicOSVideoPlayer:getPositionMs() end
+
+---`true` once playback reached the last frame with looping off. The last frame
+---stays on screen; `play()` or `resume()` replays from the start.
+---@return boolean
+function PicOSVideoPlayer:hasEnded() end
+
+---Enable/disable the built-in progress OSD (bar + elapsed/total time drawn over
+---the bottom of the video). On by default. It appears on play/pause/seek, hides
+---after the timeout while playing, and stays while paused or ended.
+---@param enabled boolean
+function PicOSVideoPlayer:setOSD(enabled) end
+
+---Show the OSD now and restart its hide timer.
+function PicOSVideoPlayer:showOSD() end
+
+---Set how long the OSD stays visible while playing (default 3000 ms).
+---@param ms integer
+function PicOSVideoPlayer:setOSDTimeout(ms) end
 
 ---@return boolean
 function PicOSVideoPlayer:isPlaying() end
@@ -2191,7 +2232,7 @@ function PicOSVideoPlayer:getFPS() end
 function PicOSVideoPlayer:getSize() end
 
 ---Return metadata and playback state.
----@return { width: integer, height: integer, frames: integer, current_frame: integer, dropped_frames: integer, has_audio: boolean }
+---@return { width: integer, height: integer, frames: integer, current_frame: integer, dropped_frames: integer, has_audio: boolean, duration_ms: integer, position_ms: integer, ended: boolean, fps: number }
 function PicOSVideoPlayer:getInfo() end
 
 ---Return `true` if the loaded AVI file contains an MP3 audio track.
@@ -2199,7 +2240,7 @@ function PicOSVideoPlayer:getInfo() end
 function PicOSVideoPlayer:hasAudio() end
 
 ---Set audio volume.
----@param vol integer 0–255
+---@param vol integer 0–100
 function PicOSVideoPlayer:setVolume(vol) end
 
 ---@return integer
@@ -2211,7 +2252,7 @@ function PicOSVideoPlayer:setMuted(muted) end
 ---@return boolean
 function PicOSVideoPlayer:isMuted() end
 
----Enable/disable looping.
+---Enable/disable looping (default off: the last frame is held and `hasEnded()` turns true).
 ---@param loop boolean
 function PicOSVideoPlayer:setLoop(loop) end
 

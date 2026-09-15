@@ -546,6 +546,24 @@ typedef struct {
     bool      (*getMuted)(pcvideo_t vp);
     uint32_t  (*getDroppedFrames)(pcvideo_t vp);
     void      (*resetStats)(pcvideo_t vp);
+
+    // --- API version 7 additions -------------------------------------------
+    // Time-based position/seek (ms).  Seeks clamp to the file and never wrap;
+    // a seek while paused presents the target frame; a seek after the end
+    // restarts playback.  With loop off the player holds the last frame and
+    // hasEnded() turns true (isPlaying() false); play() or resume() replays.
+    uint32_t  (*getFrameCount)(pcvideo_t vp);
+    uint32_t  (*getDurationMs)(pcvideo_t vp);
+    uint32_t  (*getPositionMs)(pcvideo_t vp);
+    void      (*seekMs)(pcvideo_t vp, uint32_t ms);
+    void      (*seekRelativeMs)(pcvideo_t vp, int32_t delta_ms);
+    bool      (*hasEnded)(pcvideo_t vp);
+    // Built-in progress OSD (bar + elapsed/total) drawn over the bottom of
+    // the video.  On by default; shown on play/pause/seek, hides after the
+    // timeout (default 3000 ms) while playing, stays while paused/ended.
+    void      (*setOSD)(pcvideo_t vp, bool enabled);
+    void      (*showOSD)(pcvideo_t vp);
+    void      (*setOSDTimeout)(pcvideo_t vp, uint32_t ms);
 } picocalc_video_t;
 
 // --- MOD Music Player -------------------------------------------------------
@@ -628,6 +646,7 @@ typedef struct PicoCalcAPI {
     uint32_t                      version;     // 1=Phase1, 2=Phase2, 3=fs->browse,
                                              // 4=clip rect + mode-7 plane + display parity
                                              // 5=zip read-in-place handles
+                                             // 7=video time seek/position, OSD, hasEnded
 } PicoCalcAPI;
 
 // The global API instance, populated during os_init()

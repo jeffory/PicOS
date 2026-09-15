@@ -692,10 +692,11 @@ static bool run_app(int idx) {
     if (wst == WIFI_STATUS_CONNECTED || wst == WIFI_STATUS_CONNECTING ||
         wst == WIFI_STATUS_ONLINE) {
       wifi_disconnect();
-      // Wait for Core 1 to process the disconnect request before pausing it
-      // for the clock change. wifi_disconnect() queues via IPC ring buffer.
-      sleep_ms(50);
     }
+    // Wait for Core 1 to finish the hardware disconnect (bounded) before the
+    // clock change: changing sysclk while the driver still talks to the chip
+    // triggers an "hdr mismatch" error storm on Core 1.
+    for (int i = 0; i < 100 && !wifi_hw_disconnected(); i++) sleep_ms(5);  // <= 500 ms
   }
 
   if (app->system_clock_khz > 0) {
