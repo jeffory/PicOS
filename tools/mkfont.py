@@ -167,16 +167,22 @@ def load_png(path, cell, rng):
 def trim_proportional(glyphs, max_width, spacing, first):
     out = []
     for i, g in enumerate(glyphs):
-        ink = 0
+        lo = None
+        hi = None
         for r in g.rows:
             for col in range(max_width):
                 if r & (0x80 >> col):
-                    ink = max(ink, col + 1)
-        if ink == 0:
+                    if lo is None or col < lo:
+                        lo = col
+                    if hi is None or col > hi:
+                        hi = col
+        if lo is None:
             adv = max(max_width // 2, 2)
+            rows = list(g.rows)
         else:
-            adv = min(max_width, ink + spacing)
-        out.append(Glyph(list(g.rows), adv, g.name))
+            adv = min(max_width, (hi - lo + 1) + spacing)
+            rows = [(r << lo) & 0xFF for r in g.rows]
+        out.append(Glyph(rows, adv, g.name))
     return out
 
 

@@ -63,12 +63,19 @@ def test_range_fills_missing_glyphs_blank():
 
 
 def test_proportional_trim_from_mono_grid():
-    # 4x2 cells: 'A' has ink in cols 0..1, 'B' is blank (space-like)
-    a = mkfont.Glyph(rows=[0b11000000, 0b10000000], advance=4)
+    # 4x2 cells: 'A' has ink in cols 2..3 (centred, blank on the left), 'B' is blank (space-like)
+    a = mkfont.Glyph(rows=[0b00110000, 0b00100000], advance=4)
     b = mkfont.Glyph(rows=[0, 0], advance=4)
     out = mkfont.trim_proportional([a, b], max_width=4, spacing=1, first=65)
+    assert out[0].rows == [0b11000000, 0b10000000]  # shifted left to drop blank cols
     assert out[0].advance == 3          # ink width 2 + spacing 1
     assert out[1].advance == 2          # blank keeps max(cell/2, 2)
+
+    # 8x2 cell: ink only in column 7 (far right)
+    c = mkfont.Glyph(rows=[0b00000001, 0], advance=8)
+    out2 = mkfont.trim_proportional([c], max_width=8, spacing=1, first=65)
+    assert out2[0].rows == [0b10000000, 0]
+    assert out2[0].advance == 2         # ink width 1 + spacing 1
 
 
 def test_png_grid_input(tmp_path):
