@@ -46,9 +46,7 @@ screen.png
 screenshot.png
 
 # Binary assets (not tracked in git)
-apps/doom/doom1.wad
 apps/gbc/main.elf
-apps/block.exe/inspiration.jpg
 apps/tic-80/
 
 # Simulator user data

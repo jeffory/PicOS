@@ -103,6 +103,7 @@ _GAMEPLAY_KEY_STEPS' own comment for the full verified screen-by-screen
 path and _drive_to_mission_start's for why the final equip->mission step
 needs its own retry shape.
 """
+import os
 import re
 import shutil
 import time
@@ -113,7 +114,9 @@ import pytest
 from picos_simulator import PicosSimulator
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
-CDOGS_SRC = PROJECT_ROOT / "apps" / "cdogs"
+# C-Dogs lives in its own repo (github.com/jeffory/picos-cdogs) since 2026-09-16.
+# Point PICOS_CDOGS_DIR at a checkout that has been built (`make`) to run this module.
+CDOGS_SRC = Path(os.environ.get("PICOS_CDOGS_DIR", Path.home() / "Projects" / "picos-cdogs"))
 
 HEAPSTAT_RE = re.compile(
     r"HEAPSTAT (\S+) watermark=(\d+) true=(\d+) arena=(\d+) used=(\d+) peak=(\d+)"
@@ -289,9 +292,9 @@ def cdogs_simulator(simulator_binary, tmp_path_factory, request):
     `simulator` fixture and doesn't rely on get_log_buffer()/wait_for_log().
     """
     if not (CDOGS_SRC / "main.elf").exists():
-        pytest.skip("apps/cdogs/main.elf not built — run `make` in apps/cdogs")
+        pytest.skip(f"{CDOGS_SRC}/main.elf not built — clone jeffory/picos-cdogs, run `make`, or set PICOS_CDOGS_DIR")
     if not (CDOGS_SRC / "data" / "graphics").exists():
-        pytest.skip("apps/cdogs/data not prepared — run ./prepare_data.sh")
+        pytest.skip(f"{CDOGS_SRC}/data not prepared — run ./prepare_data.sh in the picos-cdogs checkout")
 
     sd_path = tmp_path_factory.mktemp("cdogs_sd_card")
 
@@ -1343,7 +1346,7 @@ def test_sd_payload_excludes_non_runtime_sources():
     """
     data_dir = CDOGS_SRC / "data"
     if not data_dir.exists():
-        pytest.skip("apps/cdogs/data not prepared — run ./prepare_data.sh")
+        pytest.skip(f"{CDOGS_SRC}/data not prepared — run ./prepare_data.sh in the picos-cdogs checkout")
 
     offenders = []
     for pattern in EXCLUDED_PATTERNS:
