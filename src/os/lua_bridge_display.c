@@ -1,5 +1,6 @@
 #include "lua_bridge_internal.h"
 #include "toast.h"
+#include "../fonts/font_registry.h"
 
 // ── picocalc.display.* ───────────────────────────────────────────────────────
 
@@ -256,6 +257,27 @@ static int l_display_getFontHeight(lua_State *L) {
   return 1;
 }
 
+// loadFont(path) -> id | nil. Sandbox-checked like image loading. Freed at
+// app exit by the launcher, or earlier via unloadFont.
+static int l_display_loadFont(lua_State *L) {
+  const char *path = luaL_checkstring(L, 1);
+  if (!fs_sandbox_check(L, path, false)) {
+    lua_pushnil(L);
+    return 1;
+  }
+  int id = font_registry_load(path);
+  if (id < 0) lua_pushnil(L);
+  else lua_pushinteger(L, id);
+  return 1;
+}
+
+static int l_display_unloadFont(lua_State *L) {
+  int id = (int)luaL_checkinteger(L, 1);
+  if (display_get_font() == id) display_set_font(0);
+  font_registry_unload(id);
+  return 0;
+}
+
 // Convenience: create RGB565 from r,g,b components
 static int l_display_rgb(lua_State *L) {
   int r = luaL_checkinteger(L, 1);
@@ -382,6 +404,8 @@ static const luaL_Reg l_display_lib[] = {
     {"getFont", l_display_getFont},
     {"getFontWidth", l_display_getFontWidth},
     {"getFontHeight", l_display_getFontHeight},
+    {"loadFont", l_display_loadFont},
+    {"unloadFont", l_display_unloadFont},
     {"rgb", l_display_rgb},
     {"applyEffect", l_display_applyEffect},
     {"fillVLine", l_display_fillVLine},

@@ -1,5 +1,6 @@
 #include "lua_bridge_internal.h"
 #include "../drivers/image_api.h"
+#include "../fonts/font_registry.h"
 #include "../drivers/image_preload.h"
 #include "pico/time.h"
 #include <math.h>
@@ -808,14 +809,77 @@ static void tilemap_draw(lua_tilemap_t *tm, int scroll_x, int scroll_y) {
 #define GRAPHICS_FONT_MT "picocalc.graphics.font"
 
 typedef struct {
-  int font_id;
-  int cell_width;
-  int cell_height;
-  const char *name;
+  int font_id;        // registry id; >= FONT_REGISTRY_BUILTIN when owned
+  bool owned;         // true when this object loaded the slot and must free it
+  char name[64];      // built-in name or the path it was loaded from
 } lua_font_t;
 
 static lua_font_t *check_font(lua_State *L, int idx) {
   return (lua_font_t *)luaL_checkudata(L, idx, GRAPHICS_FONT_MT);
+}
+
+// Resolve the pc_font_t a Lua call should measure with: the font object at
+// `idx` when one was passed, else the display's active font.
+static const pc_font_t *font_for_arg(lua_State *L, int idx) {
+  if (lua_gettop(L) >= idx && lua_isuserdata(L, idx)) {
+    const pc_font_t *f = font_registry_get(check_font(L, idx)->font_id);
+    if (f) return f;
+  }
+  return display_get_active_font();
+}
+
+// Run `fn` with the display font temporarily switched to the object at
+// `idx` (if any). Every draw path below uses this so the swap/restore
+// logic exists once.
+#define WITH_FONT_ARG(L, idx, body) do {                       \
+    int prev_font_ = display_get_font();                      \
+    if (lua_gettop(L) >= (idx) && lua_isuserdata(L, (idx)))   \
+      display_set_font(check_font(L, (idx))->font_id);        \
+    body;                                                     \
+    display_set_font(prev_font_);                             \
+  } while (0)
+
+// Shared word-wrap loop. `emit(x, y, line, user)` is called per line with
+// x already adjusted for alignment (0 left, 1 center, 2 right) within rw.
+// Returns the number of lines emitted. Stops when the next line would not
+// fit in rh.
+static int wrap_lines(const pc_font_t *f, const char *text,
+                      int rx, int ry, int rw, int rh, int alignment,
+                      void (*emit)(int x, int y, const char *line, void *user),
+                      void *user) {
+  int fh = f->height;
+  int y = ry, lines = 0;
+  const char *p = text;
+  while (*p && (y + fh <= ry + rh)) {
+    int n = font_wrap_line(f, p, rw);
+    char line[128];
+    if (n > 127) n = 127;
+    memcpy(line, p, (size_t)n);
+    line[n] = '\0';
+    int tw = font_text_width(f, line);
+    int x = rx;
+    if (alignment == 1) x = rx + (rw - tw) / 2;
+    else if (alignment == 2) x = rx + rw - tw;
+    emit(x, y, line, user);
+    lines++;
+    y += fh;
+    p += n;
+    if (*p == ' ') p++;
+    if (*p == '\n') p++;
+  }
+  return lines;
+}
+
+typedef struct { uint16_t fg, bg; } emit_fb_t;
+static void emit_to_display(int x, int y, const char *line, void *user) {
+  emit_fb_t *e = (emit_fb_t *)user;
+  display_draw_text(x, y, line, e->fg, e->bg);
+}
+
+typedef struct { uint16_t *buf; int w, h; uint16_t fg, bg; } emit_buf_t;
+static void emit_to_buffer(int x, int y, const char *line, void *user) {
+  emit_buf_t *e = (emit_buf_t *)user;
+  display_draw_text_to_buffer(e->buf, e->w, e->h, x, y, line, e->fg, e->bg);
 }
 
 // ── Sprite System ───────────────────────────────────────────────────────────────
@@ -2998,6 +3062,10 @@ static int l_sprite_addWallSprites(lua_State *L) {
   return 1;
 }
 
+// Defined with the other text renderers below; used by spriteWithText here.
+static uint16_t *render_text_image(lua_State *L, const char *text, int w, int h,
+                                   uint16_t bg, int font_idx);
+
 // sprite.spriteWithText(text, maxWidth, maxHeight, [bgColor], [font])
 static int l_sprite_spriteWithText(lua_State *L) {
   const char *text = luaL_checkstring(L, 1);
@@ -3007,56 +3075,11 @@ static int l_sprite_spriteWithText(lua_State *L) {
                     ? l_checkcolor(L, 4)
                     : s_graphics_bg_color;
 
-  int prev_font = display_get_font();
-  int fw = display_get_font_width();
-  int fh = display_get_font_height();
-  if (lua_gettop(L) >= 5 && lua_isuserdata(L, 5)) {
-    lua_font_t *f = check_font(L, 5);
-    display_set_font(f->font_id);
-    fw = f->cell_width;
-    fh = f->cell_height;
-  }
-
-  int chars_per_line = (fw > 0) ? max_w / fw : 1;
-  if (chars_per_line < 1) chars_per_line = 1;
-
-  // Allocate image
-  size_t buf_size = (size_t)max_w * max_h * sizeof(uint16_t);
-  uint16_t *pixels = (uint16_t *)umm_malloc(buf_size);
+  uint16_t *pixels = render_text_image(L, text, max_w, max_h, bg, 5);
   if (!pixels) {
-    display_set_font(prev_font);
     lua_pushnil(L);
     return 1;
   }
-  for (int i = 0; i < max_w * max_h; i++) pixels[i] = bg;
-
-  // Word-wrap render
-  int y = 0;
-  const char *p = text;
-  while (*p && (y + fh <= max_h)) {
-    int line_len = 0, last_space = -1;
-    const char *scan = p;
-    while (*scan && *scan != '\n' && line_len < chars_per_line) {
-      if (*scan == ' ') last_space = line_len;
-      scan++;
-      line_len++;
-    }
-    int use_len = line_len;
-    if (*scan && *scan != '\n' && last_space > 0) use_len = last_space;
-
-    char line[128];
-    if (use_len > 127) use_len = 127;
-    memcpy(line, p, use_len);
-    line[use_len] = '\0';
-
-    display_draw_text_to_buffer(pixels, max_w, max_h, 0, y, line,
-                                s_graphics_color, bg);
-    y += fh;
-    p += use_len;
-    if (*p == ' ') p++;
-    if (*p == '\n') p++;
-  }
-  display_set_font(prev_font);
 
   // Create image userdata
   lua_image_t *img = (lua_image_t *)lua_newuserdata(L, sizeof(lua_image_t));
@@ -3766,150 +3789,101 @@ static const luaL_Reg l_animation_blinker_lib[] = {
 static int l_font_new(lua_State *L) {
   const char *name = luaL_checkstring(L, 1);
   int font_id = -1;
-  int w = 0, h = 0;
-
-  if (strcmp(name, "6x8") == 0) { font_id = 0; w = 6; h = 8; }
-  else if (strcmp(name, "8x12") == 0) { font_id = 1; w = 8; h = 12; }
-  else if (strcmp(name, "scientifica") == 0) { font_id = 2; w = 6; h = 12; }
-  else if (strcmp(name, "scientifica-bold") == 0) { font_id = 3; w = 6; h = 12; }
-  else return luaL_error(L, "unknown font: %s", name);
-
+  bool owned = false;
+  if      (strcmp(name, "6x8") == 0)              font_id = 0;
+  else if (strcmp(name, "8x12") == 0)             font_id = 1;
+  else if (strcmp(name, "scientifica") == 0)      font_id = 2;
+  else if (strcmp(name, "scientifica-bold") == 0) font_id = 3;
+  else {
+    if (!fs_sandbox_check(L, name, false))
+      return luaL_error(L, "access denied: %s", name);
+    font_id = font_registry_load(name);
+    if (font_id < 0)
+      return luaL_error(L, "failed to load font: %s", name);
+    owned = true;
+  }
   lua_font_t *f = (lua_font_t *)lua_newuserdata(L, sizeof(lua_font_t));
   f->font_id = font_id;
-  f->cell_width = w;
-  f->cell_height = h;
-  f->name = name;
+  f->owned = owned;
+  strncpy(f->name, name, sizeof(f->name) - 1);
+  f->name[sizeof(f->name) - 1] = '\0';
   luaL_setmetatable(L, GRAPHICS_FONT_MT);
   return 1;
 }
 
-static int l_font_drawText(lua_State *L) {
+static int l_font_gc(lua_State *L) {
   lua_font_t *f = check_font(L, 1);
+  if (f->owned) {
+    if (display_get_font() == f->font_id) display_set_font(0);
+    font_registry_unload(f->font_id);
+    f->owned = false;
+  }
+  return 0;
+}
+
+static int l_font_drawText(lua_State *L) {
   int x = luaL_checkinteger(L, 2);
   int y = luaL_checkinteger(L, 3);
   const char *text = luaL_checkstring(L, 4);
   uint16_t fg = l_checkcolor(L, 5);
   uint16_t bg = (lua_gettop(L) >= 6) ? l_checkcolor(L, 6) : COLOR_BLACK;
-
-  int prev_font = display_get_font();
-  display_set_font(f->font_id);
-  int width = display_draw_text(x, y, text, fg, bg);
-  display_set_font(prev_font);
-
+  int width = 0;
+  WITH_FONT_ARG(L, 1, width = display_draw_text(x, y, text, fg, bg));
   lua_pushinteger(L, width);
   return 1;
 }
 
 static int l_font_getHeight(lua_State *L) {
-  lua_font_t *f = check_font(L, 1);
-  lua_pushinteger(L, f->cell_height);
+  lua_pushinteger(L, font_for_arg(L, 1)->height);
   return 1;
 }
 
 static int l_font_getWidth(lua_State *L) {
-  lua_font_t *f = check_font(L, 1);
-  lua_pushinteger(L, f->cell_width);
+  lua_pushinteger(L, font_for_arg(L, 1)->max_width);
   return 1;
 }
 
 static int l_font_getTextWidth(lua_State *L) {
-  lua_font_t *f = check_font(L, 1);
   const char *text = luaL_checkstring(L, 2);
-  int len = 0;
-  while (*text++) len++;
-  lua_pushinteger(L, len * f->cell_width);
+  lua_pushinteger(L, font_text_width(font_for_arg(L, 1), text));
   return 1;
 }
 
 static int l_font_getName(lua_State *L) {
-  lua_font_t *f = check_font(L, 1);
-  lua_pushstring(L, f->name);
+  lua_pushstring(L, check_font(L, 1)->name);
   return 1;
 }
 
 // font:drawTextAligned(x, y, text, alignment, fg, [bg])
 // alignment: 0=left, 1=center, 2=right
 static int l_font_drawTextAligned(lua_State *L) {
-  lua_font_t *f = check_font(L, 1);
   int x = luaL_checkinteger(L, 2);
   int y = luaL_checkinteger(L, 3);
   const char *text = luaL_checkstring(L, 4);
   int alignment = luaL_checkinteger(L, 5);
   uint16_t fg = l_checkcolor(L, 6);
   uint16_t bg = (lua_gettop(L) >= 7) ? l_checkcolor(L, 7) : COLOR_BLACK;
-
-  int len = (int)strlen(text);
-  int tw = len * f->cell_width;
-  if (alignment == 1) x -= tw / 2;       // center
-  else if (alignment == 2) x -= tw;      // right
-
-  int prev_font = display_get_font();
-  display_set_font(f->font_id);
-  display_draw_text(x, y, text, fg, bg);
-  display_set_font(prev_font);
+  int tw = font_text_width(font_for_arg(L, 1), text);
+  if (alignment == 1) x -= tw / 2;
+  else if (alignment == 2) x -= tw;
+  WITH_FONT_ARG(L, 1, display_draw_text(x, y, text, fg, bg));
   return 0;
 }
 
 // font:drawTextInRect(x, y, w, h, text, [alignment], [fg], [bg])
-// Word-wraps text within a bounding rect. Monospace fonts only.
+// Word-wraps text within a bounding rect.
 static int l_font_drawTextInRect(lua_State *L) {
-  lua_font_t *f = check_font(L, 1);
   int rx = luaL_checkinteger(L, 2);
   int ry = luaL_checkinteger(L, 3);
   int rw = luaL_checkinteger(L, 4);
   int rh = luaL_checkinteger(L, 5);
   const char *text = luaL_checkstring(L, 6);
   int alignment = (int)luaL_optinteger(L, 7, 0);
-  uint16_t fg = (lua_gettop(L) >= 8) ? l_checkcolor(L, 8) : s_graphics_color;
-  uint16_t bg = (lua_gettop(L) >= 9) ? l_checkcolor(L, 9) : s_graphics_bg_color;
-
-  int fw = f->cell_width;
-  int fh = f->cell_height;
-  int chars_per_line = (fw > 0) ? rw / fw : 1;
-  if (chars_per_line < 1) chars_per_line = 1;
-
-  int prev_font = display_get_font();
-  display_set_font(f->font_id);
-
-  int y = ry;
-  const char *p = text;
-  while (*p && (y + fh <= ry + rh)) {
-    // Find line break: word-wrap at chars_per_line
-    int line_len = 0;
-    int last_space = -1;
-    const char *scan = p;
-    while (*scan && *scan != '\n' && line_len < chars_per_line) {
-      if (*scan == ' ') last_space = line_len;
-      scan++;
-      line_len++;
-    }
-    // If we hit the limit and there's more text, break at last space
-    int use_len = line_len;
-    if (*scan && *scan != '\n' && last_space > 0)
-      use_len = last_space;
-
-    // Build line buffer
-    char line[128];
-    if (use_len > 127) use_len = 127;
-    memcpy(line, p, use_len);
-    line[use_len] = '\0';
-
-    // Alignment offset
-    int tw = use_len * fw;
-    int x = rx;
-    if (alignment == 1) x = rx + (rw - tw) / 2;
-    else if (alignment == 2) x = rx + rw - tw;
-
-    display_draw_text(x, y, line, fg, bg);
-    y += fh;
-
-    // Advance past consumed text
-    p += use_len;
-    if (*p == ' ') p++;     // skip break space
-    if (*p == '\n') p++;    // skip newline
-  }
-
-  display_set_font(prev_font);
+  emit_fb_t e = {
+    (lua_gettop(L) >= 8) ? l_checkcolor(L, 8) : s_graphics_color,
+    (lua_gettop(L) >= 9) ? l_checkcolor(L, 9) : s_graphics_bg_color };
+  const pc_font_t *f = font_for_arg(L, 1);
+  WITH_FONT_ARG(L, 1, wrap_lines(f, text, rx, ry, rw, rh, alignment, emit_to_display, &e));
   return 0;
 }
 
@@ -3920,16 +3894,8 @@ static int l_graphics_drawText(lua_State *L) {
   const char *text = luaL_checkstring(L, 1);
   int x = luaL_checkinteger(L, 2);
   int y = luaL_checkinteger(L, 3);
-
-  int prev_font = display_get_font();
-  if (lua_gettop(L) >= 4 && lua_isuserdata(L, 4)) {
-    lua_font_t *f = check_font(L, 4);
-    display_set_font(f->font_id);
-  }
-
-  int width = display_draw_text(x, y, text, s_graphics_color, s_graphics_bg_color);
-  display_set_font(prev_font);
-
+  int width = 0;
+  WITH_FONT_ARG(L, 4, width = display_draw_text(x, y, text, s_graphics_color, s_graphics_bg_color));
   lua_pushinteger(L, width);
   return 1;
 }
@@ -3940,21 +3906,10 @@ static int l_graphics_drawTextAligned(lua_State *L) {
   int x = luaL_checkinteger(L, 2);
   int y = luaL_checkinteger(L, 3);
   int alignment = luaL_checkinteger(L, 4);
-
-  int prev_font = display_get_font();
-  int fw = display_get_font_width();
-  if (lua_gettop(L) >= 5 && lua_isuserdata(L, 5)) {
-    lua_font_t *f = check_font(L, 5);
-    display_set_font(f->font_id);
-    fw = f->cell_width;
-  }
-
-  int tw = (int)strlen(text) * fw;
+  int tw = font_text_width(font_for_arg(L, 5), text);
   if (alignment == 1) x -= tw / 2;
   else if (alignment == 2) x -= tw;
-
-  display_draw_text(x, y, text, s_graphics_color, s_graphics_bg_color);
-  display_set_font(prev_font);
+  WITH_FONT_ARG(L, 5, display_draw_text(x, y, text, s_graphics_color, s_graphics_bg_color));
   return 0;
 }
 
@@ -3966,187 +3921,66 @@ static int l_graphics_drawTextInRect(lua_State *L) {
   int rw = luaL_checkinteger(L, 4);
   int rh = luaL_checkinteger(L, 5);
   int alignment = (int)luaL_optinteger(L, 6, 0);
-
-  int prev_font = display_get_font();
-  int fw = display_get_font_width();
-  int fh = display_get_font_height();
-  if (lua_gettop(L) >= 7 && lua_isuserdata(L, 7)) {
-    lua_font_t *f = check_font(L, 7);
-    display_set_font(f->font_id);
-    fw = f->cell_width;
-    fh = f->cell_height;
-  }
-
-  int chars_per_line = (fw > 0) ? rw / fw : 1;
-  if (chars_per_line < 1) chars_per_line = 1;
-
-  int y = ry;
-  const char *p = text;
-  while (*p && (y + fh <= ry + rh)) {
-    int line_len = 0;
-    int last_space = -1;
-    const char *scan = p;
-    while (*scan && *scan != '\n' && line_len < chars_per_line) {
-      if (*scan == ' ') last_space = line_len;
-      scan++;
-      line_len++;
-    }
-    int use_len = line_len;
-    if (*scan && *scan != '\n' && last_space > 0)
-      use_len = last_space;
-
-    char line[128];
-    if (use_len > 127) use_len = 127;
-    memcpy(line, p, use_len);
-    line[use_len] = '\0';
-
-    int tw = use_len * fw;
-    int x = rx;
-    if (alignment == 1) x = rx + (rw - tw) / 2;
-    else if (alignment == 2) x = rx + rw - tw;
-
-    display_draw_text(x, y, line, s_graphics_color, s_graphics_bg_color);
-    y += fh;
-
-    p += use_len;
-    if (*p == ' ') p++;
-    if (*p == '\n') p++;
-  }
-
-  display_set_font(prev_font);
+  emit_fb_t e = { s_graphics_color, s_graphics_bg_color };
+  const pc_font_t *f = font_for_arg(L, 7);
+  WITH_FONT_ARG(L, 7, wrap_lines(f, text, rx, ry, rw, rh, alignment, emit_to_display, &e));
   return 0;
 }
 
-// graphics.getTextSize(text, [font]) → width, height
+// graphics.getTextSize(text, [font]) -> width, height
 static int l_graphics_getTextSize(lua_State *L) {
   const char *text = luaL_checkstring(L, 1);
-  int fw = display_get_font_width();
-  int fh = display_get_font_height();
-  if (lua_gettop(L) >= 2 && lua_isuserdata(L, 2)) {
-    lua_font_t *f = check_font(L, 2);
-    fw = f->cell_width;
-    fh = f->cell_height;
-  }
-  lua_pushinteger(L, (int)strlen(text) * fw);
-  lua_pushinteger(L, fh);
+  const pc_font_t *f = font_for_arg(L, 2);
+  lua_pushinteger(L, font_text_width(f, text));
+  lua_pushinteger(L, f->height);
   return 2;
 }
 
-// graphics.getTextSizeForMaxWidth(text, maxWidth, [font]) → width, height
+static void emit_measure(int x, int y, const char *line, void *user) {
+  (void)x; (void)y;
+  int *max_w = (int *)user;
+  int w = font_text_width(display_get_active_font(), line);
+  if (w > *max_w) *max_w = w;
+}
+
+// graphics.getTextSizeForMaxWidth(text, maxWidth, [font]) -> width, height
 static int l_graphics_getTextSizeForMaxWidth(lua_State *L) {
   const char *text = luaL_checkstring(L, 1);
   int max_width = luaL_checkinteger(L, 2);
-  int fw = display_get_font_width();
-  int fh = display_get_font_height();
-  if (lua_gettop(L) >= 3 && lua_isuserdata(L, 3)) {
-    lua_font_t *f = check_font(L, 3);
-    fw = f->cell_width;
-    fh = f->cell_height;
-  }
-
-  int chars_per_line = (fw > 0) ? max_width / fw : 1;
-  if (chars_per_line < 1) chars_per_line = 1;
-
-  int lines = 0;
-  int max_line_w = 0;
-  const char *p = text;
-  while (*p) {
-    int line_len = 0;
-    int last_space = -1;
-    const char *scan = p;
-    while (*scan && *scan != '\n' && line_len < chars_per_line) {
-      if (*scan == ' ') last_space = line_len;
-      scan++;
-      line_len++;
-    }
-    int use_len = line_len;
-    if (*scan && *scan != '\n' && last_space > 0)
-      use_len = last_space;
-
-    if (use_len * fw > max_line_w) max_line_w = use_len * fw;
-    lines++;
-    p += use_len;
-    if (*p == ' ') p++;
-    if (*p == '\n') p++;
-  }
-
-  lua_pushinteger(L, max_line_w);
-  lua_pushinteger(L, lines * fh);
+  const pc_font_t *f = font_for_arg(L, 3);
+  int widest = 0, lines = 0;
+  WITH_FONT_ARG(L, 3, lines = wrap_lines(f, text, 0, 0, max_width, 0x7FFF, 0, emit_measure, &widest));
+  lua_pushinteger(L, widest);
+  lua_pushinteger(L, lines * f->height);
   return 2;
+}
+
+// Shared body of imageWithText and spriteWithText: render wrapped text into
+// a fresh PSRAM image. Returns the pixel buffer or NULL when out of memory.
+static uint16_t *render_text_image(lua_State *L, const char *text, int w, int h,
+                                   uint16_t bg, int font_idx) {
+  uint16_t *pixels = (uint16_t *)umm_malloc((size_t)w * h * sizeof(uint16_t));
+  if (!pixels) return NULL;
+  for (int i = 0; i < w * h; i++) pixels[i] = bg;
+  emit_buf_t e = { pixels, w, h, s_graphics_color, bg };
+  const pc_font_t *f = font_for_arg(L, font_idx);
+  WITH_FONT_ARG(L, font_idx, wrap_lines(f, text, 0, 0, w, h, 0, emit_to_buffer, &e));
+  return pixels;
 }
 
 // graphics.imageWithText(text, maxWidth, maxHeight, [bgColor], [font])
 // Returns a graphics.image with the text rendered into it
 static int l_graphics_imageWithText(lua_State *L) {
   const char *text = luaL_checkstring(L, 1);
-  int max_w = luaL_checkinteger(L, 2);
-  int max_h = luaL_checkinteger(L, 3);
-  uint16_t bg = (lua_gettop(L) >= 4 && !lua_isnil(L, 4))
-                    ? l_checkcolor(L, 4)
-                    : s_graphics_bg_color;
-
-  int prev_font = display_get_font();
-  int fw = display_get_font_width();
-  int fh = display_get_font_height();
-  if (lua_gettop(L) >= 5 && lua_isuserdata(L, 5)) {
-    lua_font_t *f = check_font(L, 5);
-    display_set_font(f->font_id);
-    fw = f->cell_width;
-    fh = f->cell_height;
-  }
-
-  // Calculate dimensions
-  int chars_per_line = (fw > 0) ? max_w / fw : 1;
-  if (chars_per_line < 1) chars_per_line = 1;
-  int img_w = max_w;
-  int img_h = max_h;
-
-  // Allocate image buffer in PSRAM
-  size_t buf_size = (size_t)img_w * img_h * sizeof(uint16_t);
-  uint16_t *pixels = (uint16_t *)umm_malloc(buf_size);
+  int img_w = luaL_checkinteger(L, 2);
+  int img_h = luaL_checkinteger(L, 3);
+  uint16_t bg = (lua_gettop(L) >= 4 && !lua_isnil(L, 4)) ? l_checkcolor(L, 4) : s_graphics_bg_color;
+  uint16_t *pixels = render_text_image(L, text, img_w, img_h, bg, 5);
   if (!pixels) {
-    display_set_font(prev_font);
     lua_pushnil(L);
     lua_pushstring(L, "out of memory");
     return 2;
   }
-
-  // Fill with background color
-  for (int i = 0; i < img_w * img_h; i++)
-    pixels[i] = bg;
-
-  // Word-wrap and render text into the buffer
-  int y = 0;
-  const char *p = text;
-  while (*p && (y + fh <= img_h)) {
-    int line_len = 0;
-    int last_space = -1;
-    const char *scan = p;
-    while (*scan && *scan != '\n' && line_len < chars_per_line) {
-      if (*scan == ' ') last_space = line_len;
-      scan++;
-      line_len++;
-    }
-    int use_len = line_len;
-    if (*scan && *scan != '\n' && last_space > 0)
-      use_len = last_space;
-
-    char line[128];
-    if (use_len > 127) use_len = 127;
-    memcpy(line, p, use_len);
-    line[use_len] = '\0';
-
-    display_draw_text_to_buffer(pixels, img_w, img_h, 0, y, line,
-                                s_graphics_color, bg);
-    y += fh;
-    p += use_len;
-    if (*p == ' ') p++;
-    if (*p == '\n') p++;
-  }
-
-  display_set_font(prev_font);
-
-  // Create lua_image_t userdata
   lua_image_t *img = (lua_image_t *)lua_newuserdata(L, sizeof(lua_image_t));
   img->w = img_w;
   img->h = img_h;
@@ -4239,6 +4073,8 @@ void lua_bridge_graphics_init(lua_State *L) {
   lua_pushvalue(L, -1);
   lua_setfield(L, -2, "__index");
   luaL_setfuncs(L, l_font_methods, 0);
+  lua_pushcfunction(L, l_font_gc);
+  lua_setfield(L, -2, "__gc");
   lua_pop(L, 1);
 
   // Build picocalc.graphics table

@@ -13,6 +13,53 @@ local pages = {
   { id = disp.FONT_8X12,             name = "8x12" },
   { id = disp.FONT_SCIENTIFICA,      name = "scientifica" },
   { id = disp.FONT_SCIENTIFICA_BOLD, name = "scientifica-bold" },
+  { name = "extended", draw = function(p)
+      disp.clear(BLACK)
+      disp.setFont(disp.FONT_SCIENTIFICA)
+      local s = {}
+      for c = 0x80, 0x9F do s[#s + 1] = string.char(c) end
+      disp.drawText(2, 2, table.concat(s), WHITE, BLACK)
+      disp.setFont(disp.FONT_SCIENTIFICA_BOLD)
+      disp.drawText(2, 16, table.concat(s), WHITE, BLACK)
+      -- 0x7F is in scientifica's 0x20..0x9F range (a blank glyph); 0x01 is not,
+      -- so it must render as the hollow fallback box, never as '?'.
+      disp.drawText(2, 30, "a\127b\1c", WHITE, BLACK)
+      disp.flush()
+    end },
+  { name = "loaded", draw = function(p)
+      disp.clear(BLACK)
+      local id = disp.loadFont(APP_DIR .. "/fonts/demo_prop.pfn")
+      pc.sys.log("FT:LOAD " .. tostring(id))
+      if not id then disp.flush(); return end
+      disp.setFont(id)
+      local fw, fh = disp.getFontWidth(), disp.getFontHeight()
+      local y = 2
+      disp.drawText(2, y, ("loaded id %d %dx%d"):format(id, fw, fh), WHITE, BLACK)
+      y = y + fh + 2
+      local wi = disp.drawText(2, y, "iiiiiiiiii", YELLOW, BLACK)
+      local ww = disp.drawText(120, y, "WWWWWWWWWW", YELLOW, BLACK)
+      pc.sys.log(("FT:PROP %d %d"):format(wi, ww))
+      y = y + fh + 2
+      -- Unloading the slot the display is using must self-heal back to font 0.
+      disp.unloadFont(id)
+      pc.sys.log("FT:UNLOAD " .. tostring(disp.getFont()))
+      -- graphics.font path, wrap via the shared helper
+      local f = pc.graphics.font.new(APP_DIR .. "/fonts/demo_prop.pfn")
+      pc.sys.log(("FT:FONTOBJ %s %d %d %d"):format(f:getName(), f:getWidth(), f:getHeight(),
+                                                  f:getTextWidth("iiiiiiiiii")))
+      f:drawTextInRect(2, y, 150, 4 * fh, "wrap me across several narrow lines please", 0, WHITE, BLACK)
+      pc.graphics.drawTextInRect("graphics wrap in the loaded font too", 160, y, 150, 4 * fh, 0, f)
+      local tw, th = pc.graphics.getTextSize("iiiiiiiiii", f)
+      pc.sys.log(("FT:SIZE %d %d"):format(tw, th))
+      y = y + 4 * fh + 2
+      f:drawTextAligned(160, y, "centered", 1, WHITE, BLACK)
+      disp.flush()
+      -- a bad path must return nil, never raise from display.loadFont
+      pc.sys.log("FT:BADLOAD " .. tostring(disp.loadFont(APP_DIR .. "/fonts/nope.pfn")))
+      local ok, err = pcall(pc.graphics.font.new, APP_DIR .. "/fonts/nope.pfn")
+      pc.sys.log("FT:BADNEW " .. tostring(ok))
+      disp.setFont(disp.FONT_6X8)
+    end },
 }
 
 local function drawBuiltinPage(p)
