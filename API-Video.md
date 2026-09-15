@@ -41,15 +41,47 @@ player:stop()
 ### Playback control
 
 ```lua
-player:setLoop(true)         -- loop continuously (default: false)
+player:setLoop(true)         -- loop continuously (default: false — hold the last frame)
 player:seek(frame_number)    -- jump to a specific frame index
+player:seekMs(ms)            -- jump to an absolute time
+player:seekRelativeMs(-5000) -- skip backwards/forwards relative to the current position
 ```
 
+All seeks clamp to `[0, last frame]` and **never wrap**: seeking to or past the last frame ends the video on the next `update()` (held, or looped if `setLoop(true)`). A seek while paused decodes and presents the target frame immediately, so scrubbing gives feedback. A seek on an ended player restarts playback from the target.
+
 #### `player:pause()`
-Pauses video playback. Audio is also paused.
+Pauses video playback. Audio is also paused. The current frame is presented as a stable still (with the OSD) so the app can draw overlays and call `display.flush()` freely.
 
 #### `player:resume()`
-Resumes video playback after a pause.
+Resumes video playback after a pause. On an ended player this replays from the start (same as `play()`).
+
+#### End of video
+With looping off, reaching the last frame holds it on screen: `isPlaying()` becomes `false`, `hasEnded()` becomes `true`, and the OSD shows the bar at 100% with `END`. Call `play()` (or `resume()`) to replay, or seek to continue from elsewhere.
+
+---
+
+### Position and duration
+
+```lua
+player:getFrameCount()   -- total frames
+player:getDurationMs()   -- total length in milliseconds
+player:getPositionMs()   -- position of the frame on screen, in milliseconds
+player:hasEnded()        -- true once the last frame was reached (loop off)
+```
+
+---
+
+### Progress OSD
+
+The player draws its own on-screen display over the bottom of the video area: a progress bar with a playhead, elapsed time on the left, total time on the right, and a pause glyph or `END` marker in the middle. It is enabled by default.
+
+```lua
+player:setOSD(true)          -- enable/disable (default: enabled)
+player:showOSD()             -- show now and restart the hide timer
+player:setOSDTimeout(3000)   -- ms to stay visible while playing (default 3000)
+```
+
+The OSD appears automatically on `play()`, `pause()`, `resume()` and every seek. While playing it hides after the timeout; while paused or ended it stays. It is drawn into the decoded frame before the frame is flushed, so it costs nothing extra to present and works with both `setAutoFlush(true)` and manual flushing. Videos shorter than 48 px tall skip the OSD.
 
 ---
 
@@ -100,7 +132,7 @@ player:setAutoFlush(false)  -- manual flush for HUD overlay
 player:hasAudio()            -- true if the AVI file contains an MP3 audio track
 player:setMuted(true)        -- mute audio (video still plays)
 player:isMuted()             -- returns current mute state
-player:setVolume(vol)        -- 0–255
+player:setVolume(vol)        -- 0–100
 player:getVolume()           -- returns current volume
 ```
 
@@ -115,6 +147,10 @@ local info = player:getInfo()
 -- info.current_frame        — current playback position
 -- info.dropped_frames       — frames dropped during playback
 -- info.has_audio            — whether an audio track was found
+-- info.duration_ms          — total length in milliseconds
+-- info.position_ms          — position of the frame on screen
+-- info.ended                — true once the last frame was reached (loop off)
+-- info.fps                  — content frame rate
 ```
 
 ### Game loop integration
@@ -188,6 +224,7 @@ Output is written to `~/Videos/PicOS/` (the directory must exist).
 | `--crop` | Scale to 320×320, cropping to fill (square crop) | off (letterbox) |
 | `--quality N` | MJPEG quality, 1 (best) – 31 (worst) | `8` |
 | `--mute` | Strip the audio track entirely | off (include audio) |
+| `--chroma444` | Keep full-resolution colour (`yuvj444p`); roughly doubles decode time | off (`yuvj420p`) |
 
 ### Examples
 
@@ -214,7 +251,7 @@ tools/video_converter.sh --crop --mute "https://youtu.be/..."
 ```
 ffmpeg -i <input>
   -vf "fps=25,scale=320:-1"
-  -vcodec mjpeg -q:v <quality> -huffman optimal
+  -vcodec mjpeg -pix_fmt yuvj420p -q:v <quality> -huffman optimal
   -acodec libmp3lame -ab 128k -ar 22050
   <output>.avi
 ```
@@ -223,12 +260,14 @@ ffmpeg -i <input>
 ```
 ffmpeg -i <input>
   -vf "fps=25,scale=320:320:force_original_aspect_ratio=increase,crop=320:320"
-  -vcodec mjpeg -q:v <quality> -huffman optimal
+  -vcodec mjpeg -pix_fmt yuvj420p -q:v <quality> -huffman optimal
   -acodec libmp3lame -ab 128k -ar 22050
   <output>.avi
 ```
 
 **With `--mute`**: replaces the `-acodec libmp3lame ...` line with `-an` (no audio).
+
+**Chroma subsampling**: 4:2:0 (`yuvj420p`) is forced because it halves the decoder's chroma work on the RP2350 and is visually indistinguishable on the 320×320 panel for real footage. ffmpeg only picks it by itself when the source is already 4:2:0, so 4:4:4 or RGB sources would otherwise decode about twice as slowly. `--chroma444` keeps full-resolution colour for the rare clip that needs it.
 
 ---
 
