@@ -13,9 +13,10 @@ local crypto = picocalc.crypto
 
 -- ── Configuration ──────────────────────────────────────────────────────────
 
-local CATALOG_HOST = "raw.githubusercontent.com"
-local CATALOG_REPO = "jeffory/picos-catalog"
-local CATALOG_PATH = "/" .. CATALOG_REPO .. "/main/catalog.json"
+local CATALOG_HOST = "picos.jeffory.dev"
+local CATALOG_PORT = 443
+local CATALOG_SSL  = true
+local CATALOG_PATH = "/catalog.json"
 local CACHE_DIR    = "/data/com.picos.store"
 local CACHE_FILE   = CACHE_DIR .. "/catalog.json"
 local STAGING_DIR  = "/apps/.staging"
@@ -177,6 +178,18 @@ local function parse_url(url)
     return host, port, ssl, path
 end
 
+-- Developers can point a device at a staging indexer without reflashing:
+-- picocalc.sysconfig.set("store_url", "https://picos-staging.example.workers.dev/catalog.json")
+local function catalog_endpoint()
+    local override = picocalc.sysconfig.get("store_url")
+    if override and #override > 0 then
+        local host, port, ssl, path = parse_url(override)
+        if host then return host, port, ssl, path end
+        print("[STORE] Ignoring invalid store_url: " .. override)
+    end
+    return CATALOG_HOST, CATALOG_PORT, CATALOG_SSL, CATALOG_PATH
+end
+
 -- Parse a JSON string array: "key": ["a", "b", "c"]
 local function parse_string_array(json, key)
     local result = {}
@@ -273,6 +286,7 @@ local function parse_catalog_json(json)
             homepage = json_get(block, "homepage"),
             removable = json_get_bool(block, "removable"),
             requirements = parse_string_array(block, "requirements"),
+            stars = tonumber(json_get(block, "stars")) or 0,
         }
         if app.removable == nil then app.removable = true end
         if app.id then
@@ -372,7 +386,8 @@ local function fetch_catalog()
         return
     end
 
-    local conn = net.http.new(CATALOG_HOST, 443, true)
+    local host, port, ssl, path = catalog_endpoint()
+    local conn = net.http.new(host, port, ssl)
     if not conn then
         error_msg = "Cannot connect to catalog server"
         ui.toast(error_msg, ui.TOAST_ERROR)
@@ -449,7 +464,7 @@ local function fetch_catalog()
         end
     end)
 
-    conn:get(CATALOG_PATH, {["User-Agent"] = "PicOS-Store/1.0"})
+    conn:get(path, {["User-Agent"] = "PicOS-Store/1.1"})
 end
 
 -- ── Network: Download straight to a file ───────────────────────────────────
@@ -1085,6 +1100,12 @@ local function draw_detail()
     display.drawText(8, y, "Author:", GRAY, BLACK)
     display.drawText(70, y, app.author or "Unknown", WHITE, BLACK)
     y = y + 16
+
+    if app.stars and app.stars > 0 then
+        display.drawText(8, y, "Stars:", GRAY, BLACK)
+        display.drawText(70, y, tostring(app.stars) .. "  " .. (app.repo or ""), WHITE, BLACK)
+        y = y + 16
+    end
 
     display.drawText(8, y, "Category:", GRAY, BLACK)
     display.drawText(70, y, (app.category or "?"):sub(1,1):upper() .. (app.category or "?"):sub(2), WHITE, BLACK)

@@ -2,11 +2,10 @@
     "id": "com.picos.store",
     "name": "App Store",
     "description": "Browse, install, and update apps and firmware",
-    "version": "1.0.0",
+    "version": "1.1.0",
     "author": "PicOS",
     "requirements": ["http", "root-filesystem"],
     "category": "system",
-    "repo": "jeffory/picos-catalog",
     "min_firmware": "1.0.0",
     "removable": false
 }
