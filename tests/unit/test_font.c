@@ -123,12 +123,28 @@ static void test_from_blob(void) {
   CHECK(!font_from_blob(&f, NULL, 0));
 }
 
+static void test_demo_pfn_file(void) {
+  FILE *fp = fopen("apps/fonttest/fonts/demo_prop.pfn", "rb");
+  if (!fp) { printf("SKIP demo_prop.pfn not present\n"); return; }
+  fseek(fp, 0, SEEK_END); long n = ftell(fp); fseek(fp, 0, SEEK_SET);
+  unsigned char *img = malloc((size_t)n);
+  CHECK(fread(img, 1, (size_t)n, fp) == (size_t)n);
+  fclose(fp);
+  pc_font_t f;
+  CHECK(font_from_blob(&f, img, (size_t)n));
+  CHECK(f.first == 0x20 && f.last == 0x7E && f.height == 12 && f.max_width == 8);
+  CHECK(font_glyph_width(&f, 'i') < font_glyph_width(&f, 'W'));
+  CHECK(font_text_width(&f, "iii") < font_text_width(&f, "WWW"));
+  free(img);
+}
+
 int main(void) {
   test_widths();
   test_wrap();
   test_render_mono_and_clip();
   test_render_proportional_and_fallback();
   test_from_blob();
+  test_demo_pfn_file();
   if (s_fails) { printf("%d failure(s)\n", s_fails); return 1; }
   printf("test_font: all passed\n");
   return 0;
