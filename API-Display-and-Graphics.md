@@ -2481,7 +2481,7 @@ python3 tools/mkfont.py SRC OUT.pfn [--size N] [--cell WxH] [--range FIRST-LAST]
 - `--range` selects the codepoint range to emit, default `0x20-0x7E`.
 - `--dump` prints every glyph as ASCII art with its advance, for eyeballing before shipping the file.
 
-This version of the tool emits fonts up to 8 px wide (one byte of stride per row); the on-device `.pfn` format and renderer support glyphs up to 64 px wide, but wider fonts need a newer build of `mkfont.py`.
+The tool and the on-device renderer both support glyphs up to 64 px wide and 64 px tall (`stride = ceil(max_width / 8)` bytes per row).
 
 ```lua
 -- Loaded on the app's SD card at fonts/custom.pfn, built with:
