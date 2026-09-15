@@ -13,6 +13,7 @@
 #include "../drivers/pio_psram.h"
 #include "../drivers/sdcard.h"
 #include "../drivers/wifi.h"
+#include "../fonts/font_registry.h"
 
 #include "clock.h"
 #include "config.h"
@@ -719,6 +720,8 @@ static bool run_app(int idx) {
   // hardware-scroll registers can't leak into the next one.
   display_clear_clip_rect();
   display_set_scroll_offset(0);
+  display_set_font(0);            // nor the previous app's font selection
+  font_registry_unload_all();     // nor its loaded fonts
 
   // Dirty-exit marker: if this file still exists at the next boot, the app
   // never returned to the launcher (hang → watchdog, hardfault, panic, or
@@ -739,6 +742,8 @@ static bool run_app(int idx) {
   // ── Shared post-exit cleanup ──────────────────────────────────────────────
   display_clear_clip_rect();      // don't let an app's clip rect leak back to the launcher
   display_set_scroll_offset(0);   // nor its hardware-scroll offset
+  display_set_font(0);            // nor the previous app's font selection
+  font_registry_unload_all();     // nor its loaded fonts
 
   if (app->system_clock_khz > 0) {
     launcher_apply_clock(200000); // Reset to system default

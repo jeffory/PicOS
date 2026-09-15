@@ -3,6 +3,8 @@
 #include <stdbool.h>
 #include <stdint.h>
 
+#include "../fonts/font.h"
+
 // =============================================================================
 // ST7365P Display Driver
 // 320x320 IPS LCD via PIO SPI on PicoCalc mainboard v2.0
@@ -69,26 +71,32 @@ void display_draw_textured_column(int x, int y0, int y1,
 void display_fill_vline_gradient(int x, int y0, int y1,
                                  uint16_t color_top, uint16_t color_bottom);
 
-// Text rendering using the active bitmap font (default: 6x8)
-// Returns pixel width of the rendered text
+// Text rendering using the active font (default: slot 0, 6x8).
+// Returns the pixel advance of the rendered text.
 int display_draw_text(int x, int y, const char *text, uint16_t fg, uint16_t bg);
 
-// Draws text leaving the background pixels untouched, so it can be placed over
-// existing art. display_draw_text always paints bg into every non-glyph pixel.
+// Draws text leaving background pixels untouched.
 int display_draw_text_transparent(int x, int y, const char *text, uint16_t fg);
 
 // Horizontal counterpart to display_fill_vline (sugar over display_fill_rect).
 void display_fill_hline(int y, int x0, int x1, uint16_t color);
+
+// Render into a host-order offscreen buffer, clipped to its bounds.
 int display_draw_text_to_buffer(uint16_t *buf, int buf_w, int buf_h,
                                 int x, int y, const char *text,
                                 uint16_t fg, uint16_t bg);
+
+// Pixel width of `text` in the active font (proportional-aware).
 int display_text_width(const char *text);
 
-// Font selection: 0 = 6x8 (default), 1 = 8x12, 2 = scientifica 6x12, 3 = scientifica-bold 6x12
+// Font selection by registry id: 0 = 6x8, 1 = 8x12, 2 = scientifica,
+// 3 = scientifica-bold, >= 4 = fonts loaded via font_registry_load.
+// Ids the registry does not have are ignored.
 void display_set_font(int font_id);
 int display_get_font(void);
-int display_get_font_width(void);
+int display_get_font_width(void);    // max advance of the active font
 int display_get_font_height(void);
+const pc_font_t *display_get_active_font(void);
 
 // Blit raw RGB565 image data to the framebuffer at (x, y).
 // Pixel values must be in host byte order (same as the RGB565() macro).
