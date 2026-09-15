@@ -129,20 +129,19 @@ void display_draw_rect(int x, int y, int w, int h, uint16_t color) {
 
 // ── Active font ─────────────────────────────────────────────────────────────
 // All glyph data and the renderer live in src/fonts/ — this stub only tracks
-// which registry slot is active (mirrors src/drivers/display.c).
+// which registry slot is active, by id and never by pointer, so an app that
+// unloads the selected slot cannot leave a dangle behind (mirrors
+// src/drivers/display.c).
 static int s_active_font_id = 0;
-static const pc_font_t *s_active_font = NULL;
 
 static const pc_font_t *active_font(void) {
-  if (!s_active_font) s_active_font = font_registry_get(0);
-  return s_active_font;
+  const pc_font_t *f = font_registry_get(s_active_font_id);
+  if (!f) { s_active_font_id = 0; f = font_registry_get(0); }
+  return f;
 }
 
 void display_set_font(int font_id) {
-  const pc_font_t *f = font_registry_get(font_id);
-  if (!f) return;
-  s_active_font_id = font_id;
-  s_active_font = f;
+  if (font_registry_get(font_id)) s_active_font_id = font_id;
 }
 int display_get_font(void) { return s_active_font_id; }
 int display_get_font_width(void) { return active_font()->max_width; }

@@ -58,22 +58,20 @@ static int s_clip_x1 = FB_WIDTH - 1, s_clip_y1 = FB_HEIGHT - 1;
 
 // ── Active font ─────────────────────────────────────────────────────────────
 // All glyph data and the renderer live in src/fonts/. This driver only
-// tracks which registry slot is active. Loaded fonts are freed by the
-// launcher between apps, so a stale pointer cannot survive an app exit as
-// long as the launcher also resets the selection to slot 0.
+// tracks which registry slot is active — the id, never a pointer: an app can
+// unload the slot it has selected (font_registry_unload is in the native API),
+// so the pointer is re-resolved on every use and a freed slot self-heals the
+// selection back to the built-in 6x8.
 static int s_active_font_id = 0;
-static const pc_font_t *s_active_font = NULL;
 
 static const pc_font_t *active_font(void) {
-  if (!s_active_font) s_active_font = font_registry_get(0);
-  return s_active_font;
+  const pc_font_t *f = font_registry_get(s_active_font_id);
+  if (!f) { s_active_font_id = 0; f = font_registry_get(0); }
+  return f;
 }
 
 void display_set_font(int font_id) {
-  const pc_font_t *f = font_registry_get(font_id);
-  if (!f) return;
-  s_active_font_id = font_id;
-  s_active_font = f;
+  if (font_registry_get(font_id)) s_active_font_id = font_id;
 }
 
 int display_get_font(void) { return s_active_font_id; }

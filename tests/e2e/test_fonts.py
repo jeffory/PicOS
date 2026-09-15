@@ -1,9 +1,19 @@
 """Font rendering tests.
 
-Pages 0-3 of the font_test fixture are compared byte-for-byte against PNGs
-captured on the renderer that shipped in develop @bab923e. The shared
-renderer introduced by the font-system work must reproduce them exactly.
-Regenerate them ONLY with --update-baselines on that original build.
+Pages 0-3 of the font_test fixture are compared byte-for-byte against PNGs in
+tests/e2e/fixtures/fonts/. Do not regenerate them casually: they are the proof
+that the shared renderer in src/fonts/ reproduces the blitters it replaced.
+
+Pages 2 and 3 (scientifica, scientifica-bold) are byte-exact captures of the
+renderer that shipped in develop @bab923e, and must stay that way.
+
+Pages 0 and 1 (6x8, 8x12) were re-captured when the display driver moved onto
+the shared renderer. Until then the simulator carried its own copies of both
+glyph tables, and they were not copies: the 6x8 differed from the firmware's in
+four glyphs ('<', '>', 'M', 'g') and the 8x12 was a different typeface
+altogether. The firmware tables are what the device renders, so they are now
+the single source for firmware and simulator alike, and the old page 0/1
+goldens recorded simulator-only output that no build can produce any more.
 """
 import time
 from pathlib import Path
