@@ -1,0 +1,7 @@
+{
+    "id": "com.picos.fonttest",
+    "name": "Font Test",
+    "description": "Cycle the built-in fonts and a loaded proportional .pfn",
+    "version": "1.0",
+    "author": "PicOS"
+}

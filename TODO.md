@@ -346,7 +346,7 @@ The Menu/Sym key (`BTN_MENU`) pauses the running app and shows an OS-level overl
 - [x] graphics.sprite.addEmptyCollisionSprite(r)
 - [x] graphics.sprite.addEmptyCollisionSprite(x, y, w, h)
 - [x] graphics.sprite.addWallSprites(tilemap, wallIDs, [xOffset, yOffset]) — creates invisible collision sprites for wall tiles
-- [dropped] ~~graphics.font.new(path)~~ — custom font file loading deferred; 4 built-in bitmap fonts cover practical needs on 320x320
+- [x] graphics.font.new(path) — loads .pfn fonts from SD (tools/mkfont.py builds them from BDF/TTF/PNG); display.loadFont/unloadFont; native API v6
 - [dropped] ~~graphics.font.newFamily / setFontFamily / setFontTracking / getFontTracking / getSystemFont~~ — font family/tracking system deferred
 - [dropped] ~~graphics.font:setTracking / getTracking / setLeading / getLeading / getGlyph~~ — advanced font metrics deferred
 - [x] graphics.font:drawText(text, x, y, [width, height], [wrapMode], [alignment])
