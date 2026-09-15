@@ -93,6 +93,38 @@ def test_png_grid_input(tmp_path):
     assert glyphs[1].rows == [0x80, 0x80]
 
 
+def test_png_grid_input_wide(tmp_path):
+    """A 12 px cell needs two bytes per row; ink past column 7 must survive."""
+    from PIL import Image
+    # 2 cells of 12x3, first='A': A has ink in columns 0 and 11, B in column 8.
+    img = Image.new("L", (24, 3), 0)
+    for y in range(3):
+        img.putpixel((0, y), 255)
+        img.putpixel((11, y), 255)
+        img.putpixel((12 + 8, y), 255)
+    p = tmp_path / "wide.png"
+    img.save(p)
+    glyphs, first, height, max_w = mkfont.load_png(p, cell=(12, 3), rng=(65, 66))
+    assert (first, height, max_w) == (65, 3, 12)
+    data = mkfont.build_pfn(glyphs, first, height, max_w, proportional=False)
+    hdr = parse_header(data)
+    assert hdr["stride"] == 2 and hdr["max_width"] == 12
+    count, off = 2, 12 + 2
+    a = data[off:off + 3 * 2]
+    b = data[off + 3 * 2:off + count * 3 * 2]
+    assert list(a) == [0x80, 0x10] * 3        # columns 0 and 11
+    assert list(b) == [0x00, 0x80] * 3        # column 8
+    assert len(data) == 12 + count + count * height * 2
+
+
+def test_build_pfn_stride_2_length():
+    height, count = 5, 3
+    glyphs = [mkfont.Glyph(rows=[0] * height, advance=9) for _ in range(count)]
+    data = mkfont.build_pfn(glyphs, 65, height, 9, proportional=False)
+    assert parse_header(data)["stride"] == 2
+    assert len(data) == 12 + count + count * height * 2
+
+
 def test_build_rejects_oversize():
     import pytest
     g = mkfont.Glyph(rows=[0] * 65, advance=1)

@@ -8,6 +8,12 @@
 
 #define LOADED_SLOTS (FONT_REGISTRY_SLOTS - FONT_REGISTRY_BUILTIN)
 
+// The built-in tables below are one byte per glyph row, so their stride column
+// is hardcoded to 1. Widen a built-in font past 8 px and this must be revisited.
+_Static_assert((FONT_6X8_WIDTH + 7) / 8 == 1, "font_6x8 no longer has stride 1");
+_Static_assert((FONT_8X12_WIDTH + 7) / 8 == 1, "font_8x12 no longer has stride 1");
+_Static_assert((FONT_SCI_WIDTH + 7) / 8 == 1, "font_scientifica no longer has stride 1");
+
 static const pc_font_t s_builtin[FONT_REGISTRY_BUILTIN] = {
   { 0x20, 0x7E, FONT_6X8_HEIGHT,  FONT_6X8_WIDTH,  1, NULL, &font_6x8[0][0],             NULL },
   { 0x20, 0x7E, FONT_8X12_HEIGHT, FONT_8X12_WIDTH, 1, NULL, &font_8x12[0][0],            NULL },
@@ -50,9 +56,17 @@ int font_registry_load(const char *path) {
   f.blob = blob;
   s_loaded[slot] = f;
   s_live[slot] = true;
+  // Every .pfn carries a widths table, so a non-NULL `widths` proves nothing:
+  // the font is only proportional if some advance differs from the cell width.
+  bool proportional = false;
+  if (f.widths) {
+    for (int i = 0, n = font_glyph_count(&f); i < n; i++) {
+      if (f.widths[i] != f.max_width) { proportional = true; break; }
+    }
+  }
   printf("[FONT] loaded %s -> id %d (%dx%d, %d glyphs%s)\n", path,
          FONT_REGISTRY_BUILTIN + slot, f.max_width, f.height,
-         font_glyph_count(&f), f.widths ? ", proportional" : "");
+         font_glyph_count(&f), proportional ? ", proportional" : "");
   return FONT_REGISTRY_BUILTIN + slot;
 }
 

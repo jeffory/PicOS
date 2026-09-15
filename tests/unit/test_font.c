@@ -95,6 +95,26 @@ static void test_render_proportional_and_fallback(void) {
   CHECK(buf[2 * 8 + 0] == 0x0000);                  // row h-1 is bg
 }
 
+// A 12-wide font needs 2 bytes per row; columns past 7 live in the second.
+static void test_render_stride2(void) {
+  static const uint8_t bits[2 * 2] = {
+    0x80, 0x10,   // row 0: columns 0 and 11
+    0x00, 0x80,   // row 1: column 8
+  };
+  pc_font_t f = { 'A', 'A', 2, 12, 2, NULL, bits, NULL };
+  uint16_t buf[16 * 2];
+  memset(buf, 0x77, sizeof buf);
+  int adv = font_render(&f, buf, 16, 0, 0, 15, 1, 0, 0, "A", 0xFFFF, 0x0000, false);
+  CHECK(adv == 12);
+  for (int c = 0; c < 12; c++) {
+    bool want_on = (c == 0 || c == 11);
+    CHECK(buf[c] == (want_on ? 0xFFFF : 0x0000));
+  }
+  for (int c = 0; c < 12; c++)
+    CHECK(buf[16 + c] == (c == 8 ? 0xFFFF : 0x0000));
+  CHECK(buf[12] == 0x7777 && buf[16 + 12] == 0x7777);   // nothing past the cell
+}
+
 static void test_from_blob(void) {
   // Build a valid 2-glyph 3x2 font: count=2, height=2, max_width=3, stride=1
   uint8_t img[PFNT_HEADER_SIZE + 2 + 2 * 2 * 1];
@@ -119,6 +139,8 @@ static void test_from_blob(void) {
   img[13] = 4; CHECK(!font_from_blob(&f, img, sizeof img)); img[13] = 2;  // width > max
   img[13] = 0; CHECK(!font_from_blob(&f, img, sizeof img)); img[13] = 2;  // width 0
   img[11] = 1; CHECK(!font_from_blob(&f, img, sizeof img)); img[11] = 0;  // reserved
+  img[5] = 0x02; CHECK(!font_from_blob(&f, img, sizeof img));             // unknown flag bit
+  img[5] = PFNT_FLAG_PROPORTIONAL;
   img[8] = 65; CHECK(!font_from_blob(&f, img, sizeof img)); img[8] = 2;   // height > 64
   CHECK(!font_from_blob(&f, NULL, 0));
 }
@@ -143,6 +165,7 @@ int main(void) {
   test_wrap();
   test_render_mono_and_clip();
   test_render_proportional_and_fallback();
+  test_render_stride2();
   test_from_blob();
   test_demo_pfn_file();
   if (s_fails) { printf("%d failure(s)\n", s_fails); return 1; }

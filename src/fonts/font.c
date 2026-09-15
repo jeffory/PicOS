@@ -75,6 +75,8 @@ int font_render(const pc_font_t *f, uint16_t *buf, int buf_w,
       continue;
     }
     int gi = c - f->first;
+    // Deliberately inlines font_glyph_width: the glyph index is needed anyway
+    // for the bitmap pointer, so re-deriving it inside a call would be waste.
     int adv = f->widths ? f->widths[gi] : f->max_width;
     const uint8_t *glyph = f->bitmaps + (size_t)gi * h * f->stride;
     blit_cell(buf, buf_w, cx0, cy0, cx1, cy1, x, y, adv, h,
@@ -89,6 +91,7 @@ bool font_from_blob(pc_font_t *out, const void *blob, size_t len) {
   if (!out || !b || len < PFNT_HEADER_SIZE) return false;
   if (memcmp(b, "PFNT", 4) != 0) return false;
   if (b[4] != PFNT_VERSION) return false;
+  if (b[5] & ~PFNT_FLAG_PROPORTIONAL) return false;   // unknown flag bits
   uint8_t first = b[6], last = b[7], height = b[8], max_w = b[9], stride = b[10];
   if (last < first) return false;
   if (height < 1 || height > FONT_MAX_DIM) return false;

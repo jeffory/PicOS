@@ -3,6 +3,10 @@
 -- do not change what they draw without regenerating the goldens on the
 -- ORIGINAL renderer.
 local pc, disp, input = picocalc, picocalc.display, picocalc.input
+-- First thing this app does: report the font it inherited. The launcher resets
+-- the selection to 0 around every app, so a second run must also see 0 even
+-- though the previous run exited with 8x12 selected (see the Esc branch).
+pc.sys.log(("FT:ENTRY %d"):format(disp.getFont()))
 local BLACK, WHITE = 0x0000, 0xFFFF
 local YELLOW = disp.rgb(255, 255, 0)
 local BLUE   = disp.rgb(0, 0, 255)
@@ -109,12 +113,23 @@ drawPage(page)
 while true do
   input.update()
   local pressed = input.getButtonsPressed()
-  if (pressed & input.BTN_ESC) ~= 0 then break end
+  if (pressed & input.BTN_ESC) ~= 0 then
+    -- Exit dirty on purpose: the state reset test must measure the launcher and
+    -- nothing else. collectgarbage() first so page 5's graphics.font object
+    -- hands slot 4 back; the raw id taken below is then slot 4 again, and being
+    -- a plain integer nothing can free it - not the GC at lua_close, not
+    -- unloadFont. Only font_registry_unload_all() in the launcher can.
+    collectgarbage()
+    local leak = disp.loadFont(APP_DIR .. "/fonts/demo_prop.pfn")
+    disp.setFont(disp.FONT_8X12)
+    pc.sys.log(("FT:EXIT font=%s leak=%s"):format(tostring(disp.getFont()),
+                                                  tostring(leak)))
+    break
+  end
   if (pressed & input.BTN_RIGHT) ~= 0 then
     page = (page + 1) % #pages
     drawPage(page)
   end
   pc.sys.sleep(10)
 end
-disp.setFont(disp.FONT_6X8)
 pc.sys.log("FT:DONE")

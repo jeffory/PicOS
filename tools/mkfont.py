@@ -13,6 +13,9 @@ SRC may be:
 .pfn layout (little-endian):
   "PFNT" ver=1 flags first last height max_width stride reserved
   widths[count] (u8)  bitmaps[count * height * stride] (row-major, MSB left)
+
+Fonts up to 64 px wide are supported: stride = (max_width + 7) // 8 bytes per
+glyph row, emitted big-endian so the leftmost column is the MSB of byte 0.
 """
 import argparse
 import struct
@@ -23,9 +26,19 @@ from pathlib import Path
 MAX_DIM = 64
 
 
+def stride_for(max_width):
+    """Bytes per glyph row for a font this wide."""
+    return (max_width + 7) // 8
+
+
+def bit_for(col, stride):
+    """Mask of column `col` in a row int that is 8*stride bits wide, MSB left."""
+    return 1 << (8 * stride - 1 - col)
+
+
 @dataclass
 class Glyph:
-    rows: list          # one int per row, bit (0x80 >> col) set = pixel on
+    rows: list          # one int per row, bit (8*stride - 1 - col) set = pixel on
     advance: int
     name: str = field(default="")
 
@@ -83,8 +96,18 @@ def load_bdf(lines, rng):
         raise ValueError("BDF has no FONTBOUNDINGBOX")
     fw, fh, fxo, fyo = fbb
     height = fh
-    glyphs = []
+    # The row ints are aligned to 8*stride bits, so the widest advance (and the
+    # widest bounding box) has to be known before any row is built.
     max_w = 1
+    for code in range(first, last + 1):
+        if code not in chars:
+            continue
+        _, dw, (bw, _bh, _bxo, _byo), _ = chars[code]
+        max_w = max(max_w, dw if dw is not None else bw, bw)
+    stride = stride_for(max_w)
+    row_bits = 8 * stride
+    row_mask = (1 << row_bits) - 1
+    glyphs = []
     for code in range(first, last + 1):
         if code not in chars:
             glyphs.append(Glyph(blank(height), 0, ""))
@@ -94,16 +117,15 @@ def load_bdf(lines, rng):
         rows = blank(height)
         # BDF bitmap rows are top-down; place the BBX inside the font box.
         top = (fh + fyo) - (bh + byo)
-        hexw = (bw + 7) // 8 * 8
+        hexw = (bw + 7) // 8 * 8    # BITMAP hex rows are MSB-left, byte-padded
         for i, val in enumerate(bitmap[:bh]):
             r = top + i
             if 0 <= r < height:
-                # shift the glyph right by bxo - fxo columns
-                v = val << (32 - hexw)          # MSB-align in 32 bits
-                v >>= max(0, bxo - fxo)
-                rows[r] = (v >> 24) & 0xFF if height else 0
+                v = val << (row_bits - hexw)    # MSB-align in the row int
+                shift = bxo - fxo               # move the glyph within the box
+                v = v >> shift if shift >= 0 else v << -shift
+                rows[r] = v & row_mask
         glyphs.append(Glyph(rows, max(adv, 1), name))
-        max_w = max(max_w, adv, bw)
     for g in glyphs:
         if g.advance == 0:
             g.advance = max_w
@@ -118,22 +140,23 @@ def load_ttf(path, size, rng):
     first, last = rng
     ascent, descent = font.getmetrics()
     height = ascent + descent
+    # Advances first: the row ints are aligned to the widest glyph's stride.
+    advances = [max(1, int(round(font.getlength(chr(c))))) for c in range(first, last + 1)]
+    max_w = max([1] + advances)
+    stride = stride_for(max_w)
     glyphs = []
-    max_w = 1
-    for code in range(first, last + 1):
+    for code, adv in zip(range(first, last + 1), advances):
         ch = chr(code)
-        adv = max(1, int(round(font.getlength(ch))))
-        img = Image.new("L", (max(adv, 1), height), 0)
+        img = Image.new("L", (adv, height), 0)
         ImageDraw.Draw(img).text((0, 0), ch, font=font, fill=255)
         rows = []
         for y in range(height):
             v = 0
-            for x in range(min(adv, MAX_DIM)):
+            for x in range(min(adv, 8 * stride)):
                 if img.getpixel((x, y)) >= 128:
-                    v |= 0x80 >> x if x < 8 else 0
+                    v |= bit_for(x, stride)
             rows.append(v)
         glyphs.append(Glyph(rows, adv, ch))
-        max_w = max(max_w, adv)
     return glyphs, first, height, max_w
 
 
@@ -147,6 +170,7 @@ def load_png(path, cell, rng):
     per_row = img.width // cw
     if per_row == 0:
         raise ValueError("cell wider than image")
+    stride = stride_for(cw)
     glyphs = []
     for i, code in enumerate(range(first, last + 1)):
         gx, gy = (i % per_row) * cw, (i // per_row) * ch
@@ -156,7 +180,7 @@ def load_png(path, cell, rng):
             for x in range(cw):
                 px, py = gx + x, gy + y
                 if px < img.width and py < img.height and img.getpixel((px, py)) >= 128:
-                    v |= 0x80 >> x
+                    v |= bit_for(x, stride)
             rows.append(v)
         glyphs.append(Glyph(rows, cw, chr(code)))
     return glyphs, first, ch, cw
@@ -165,13 +189,15 @@ def load_png(path, cell, rng):
 # ── Transforms and output ───────────────────────────────────────────────────
 
 def trim_proportional(glyphs, max_width, spacing, first):
+    stride = stride_for(max_width)
+    row_mask = (1 << (8 * stride)) - 1
     out = []
     for i, g in enumerate(glyphs):
         lo = None
         hi = None
         for r in g.rows:
             for col in range(max_width):
-                if r & (0x80 >> col):
+                if r & bit_for(col, stride):
                     if lo is None or col < lo:
                         lo = col
                     if hi is None or col > hi:
@@ -181,7 +207,7 @@ def trim_proportional(glyphs, max_width, spacing, first):
             rows = list(g.rows)
         else:
             adv = min(max_width, (hi - lo + 1) + spacing)
-            rows = [(r << lo) & 0xFF for r in g.rows]
+            rows = [(r << lo) & row_mask for r in g.rows]
         out.append(Glyph(rows, adv, g.name))
     return out
 
@@ -193,25 +219,26 @@ def build_pfn(glyphs, first, height, max_width, proportional):
         raise ValueError("height/width must be 1..64")
     if not (0 <= first <= last <= 255):
         raise ValueError("code range must fit in 0..255")
-    stride = (max_width + 7) // 8
-    if stride != 1:
-        raise ValueError("this tool emits 1 byte per row; max_width must be <= 8 for now")
+    stride = stride_for(max_width)
     hdr = struct.pack("<4sBBBBBBBB", b"PFNT", 1, 1 if proportional else 0,
                       first, last, height, max_width, stride, 0)
     widths = bytes(min(max(g.advance, 1), max_width) for g in glyphs)
+    row_mask = (1 << (8 * stride)) - 1
     bitmaps = bytearray()
     for g in glyphs:
         if len(g.rows) != height:
             raise ValueError(f"glyph {g.name!r} has {len(g.rows)} rows, expected {height}")
-        bitmaps.extend(r & 0xFF for r in g.rows)
+        for r in g.rows:
+            bitmaps.extend((r & row_mask).to_bytes(stride, "big"))
     return hdr + widths + bytes(bitmaps)
 
 
 def dump(glyphs, first, max_width):
+    stride = stride_for(max_width)
     for i, g in enumerate(glyphs):
         print(f"--- 0x{first + i:02X} {g.name!r} advance={g.advance}")
         for r in g.rows:
-            print("".join("#" if r & (0x80 >> c) else "." for c in range(max_width)))
+            print("".join("#" if r & bit_for(c, stride) else "." for c in range(max_width)))
 
 
 def main(argv=None):

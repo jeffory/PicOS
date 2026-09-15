@@ -122,7 +122,14 @@ def test_extended_and_loaded_pages(simulator):
 
 
 def test_font_state_reset_between_apps(simulator):
-    """A font selected and loaded by one app must not leak into the next."""
+    """A font selected and loaded by one app must not leak into the next.
+
+    The fixture exits dirty on purpose: it selects 8x12 and takes a raw font
+    slot via display.loadFont, which is a plain integer no Lua GC can reclaim
+    (a graphics.font object would be freed by lua_close and hide the bug). So
+    the only thing that can hand slot 4 back, or put the selection back to 0,
+    is display_set_font(0) / font_registry_unload_all() in launcher.c.
+    """
     simulator.clear_log()
     simulator.launch_app("font_test")
     simulator.wait_for_log("FT:PAGE 0 ", timeout=30)
@@ -133,10 +140,15 @@ def test_font_state_reset_between_apps(simulator):
     # returns to the launcher, which is what runs the font-state reset.
     simulator.wait_for_log("FT:DONE", timeout=10)
     time.sleep(0.5)
+    exits = [l for l in _lines(simulator) if l.startswith("FT:EXIT ")]
+    assert exits == ["FT:EXIT font=1 leak=4"], exits
 
     simulator.clear_log()
     simulator.launch_app("font_test")
     simulator.wait_for_log("FT:PAGE 0 ", timeout=30)
+    entry = [l for l in _lines(simulator) if l.startswith("FT:ENTRY ")]
+    assert entry and entry[0] == "FT:ENTRY 0", (
+        f"the 8x12 selection leaked into the next app: {entry}")
     for page in range(1, 6):
         _goto_page(simulator, page, page - 1)
     load = [l for l in _lines(simulator) if l.startswith("FT:LOAD ")]
