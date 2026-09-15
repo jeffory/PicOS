@@ -41,7 +41,9 @@
 // ── App discovery
 // ─────────────────────────────────────────────────────────────
 
-#define MAX_APPS 32
+// App table lives in PSRAM; the only SRAM cost is s_cat_indices (uint8_t,
+// so the cap can go to 255 before the index type needs widening).
+#define MAX_APPS 64
 
 static app_entry_t *s_apps = NULL;
 static int s_app_count = 0;
@@ -114,8 +116,11 @@ static void on_app_dir(const sdcard_entry_t *entry, void *user) {
     return;
   if (entry->name[0] == '.')
     return;
-  if (s_app_count >= MAX_APPS)
+  if (s_app_count >= MAX_APPS) {
+    printf("[LAUNCHER] WARNING: app cap (%d) reached, ignoring '%s'\n",
+           MAX_APPS, entry->name);
     return;
+  }
 
   // Detect available runtimes
   char lua_path[160], elf_path[160];
@@ -239,7 +244,8 @@ static const uint16_t s_cat_colors[CAT_COUNT] = {
 };
 
 // Per-category app indices into s_apps[]
-static int s_cat_indices[CAT_COUNT][MAX_APPS];
+_Static_assert(MAX_APPS <= 255, "s_cat_indices is uint8_t");
+static uint8_t s_cat_indices[CAT_COUNT][MAX_APPS];
 static int s_cat_counts[CAT_COUNT];
 
 static category_t parse_category(const char *cat_str) {
@@ -258,7 +264,7 @@ static void build_category_indices(void) {
   for (int i = 0; i < s_app_count; i++) {
     category_t cat = parse_category(s_apps[i].category);
     if (cat < CAT_COUNT)
-      s_cat_indices[cat][s_cat_counts[cat]++] = i;
+      s_cat_indices[cat][s_cat_counts[cat]++] = (uint8_t)i;
   }
 }
 
