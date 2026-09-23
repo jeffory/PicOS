@@ -401,7 +401,8 @@ set_target_properties(picos_simulator PROPERTIES
 
 # ── Web demo packaging ──────────────────────────────────────────────────────
 if(EMSCRIPTEN)
-    # Lua apps bundled into the demo's read-only SD image (dirs under apps/).
+    # Lua apps bundled into the demo's SD image: names of dirs under apps/, or
+    # absolute paths to app dirs that live in their own repos.
     set(PICOS_WEB_APPS "hello;snake;nonogram;calculator;editor;graphicstest;fonttest;3dtest"
         CACHE STRING "Apps to bundle into the web demo SD image")
 
@@ -410,8 +411,18 @@ if(EMSCRIPTEN)
     file(MAKE_DIRECTORY ${WEB_SD_DIR}/apps ${WEB_SD_DIR}/data)
     file(COPY ${PICOS_ROOT}/system DESTINATION ${WEB_SD_DIR})
     foreach(app ${PICOS_WEB_APPS})
-        file(COPY ${PICOS_ROOT}/apps/${app} DESTINATION ${WEB_SD_DIR}/apps
-             PATTERN "tests" EXCLUDE PATTERN "tools" EXCLUDE PATTERN "*.md" EXCLUDE)
+        if(IS_ABSOLUTE ${app})
+            set(app_src ${app})
+        else()
+            set(app_src ${PICOS_ROOT}/apps/${app})
+        endif()
+        if(NOT IS_DIRECTORY ${app_src})
+            message(FATAL_ERROR "PICOS_WEB_APPS: ${app_src} is not a directory")
+        endif()
+        file(COPY ${app_src} DESTINATION ${WEB_SD_DIR}/apps
+             PATTERN ".git" EXCLUDE PATTERN ".github" EXCLUDE
+             PATTERN "tests" EXCLUDE PATTERN "tools" EXCLUDE
+             PATTERN "*.md" EXCLUDE)
     endforeach()
 
     set_target_properties(picos_simulator PROPERTIES
