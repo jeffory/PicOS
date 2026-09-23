@@ -7,7 +7,11 @@
 #include <string.h>
 #include <signal.h>
 #include <unistd.h>
+#ifndef __EMSCRIPTEN__
 #include <execinfo.h>
+#else
+#include "web/web_platform.h"
+#endif
 #include <fcntl.h>
 #include "hal/hal_display.h"
 #include "hal/hal_input.h"
@@ -34,7 +38,11 @@
 // Simulator configuration
 #define SIM_WINDOW_TITLE "PicOS Simulator"
 #ifdef PICOS_PROJECT_ROOT
+#ifdef __EMSCRIPTEN__
+#define SIM_DEFAULT_SD_CARD "/sd"  // --preload-file mount point
+#else
 #define SIM_DEFAULT_SD_CARD PICOS_PROJECT_ROOT
+#endif
 #else
 #define SIM_DEFAULT_SD_CARD "."
 #endif
@@ -98,9 +106,11 @@ static void crash_handler(int sig) {
         (void)!write(fd, sig_name, strlen(sig_name));
         (void)!write(fd, "\nBacktrace:\n", 12);
 
+#ifndef __EMSCRIPTEN__
         void *frames[32];
         int n = backtrace(frames, 32);
         backtrace_symbols_fd(frames, n, fd);
+#endif
         close(fd);
     }
 
@@ -401,6 +411,7 @@ int main(int argc, char** argv) {
     printf("  Audio: SDL2\n");
     printf("  Threading: Dual-core simulation\n\n");
     
+#ifndef __EMSCRIPTEN__
     // Set up signal handlers
     signal(SIGINT, signal_handler);
     signal(SIGTERM, signal_handler);
@@ -410,6 +421,7 @@ int main(int argc, char** argv) {
     signal(SIGABRT, crash_handler);
     signal(SIGBUS, crash_handler);
     signal(SIGFPE, crash_handler);
+#endif
     
     // Initialize SDL
     if (SDL_Init(SDL_INIT_VIDEO | SDL_INIT_AUDIO | SDL_INIT_EVENTS) < 0) {
@@ -465,6 +477,11 @@ int main(int argc, char** argv) {
     tcp_init();
     wifi_init();
 
+#ifdef __EMSCRIPTEN__
+    // No threads in the browser: Core 1's loop runs cooperatively from every
+    // yield point (see web/web_platform.c).
+    hal_audio_init();
+#else
     // Start Core 1 thread (simulates second core)
     thread_t core1;
     if (!hal_thread_create(&core1, core1_thread, NULL)) {
@@ -476,7 +493,8 @@ int main(int argc, char** argv) {
         SDL_Quit();
         return 1;
     }
-    
+#endif
+
     printf("[Core0] Starting main loop...\n");
     fflush(stdout);
     
@@ -503,13 +521,19 @@ int main(int argc, char** argv) {
     extern void dev_commands_init(void);
     dev_commands_init();
 
+#ifndef __EMSCRIPTEN__
     sim_socket_init(g_tcp_port, g_instance_id[0] ? g_instance_id : NULL);
+#endif
 
     launcher_run();
     printf("[Core0] Launcher exited, setting g_running=0\n");
     fflush(stdout);
     g_running = 0;
 
+#ifdef __EMSCRIPTEN__
+    // Nothing to join or close; leave the last frame on the canvas.
+    return 0;
+#else
     // Arm a forced-exit timeout so cleanup can't hang forever
     signal(SIGALRM, force_exit_handler);
     alarm(3);
@@ -530,4 +554,5 @@ int main(int argc, char** argv) {
 
     printf("Simulator exited cleanly.\n");
     return 0;
+#endif
 }

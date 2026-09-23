@@ -44,6 +44,13 @@ static void lua_show_launch_failure(const app_entry_t *app, const char *line1,
   }
 }
 
+// lua_bridge_register() returns void; calling it through a cast lua_CFunction
+// (int return) is undefined behaviour that WebAssembly traps on.
+static int lua_bridge_register_cfn(lua_State *L) {
+  lua_bridge_register(L);
+  return 0;
+}
+
 static bool lua_run(const app_entry_t *app) {
   printf("[LUA] Starting app '%s', PSRAM free: %zu\n",
          app->name, lua_psram_alloc_free_size());
@@ -77,7 +84,7 @@ static bool lua_run(const app_entry_t *app) {
 
   // Wrap registration in a pcall to catch errors before we enter the main loop.
   // This prevents abort() if a module fails to register (e.g. OOM).
-  lua_pushcfunction(L, (lua_CFunction)lua_bridge_register);
+  lua_pushcfunction(L, lua_bridge_register_cfn);
   if (lua_pcall(L, 0, 0, 0) != LUA_OK) {
     lua_bridge_show_error(L, "Init error:");
     lua_close(L);

@@ -1091,10 +1091,16 @@ void* umm_calloc(size_t num, size_t size) {
 }
 
 // Lua bridge stubs — network/tcp now provided by real lua_bridge_network.c/tcp.c
-void lua_bridge_crypto_init(void) {}
+// Must match lua_bridge_internal.h: WASM traps on signature mismatches.
+struct lua_State;
+void lua_bridge_crypto_init(struct lua_State *L) { (void)L; }
 
 // OTA stub
-void ota_trigger_update(const char* url) { (void)url; }
+bool ota_trigger_update(const char *bin_path, const char **out_err) {
+    (void)bin_path;
+    if (out_err) *out_err = "OTA not supported in simulator";
+    return false;
+}
 
 // Video player stubs
 typedef struct { int dummy; } VideoPlayer;
@@ -1105,8 +1111,8 @@ void video_player_play(void* player) { (void)player; }
 void video_player_pause(void* player) { (void)player; }
 void video_player_resume(void* player) { (void)player; }
 void video_player_stop(void* player) { (void)player; }
-void video_player_seek(void* player, float pos) { (void)player; (void)pos; }
-void video_player_update(void* player) { (void)player; }
+void video_player_seek(void* player, uint32_t frame) { (void)player; (void)frame; }
+bool video_player_update(void* player) { (void)player; return false; }
 float video_player_get_fps(void* player) { (void)player; return 0; }
 int video_player_get_dropped_frames(void* player) { (void)player; return 0; }
 void video_player_reset_stats(void* player) { (void)player; }

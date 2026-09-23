@@ -138,7 +138,14 @@ static inline void sleep_us(uint64_t us) {
 #define clk_peri 1
 
 // Watchdog stubs
+#ifdef __EMSCRIPTEN__
+// Called from the Lua hook every 256 opcodes: the web build's escape hatch for
+// Lua loops that never sleep or flush.
+extern void web_yield_if_due(void);
+static inline void watchdog_update(void) { web_yield_if_due(); }
+#else
 static inline void watchdog_update(void) {}
+#endif
 static inline void watchdog_enable(uint32_t delay_ms, bool pause_on_debug) { (void)delay_ms; (void)pause_on_debug; }
 static inline void watchdog_disable(void) {}
 static inline uint32_t watchdog_get_count(void) { return 0; }

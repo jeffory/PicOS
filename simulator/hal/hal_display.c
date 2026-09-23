@@ -4,6 +4,10 @@
 #include <SDL2/SDL.h>
 #include <stdlib.h>
 #include <string.h>
+#ifdef __EMSCRIPTEN__
+#include <emscripten.h>
+#include "web/web_platform.h"
+#endif
 
 static SDL_Window* g_window = NULL;
 static SDL_Renderer* g_renderer = NULL;
@@ -129,6 +133,16 @@ void hal_display_present(void) {
     
     // Present
     SDL_RenderPresent(g_renderer);
+
+#ifdef __EMSCRIPTEN__
+    // Desktop PRESENTVSYNC blocks ~16 ms here; the browser does not, so pace
+    // to ~60 fps and let the browser composite the frame.
+    static double s_last_present_ms;
+    double now = emscripten_get_now();
+    double wait = 16.0 - (now - s_last_present_ms);
+    web_yield(wait > 0 ? (uint32_t)wait : 0);
+    s_last_present_ms = emscripten_get_now();
+#endif
 }
 
 void hal_display_clear(void) {
