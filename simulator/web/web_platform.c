@@ -54,6 +54,56 @@ void web_yield_if_due(void) {
     if (emscripten_get_now() - s_last_yield_ms >= WEB_MAX_BUSY_MS) web_yield(0);
 }
 
+// ── Persistent saves ─────────────────────────────────────────────────────────
+// /sd/data (per-app config + game saves) lives in IndexedDB via IDBFS; the rest
+// of the SD image is the read-only preload. Loaded before the SD card mounts,
+// written back every 2 s and whenever the page is hidden. If IndexedDB is
+// unavailable (some private windows) saves just stay in memory for the session.
+EM_ASYNC_JS(void, web_fs_init_js, (const char *dir_c), {
+  var dir = UTF8ToString(dir_c);
+  var syncing = false;
+  function sync(populate) {
+    return new Promise(function (resolve) {
+      if (syncing) return resolve();
+      syncing = true;
+      FS.syncfs(populate, function (err) {
+        syncing = false;
+        if (err) console.warn('[WEB] save sync failed:', err);
+        resolve();
+      });
+    });
+  }
+  try {
+    FS.mkdirTree(dir);
+    FS.mount(IDBFS, {}, dir);
+  } catch (e) {
+    console.warn('[WEB] persistent saves unavailable:', e);
+    return;
+  }
+  await sync(true);
+  setInterval(function () { sync(false); }, 2000);
+  document.addEventListener('visibilitychange', function () {
+    if (document.visibilityState === 'hidden') sync(false);
+  });
+  window.addEventListener('pagehide', function () { sync(false); });
+});
+
+void web_fs_init(const char *sd_root) {
+    char dir[512];
+    snprintf(dir, sizeof(dir), "%s/data", sd_root);
+    web_fs_init_js(dir);
+    printf("[WEB] Saves persisted in browser storage: %s\n", dir);
+}
+
+// ── Soft-keyboard text ───────────────────────────────────────────────────────
+// SDL derives characters from the unshifted US key (Shift+= arrives as '='), so
+// the page's phone-keyboard path types exact ASCII straight into the char queue.
+extern void hal_input_inject_char(char c);
+
+EMSCRIPTEN_KEEPALIVE void web_type_char(int c) {
+    if (c >= 32 && c < 127) hal_input_inject_char((char)c);
+}
+
 // ── sim_socket_handler.c hooks (no RPC socket in the browser) ────────────────
 
 bool sim_handler_check_launch(void) { return false; }

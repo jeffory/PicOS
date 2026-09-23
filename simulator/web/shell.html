@@ -2,23 +2,95 @@
 <html lang="en">
 <head>
 <meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 <title>PicOS Web Demo</title>
 <style>
-  :root { color-scheme: dark; }
-  body { margin: 0; min-height: 100vh; display: flex; flex-direction: column;
-         align-items: center; justify-content: center; gap: 12px;
-         background: #111; color: #ccc; font: 14px system-ui, sans-serif; }
+  :root {
+    color-scheme: dark;
+    --bg: #111; --fg: #ccc; --muted: #888;
+    --key: #23262e; --key-edge: #3a3f4b; --key-down: #3d5afe; --key-fg: #e6e6e6;
+    --accent: #2e7d32; --danger: #8e2c2c;
+  }
+  * { box-sizing: border-box; }
+  html, body { height: 100%; }
+  body { margin: 0; min-height: 100dvh; display: flex; flex-direction: column;
+         align-items: center; justify-content: center; gap: 12px; padding: 16px;
+         background: var(--bg); color: var(--fg); font: 14px system-ui, sans-serif;
+         touch-action: manipulation; }
   #canvas { width: min(640px, calc(100vw - 32px)); aspect-ratio: 1;
             image-rendering: pixelated; background: #000; outline: none; }
   #status { min-height: 1.2em; }
-  .keys { opacity: .7; text-align: center; max-width: 640px; padding: 0 16px; }
+  .hint { color: var(--muted); text-align: center; max-width: 640px; }
+  .hint .touch-only { display: none; }
+
+  /* ── On-screen keys: hidden until the first touch ─────────────────────── */
+  #pad { display: none; width: 100%; max-width: 480px; user-select: none;
+         -webkit-user-select: none; -webkit-touch-callout: none; touch-action: none; }
+  body.touch { justify-content: flex-start; gap: 10px; padding: 8px 8px
+               max(8px, env(safe-area-inset-bottom)); }
+  body.touch #canvas { width: min(calc(100vw - 16px), calc(100dvh - 290px), 640px); }
+  body.touch #pad { display: grid; gap: 10px; }
+  body.touch .hint .desktop-only { display: none; }
+  body.touch .hint .touch-only { display: inline; }
+
+  .pad-main { display: flex; justify-content: space-between; align-items: center; }
+  .dpad { display: grid; grid-template: repeat(3, 52px) / repeat(3, 52px); gap: 4px; }
+  .dpad [data-key="ArrowUp"] { grid-area: 1 / 2; }
+  .dpad [data-key="ArrowLeft"] { grid-area: 2 / 1; }
+  .dpad [data-key="ArrowRight"] { grid-area: 2 / 3; }
+  .dpad [data-key="ArrowDown"] { grid-area: 3 / 2; }
+  .ab { display: grid; grid-template: 62px 62px / 62px 62px; gap: 6px; }
+  #pad .ab [data-key="Enter"] { grid-area: 1 / 2; border-radius: 50%; background: var(--accent); }
+  #pad .ab [data-key="Escape"] { grid-area: 2 / 1; border-radius: 50%; background: var(--danger); }
+  .pad-row { display: grid; grid-template-columns: repeat(5, 1fr); gap: 6px; }
+  .pad-row button { height: 40px; font-size: 13px; }
+
+  #pad button { appearance: none; border: 1px solid var(--key-edge); border-radius: 10px;
+                background: var(--key); color: var(--key-fg); font: inherit;
+                font-weight: 600; padding: 0; touch-action: none; }
+  #pad button.down, #pad .ab button.down { background: var(--key-down); border-color: var(--key-down); }
+  #pad button.on { outline: 2px solid var(--key-down); }
+  .dpad button { font-size: 20px; }
+
+  /* Receives the phone's soft keyboard; kept on-screen but invisible. */
+  #textsink { position: fixed; left: 0; bottom: 0; width: 1px; height: 1px;
+              opacity: 0; font-size: 16px; border: 0; padding: 0; }
 </style>
 </head>
 <body>
 <canvas id="canvas" tabindex="0" oncontextmenu="event.preventDefault()"></canvas>
 <div id="status">Loading…</div>
-<div class="keys">Arrows move · Enter selects · Esc backs out · F10 system menu. Networking and native apps are not available in the browser.</div>
+
+<div id="pad" aria-label="On-screen PicoCalc keys">
+  <div class="pad-main">
+    <div class="dpad">
+      <button data-key="ArrowUp" aria-label="Up">▲</button>
+      <button data-key="ArrowLeft" aria-label="Left">◀</button>
+      <button data-key="ArrowRight" aria-label="Right">▶</button>
+      <button data-key="ArrowDown" aria-label="Down">▼</button>
+    </div>
+    <div class="ab">
+      <button data-key="Enter" aria-label="Enter">OK</button>
+      <button data-key="Escape" aria-label="Escape">ESC</button>
+    </div>
+  </div>
+  <div class="pad-row">
+    <button data-key="F10">Menu</button>
+    <button data-key="Tab">Tab</button>
+    <button data-key=" ">Space</button>
+    <button data-key="Backspace" aria-label="Backspace">⌫</button>
+    <button id="kbd-toggle" aria-label="Show keyboard">Abc</button>
+  </div>
+</div>
+<input id="textsink" type="text" autocomplete="off" autocorrect="off"
+       autocapitalize="off" spellcheck="false" aria-hidden="true" tabindex="-1">
+
+<div class="hint">
+  <span class="desktop-only">Arrows move · Enter selects · Esc backs out · F10 system menu.</span>
+  <span class="touch-only">Abc opens the keyboard for typing.</span>
+  Saves stay in this browser. Networking and native apps are not available.
+</div>
+
 <script>
   var statusEl = document.getElementById('status');
   var Module = {
@@ -32,12 +104,93 @@
       if (!left) statusEl.textContent = '';
     },
   };
+
   // Browsers only start audio after a user gesture.
-  window.addEventListener('keydown', function resume() {
+  function resumeAudio() {
     var ctx = Module.SDL2 && Module.SDL2.audioContext;
     if (ctx && ctx.state === 'suspended') ctx.resume();
-  });
+  }
+  window.addEventListener('keydown', resumeAudio);
+  window.addEventListener('pointerdown', resumeAudio);
   Module.canvas.focus();
+
+  // ── On-screen keys ──────────────────────────────────────────────────────
+  // SDL listens for keyboard events on window, so the pad synthesises them.
+  var KEYCODES = { ArrowLeft: 37, ArrowUp: 38, ArrowRight: 39, ArrowDown: 40,
+                   Enter: 13, Escape: 27, Tab: 9, Backspace: 8, F10: 121, ' ': 32 };
+  var CODES = { ' ': 'Space' };
+
+  function codeFor(key) {
+    if (CODES[key]) return CODES[key];
+    if (key.length > 1) return key;                 // named keys: code == key
+    if (/[a-z]/i.test(key)) return 'Key' + key.toUpperCase();
+    if (/[0-9]/.test(key)) return 'Digit' + key;
+    return '';
+  }
+  function keyCodeFor(key) {
+    if (KEYCODES[key]) return KEYCODES[key];
+    return key.length === 1 ? key.toUpperCase().charCodeAt(0) : 0;
+  }
+  function sendKey(type, key) {
+    var ev = new KeyboardEvent(type, { key: key, code: codeFor(key),
+                                       bubbles: true, cancelable: true });
+    var kc = keyCodeFor(key);
+    Object.defineProperty(ev, 'keyCode', { get: function () { return kc; } });
+    Object.defineProperty(ev, 'which', { get: function () { return kc; } });
+    window.dispatchEvent(ev);
+  }
+  function tapKey(key) { sendKey('keydown', key); sendKey('keyup', key); }
+
+  // Hold-to-press: keydown on touch, keyup on release — multitouch safe.
+  document.querySelectorAll('#pad [data-key]').forEach(function (btn) {
+    var key = btn.dataset.key;
+    function release(e) {
+      if (!btn.classList.contains('down')) return;
+      btn.classList.remove('down');
+      sendKey('keyup', key);
+    }
+    btn.addEventListener('pointerdown', function (e) {
+      e.preventDefault();
+      btn.setPointerCapture(e.pointerId);
+      btn.classList.add('down');
+      sendKey('keydown', key);
+      if (navigator.vibrate) navigator.vibrate(8);
+    });
+    btn.addEventListener('pointerup', release);
+    btn.addEventListener('pointercancel', release);
+    btn.addEventListener('lostpointercapture', release);
+  });
+
+  // Soft keyboard for typing: its keystrokes must not also reach SDL directly
+  // (iOS sends real key events, Android sends 'Unidentified'), so everything
+  // goes through input/beforeinput and is re-sent once.
+  var sink = document.getElementById('textsink');
+  var kbdBtn = document.getElementById('kbd-toggle');
+  kbdBtn.addEventListener('pointerdown', function (e) { e.preventDefault(); });
+  kbdBtn.addEventListener('click', function () {
+    if (document.activeElement === sink) sink.blur(); else sink.focus();
+  });
+  sink.addEventListener('focus', function () { kbdBtn.classList.add('on'); });
+  sink.addEventListener('blur', function () { kbdBtn.classList.remove('on'); });
+  ['keydown', 'keyup', 'keypress'].forEach(function (t) {
+    sink.addEventListener(t, function (e) { e.stopPropagation(); });
+  });
+  sink.addEventListener('beforeinput', function (e) {
+    if (e.inputType === 'deleteContentBackward') { e.preventDefault(); tapKey('Backspace'); }
+    else if (e.inputType === 'insertLineBreak') { e.preventDefault(); tapKey('Enter'); }
+  });
+  // Typed text goes straight to the OS char queue (exact case and punctuation;
+  // synthesised key events would come through SDL as unshifted US keys).
+  sink.addEventListener('input', function (e) {
+    var text = sink.value;
+    sink.value = '';
+    for (var i = 0; i < text.length; i++) Module._web_type_char(text.charCodeAt(i));
+  });
+
+  // Reveal the pad on the first touch only; mouse and keyboard users never see it.
+  window.addEventListener('touchstart', function () {
+    document.body.classList.add('touch');
+  }, { once: true, passive: true });
 </script>
 {{{ SCRIPT }}}
 </body>

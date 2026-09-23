@@ -436,6 +436,8 @@ if(EMSCRIPTEN)
         -sALLOW_MEMORY_GROWTH
         -sINITIAL_MEMORY=64MB
         -sEXIT_RUNTIME=0
+        -lidbfs.js
+        -sEXPORTED_RUNTIME_METHODS=FS
         --preload-file ${WEB_SD_DIR}@/sd
         --shell-file ${CMAKE_CURRENT_SOURCE_DIR}/web/shell.html
     )

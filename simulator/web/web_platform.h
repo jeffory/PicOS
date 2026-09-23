@@ -12,4 +12,7 @@ void web_yield(uint32_t ms);
 // Yield only if the OS has been running for longer than a frame without one.
 void web_yield_if_due(void);
 
+// Mount <sd_root>/data on IndexedDB and load saved data (blocks until loaded).
+void web_fs_init(const char *sd_root);
+
 #endif

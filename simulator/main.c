@@ -448,6 +448,9 @@ int main(int argc, char** argv) {
         return 1;
     }
     
+#ifdef __EMSCRIPTEN__
+    web_fs_init(g_sd_card_path);
+#endif
     if (!hal_sdcard_init(g_sd_card_path)) {
         fprintf(stderr, "SD card initialization failed\n");
         hal_input_shutdown();
