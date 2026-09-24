@@ -62,7 +62,8 @@ def test_float_quantity_arguments_round(simulator):
     # Size: image.new(10.5, 4.4) -> 11 x 4
     assert r["SIZE"] == "11x4", r["SIZE"]
     # Duration: animator.new(99.99999 ms) sampled at 50.5 ms -> 51 / 100
-    # (compare as a number: tostring prints "51.0" in the sim, "51.00000" on device)
+    # (tostring prints "51.0" on both targets since the float formatter fix;
+    # the numeric compare is kept as the looser check)
     assert float(r["DURATION"]) == 51.0, r["DURATION"]
     assert r["SLEEP"] == "ok", r["SLEEP"]
     assert r["REPEAT"] == "ok", r["REPEAT"]
