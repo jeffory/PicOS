@@ -46,14 +46,17 @@ static int l_sys_log(lua_State *L) {
 
 static int l_sys_sleep(lua_State *L) {
   int ms = (int)lb_checkint(L, 1);
-  // Every 10 ms the same service pass as the instruction hook: callbacks,
-  // dev commands, a pending menu press, and the exit request (raised from
-  // here, so an exit or the system menu's Exit App ends a long sleep at
-  // once). It does NOT call kbd_poll(): that would drain the STM32 FIFO and
-  // consume key edges the app expects to read via input.update().
+  // Every 10 ms: a background keyboard poll, so a physical Sym press is seen
+  // during the sleep (it queues events and chars and accumulates press
+  // edges without starting a new app-facing poll, so the app's next
+  // input.update() still delivers them), then the same service pass as the
+  // instruction hook: callbacks, dev commands, the menu, and the exit
+  // request (raised from here, so an exit or the menu's Exit App ends a long
+  // sleep at once).
   uint32_t start_ms = (uint32_t)to_ms_since_boot(get_absolute_time());
   uint32_t span = ms > 0 ? (uint32_t)ms : 0;
   while (true) {
+    kbd_poll_background();
     lua_bridge_service(L);
     uint32_t elapsed = (uint32_t)to_ms_since_boot(get_absolute_time()) - start_ms;
     if (elapsed >= span)

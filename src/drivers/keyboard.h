@@ -168,6 +168,12 @@ bool kbd_poll_event(kbd_event_t *out);
 // sticks is cleared by kbd_clear_state().
 bool kbd_is_key_down(uint8_t keycode);
 
+// Read pending key input without starting a new app-facing poll (used by
+// sys.sleep, which must see the Sym key): events and chars queue up and
+// press edges accumulate, so the app's next kbd_poll() still delivers what
+// arrived meanwhile. Sets the menu/screenshot flags at once.
+void kbd_poll_background(void);
+
 // Drop queued events only (held state is kept). Called when an app starts so
 // it does not receive the launcher's keys.
 void kbd_flush_events(void);

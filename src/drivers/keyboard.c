@@ -246,10 +246,25 @@ bool kbd_init(void) {
   return ok;
 }
 
-void kbd_poll(void) {
-  kbd_buttons_begin_poll(&s_btn);
-  s_last_char = 0;
-  s_last_raw_key = 0;
+// bg: a background poll (kbd_poll_background) that reads the STM32 FIFO into
+// the event queue, the char backlog and the button masks WITHOUT starting a
+// new app-facing poll: prev, the pending tap/defer state, the char the app
+// has not read yet and the raw key stay as they are, and injected one-shots
+// are neither retired nor published. So edges that arrive during a sleep
+// accumulate and the app's next kbd_poll() still delivers them; only the
+// OS-level Sym and Brk flags are set right away.
+static void kbd_poll_impl(bool bg);
+
+void kbd_poll(void) { kbd_poll_impl(false); }
+
+void kbd_poll_background(void) { kbd_poll_impl(true); }
+
+static void kbd_poll_impl(bool bg) {
+  if (!bg) {
+    kbd_buttons_begin_poll(&s_btn);
+    s_last_char = 0;
+    s_last_raw_key = 0;
+  }
   s_in.ev_pushed = 0;
   s_in.char_pushed = 0;
   kbd_keyset_t down_before = s_in.down;
@@ -269,7 +284,7 @@ void kbd_poll(void) {
   // the press before the app ever saw it. A minimum wall-clock hold makes
   // delivery independent of how many times kbd_poll() happens to run.
   bool injected_retired_this_poll = false;
-  if (s_injected_active &&
+  if (!bg && s_injected_active &&
       (now_ms - s_injected_active_since_ms >= KBD_INJECT_HOLD_MS)) {
     uint32_t retired = s_injected_active & ~s_injected_held;
     s_btn.curr &= ~s_injected_active;
@@ -283,7 +298,8 @@ void kbd_poll(void) {
   // same button re-injected while it was still active, which was left
   // sitting in s_injected_pending) can be republished — a real release edge,
   // the same way a human can't press a key again without releasing it first.
-  if (!injected_retired_this_poll && !s_injected_active && s_injected_pending) {
+  if (!bg && !injected_retired_this_poll && !s_injected_active &&
+      s_injected_pending) {
     s_injected_active = s_injected_pending;
     s_injected_pending = 0;
     s_injected_active_since_ms = now_ms;
@@ -409,7 +425,8 @@ done_polling:;
   }
   // One char per poll, oldest first: a second key in the same poll is kept
   // for the next poll instead of overwriting the first.
-  s_last_char = kbd_chars_pop(&s_in);
+  if (!bg)
+    s_last_char = kbd_chars_pop(&s_in);
   idle_dim_poll();
 }
 

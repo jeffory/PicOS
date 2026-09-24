@@ -221,3 +221,39 @@ while true do pcall(busy) end
     time.sleep(0.2)
     simulator.keypress_sequence(["up", "enter"], delay_ms=200)
     _assert_exited(simulator.wait_for_exit(timeout=EXIT_TIMEOUT))
+
+
+def test_key_edges_during_sleep_reach_the_app_after_it(simulator):
+    """sys.sleep polls the keyboard in the background (so the physical Sym
+    key works during it); keys that arrive meanwhile must still reach the
+    app's next input.update(): the press edge, the char and the events."""
+    code = """
+local pc = picocalc
+local input = pc.input
+input.update()
+while input.pollEvent() do end
+pc.sys.log("EXIT_READY")
+pc.sys.sleep(1500)
+input.update()
+local pressed = input.getButtonsPressed()
+local c = input.getChar()
+local downs = 0
+while true do
+    local ev = input.pollEvent()
+    if not ev then break end
+    if ev.type == "down" then downs = downs + 1 end
+end
+pc.sys.log(string.format("AFTER enter=%s char=%s downs=%d",
+    tostring(pressed & input.BTN_ENTER ~= 0), tostring(c), downs))
+"""
+    stage_lua_app(simulator.sd_card_path, "sleep_edges", code)
+    seq = simulator.get_log_buffer(tail=1).get("next_seq", 0)
+    simulator.launch_app("sleep_edges")
+    simulator.wait_for_log(r"^EXIT_READY$", timeout=10, since_seq=seq)
+    time.sleep(0.3)
+    simulator.keypress("enter")
+    time.sleep(0.2)
+    simulator.keypress("q")
+    line = simulator.wait_for_log(r"^AFTER ", timeout=10, since_seq=seq)
+    assert line.startswith("AFTER enter=true char=q"), line
+    assert int(line.rsplit("=", 1)[1]) >= 2, line
