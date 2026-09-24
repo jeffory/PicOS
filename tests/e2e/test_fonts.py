@@ -15,14 +15,11 @@ altogether. The firmware tables are what the device renders, so they are now
 the single source for firmware and simulator alike, and the old page 0/1
 goldens recorded simulator-only output that no build can produce any more.
 """
-import time
-
 import numpy as np
 import pytest
 
 from helpers import GOLDEN_DIR as FIXTURES_DIR, compare_golden
 
-BUTTON_HOLD_S = 0.13
 GOLDEN_DIR = FIXTURES_DIR / "fonts"
 BUILTIN_NAMES = ["6x8", "8x12", "scientifica", "scientifica-bold"]
 
@@ -35,12 +32,16 @@ def _lines(sim):
 
 
 def _goto_page(sim, n, current):
-    """Advance the fixture from page `current` to page `n` with Right taps."""
+    """Advance the fixture from page `current` to page `n` with Right taps.
+
+    Each tap waits until the OS has read it: a same-button click injected
+    while the previous one is still held is queued, and a second queued one
+    would merge into it. The fixture flushes a page before it logs
+    "FT:PAGE n", so the screen is final once that line appears."""
     for _ in range(n - current):
-        sim.keypress("right")
-        time.sleep(BUTTON_HOLD_S)
+        r = sim.keypress("right")
+        sim.wait_input_consumed(r["input_seq"], timeout=5.0)
     sim.wait_for_log(f"FT:PAGE {n} ", timeout=10)
-    time.sleep(0.2)  # let the flush land before screenshotting
 
 
 def _screenshot_array(sim):

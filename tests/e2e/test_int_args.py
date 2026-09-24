@@ -13,8 +13,6 @@ The intarg_test fixture logs "IA <NAME> <value>" per probe, draws a fixed
 scene on white, then logs "IA DONE"; the pixel probes below check that the
 draws landed on the rounded pixel.
 """
-import time
-
 import pytest
 
 
@@ -28,22 +26,22 @@ def _lines(sim):
 def _run_fixture(sim, timeout=30.0):
     sim.clear_log()
     sim.launch_app("intarg_test")
-    deadline = time.time() + timeout
-    while time.time() < deadline:
-        lines = _lines(sim)
-        if any("IA DONE" in l for l in lines):
-            results = {}
-            for l in lines:
-                idx = l.find("IA ")
-                if idx < 0:
-                    continue
-                name, _, value = l[idx + 3:].partition(" ")
-                results[name] = value
-            print("IA results:", results)
-            return results
-        time.sleep(0.25)
-    pytest.fail("IA DONE not seen within %.0fs:\n%s"
-                % (timeout, "\n".join(_lines(sim)[-40:])))
+    # The fixture logs "IA DONE" after its last probe and after the flush of
+    # its scene, so the pixels are final once it appears.
+    try:
+        sim.wait_for_log(r"IA DONE", timeout=timeout)
+    except TimeoutError:
+        pytest.fail("IA DONE not seen within %.0fs:\n%s"
+                    % (timeout, "\n".join(_lines(sim)[-40:])))
+    results = {}
+    for l in _lines(sim):
+        idx = l.find("IA ")
+        if idx < 0:
+            continue
+        name, _, value = l[idx + 3:].partition(" ")
+        results[name] = value
+    print("IA results:", results)
+    return results
 
 
 def _px(sim, x, y):
@@ -57,7 +55,6 @@ NOT_FINITE = "number is NaN or infinite"
 
 def test_float_quantity_arguments_round(simulator):
     r = _run_fixture(simulator)
-    time.sleep(0.3)
 
     # Size: image.new(10.5, 4.4) -> 11 x 4
     assert r["SIZE"] == "11x4", r["SIZE"]
@@ -95,7 +92,6 @@ def test_unrepresentable_arguments_error_cleanly(simulator):
 
 def test_float_coordinates_land_on_rounded_pixel(simulator):
     _run_fixture(simulator)
-    time.sleep(0.3)
 
     # a = 11x4 black image drawn at (99.99999, 50) -> covers x 100..110, y 50..53
     assert _px(simulator, 99, 51) == WHITE
@@ -148,7 +144,6 @@ def test_table_field_errors_name_the_argument(simulator):
 
 def test_display_primitives_round_like_everything_else(simulator):
     r = _run_fixture(simulator)
-    time.sleep(0.3)
 
     # NaN / inf used to go through an undefined (int) cast; now an error
     for name, fn in (("FILL_NAN", "fillRect"), ("TEXT_INF", "drawText")):
@@ -166,7 +161,6 @@ def test_display_primitives_round_like_everything_else(simulator):
 
 def test_negative_ties_round_toward_positive_infinity(simulator):
     _run_fixture(simulator)
-    time.sleep(0.3)
 
     # b (2x2) at x = -1.5 -> -1: covers x -1..0
     assert _px(simulator, 0, 100) == BLACK

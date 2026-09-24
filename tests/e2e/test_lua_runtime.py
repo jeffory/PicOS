@@ -8,8 +8,6 @@ overflowed the minesweeper flood fill); these tests pin the result down
 through the lua_runtime fixture app, which logs one "LR <NAME> <value>" line
 per probe.
 """
-import time
-
 import pytest
 
 
@@ -22,21 +20,20 @@ def _lines(sim):
 
 def _run_fixture(sim, timeout=30.0):
     sim.launch_app("lua_runtime")
-    deadline = time.time() + timeout
-    while time.time() < deadline:
-        lines = _lines(sim)
-        if any("LR DONE" in l for l in lines):
-            results = {}
-            for l in lines:
-                idx = l.find("LR ")
-                if idx < 0:
-                    continue
-                name, _, value = l[idx + 3:].partition(" ")
-                results[name] = value
-            return results
-        time.sleep(0.25)
-    pytest.fail("LR DONE not seen within %.0fs:\n%s"
-                % (timeout, "\n".join(_lines(sim)[-40:])))
+    # The fixture logs "LR DONE" after its last probe.
+    try:
+        sim.wait_for_log(r"LR DONE", timeout=timeout)
+    except TimeoutError:
+        pytest.fail("LR DONE not seen within %.0fs:\n%s"
+                    % (timeout, "\n".join(_lines(sim)[-40:])))
+    results = {}
+    for l in _lines(sim):
+        idx = l.find("LR ")
+        if idx < 0:
+            continue
+        name, _, value = l[idx + 3:].partition(" ")
+        results[name] = value
+    return results
 
 
 BINARY_REJECTED = "nil attempt to load a binary chunk (mode is 't')"

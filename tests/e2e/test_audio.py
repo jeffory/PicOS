@@ -4,7 +4,6 @@ Verifies tone generation, volume control, and audio state reporting.
 Uses get_audio_state RPC to check playback status.
 """
 
-import time
 
 import pytest
 
@@ -41,8 +40,8 @@ class TestAudioRPC:
         })
         assert result.get("ok"), f"play_tone failed: {result}"
 
-        # Check audio state — tone should be playing
-        time.sleep(0.1)
+        # Check audio state — tone should be playing (play_tone sets the
+        # state before it replies; the 2 s tone is far from expiring)
         state = simulator.call("get_audio_state")
         assert state["tone_playing"] is True, (
             f"Tone should be playing after play_tone. State: {state}"
@@ -55,13 +54,12 @@ class TestAudioRPC:
         """Test stop_audio RPC stops playback."""
         # Start a tone
         simulator.call("play_tone", {"frequency": 880, "duration_ms": 5000})
-        time.sleep(0.1)
 
         # Stop it
         result = simulator.call("stop_audio")
         assert result.get("ok"), f"stop_audio failed: {result}"
 
-        time.sleep(0.1)
+        # stop_audio clears the state before it replies.
         state = simulator.call("get_audio_state")
         assert state["tone_playing"] is False, (
             f"Tone should not be playing after stop_audio. State: {state}"
@@ -81,7 +79,6 @@ class TestAudioRPC:
         """Test audio state when nothing is playing."""
         # Ensure nothing is playing
         simulator.call("stop_audio")
-        time.sleep(0.1)
 
         state = simulator.call("get_audio_state")
         assert state["tone_playing"] is False

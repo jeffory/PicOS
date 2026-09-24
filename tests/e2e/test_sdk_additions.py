@@ -8,17 +8,11 @@ The applyEffect test is the important one: all ten display_effect_* functions
 were no-op stubs in the simulator while working on hardware, so the entire
 family silently did nothing in the sim. Nothing caught that until this existed.
 """
-import time
+import re
 
 import pytest
 
 from helpers import lua_case_names
-
-
-# Injected buttons are HELD for 80ms so extra polls cannot consume them, which
-# means two presses of the same key inside that window coalesce into a single
-# edge. Any test that taps the same key repeatedly must space the taps past it.
-BUTTON_HOLD_S = 0.13
 
 
 def _lines(sim):
@@ -29,9 +23,20 @@ def _lines(sim):
 
 
 def _tap(sim, key, count=1):
+    """Tap `key`, waiting until the OS has read each tap. (An injected click
+    is held 80 ms; a same-key click sent inside that window is queued and a
+    second queued one would merge into it, so taps are paced by consumption,
+    not by a sleep.)"""
     for _ in range(count):
-        sim.keypress(key)
-        time.sleep(BUTTON_HOLD_S)
+        r = sim.keypress(key)
+        sim.wait_input_consumed(r["input_seq"], timeout=5.0)
+
+
+def _next_phase(sim, prefix, phases, i):
+    """Wait for phase i+1 (0-based index into `phases`). The fixtures flush a
+    phase's frame before logging "<prefix>:PHASE <n> <name>", so its pixels
+    are final once the line appears."""
+    sim.wait_for_log(rf"{prefix}:PHASE {i + 1} {re.escape(phases[i])}$", timeout=15)
 
 
 def _px(sim, x, y):
@@ -88,7 +93,6 @@ def test_apply_effect_mutates_framebuffer(simulator):
     simulator.clear_log()
     simulator.launch_app("effects_test")
     simulator.wait_for_log("FX:PHASE 1 baseline", timeout=30)
-    time.sleep(0.3)
 
     seen = {}
     for i in range(len(EFFECT_PHASES)):
@@ -102,7 +106,7 @@ def test_apply_effect_mutates_framebuffer(simulator):
         seen[name] = (_px(simulator, 160, 100), _px(simulator, 160, 101))
         if i < len(EFFECT_PHASES) - 1:
             _tap(simulator, "enter")
-            time.sleep(0.25)
+            _next_phase(simulator, "FX", EFFECT_PHASES, i + 1)
 
     base_even = seen["baseline"][0]
     assert seen["baseline"][0] == seen["baseline"][1], "baseline rows differ"
@@ -153,7 +157,6 @@ def test_transparent_text_and_primitives(simulator):
     simulator.clear_log()
     simulator.launch_app("drawprim_test")
     simulator.wait_for_log("DP:PHASE 1 backdrop", timeout=30)
-    time.sleep(0.3)
 
     seen = {}
     for i in range(len(DP_PHASES)):
@@ -167,7 +170,7 @@ def test_transparent_text_and_primitives(simulator):
         seen[name] = _region(simulator, 64, 64, 16, 16)
         if i < len(DP_PHASES) - 1:
             _tap(simulator, "enter")
-            time.sleep(0.25)
+            _next_phase(simulator, "DP", DP_PHASES, i + 1)
 
     assert set(seen["backdrop"]) == {RED}, "backdrop not a clean fill"
 
@@ -235,7 +238,6 @@ def test_clip_rect_and_partial_flush(simulator):
     simulator.clear_log()
     simulator.launch_app("cliprect_test")
     simulator.wait_for_log("CR:PHASE 1 backdrop", timeout=30)
-    time.sleep(0.3)
 
     seen = {}
     for i in range(len(CR_PHASES)):
@@ -252,7 +254,7 @@ def test_clip_rect_and_partial_flush(simulator):
         }
         if i < len(CR_PHASES) - 1:
             _tap(simulator, "enter")
-            time.sleep(0.25)
+            _next_phase(simulator, "CR", CR_PHASES, i + 1)
 
     for name in CR_PHASES:
         assert name in seen, f"phase {name} missing"
@@ -324,17 +326,23 @@ def test_clip_rect_and_partial_flush(simulator):
 # ── input auto-repeat ────────────────────────────────────────────────────────
 
 
-def test_input_auto_repeat(simulator):
-    """A held button must yield one press edge but many repeated edges."""
+def test_input_auto_repeat(sim_factory, test_sd_card):
+    """A held button must yield one press edge but many repeated edges.
+
+    Runs on the virtual clock: the fixture's frame loop is sys.sleep(16), so
+    every frame is exactly 16 ms of sim time however loaded the host is, and
+    the hold lasts until the sixth repeated edge rather than a wall-clock
+    second."""
+    simulator = sim_factory(test_sd_card, virtual_time=True)
     simulator.clear_log()
     simulator.launch_app("repeat_test")
     simulator.wait_for_log("RP:READY", timeout=30)
-    time.sleep(0.2)
 
-    simulator.call("inject_button", {"button": "right", "action": "press"})
-    time.sleep(1.0)
-    simulator.call("inject_button", {"button": "right", "action": "release"})
-    time.sleep(0.3)
+    r = simulator.call("inject_button", {"button": "right", "action": "press"})
+    simulator.wait_input_consumed(r["input_seq"], timeout=5.0)
+    simulator.wait_for_log(r"RP:REPEAT n=6$", timeout=15)
+    r = simulator.call("inject_button", {"button": "right", "action": "release"})
+    simulator.wait_input_consumed(r["input_seq"], timeout=5.0)
     simulator.keypress("esc")
     simulator.wait_for_log("RP:DONE", timeout=15)
 
@@ -377,7 +385,6 @@ def test_hw_scroll_registers(simulator):
     simulator.clear_log()
     simulator.launch_app("scrollreg_test")
     simulator.wait_for_log("SR:PHASE 1 flat", timeout=30)
-    time.sleep(0.3)
 
     # Identity: bands where they were drawn.
     assert _px(simulator, 160, 8) == _sr_band(8)
@@ -386,7 +393,6 @@ def test_hw_scroll_registers(simulator):
 
     _tap(simulator, "enter")
     simulator.wait_for_log("SR:PHASE 2 scrolled", timeout=15)
-    time.sleep(0.3)
 
     # Offset 64: screen row L shows GRAM row (64+L) % 320 — including the
     # wrap at the bottom of the screen (row 264 -> GRAM row 8).
@@ -406,7 +412,6 @@ def test_hw_scroll_registers(simulator):
 
     _tap(simulator, "enter")
     simulator.wait_for_log("SR:PHASE 3 strip", timeout=15)
-    time.sleep(0.3)
 
     # flushRows(0,7) wrote GRAM rows 0..7; under offset 64 those display at
     # screen rows 256..263.  Screen rows 0..7 (GRAM 64..71) keep their band.
@@ -419,7 +424,6 @@ def test_hw_scroll_registers(simulator):
 
     _tap(simulator, "enter")
     simulator.wait_for_log("SR:PHASE 4 reset", timeout=15)
-    time.sleep(0.3)
 
     # Identity restored: the strip shows at its GRAM home, rows 0..7.
     assert _px(simulator, 160, 4) == SR_STRIP

@@ -8,7 +8,7 @@ Lua-visible behaviour (via "ZE " marker logs from the zip_test fixture app)
 and the filesystem outcome (nothing escapes the destination).
 """
 import io
-import time
+import re
 import zipfile
 from pathlib import Path
 
@@ -23,14 +23,14 @@ def _lines(sim):
 
 
 def _wait_for(sim, marker, timeout=20.0):
-    deadline = time.time() + timeout
-    while time.time() < deadline:
-        joined = "\n".join(_lines(sim))
-        if marker in joined:
-            return joined
-        time.sleep(0.25)
-    pytest.fail(f"marker {marker!r} not seen within {timeout}s:\n"
-                + "\n".join(_lines(sim)[-30:]))
+    """Wait (event-driven) for a log line containing `marker`; returns the
+    whole log joined."""
+    try:
+        sim.wait_for_log(re.escape(marker), timeout=timeout)
+    except TimeoutError:
+        pytest.fail(f"marker {marker!r} not seen within {timeout}s:\n"
+                    + "\n".join(_lines(sim)[-30:]))
+    return "\n".join(_lines(sim))
 
 
 def _build_archives(app_dir: Path):
