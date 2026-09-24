@@ -19,6 +19,9 @@ static inline uint8_t *rx_buf_uncached(const uint8_t *cached_ptr) {
 static tcp_conn_t s_conns[TCP_MAX_CONNECTIONS];
 static spin_lock_t *s_lock;  // the pool lock (see tcp.h)
 
+// Unconsumed bytes in Mongoose past which reading pauses (tcp_drain).
+#define TCP_RECV_PAUSE (16u * 1024u)
+
 // How long tcp_alloc waits for a slot that is being released.
 #define TCP_ALLOC_WAIT_MS 100
 
@@ -381,7 +384,7 @@ void tcp_c1_fail_all(const char *msg) {
 // the app has read.
 static void tcp_drain(struct mg_connection *nc, tcp_conn_t *c) {
     struct mg_iobuf *io = &nc->recv;
-    if (io->len == 0) return;
+    if (io->len == 0) { nc->is_full = 0; return; }
 
     uint32_t save = spin_lock_blocking(s_lock);
     if (st_released(st_get(c))) {
@@ -414,6 +417,9 @@ static void tcp_drain(struct mg_connection *nc, tcp_conn_t *c) {
     spin_unlock(s_lock, save);
 
     if (len > 0) mg_iobuf_del(io, 0, len);
+    // Stop reading while the app lags (honoured by the socket build only;
+    // see HTTP_RECV_PAUSE in http.c).
+    nc->is_full = io->len >= TCP_RECV_PAUSE;
 }
 
 void tcp_ev_fn(struct mg_connection *nc, int ev, void *ev_data) {

@@ -45,7 +45,15 @@ enum { CH_SIZE = 0, CH_DATA, CH_DATA_CRLF, CH_TRAILER, CH_DONE };
 #define HTTP_HEAD_MAX (HTTP_HEADER_BUF_MAX + 1024)
 // Body bytes Mongoose may hold beyond the ring before the transfer is failed
 // (there is no TCP backpressure on the device stack; see the report).
-#define HTTP_RECV_OVERFLOW (512u * 1024u)
+// Under Core 1's 128 KB Mongoose pool: one HTTPS connection uses ~35-40 KB
+// and growing nc->recv reallocates (old + new live at once), so the guard
+// fires before the pool runs out and the transfer fails with a clear error.
+#define HTTP_RECV_OVERFLOW (32u * 1024u)
+// Ask Mongoose to stop reading (nc->is_full) past this much unconsumed
+// data.  Only the socket build (MG_ARCH_UNIX, the simulator) honours it;
+// the device's built-in TCP stack has no receive window, so there the
+// overflow guard is what stops a reader that falls behind.
+#define HTTP_RECV_PAUSE (16u * 1024u)
 // How long http_alloc waits for a slot that is being released.
 #define HTTP_ALLOC_WAIT_MS 100
 
@@ -584,6 +592,8 @@ void http_ev_fn(struct mg_connection *nc, int ev, void *ev_data) {
   if (c->pcb != NULL && c->pcb != nc)
     return;
   c1_event(nc, c, ev, ev_data);
+  if ((ev == MG_EV_READ || ev == MG_EV_POLL) && nc->fn_data == c)
+    nc->is_full = nc->recv.len >= HTTP_RECV_PAUSE;
   // Invariant: pcb never outlives its connection.  Mongoose frees nc right
   // after MG_EV_CLOSE, so drop it here whatever the handler did — also for
   // a CLOSING slot, whose close handler (http_c1_release) would otherwise
