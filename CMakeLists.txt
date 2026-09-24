@@ -76,13 +76,11 @@ set(LUA_SOURCES
 add_library(lua STATIC ${LUA_SOURCES})
 target_include_directories(lua PUBLIC ${LUA_DIR})
 
-# Lua config overrides for embedded target
-target_compile_definitions(lua PRIVATE
-    LUA_32BITS=1           # Use 32-bit integers (saves memory on RP2350)
-    LUA_USE_LONGJMP=1      # Use setjmp/longjmp instead of C++ exceptions
-    LUAI_MAXSTACK=500      # Reduce stack depth from 1000000 to 500
-    LUA_IDSIZE=60          # Smaller error source IDs
-)
+# Lua config (shared with the simulator). luaconf.h is patched so these
+# -D values actually take effect; PUBLIC so the bridge sees the same types.
+include(${CMAKE_SOURCE_DIR}/cmake/picos_lua.cmake)
+picos_patch_luaconf(${LUA_DIR})
+target_compile_definitions(lua PUBLIC ${PICOS_LUA_DEFINITIONS})
 # No signals, no OS-level stuff
 target_compile_options(lua PRIVATE -Os)
 

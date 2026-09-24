@@ -126,7 +126,11 @@ The Lua bridge is split into ~20 module files, coordinated by `lua_bridge.c`:
 
 All `picocalc.*` Lua functions are `static int l_<module>_<fn>(lua_State *L)` wrappers. Registered via `luaL_Reg` tables passed to `register_subtable()`. Integer constants (button codes, color names) are pushed with `lua_pushinteger` / `lua_setfield`.
 
-Lua 5.4.7 is embedded with restricted stdlib: `base`, `table`, `string`, `math` only (no `utf8`, no `coroutine` — neither is registered). Blocked: `io`, `os`, `package`, `debug`. Compile-time config: `LUA_32BITS=1`, `LUA_USE_LONGJMP=1`, `LUAI_MAXSTACK=500`.
+Lua 5.4.7 is embedded with restricted stdlib: `base`, `table`, `string`, `math`, `coroutine`, `utf8`. Blocked: `io`, `os`, `package`, `debug`. `load` is text-only (mode forced to `"t"`; bytecode is rejected), as are app `main.lua` and `sys.loadlib`.
+
+Compile-time config lives in one place, `cmake/picos_lua.cmake` (`PICOS_LUA_DEFINITIONS`, applied `PUBLIC` by both the firmware and simulator builds): `LUA_32BITS=1`, `LUA_USE_LONGJMP=1`, `LUAI_MAXSTACK=1000`, `LUA_IDSIZE=60`. Upstream `luaconf.h` hard-codes these, so the same file also patches it (`#if !defined` guards, idempotent, marker comment on line 1) — at CMake configure time, from `make download-lua`, and in the CI workflows. `_Static_assert`s in `lua_bridge.c` fail the build if the patch is lost.
+- Numbers: `lua_Integer` is 32-bit (wraps at ±2^31; hex literals like `0xDEADBEEF` wrap to negative, `%x` still prints the 32-bit pattern), `lua_Number` is single-precision `float` (~7 significant digits, integers exact only to 2^24, `1e39 == math.huge`). `sys.getTimeMs()` goes negative after ~24.8 days uptime (differences still wrap correctly); `getClock().epoch` overflows in 2038; file sizes above 2 GB read negative.
+- `LUAI_MAXSTACK` counts stack *slots*, not frames: a typical frame costs 10–13 slots, so recursion tops out around 80–100 levels. 500 (the old nominal value) overflowed the minesweeper flood fill on ~3% of first clicks; 1000 is the smallest value that runs every shipped app.
 
 A debug hook fires every 256 opcodes (`lua_sethook` with `LUA_MASKCOUNT`). The hook checks for the Sym (Menu) key and fires pending HTTP Lua callbacks via `http_lua_fire_pending()`.
 

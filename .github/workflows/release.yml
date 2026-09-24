@@ -25,6 +25,8 @@ jobs:
           mkdir -p third_party/lua-5.4
           curl -fL https://www.lua.org/ftp/lua-5.4.7.tar.gz \
             | tar -xz --strip-components=1 -C third_party/lua-5.4/
+          # Make luaconf.h honour the CMake Lua config (see cmake/picos_lua.cmake)
+          cmake -DLUA_SRC_DIR=third_party/lua-5.4/src -P cmake/picos_lua.cmake
 
           # FatFS R0.15 — extracts upstream sources only.
           # ffconf.h and port/diskio_spi.c are project-specific and already
@@ -88,6 +90,8 @@ jobs:
           mkdir -p third_party/lua-5.4
           curl -fL https://www.lua.org/ftp/lua-5.4.7.tar.gz \
             | tar -xz --strip-components=1 -C third_party/lua-5.4/
+          # Make luaconf.h honour the CMake Lua config (see cmake/picos_lua.cmake)
+          cmake -DLUA_SRC_DIR=third_party/lua-5.4/src -P cmake/picos_lua.cmake
 
       - name: Build simulator
         run: make simulator

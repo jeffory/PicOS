@@ -106,7 +106,8 @@ static bool lua_run(const app_entry_t *app) {
   display_clear(C_BG);
   display_flush();
 
-  int load_err = luaL_loadbuffer(L, lua_src, lua_len, app->name);
+  // Text only: app bundles must not smuggle in unverified bytecode.
+  int load_err = luaL_loadbufferx(L, lua_src, lua_len, app->name, "t");
   umm_free(lua_src);
 
   if (load_err != LUA_OK) {

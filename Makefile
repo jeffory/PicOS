@@ -111,6 +111,9 @@ download-lua:
 		rm lua-$(LUA_VERSION).tar.gz && \
 		echo "  ✓ Lua $(LUA_VERSION) extracted to $(LUA_DIR)"; \
 	fi
+	@# luaconf.h hard-codes LUA_32BITS/LUAI_MAXSTACK; patch it to honour the
+	@# CMake config (idempotent — also fixes checkouts extracted before this).
+	@cmake -DLUA_SRC_DIR=$(LUA_DIR)/src -P cmake/picos_lua.cmake
 
 download-fatfs:
 	@if [ -d "$(FATFS_DIR)" ] && [ -f "$(FATFS_DIR)/ff.h" ]; then \

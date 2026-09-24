@@ -125,6 +125,35 @@ void lua_bridge_terminal_init(lua_State *L);
 void lua_bridge_register_3d(lua_State *L);
 void lua_bridge_zip_init(lua_State *L);
 
+// The VM and this bridge must agree on the number types. cmake/picos_lua.cmake
+// patches luaconf.h so LUA_32BITS=1 takes effect and applies it PUBLIC; if
+// either step regresses, Lua silently reverts to 64-bit integers and doubles
+// (apps then behave differently on the simulator and the device). Fail the
+// build instead.
+_Static_assert(sizeof(lua_Integer) == 4,
+               "lua_Integer must be 32-bit: luaconf.h not patched or "
+               "PICOS_LUA_DEFINITIONS not applied (see cmake/picos_lua.cmake)");
+_Static_assert(sizeof(lua_Number) == 4,
+               "lua_Number must be float: luaconf.h not patched or "
+               "PICOS_LUA_DEFINITIONS not applied (see cmake/picos_lua.cmake)");
+_Static_assert(LUAI_MAXSTACK == 1000,
+               "LUAI_MAXSTACK override not applied (see cmake/picos_lua.cmake)");
+
+// load(chunk [, chunkname [, mode [, env]]]) with mode forced to "t".
+// Precompiled bytecode is not verified by the VM, so a crafted chunk can read
+// and write arbitrary memory; apps may only load source text. The original
+// base-library load is upvalue 1.
+static int l_base_load_text(lua_State *L) {
+  if (lua_gettop(L) < 3)
+    lua_settop(L, 3);  // pad chunkname/mode with nil; env (arg 4) stays absent
+  lua_pushliteral(L, "t");
+  lua_replace(L, 3);
+  lua_pushvalue(L, lua_upvalueindex(1));
+  lua_insert(L, 1);
+  lua_call(L, lua_gettop(L) - 1, LUA_MULTRET);
+  return lua_gettop(L);
+}
+
 void lua_bridge_register(lua_State *L) {
   printf("[LUA] lua_bridge_register start, PSRAM free=%lu\n",
          (unsigned long)umm_free_heap_size());
@@ -136,7 +165,7 @@ void lua_bridge_register(lua_State *L) {
 
 
 
-  // Open standard Lua libs (but not io/os/package for sandboxing)
+  // Open standard Lua libs. io, os, package and debug stay closed (sandbox).
   printf("[LUA] registering _G...\n");
   luaL_requiref(L, "_G", luaopen_base, 1);
   lua_pop(L, 1);
@@ -149,6 +178,16 @@ void lua_bridge_register(lua_State *L) {
   printf("[LUA] registering math...\n");
   luaL_requiref(L, "math", luaopen_math, 1);
   lua_pop(L, 1);
+  printf("[LUA] registering coroutine...\n");
+  luaL_requiref(L, LUA_COLIBNAME, luaopen_coroutine, 1);
+  lua_pop(L, 1);
+  printf("[LUA] registering utf8...\n");
+  luaL_requiref(L, LUA_UTF8LIBNAME, luaopen_utf8, 1);
+  lua_pop(L, 1);
+  // Replace base load with the text-only wrapper.
+  lua_getglobal(L, "load");
+  lua_pushcclosure(L, l_base_load_text, 1);
+  lua_setglobal(L, "load");
   printf("[LUA] stdlib done, PSRAM free=%lu\n",
          (unsigned long)umm_free_heap_size());
 

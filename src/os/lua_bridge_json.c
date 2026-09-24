@@ -235,8 +235,14 @@ static void enc_number(lua_State *L, json_enc_t *e, int idx) {
     // document no parser accepts, so fail loudly instead.
     if (isnan(v) || isinf(v))
       luaL_error(L, "json.encode: cannot encode %s", isnan(v) ? "NaN" : "Infinity");
-    // %.14g round-trips a double without trailing float noise.
-    snprintf(tmp, sizeof(tmp), "%.14g", (double)v);
+    // lua_Number is a float (LUA_32BITS). Emit the shortest form that decodes
+    // back to the same value: 7 digits reads cleanly (0.1, not
+    // 0.100000001490116), 9 always round-trips a float.
+    for (int prec = 7; prec <= 9; prec++) {
+      snprintf(tmp, sizeof(tmp), "%.*g", prec, (double)v);
+      if ((lua_Number)strtod(tmp, NULL) == v)
+        break;
+    }
   }
   enc_addstring(e, tmp);
 }

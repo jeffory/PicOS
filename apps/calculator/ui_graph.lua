@@ -6,6 +6,9 @@ local Graph = require("calc_graph")
 
 local UIGraph = {}
 
+-- PicOS Lua numbers are single-precision floats (~7 significant digits).
+local SIG_FMT = (2^24 + 1 == 2^24) and "%.7g" or "%.8g"
+
 -- State
 local graph = Graph.new()
 local mode = "input"        -- "input", "view", "trace", "table"
@@ -423,8 +426,8 @@ function UIGraph.draw_trace(disp, engine)
     -- Info bar
     disp.fillRect(0, 280, 320, 40, disp.rgb(10, 12, 20))
     disp.setFont(0)
-    local y_str = y_val and string.format("%.8g", y_val) or "undef"
-    local info = string.format("y%d: x=%.8g  y=%s", trace_slot, x_val, y_str)
+    local y_str = y_val and string.format(SIG_FMT, y_val) or "undef"
+    local info = string.format("y%d: x=" .. SIG_FMT .. "  y=%s", trace_slot, x_val, y_str)
     disp.drawText(4, 282, info, FUNC_COLORS[trace_slot], disp.rgb(10, 12, 20))
     disp.drawText(4, 294, "L/R:move U/D:switch func Enter/Esc:back", disp.rgb(80, 90, 110), disp.rgb(10, 12, 20))
 end

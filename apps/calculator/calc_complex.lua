@@ -4,6 +4,12 @@
 local Complex = {}
 Complex.__index = Complex
 
+-- PicOS runs Lua with single-precision floats (LUA_32BITS): ~7 significant
+-- digits, integers exact only up to 2^24. Host tests run with doubles.
+local FLOAT32 = (2^24 + 1 == 2^24)
+local SIG_FMT = FLOAT32 and "%.7g" or "%.10g"
+local EXACT_INT_LIMIT = FLOAT32 and 2^24 or 1e15
+
 function Complex.new(re, im)
     return setmetatable({re = re or 0, im = im or 0}, Complex)
 end
@@ -178,10 +184,10 @@ end
 ---------------------------------------------------------------------------
 
 local function fmt_num(n)
-    if n == math.floor(n) and math.abs(n) < 1e15 then
+    if n == math.floor(n) and math.abs(n) < EXACT_INT_LIMIT then
         return string.format("%.0f", n)
     end
-    return string.format("%.10g", n)
+    return string.format(SIG_FMT, n)
 end
 
 function Complex.format(a)

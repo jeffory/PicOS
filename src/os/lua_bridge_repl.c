@@ -198,7 +198,7 @@ static int l_repl_print(lua_State *L) {
                 if (lua_isinteger(L, i)) {
                     pos += snprintf(buf + pos, sizeof(buf) - pos, "%lld", (long long)lua_tointeger(L, i));
                 } else {
-                    pos += snprintf(buf + pos, sizeof(buf) - pos, "%.17g", lua_tonumber(L, i));
+                    pos += snprintf(buf + pos, sizeof(buf) - pos, LUA_NUMBER_FMT, (LUAI_UACNUMBER)lua_tonumber(L, i));
                 }
                 break;
             case LUA_TSTRING: {

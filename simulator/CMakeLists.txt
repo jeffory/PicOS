@@ -67,12 +67,12 @@ set(LUA_SOURCES
 
 add_library(lua_sim STATIC ${LUA_SOURCES})
 target_include_directories(lua_sim PUBLIC ${LUA_DIR})
-target_compile_definitions(lua_sim PRIVATE
-    LUA_32BITS=1
-    LUA_USE_LONGJMP=1
-    LUAI_MAXSTACK=500
-    PICOS_SIMULATOR=1
-)
+# Same Lua config as the firmware (cmake/picos_lua.cmake) so the simulator VM
+# has identical numeric semantics and stack limit. PUBLIC so the bridge agrees.
+include(${PICOS_ROOT}/cmake/picos_lua.cmake)
+picos_patch_luaconf(${LUA_DIR})
+target_compile_definitions(lua_sim PUBLIC ${PICOS_LUA_DEFINITIONS})
+target_compile_definitions(lua_sim PRIVATE PICOS_SIMULATOR=1)
 target_compile_options(lua_sim PRIVATE -O2 -Wall)
 
 # ── libmad (MP3 decoder) ──────────────────────────────────────────────────

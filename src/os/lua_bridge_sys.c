@@ -292,8 +292,8 @@ static int l_sys_loadlib(lua_State *L) {
   sdcard_fclose(f);
   buf[read] = '\0';
 
-  // Load and execute
-  int status = luaL_loadbuffer(L, buf, read, path);
+  // Load and execute (source text only — never precompiled bytecode)
+  int status = luaL_loadbufferx(L, buf, read, path, "t");
   umm_free(buf);
 
   if (status != LUA_OK)
