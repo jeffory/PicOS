@@ -176,7 +176,7 @@ T.case("enumeration_returns_identical_sprites", function()
         end
         T.ok(gfx.sprite.getAllSprites()[1] == a, "getAllSprites()[1] is a")
         T.ok(a:overlappingSprites()[1] == b, "overlappingSprites")
-        local pair = gfx.sprite.allOverlappingSprites()[1]
+        local pair = a:allOverlappingSprites()[1]   -- registered as a method
         T.ok(pair[1] == a and pair[2] == b, "allOverlappingSprites")
         T.ok(gfx.sprite.querySpritesAtPoint(52, 52)[1] == a, "querySpritesAtPoint")
         T.ok(gfx.sprite.querySpritesInRect(0, 0, 100, 100)[2] == b, "querySpritesInRect")

@@ -1014,6 +1014,16 @@ static void sprite_list_clear(lua_State *L) {
   lua_rawsetp(L, LUA_REGISTRYINDEX, s_sprites);
 }
 
+// Push the userdata of a listed sprite (nil if it is not in the list).
+// Enumeration hands out these real objects, never a proxy or a light
+// userdata: a 4-byte proxy with the sprite metatable let any method read
+// and write past its allocation.
+static void push_sprite(lua_State *L, const lua_sprite_t *s) {
+  lua_rawgetp(L, LUA_REGISTRYINDEX, s_sprites);
+  lua_rawgetp(L, -1, s);
+  lua_remove(L, -2);
+}
+
 // Push a new, zeroed sprite userdata with its anchor slots (no metatable yet).
 static lua_sprite_t *new_sprite_ud(lua_State *L) {
   lua_sprite_t *s = (lua_sprite_t *)lua_newuserdatauv(L, sizeof(lua_sprite_t),
@@ -1112,11 +1122,6 @@ static int l_sprite_addEmptyCollisionSprite(lua_State *L);
 static int l_graphics_setStencilPattern(lua_State *L);
 
 static int l_sprite_gc(lua_State *L) {
-  // getAllSprites() previously pushed proxy full-userdata of sizeof(lua_sprite_t*)
-  // bytes with the sprite metatable.  Accessing frame_data (offset ~104) on such
-  // a proxy reads past the end of the 4-byte allocation and corrupts the heap.
-  // Guard against any undersized userdata as a safety net.
-  if ((size_t)lua_rawlen(L, 1) < sizeof(lua_sprite_t)) return 0;
   lua_sprite_t *s = check_sprite(L, 1);
   // A listed sprite is anchored, so this only happens at lua_close. Unlink
   // it anyway: s_sprites[] must never hold a freed sprite.
@@ -1800,10 +1805,7 @@ static int l_sprite_removeSprite(lua_State *L) {
 static int l_sprite_getAllSprites(lua_State *L) {
   lua_createtable(L, s_sprite_count, 0);
   for (int i = 0; i < s_sprite_count; i++) {
-    // Use light userdata: no GC finalizer, no size mismatch with GRAPHICS_SPRITE_MT.
-    // Proxy full-userdata (sizeof ptr = 4 bytes) with GRAPHICS_SPRITE_MT caused
-    // l_sprite_gc to read frame_data at offset ~104, corrupting the umm heap.
-    lua_pushlightuserdata(L, s_sprites[i]);
+    push_sprite(L, s_sprites[i]);
     lua_rawseti(L, -2, i + 1);
   }
   return 1;
@@ -1832,23 +1834,19 @@ static int l_sprite_removeSprites(lua_State *L) {
   return 0;
 }
 
+// performOnAllSprites(fn): fn(sprite) for each listed sprite. It iterates a
+// snapshot (getAllSprites), so fn may add or remove sprites; an error in fn
+// propagates to the caller.
 static int l_sprite_performOnAllSprites(lua_State *L) {
   luaL_checktype(L, 1, LUA_TFUNCTION);
-  lua_State *thread = lua_newthread(L);
-  lua_xmove(L, thread, 1);
-  
-  for (int i = 0; i < s_sprite_count; i++) {
-    lua_sprite_t *s = s_sprites[i];
-    lua_sprite_t **ptr = (lua_sprite_t **)lua_newuserdata(thread, sizeof(lua_sprite_t *));
-    *ptr = s;
-    luaL_setmetatable(thread, GRAPHICS_SPRITE_MT);
-    
-    lua_pushvalue(thread, -1);
-    if (lua_pcall(thread, 1, 0, 0) != 0) {
-      lua_pop(thread, 1);
-    }
+  lua_settop(L, 1);
+  l_sprite_getAllSprites(L);  // index 2
+  int n = (int)lua_rawlen(L, 2);
+  for (int i = 1; i <= n; i++) {
+    lua_pushvalue(L, 1);
+    lua_rawgeti(L, 2, i);
+    lua_call(L, 1, 0);
   }
-  lua_pop(thread, 1);
   return 0;
 }
 
@@ -1957,7 +1955,7 @@ static int l_sprite_overlappingSprites(lua_State *L) {
   for (int i = 0; i < s_sprite_count; i++) {
     lua_sprite_t *other = s_sprites[i];
     if (other != s && spritesOverlap(s, other)) {
-      lua_pushlightuserdata(L, other);
+      push_sprite(L, other);
       lua_rawseti(L, -2, ++count);
     }
   }
@@ -1979,10 +1977,10 @@ static int l_sprite_allOverlappingSprites(lua_State *L) {
       if (spritesOverlap(a, b)) {
         lua_createtable(L, 2, 0);
 
-        lua_pushlightuserdata(L, a);
+        push_sprite(L, a);
         lua_rawseti(L, -2, 1);
 
-        lua_pushlightuserdata(L, b);
+        push_sprite(L, b);
         lua_rawseti(L, -2, 2);
 
         lua_rawseti(L, -2, ++count);
@@ -2088,9 +2086,7 @@ static int l_sprite_querySpritesAtPoint(lua_State *L) {
     
     if (px >= sx && px < sx + s->collide_w &&
         py >= sy && py < sy + s->collide_h) {
-      lua_sprite_t **ptr = (lua_sprite_t **)lua_newuserdata(L, sizeof(lua_sprite_t *));
-      *ptr = s;
-      luaL_setmetatable(L, GRAPHICS_SPRITE_MT);
+      push_sprite(L, s);
       lua_rawseti(L, -2, ++count);
     }
   }
@@ -2127,9 +2123,7 @@ static int l_sprite_querySpritesInRect(lua_State *L) {
     
     if (sx < rx + rw && sx + s->collide_w > rx &&
         sy < ry + rh && sy + s->collide_h > ry) {
-      lua_sprite_t **ptr = (lua_sprite_t **)lua_newuserdata(L, sizeof(lua_sprite_t *));
-      *ptr = s;
-      luaL_setmetatable(L, GRAPHICS_SPRITE_MT);
+      push_sprite(L, s);
       lua_rawseti(L, -2, ++count);
     }
   }
@@ -2238,10 +2232,10 @@ static int l_sprite_moveWithCollisions(lua_State *L) {
           lua_createtable(L, 0, 6);
 
           // sprite (self)
-          lua_pushlightuserdata(L, s);
+          lua_pushvalue(L, 1);
           lua_setfield(L, -2, "sprite");
           // other
-          lua_pushlightuserdata(L, hit);
+          push_sprite(L, hit);
           lua_setfield(L, -2, "other");
           // type (default: slide)
           lua_pushinteger(L, COLLISION_SLIDE);
@@ -2286,9 +2280,9 @@ static int l_sprite_moveWithCollisions(lua_State *L) {
           coll_count++;
           lua_createtable(L, 0, 6);
 
-          lua_pushlightuserdata(L, s);
+          lua_pushvalue(L, 1);
           lua_setfield(L, -2, "sprite");
-          lua_pushlightuserdata(L, hit);
+          push_sprite(L, hit);
           lua_setfield(L, -2, "other");
           lua_pushinteger(L, COLLISION_SLIDE);
           lua_setfield(L, -2, "type");
@@ -2453,9 +2447,7 @@ static int l_sprite_querySpritesAlongLine(lua_State *L) {
     int sh = s->height > 0 ? s->height : s->collide_h;
     
     if (sprite_line_intersect(x1, y1, x2, y2, sx, sy, sw, sh)) {
-      lua_sprite_t **ptr = (lua_sprite_t **)lua_newuserdata(L, sizeof(lua_sprite_t *));
-      *ptr = s;
-      luaL_setmetatable(L, GRAPHICS_SPRITE_MT);
+      push_sprite(L, s);
       lua_rawseti(L, -2, ++count);
     }
   }
@@ -2531,9 +2523,7 @@ static int l_sprite_querySpriteInfoAlongLine(lua_State *L) {
     int ix, iy;
     if (sprite_line_rect_intersection(x1, y1, x2, y2, sx, sy, sw, sh, &ix, &iy)) {
       lua_createtable(L, 0, 0);
-      lua_sprite_t **ptr = (lua_sprite_t **)lua_newuserdata(L, sizeof(lua_sprite_t *));
-      *ptr = s;
-      luaL_setmetatable(L, GRAPHICS_SPRITE_MT);
+      push_sprite(L, s);
       lua_setfield(L, -2, "sprite");
       lua_pushinteger(L, ix);
       lua_setfield(L, -2, "x");

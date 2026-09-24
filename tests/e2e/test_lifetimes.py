@@ -16,13 +16,10 @@ from helpers import case_params, lua_case_names, run_lua_app, stage_lua_app
 
 GC_CASES = lua_case_names("gc_test")
 
-PERFORM_BUG = ("review: Graphics Critical — performOnAllSprites passes 4-byte proxy "
-               "userdata (and today never calls the callback); Task 10")
 SAMPLE_BUG = ("review: Audio High — a sampleplayer keeps no reference to its "
               "sample; Task 11")
 
 GC_KNOWN_BUGS = {
-    "performOnAllSprites_visits_real_sprites": PERFORM_BUG,
     "sampleplayer_setSample_keeps_sample": SAMPLE_BUG,
     "sampleplayer_new_keeps_sample": SAMPLE_BUG,
 }
@@ -61,8 +58,8 @@ def test_gc_suite_survives(gc_runs, mode):
 # parent is used after the collection, and a missing anchor is a
 # heap-use-after-free that ASan reports (and aborts on) at the bridge call.
 # Reasons name the ASan report each case produced (task-22-report.md has the
-# stacks). performOnAllSprites is not a lifetime case (its callback never
-# runs), so it is not repeated here.
+# stacks). performOnAllSprites is not a lifetime case, so it is not repeated
+# here.
 def _gc_asan(bug, site):
     return f"{bug}; ASan: heap-use-after-free in {site} on the collected child"
 
