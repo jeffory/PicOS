@@ -47,12 +47,17 @@ def _assert_extracted(root: Path, members: dict):
 
 
 def _wait_running(sim, timeout=10.0):
-    deadline = time.time() + timeout
-    while time.time() < deadline:
-        if sim.call("get_running_app").get("name"):
-            return
-        time.sleep(0.05)
-    pytest.fail("app did not start")
+    """Wait for the launched app to be running. get_running_app always
+    answers {"running": bool, "name": str|null}; before the launch is picked
+    up it is running:false, so keep polling rather than read it once."""
+    deadline = time.monotonic() + timeout
+    while True:
+        status = sim.call("get_running_app")
+        if status["running"]:
+            return status["name"]
+        if time.monotonic() >= deadline:
+            pytest.fail(f"app did not start: {status}")
+        time.sleep(0.02)
 
 
 def test_exit_at_launcher_is_refused(simulator):
@@ -69,7 +74,10 @@ def test_exit_at_launcher_is_refused(simulator):
     assert r2.get("ok") is False
     assert "no app running" in r2.get("message", "")
 
-    time.sleep(0.5)
+    # A later command that Core 0 answers proves the launcher loop carried
+    # on past the refused exit (a shutdown would never reply).
+    r3 = _dev(simulator, "ping")
+    assert r3["ok"] is True, r3
     assert simulator.is_alive(), "simulator shut down on exit at the launcher"
     assert simulator.ping()
 
@@ -112,7 +120,7 @@ def test_unzip_while_lua_app_running(simulator, test_sd_card):
     assert r["ok"] is True, r
     assert f"Unzipped {len(members)} files" in r["output"]
     _assert_extracted(test_sd_card / "data" / "unz_app", members)
-    assert simulator.call("get_running_app").get("name"), \
+    assert simulator.call("get_running_app")["running"], \
         "app stopped during unzip"
 
     r = _dev(simulator, "exit")

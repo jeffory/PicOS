@@ -399,14 +399,18 @@ static char *h_dev_command(const char *params) {
 
 static char *h_get_running_app(const char *params) {
     (void)params;
+    // Always an object, so clients can .get("name") without a None check:
+    // {"running": bool, "name": str | null}.
     const char *name = launcher_get_running_app_name();
+    sim_strbuf_t sb = {0};
     if (name && name[0]) {
-        static char buf[256];
-        snprintf(buf, sizeof(buf),
-                 "{\"jsonrpc\":\"2.0\",\"result\":{\"name\":\"%s\"}}", name);
-        return strdup(buf);
+        sim_sb_appendf(&sb, "{\"jsonrpc\":\"2.0\",\"result\":{\"running\":true,\"name\":");
+        sim_sb_append_json_str(&sb, name);
+        sim_sb_appendf(&sb, "}}");
+    } else {
+        sim_sb_appendf(&sb, "{\"jsonrpc\":\"2.0\",\"result\":{\"running\":false,\"name\":null}}");
     }
-    return strdup("{\"jsonrpc\":\"2.0\",\"result\":null}");
+    return sim_sb_finish(&sb);
 }
 
 static uint32_t button_name_to_mask(const char *button) {
