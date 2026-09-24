@@ -21,6 +21,7 @@
 
 // External base path from hal_sdcard.c
 extern char g_base_path[512];
+#include "../hal/hal_sdcard.h"
 
 // Core 1 control variables
 volatile bool g_core1_pause = false;
@@ -577,27 +578,18 @@ bool sdcard_ensure_ready(void) { return true; }
 void sd_set_slow_mode(bool slow) { (void)slow; }
 
 bool sdcard_fexists(const char* path) {
-    extern char g_base_path[512];
     char full_path[1024];
-
-    if (path[0] == '/') {
-        snprintf(full_path, sizeof(full_path), "%s%s", g_base_path, path);
-    } else {
-        snprintf(full_path, sizeof(full_path), "%s/%s", g_base_path, path);
-    }
+    if (!hal_sdcard_resolve(path, full_path, sizeof(full_path))) return false;
 
     struct stat st;
     return stat(full_path, &st) == 0;
 }
 
 char* sdcard_read_file(const char* path, int* out_len) {
-    extern char g_base_path[512];
     char full_path[1024];
-    
-    if (path[0] == '/') {
-        snprintf(full_path, sizeof(full_path), "%s%s", g_base_path, path);
-    } else {
-        snprintf(full_path, sizeof(full_path), "%s/%s", g_base_path, path);
+    if (!hal_sdcard_resolve(path, full_path, sizeof(full_path))) {
+        if (out_len) *out_len = 0;
+        return NULL;
     }
     
     FILE* f = fopen(full_path, "rb");
@@ -627,24 +619,9 @@ char* sdcard_read_file(const char* path, int* out_len) {
 int sdcard_list_dir(const char* path,
                     void (*callback)(const sdcard_entry_t* entry, void* user),
                     void* user) {
-    // Real implementation using host filesystem
-    // g_base_path is defined in hal_sdcard.c
-    extern char g_base_path[512];
-    const char* base = g_base_path;
-    
+    // Real implementation using host filesystem ("/" maps to the SD root).
     char full_path[1024];
-    // The base path is the location of the SD card contents
-    // PicOS paths like /apps should map directly to the filesystem
-    if (strcmp(path, "/") == 0) {
-        // Root maps to base
-        strncpy(full_path, base, sizeof(full_path) - 1);
-        full_path[sizeof(full_path) - 1] = '\0';
-    } else if (path[0] == '/') {
-        // Other paths: append to base (skip leading /)
-        snprintf(full_path, sizeof(full_path), "%s%s", base, path);
-    } else {
-        snprintf(full_path, sizeof(full_path), "%s/%s", base, path);
-    }
+    if (!hal_sdcard_resolve(path, full_path, sizeof(full_path))) return -1;
     
     printf("[SDCARD] Listing directory: %s (full: %s)\n", path, full_path);
     fflush(stdout);
@@ -702,9 +679,6 @@ int sdcard_list_dir(const char* path,
     return count;
 }
 
-// Include HAL for file operations
-#include "../hal/hal_sdcard.h"
-
 // SD card file handle stubs — use HAL functions.
 // Signatures/semantics must match src/drivers/sdcard.h exactly (the header is
 // #included at the top of this file, so any drift is a compile error):
@@ -745,10 +719,8 @@ bool sdcard_mkdir(const char* path) {
 bool sdcard_is_mounted(void) { return true; }
 
 bool sdcard_delete(const char* path) {
-    extern char g_base_path[512];
     char full[1024];
-    if (path[0] == '/') snprintf(full, sizeof(full), "%s%s", g_base_path, path);
-    else snprintf(full, sizeof(full), "%s/%s", g_base_path, path);
+    if (!hal_sdcard_resolve(path, full, sizeof(full))) return false;
     return remove(full) == 0;
 }
 // Recursive delete helper using nftw
@@ -758,19 +730,15 @@ static int nftw_remove_cb(const char *fpath, const struct stat *sb,
     return remove(fpath);
 }
 bool sdcard_delete_recursive(const char* path) {
-    extern char g_base_path[512];
     char full[1024];
-    if (path[0] == '/') snprintf(full, sizeof(full), "%s%s", g_base_path, path);
-    else snprintf(full, sizeof(full), "%s/%s", g_base_path, path);
+    if (!hal_sdcard_resolve(path, full, sizeof(full))) return false;
     return nftw(full, nftw_remove_cb, 64, FTW_DEPTH | FTW_PHYS) == 0;
 }
 bool sdcard_rename(const char* oldpath, const char* newpath) {
-    extern char g_base_path[512];
     char full_old[1024], full_new[1024];
-    if (oldpath[0] == '/') snprintf(full_old, sizeof(full_old), "%s%s", g_base_path, oldpath);
-    else snprintf(full_old, sizeof(full_old), "%s/%s", g_base_path, oldpath);
-    if (newpath[0] == '/') snprintf(full_new, sizeof(full_new), "%s%s", g_base_path, newpath);
-    else snprintf(full_new, sizeof(full_new), "%s/%s", g_base_path, newpath);
+    if (!hal_sdcard_resolve(oldpath, full_old, sizeof(full_old)) ||
+        !hal_sdcard_resolve(newpath, full_new, sizeof(full_new)))
+        return false;
     return rename(full_old, full_new) == 0;
 }
 bool sdcard_copy(const char* src, const char* dst,
@@ -779,13 +747,8 @@ bool sdcard_copy(const char* src, const char* dst,
     (void)src; (void)dst; (void)progress_cb; (void)user; return false;
 }
 bool sdcard_stat(const char* path, sdcard_stat_t* out) {
-    extern char g_base_path[512];
     char full_path[1024];
-    if (path[0] == '/') {
-        snprintf(full_path, sizeof(full_path), "%s%s", g_base_path, path);
-    } else {
-        snprintf(full_path, sizeof(full_path), "%s/%s", g_base_path, path);
-    }
+    if (!hal_sdcard_resolve(path, full_path, sizeof(full_path))) return false;
     struct stat host_st;
     if (stat(full_path, &host_st) != 0) return false;
     out->size = (uint32_t)host_st.st_size;

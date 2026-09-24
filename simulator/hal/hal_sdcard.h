@@ -9,6 +9,11 @@
 // Initialize SD card subsystem with base path
 bool hal_sdcard_init(const char* base_path);
 
+// Map an SD path to its host path under the SD root. Resolves "." and ".."
+// lexically and returns false (logging "[SIM] SD escape") for any path that
+// leaves the root. Every host-path join in the simulator must go through it.
+bool hal_sdcard_resolve(const char* path, char* out, size_t out_size);
+
 // Shutdown SD card subsystem
 void hal_sdcard_shutdown(void);
 

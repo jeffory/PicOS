@@ -344,13 +344,8 @@ static void trampoline_hook(uc_engine *uc, uint32_t intno, void *user_data) {
 
 static bool load_elf(uc_engine *uc, const char *path, uint32_t *out_entry) {
     // Resolve virtual SD card path to host filesystem path
-    extern char g_base_path[512];
     char full_path[1024];
-    if (path[0] == '/') {
-        snprintf(full_path, sizeof(full_path), "%s%s", g_base_path, path);
-    } else {
-        snprintf(full_path, sizeof(full_path), "%s/%s", g_base_path, path);
-    }
+    if (!hal_sdcard_resolve(path, full_path, sizeof(full_path))) return false;
 
     FILE *f = fopen(full_path, "rb");
     if (!f) {

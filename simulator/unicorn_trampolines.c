@@ -1193,12 +1193,7 @@ static void tramp_fs_list_dir(uc_engine *uc) {
 
     // Use host filesystem directly (avoids sdcard_list_dir callback mismatch)
     char full_path[1024];
-    extern char g_base_path[512];
-    if (path[0] == '/') {
-        snprintf(full_path, sizeof(full_path), "%s%s", g_base_path, path);
-    } else {
-        snprintf(full_path, sizeof(full_path), "%s/%s", g_base_path, path);
-    }
+    if (!hal_sdcard_resolve(path, full_path, sizeof(full_path))) full_path[0] = '\0';
 
     // Use POSIX opendir/readdir
     DIR *dir = opendir(full_path);
@@ -1318,15 +1313,10 @@ static void tramp_fs_rename_file(uc_engine *uc) {
 static void tramp_fs_is_dir(uc_engine *uc) {
     uint32_t path_addr = read_reg(uc, UC_ARM_REG_R0);
     char *path = uc_read_string(uc, path_addr);
-    extern char g_base_path[512];
     char full_path[1024];
-    if (path && path[0] == '/') {
-        snprintf(full_path, sizeof(full_path), "%s%s", g_base_path, path);
-    } else {
-        snprintf(full_path, sizeof(full_path), "%s/%s", g_base_path, path ? path : "");
-    }
     struct stat st;
-    bool is_dir = (stat(full_path, &st) == 0 && S_ISDIR(st.st_mode));
+    bool is_dir = hal_sdcard_resolve(path ? path : "", full_path, sizeof(full_path)) &&
+                  stat(full_path, &st) == 0 && S_ISDIR(st.st_mode);
     write_reg(uc, UC_ARM_REG_R0, is_dir ? 1 : 0);
 }
 

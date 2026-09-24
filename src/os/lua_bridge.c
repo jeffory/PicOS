@@ -252,6 +252,13 @@ void lua_bridge_register(lua_State *L) {
   printf("[LUA] registering _G...\n");
   luaL_requiref(L, "_G", luaopen_base, 1);
   lua_pop(L, 1);
+  // dofile/loadfile read the host filesystem through C stdio: on firmware
+  // there is no such filesystem, in the simulator they bypass the SD root
+  // and the app sandbox. Apps load code with load() or picocalc.sys.loadlib.
+  lua_pushnil(L);
+  lua_setglobal(L, "dofile");
+  lua_pushnil(L);
+  lua_setglobal(L, "loadfile");
   printf("[LUA] registering table...\n");
   luaL_requiref(L, "table", luaopen_table, 1);
   lua_pop(L, 1);
