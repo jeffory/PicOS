@@ -29,6 +29,10 @@
 #include "drivers/fileplayer.h"
 #include "drivers/mp3_player.h"
 #include "drivers/http.h"
+#ifdef PICOS_SIM_FIRMWARE_NET
+#include "drivers/wifi.h"
+#include "net/sim_net.h"
+#endif
 #include "drivers/keyboard.h"
 #include "appconfig.h"
 #include "config.h"
@@ -154,6 +158,12 @@ static void parse_args(int argc, char** argv) {
         } else if (strcmp(argv[i], "--build-info") == 0) {
             // Read by the E2E harness (conftest) to enable asan_only tests.
             printf("sanitize=%s\n", PICOS_SIM_SANITIZE_STR);
+#ifdef PICOS_SIM_FIRMWARE_NET
+            // test_network_firmware.py runs only against this build.
+            printf("firmware_net=1\n");
+#else
+            printf("firmware_net=0\n");
+#endif
             exit(0);
         } else if (strcmp(argv[i], "--sd-card") == 0 && i + 1 < argc) {
             strncpy(g_sd_card_path, argv[i + 1], sizeof(g_sd_card_path) - 1);
@@ -264,6 +274,10 @@ static void show_boot_splash(void) {
 // Core 1 entry point (simulates the second core)
 static void* core1_thread(void* arg) {
     (void)arg;
+#ifdef PICOS_SIM_FIRMWARE_NET
+    // Firmware wifi_poll() only runs on Core 1 (get_core_num() == 1).
+    sim_net_core1_init();
+#endif
     printf("[Core1] Started (network/audio thread)\n");
     
     // Initialize audio
@@ -533,6 +547,13 @@ int main(int argc, char** argv) {
     wifi_init();
     http_init();
     tcp_init();
+#ifdef PICOS_SIM_FIRMWARE_NET
+    // Firmware network stack (simulator/net): join the stand-in network now,
+    // as sim_wifi.c's mock is "always online", unless config.json's
+    // wifi_ssid already started the firmware's own boot auto-connect.
+    if (wifi_get_status() == WIFI_STATUS_DISCONNECTED)
+        wifi_connect("SimulatorWiFi", "");
+#endif
 
     // Start Core 1 thread (simulates second core)
     thread_t core1;

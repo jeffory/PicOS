@@ -7,7 +7,9 @@
 #include <stdio.h>
 
 // RP2350 XIP cache coherency — see comment in http.c
+#ifndef PSRAM_UNCACHED_OFFSET  // SIM_FIRMWARE_NET: 0 (host heap has no alias)
 #define PSRAM_UNCACHED_OFFSET 0x04000000u
+#endif
 static inline uint8_t *rx_buf_uncached(const uint8_t *cached_ptr) {
   return (uint8_t *)((uintptr_t)cached_ptr + PSRAM_UNCACHED_OFFSET);
 }

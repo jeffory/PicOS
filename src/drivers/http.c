@@ -13,11 +13,11 @@
 #include "os/core1_alloc.h"
 #include "umm_malloc.h"
 
-// RP2350 XIP cache is per-core with no hardware coherency for PSRAM.
-// Core 1 writes response data to rx_buf; Core 0 reads it.  Both must
-// access rx_buf through the uncached alias (0x15xxxxxx) so writes go
-// straight to physical PSRAM and reads bypass stale cache lines.
+// RP2350 XIP cache is per-core, no PSRAM coherency: Core 1 writes rx_buf and
+// Core 0 reads it through the uncached alias (0x15xxxxxx), bypassing stale lines.
+#ifndef PSRAM_UNCACHED_OFFSET  // SIM_FIRMWARE_NET: 0 (host heap has no alias)
 #define PSRAM_UNCACHED_OFFSET 0x04000000u
+#endif
 static inline uint8_t *rx_buf_uncached(const uint8_t *cached_ptr) {
   return (uint8_t *)((uintptr_t)cached_ptr + PSRAM_UNCACHED_OFFSET);
 }

@@ -7,6 +7,16 @@ project(picos_simulator C CXX)
 set(CMAKE_C_STANDARD 11)
 set(CMAKE_CXX_STANDARD 17)
 
+# SIM_FIRMWARE_NET (see "Simulator Network Library" below) changes what
+# hardware/sync.h means for every translation unit (real spinlocks instead of
+# no-ops, simulator/stubs/hardware/sync.h), so the define is global.
+option(SIM_FIRMWARE_NET
+       "Simulator runs the firmware network stack (wifi.c/http.c/tcp.c on Mongoose/POSIX)"
+       OFF)
+if(SIM_FIRMWARE_NET)
+    add_compile_definitions(PICOS_SIM_FIRMWARE_NET=1)
+endif()
+
 # Parent directory (PicOS root)
 set(PICOS_ROOT ${CMAKE_CURRENT_SOURCE_DIR}/..)
 
@@ -190,12 +200,68 @@ target_compile_definitions(sim_hal PUBLIC
     SIMULATOR_BUILD=1
 )
 
-# ── Simulator Network Library (libcurl-based) ──────────────────────────────
-add_library(sim_network STATIC
-    sim_wifi.c
-    sim_http.c
-    sim_tcp.c
-)
+# ── Simulator Network Library ───────────────────────────────────────────────
+# Default: the simulator's own libcurl/POSIX layer (sim_wifi.c, sim_http.c,
+# sim_tcp.c) behind the firmware's http.h/tcp.h/wifi.h API.
+#
+# SIM_FIRMWARE_NET=ON (make simulator-net): the firmware's own
+# src/drivers/wifi.c, http.c and tcp.c instead, on the vendored Mongoose
+# built for the host (MG_ARCH_UNIX: BSD sockets, no built-in TCP/IP stack, no
+# TLS), with Core 0 = the main thread and Core 1 = the sim's core1_thread.
+# The host shims live in simulator/net/ (see sim_net_shim.c); the firmware
+# files carry only PICOS_SIM_FIRMWARE_NET guards. This is the build that can
+# reproduce the Core 0/Core 1 close races (specs/test-audit-2026-09-24.md
+# R13); tests/e2e/test_network_firmware.py runs only against it.
+if(SIM_FIRMWARE_NET)
+    add_library(sim_network STATIC
+        ${PICOS_ROOT}/src/drivers/wifi.c
+        ${PICOS_ROOT}/src/drivers/http.c
+        ${PICOS_ROOT}/src/drivers/tcp.c
+        ${PICOS_ROOT}/third_party/mongoose/mongoose.c
+        net/sim_net_shim.c
+    )
+    # net/include first: its mongoose.h shadows the real one for the firmware
+    # sources (stand-in Wi-Fi interface) and it carries pico/multicore.h.
+    target_include_directories(sim_network BEFORE PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}/net/include
+        ${CMAKE_CURRENT_SOURCE_DIR}/net
+    )
+    target_include_directories(sim_network PRIVATE
+        ${PICOS_ROOT}/third_party/mongoose
+    )
+    # Mongoose as the firmware configures it, minus what a host build can't
+    # have (third_party/mongoose/mongoose_config.h): mg_calloc/mg_free come
+    # from http.c (core1_calloc → host calloc), mg_random from the shim, and
+    # the same 8 KB IO granularity.
+    target_compile_definitions(sim_network PRIVATE
+        MG_ENABLE_CUSTOM_CALLOC=1
+        MG_ENABLE_CUSTOM_RANDOM=1
+        MG_IO_SIZE=8192
+        # The same loopback stand-ins for wifi.c's SNTP server and
+        # connectivity-check target (net/include/mongoose.h).
+        "WIFI_SNTP_URL=sim_net_sntp_url()"
+        "WIFI_CHECK_URL=sim_net_check_url()"
+        # http.c/tcp.c reach rx_buf through the RP2350's uncached PSRAM alias
+        # (+0x04000000); the host heap has none.
+        PSRAM_UNCACHED_OFFSET=0
+    )
+    # -g: crash-log backtraces from Core 1 then name the firmware lines.
+    target_compile_options(sim_network PRIVATE -Wall -Wextra -Wno-unused-parameter -g)
+    set_source_files_properties(${PICOS_ROOT}/third_party/mongoose/mongoose.c
+        PROPERTIES COMPILE_OPTIONS "-w")
+    # wifi.c prints an int64_t with %lld: right on the ARM target (long long),
+    # a -Wformat warning on LP64 hosts (long). Firmware code stays untouched.
+    set_source_files_properties(${PICOS_ROOT}/src/drivers/wifi.c
+        PROPERTIES COMPILE_OPTIONS "-Wno-format")
+    # http.c includes mbedtls/platform.h (declarations only).
+    target_link_libraries(sim_network PRIVATE picos_host_mbedtls)
+else()
+    add_library(sim_network STATIC
+        sim_wifi.c
+        sim_http.c
+        sim_tcp.c
+    )
+endif()
 target_include_directories(sim_network PUBLIC
     ${CMAKE_CURRENT_SOURCE_DIR}
     ${CMAKE_CURRENT_SOURCE_DIR}/stubs
@@ -427,6 +493,9 @@ endif()
 # sanitizer build from a release one (asan_only tests).
 target_compile_definitions(picos_simulator PRIVATE
     PICOS_SIM_SANITIZE_STR="${_picos_san}")
+if(SIM_FIRMWARE_NET)
+    message(STATUS "  - Network: firmware wifi.c/http.c/tcp.c on Mongoose/POSIX (SIM_FIRMWARE_NET)")
+endif()
 
 # ── Install / Run ───────────────────────────────────────────────────────────
 set_target_properties(picos_simulator PROPERTIES
@@ -447,5 +516,9 @@ message(STATUS "  - Display: 960x960 (3x scale)")
 message(STATUS "  - Audio: SDL2 enabled")
 message(STATUS "  - Threading: Dual-core simulation")
 message(STATUS "  - SD Card: Host filesystem")
-message(STATUS "  - WiFi: Mock (always connected)")
-message(STATUS "  - HTTP/TCP: libcurl")
+if(SIM_FIRMWARE_NET)
+    message(STATUS "  - WiFi/HTTP/TCP: firmware drivers on Mongoose/POSIX (TLS off)")
+else()
+    message(STATUS "  - WiFi: Mock (always connected)")
+    message(STATUS "  - HTTP/TCP: libcurl")
+endif()

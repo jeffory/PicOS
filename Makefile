@@ -1,7 +1,7 @@
 # PicOS Makefile
 # Automated setup, build, and deployment for ClockworkPi PicoCalc
 
-.PHONY: help setup build clean flash flash-ota rebuild check-env test-lua test-unit test-numfmt-sweep fuzz fuzz-build simulator simulator-asan simulator-tsan simulator-run simulator-clean
+.PHONY: help setup build clean flash flash-ota rebuild check-env test-lua test-unit test-numfmt-sweep fuzz fuzz-build simulator simulator-asan simulator-tsan simulator-net simulator-net-asan simulator-net-tsan simulator-run simulator-clean
 
 # ── Configuration ─────────────────────────────────────────────────────────────
 
@@ -36,6 +36,8 @@ help:
 	@echo "  make simulator      - Build PC simulator for testing/debugging"
 	@echo "  make simulator-asan - Simulator with ASan+UBSan (build_sim_asan/)"
 	@echo "  make simulator-tsan - Simulator with TSan (build_sim_tsan/)"
+	@echo "  make simulator-net  - Simulator on the firmware network stack (build_sim_net/;"
+	@echo "                        also simulator-net-asan / simulator-net-tsan)"
 	@echo "  make simulator-run  - Build and run the simulator"
 	@echo "  make simulator-clean - Clean simulator build files"
 	@echo ""
@@ -300,12 +302,12 @@ SIM_SAN_CC ?= clang
 SIM_SAN_CXX ?= clang++
 SIM_UNICORN_SRC := $(CURDIR)/$(SIM_BUILD_DIR)/_deps/unicorn-src
 define sim_sanitize_build
-	@echo "Building PicOS PC Simulator ($(2))..."
+	@echo "Building PicOS PC Simulator ($(2) $(3))..."
 	@mkdir -p $(1)
 	@cd $(1) && \
 		cmake ../simulator -DCMAKE_BUILD_TYPE=RelWithDebInfo \
 			-DCMAKE_C_COMPILER=$(SIM_SAN_CC) -DCMAKE_CXX_COMPILER=$(SIM_SAN_CXX) \
-			-DPICOS_SIM_SANITIZE="$(2)" \
+			-DPICOS_SIM_SANITIZE="$(2)" $(3) \
 			$$( [ -d $(SIM_UNICORN_SRC) ] && echo -DFETCHCONTENT_SOURCE_DIR_UNICORN=$(SIM_UNICORN_SRC) ) && \
 		$(MAKE) -j$$(nproc 2>/dev/null || echo 4)
 	@test -x $(1)/picos_simulator || { \
@@ -321,6 +323,30 @@ simulator-asan: simulator-check download-lua
 simulator-tsan: simulator-check download-lua
 	$(call sim_sanitize_build,build_sim_tsan,thread)
 
+# The firmware network stack in the simulator (SIM_FIRMWARE_NET: the real
+# src/drivers/wifi.c, http.c, tcp.c on Mongoose/POSIX, see simulator/net/).
+# Own build dirs; only tests/e2e/test_network_firmware.py needs them:
+#   PICOS_SIM_BINARY=build_sim_net/picos_simulator \
+#       pytest tests/e2e/test_network_firmware.py -n auto
+simulator-net: simulator-check download-lua
+	@echo "Building PicOS PC Simulator (firmware network stack)..."
+	@mkdir -p build_sim_net
+	@cd build_sim_net && \
+		cmake ../simulator -DCMAKE_BUILD_TYPE=Release -DSIM_FIRMWARE_NET=ON \
+			$$( [ -d $(SIM_UNICORN_SRC) ] && echo -DFETCHCONTENT_SOURCE_DIR_UNICORN=$(SIM_UNICORN_SRC) ) && \
+		$(MAKE) -j$$(nproc 2>/dev/null || echo 4)
+	@test -x build_sim_net/picos_simulator || { \
+		echo "ERROR: build finished but build_sim_net/picos_simulator is missing"; \
+		exit 1; \
+	}
+	@echo "✓ build_sim_net/picos_simulator (firmware network stack)"
+
+simulator-net-asan: simulator-check download-lua
+	$(call sim_sanitize_build,build_sim_net_asan,address;undefined,-DSIM_FIRMWARE_NET=ON)
+
+simulator-net-tsan: simulator-check download-lua
+	$(call sim_sanitize_build,build_sim_net_tsan,thread,-DSIM_FIRMWARE_NET=ON)
+
 simulator-run: simulator
 	@echo "Running PicOS Simulator..."
 	@echo ""
@@ -328,7 +354,8 @@ simulator-run: simulator
 
 simulator-clean:
 	@echo "Cleaning simulator build..."
-	@rm -rf $(SIM_BUILD_DIR) build_sim_asan build_sim_tsan
+	@rm -rf $(SIM_BUILD_DIR) build_sim_asan build_sim_tsan \
+		build_sim_net build_sim_net_asan build_sim_net_tsan
 	@echo "✓ Simulator clean complete"
 
 # ── Host unit tests ──────────────────────────────────────────────────────────

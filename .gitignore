@@ -16,6 +16,9 @@ build/
 build_sim/
 build_sim_asan/
 build_sim_tsan/
+build_sim_net/
+build_sim_net_asan/
+build_sim_net_tsan/
 build_unit/
 build_fuzz/
 tools/__pycache__/

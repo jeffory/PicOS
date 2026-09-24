@@ -107,6 +107,16 @@ bool wifi_req_push(const conn_req_t *req) {
 // reachability with a lightweight TCP connect to 8.8.8.8:53 (Google DNS).
 // No DNS dependency, no TLS, minimal overhead.
 
+// Where the SNTP query and the connectivity check go. Overridable only so the
+// simulator's SIM_FIRMWARE_NET build can keep them on loopback
+// (simulator/net/include/mongoose.h); the firmware never defines them.
+#ifndef WIFI_SNTP_URL
+#define WIFI_SNTP_URL "udp://pool.ntp.org:123"
+#endif
+#ifndef WIFI_CHECK_URL
+#define WIFI_CHECK_URL "tcp://8.8.8.8:53"
+#endif
+
 static _Atomic bool     s_internet_ok = false;
 static uint32_t s_connectivity_check_ms = 0;
 static struct mg_connection *s_check_conn = NULL;
@@ -143,7 +153,7 @@ static void connectivity_cb(struct mg_connection *c, int ev, void *ev_data) {
 
 static void start_connectivity_check(void) {
   if (s_check_conn) return; // already in progress
-  s_check_conn = mg_connect(&s_mgr, "tcp://8.8.8.8:53", connectivity_cb, NULL);
+  s_check_conn = mg_connect(&s_mgr, WIFI_CHECK_URL, connectivity_cb, NULL);
   if (!s_check_conn) {
     s_internet_ok = false;
     s_connectivity_check_ms =
@@ -191,7 +201,7 @@ static void sntp_cb(struct mg_connection *c, int ev, void *ev_data) {
 
 static void start_sntp(void) {
   printf("WiFi: Starting SNTP sync...\n");
-  mg_sntp_connect(&s_mgr, "udp://pool.ntp.org:123", sntp_cb, NULL);
+  mg_sntp_connect(&s_mgr, WIFI_SNTP_URL, sntp_cb, NULL);
 }
 
 // ── Internal helpers
@@ -249,6 +259,11 @@ static bool tls_clock_ready(void) {
   }
   return false;
 }
+
+#ifndef PICOS_SIM_FIRMWARE_NET
+// (Guard: the simulator's SIM_FIRMWARE_NET build runs this file on Mongoose
+// MG_ARCH_UNIX with TLS compiled out, so there is no mbedTLS here; the #else
+// branch below refuses TLS instead.)
 
 // The root bundle, parsed ONCE (wifi_tls_init, at boot) into one chain that
 // every connection shares read-only, instead of Mongoose re-parsing ~15 KB
@@ -330,6 +345,27 @@ bool wifi_tls_verify_error(struct mg_connection *nc, char *out, size_t n) {
   snprintf(out, n, "TLS: %s (flags 0x%lx)", why, (unsigned long)flags);
   return true;
 }
+
+#else  // PICOS_SIM_FIRMWARE_NET: TLS compiled out (simulator/net)
+
+bool wifi_tls_init(void) { return false; }
+
+static bool tls_start(struct mg_connection *nc, const char *host,
+                      bool insecure) {
+  (void)nc;
+  (void)insecure;
+  printf("[TLS] %s: refused, TLS is not built into the simulator\n", host);
+  return false;
+}
+
+bool wifi_tls_verify_error(struct mg_connection *nc, char *out, size_t n) {
+  (void)nc;
+  (void)out;
+  (void)n;
+  return false;
+}
+
+#endif  // PICOS_SIM_FIRMWARE_NET
 
 // ── Core 1 request drainer
 // ────────────────────────────────────────────────
@@ -768,7 +804,9 @@ void wifi_poll(void) {
   }
 }
 
-// mbedtls/time support
+// mbedtls/time support.  (Guard: not in the simulator's SIM_FIRMWARE_NET
+// build, which has no mbedTLS and must not replace the host's time().)
+#ifndef PICOS_SIM_FIRMWARE_NET
 #include "mbedtls/platform_time.h"
 
 mbedtls_ms_time_t mbedtls_platform_ms_time(void) {
@@ -782,3 +820,4 @@ time_t time(time_t *t) {
     *t = now;
   return now;
 }
+#endif  // !PICOS_SIM_FIRMWARE_NET
