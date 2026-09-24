@@ -62,6 +62,16 @@ picos_unit_test(test_elf_plan SOURCES ${SRC}/os/elf_plan.c)
 picos_unit_test(test_fs_path SOURCES ${SRC}/os/fs_path.c)
 picos_unit_test(test_app_manifest SOURCES ${SRC}/os/app_manifest.c)
 
+# Modules that use the SD card and umm_*: in-memory SD fake, umm on malloc.
+# simulator/stubs first so umm_malloc.h / pico/mutex.h resolve to the stubs.
+set(SD_FAKE ${CMAKE_CURRENT_SOURCE_DIR}/fakes/sdcard_fake.c
+            ${CMAKE_CURRENT_SOURCE_DIR}/fakes/umm_fake.c)
+set(SD_INCLUDES ${PICOS_ROOT}/simulator/stubs ${SRC}/drivers)
+picos_unit_test(test_config SOURCES ${SRC}/os/config.c ${SD_FAKE}
+                INCLUDES ${SD_INCLUDES})
+picos_unit_test(test_appconfig SOURCES ${SRC}/os/appconfig.c ${SD_FAKE}
+                INCLUDES ${SD_INCLUDES})
+
 if(PICOS_FUZZ)
     add_subdirectory(${PICOS_ROOT}/tests/fuzz ${CMAKE_CURRENT_BINARY_DIR}/fuzz)
 endif()

@@ -1,6 +1,7 @@
 #include "config.h"
 #include "../drivers/sdcard.h"
 #include "umm_malloc.h"
+#include "flat_json.h"
 
 #include <string.h>
 #include <stdio.h>
@@ -18,51 +19,6 @@ typedef struct {
 
 static config_entry_t s_entries[CONFIG_MAX_ENTRIES];
 static int            s_count = 0;
-
-// ── JSON helpers ──────────────────────────────────────────────────────────────
-
-// Extract the value for `key` from a flat JSON object string.
-// Writes at most out_len-1 bytes to `out` and null-terminates.
-// Returns true on success.
-static bool json_get_string(const char *json, const char *key,
-                             char *out, int out_len) {
-    // Build search pattern: "key":
-    char search[CONFIG_KEY_MAX + 4];
-    snprintf(search, sizeof(search), "\"%s\"", key);
-
-    const char *p = strstr(json, search);
-    if (!p) return false;
-
-    // Advance past "key"
-    p += strlen(search);
-
-    // Skip whitespace and ':'
-    while (*p == ' ' || *p == '\t' || *p == ':') p++;
-
-    // Expect opening quote
-    if (*p != '"') return false;
-    p++;  // skip opening "
-
-    int i = 0;
-    while (*p && *p != '"' && i < out_len - 1) {
-        // Handle basic escape sequences
-        if (*p == '\\' && *(p + 1)) {
-            p++;
-            switch (*p) {
-                case 'n':  out[i++] = '\n'; break;
-                case 't':  out[i++] = '\t'; break;
-                case '"':  out[i++] = '"';  break;
-                case '\\': out[i++] = '\\'; break;
-                default:   out[i++] = *p;   break;
-            }
-        } else {
-            out[i++] = *p;
-        }
-        p++;
-    }
-    out[i] = '\0';
-    return true;
-}
 
 // ── Public API ─────────────────────────────────────────────────────────────────
 
@@ -85,14 +41,11 @@ bool config_load(void) {
         if (!p) break;
         p++;  // skip opening "
 
-        // Read key
+        // Read key (escaped by config_save; over-long keys are truncated
+        // and the rest skipped)
         char key[CONFIG_KEY_MAX];
-        int ki = 0;
-        while (*p && *p != '"' && ki < (int)sizeof(key) - 1)
-            key[ki++] = *p++;
-        key[ki] = '\0';
+        p = flat_json_read_string(p, key, sizeof(key));
         if (!*p) break;
-        p++;  // skip closing "
 
         // Skip whitespace and ':'
         while (*p == ' ' || *p == '\t' || *p == ':') p++;
@@ -108,29 +61,12 @@ bool config_load(void) {
 
         // Read value
         char val[CONFIG_VAL_MAX];
-        int vi = 0;
-        while (*p && *p != '"' && vi < (int)sizeof(val) - 1) {
-            if (*p == '\\' && *(p + 1)) {
-                p++;
-                switch (*p) {
-                    case 'n':  val[vi++] = '\n'; break;
-                    case 't':  val[vi++] = '\t'; break;
-                    case '"':  val[vi++] = '"';  break;
-                    case '\\': val[vi++] = '\\'; break;
-                    default:   val[vi++] = *p;   break;
-                }
-            } else {
-                val[vi++] = *p;
-            }
-            p++;
-        }
-        val[vi] = '\0';
-        if (*p == '"') p++;  // skip closing "
+        p = flat_json_read_string(p, val, sizeof(val));
 
         // Skip internal metadata key
         if (key[0] != '\0') {
-            strncpy(s_entries[s_count].key, key, CONFIG_KEY_MAX - 1);
-            strncpy(s_entries[s_count].val, val, CONFIG_VAL_MAX - 1);
+            memcpy(s_entries[s_count].key, key, sizeof(key));  // NUL-terminated
+            memcpy(s_entries[s_count].val, val, sizeof(val));
             s_count++;
         }
     }

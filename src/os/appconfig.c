@@ -1,15 +1,22 @@
 #include "appconfig.h"
 #include "../drivers/sdcard.h"
 #include "umm_malloc.h"
+#include "flat_json.h"
 
 #include <stdio.h>
 #include <string.h>
 #include <stdbool.h>
 
-#define APPCONFIG_PATH_LEN 64
+// app_entry_t.id is 80 bytes; the path is built on demand (no static copy)
+// and sized for the longest id: "/data/" + 79 + "/config.json".
+#define APPCONFIG_ID_MAX   80
+#define APPCONFIG_PATH_LEN (6 + APPCONFIG_ID_MAX + 12)
 
-static char s_app_id[64] = {0};
-static char s_config_path[APPCONFIG_PATH_LEN] = {0};
+static char s_app_id[APPCONFIG_ID_MAX] = {0};
+
+static void config_path(char *out, size_t n) {
+    snprintf(out, n, "/data/%s/config.json", s_app_id);
+}
 
 typedef struct {
     char key[APPCONFIG_KEY_MAX];
@@ -39,17 +46,22 @@ bool appconfig_load(const char *app_id) {
         return false;
     }
     
-    strncpy(s_app_id, app_id, sizeof(s_app_id) - 1);
-    s_app_id[sizeof(s_app_id) - 1] = '\0';
-    
-    snprintf(s_config_path, sizeof(s_config_path), "/data/%s/config.json", app_id);
-    
     s_count = 0;
+    if (strlen(app_id) >= sizeof(s_app_id)) {
+        // Too long to be a launcher id; never truncate into another path.
+        printf("[APPCONFIG] ERROR: app_id too long\n");
+        s_app_id[0] = '\0';
+        return false;
+    }
+    strcpy(s_app_id, app_id);
+
+    char path[APPCONFIG_PATH_LEN];
+    config_path(path, sizeof(path));
     
     int len = 0;
-    char *json = sdcard_read_file(s_config_path, &len);
+    char *json = sdcard_read_file(path, &len);
     if (!json) {
-        printf("[APPCONFIG] No config file at %s (first run?)\n", s_config_path);
+        printf("[APPCONFIG] No config file at %s (first run?)\n", path);
         return false;
     }
     
@@ -60,12 +72,8 @@ bool appconfig_load(const char *app_id) {
         p++;
         
         char key[APPCONFIG_KEY_MAX];
-        int ki = 0;
-        while (*p && *p != '"' && ki < (int)sizeof(key) - 1)
-            key[ki++] = *p++;
-        key[ki] = '\0';
+        p = flat_json_read_string(p, key, sizeof(key));
         if (!*p) break;
-        p++;
         
         while (*p == ' ' || *p == '\t' || *p == ':') p++;
         
@@ -77,28 +85,11 @@ bool appconfig_load(const char *app_id) {
         p++;
         
         char val[APPCONFIG_VAL_MAX];
-        int vi = 0;
-        while (*p && *p != '"' && vi < (int)sizeof(val) - 1) {
-            if (*p == '\\' && *(p + 1)) {
-                p++;
-                switch (*p) {
-                    case 'n':  val[vi++] = '\n'; break;
-                    case 't':  val[vi++] = '\t'; break;
-                    case '"':  val[vi++] = '"';  break;
-                    case '\\': val[vi++] = '\\'; break;
-                    default:   val[vi++] = *p;   break;
-                }
-            } else {
-                val[vi++] = *p;
-            }
-            p++;
-        }
-        val[vi] = '\0';
-        if (*p == '"') p++;
-        
+        p = flat_json_read_string(p, val, sizeof(val));
+
         if (key[0] != '\0') {
-            strncpy(s_entries[s_count].key, key, APPCONFIG_KEY_MAX - 1);
-            strncpy(s_entries[s_count].val, val, APPCONFIG_VAL_MAX - 1);
+            memcpy(s_entries[s_count].key, key, sizeof(key));  // NUL-terminated
+            memcpy(s_entries[s_count].val, val, sizeof(val));
             s_entries[s_count].key[APPCONFIG_KEY_MAX - 1] = '\0';
             s_entries[s_count].val[APPCONFIG_VAL_MAX - 1] = '\0';
             s_count++;
@@ -106,7 +97,7 @@ bool appconfig_load(const char *app_id) {
     }
     
     umm_free(json);
-    printf("[APPCONFIG] Loaded %d entries from %s\n", s_count, s_config_path);
+    printf("[APPCONFIG] Loaded %d entries from %s\n", s_count, path);
     return true;
 }
 
@@ -151,9 +142,11 @@ bool appconfig_save(void) {
     buf[pos++] = '}';
     buf[pos] = '\0';
     
-    sdfile_t f = sdcard_fopen(s_config_path, "w");
+    char path[APPCONFIG_PATH_LEN];
+    config_path(path, sizeof(path));
+    sdfile_t f = sdcard_fopen(path, "w");
     if (!f) {
-        printf("[APPCONFIG] ERROR: Failed to open %s for writing\n", s_config_path);
+        printf("[APPCONFIG] ERROR: Failed to open %s for writing\n", path);
         umm_free(buf);
         return false;
     }
@@ -165,7 +158,7 @@ bool appconfig_save(void) {
         printf("[APPCONFIG] ERROR: Write truncated (%d/%d)\n", written, pos);
         return false;
     }
-    printf("[APPCONFIG] Saved %d entries to %s\n", s_count, s_config_path);
+    printf("[APPCONFIG] Saved %d entries to %s\n", s_count, path);
     return true;
 }
 
@@ -226,9 +219,11 @@ bool appconfig_reset(void) {
         return false;
     }
     
-    if (sdcard_fexists(s_config_path)) {
-        sdcard_delete(s_config_path);
-        printf("[APPCONFIG] Deleted config file: %s\n", s_config_path);
+    char path[APPCONFIG_PATH_LEN];
+    config_path(path, sizeof(path));
+    if (sdcard_fexists(path)) {
+        sdcard_delete(path);
+        printf("[APPCONFIG] Deleted config file: %s\n", path);
     }
     
     s_count = 0;
