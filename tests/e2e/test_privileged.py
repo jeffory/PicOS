@@ -214,6 +214,42 @@ def test_apply_update_asks_before_flashing(sim):
         assert cases[name]["status"] == "PASS", cases[name]
 
 
+QUEUED_KEYS_APP = """
+local T = picocalc.sys.loadlib("picotest")
+T.case("queued_keys_do_not_confirm", function()
+    picocalc.sys.log("T7:QUEUE_NOW")
+    picocalc.sys.sleep(1500)   -- does not poll: injected keys stay queued
+    local ok, err = picocalc.sys.applyUpdate(APP_DIR .. "/fw.bin")
+    T.eq(ok, false)
+    T.eq(err, "cancelled")
+end)
+T.done()
+"""
+
+
+def test_confirm_ignores_keys_queued_before_it(sim):
+    """A "yes" typed (queued) before the confirm dialog appears must not
+    answer it: an app could show "press Enter", sleep, then applyUpdate."""
+    stage_lua_app(sim.sd_card_path, "priv_upd_queued", QUEUED_KEYS_APP,
+                  requirements=["system-update", "root-filesystem"],
+                  id="com.picos.store", files={"fw.bin": b"\0" * 4096})
+    seq = sim.get_log_buffer(tail=1).get("next_seq", 0)
+    sim.launch_app("priv_upd_queued")
+    sim.wait_for_log("T7:QUEUE_NOW", timeout=15, since_seq=seq)
+    sim.keypress("y")
+    sim.keypress("enter")
+    sim.keypress("Y")
+    # Sleep ends, the dialog shows and its grace period passes: still open.
+    with pytest.raises(TimeoutError):
+        sim.wait_for_exit(timeout=3.0)
+    outcome = _press_until_exit(sim, "n")
+    assert outcome.get("result") == "returned", outcome
+    res = json.loads((Path(sim.sd_card_path) / "data" / "com.picos.store" /
+                      "test_results.json").read_text())
+    case = {c["name"]: c for c in res["cases"]}["queued_keys_do_not_confirm"]
+    assert case["status"] == "PASS", case
+
+
 # ── fs.browse start path (sandbox residual a) ───────────────────────────────
 
 BROWSE_APP = """

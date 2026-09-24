@@ -552,6 +552,23 @@ bool kbd_consume_screenshot_press(void) {
   return val;
 }
 
+void kbd_discard_pending(void) {
+  // Everything the STM32 queued while nobody polled (sys.sleep does not
+  // poll), plus pending/active one-shot injections: none of it was typed
+  // at whatever is about to be shown.  Bounded: the FIFO holds 31 events.
+  for (int i = 0; i < 40; i++) {
+    uint8_t event[2] = {0, 0};
+    if (!i2c_read_reg(KBD_REG_FIF, event, 2, KBD_REG_DELAY_MS))
+      break;
+    if (event[0] == KEY_STATE_IDLE)
+      break;
+  }
+  s_injected_pending = 0;
+  s_injected_active = 0;
+  s_injected_char = 0;
+  kbd_clear_state();
+}
+
 void kbd_clear_state(void) {
   s_buttons_prev = 0;
   s_buttons_curr = 0;

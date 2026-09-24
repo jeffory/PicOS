@@ -309,6 +309,18 @@ void hal_input_get_seq_state(uint32_t *issued, uint32_t *consumed) {
     pthread_mutex_unlock(&s_input_mutex);
 }
 
+void hal_input_discard_pending(void) {
+    pthread_mutex_lock(&s_input_mutex);
+    g_char_tail = g_char_head;
+    g_buttons &= ~g_injected_click;
+    g_buttons_pressed = 0;
+    g_injected_click = 0;
+    g_injected_click_pending = 0;
+    g_btn_unread_seq = 0;
+    g_btn_pending_seq = 0;
+    pthread_mutex_unlock(&s_input_mutex);
+}
+
 void hal_input_note_menu_injected(void) {
     pthread_mutex_lock(&s_input_mutex);
     g_menu_seq = min_nonzero(g_menu_seq, ++g_seq_issued);

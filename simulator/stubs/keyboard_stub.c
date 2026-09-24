@@ -181,6 +181,11 @@ void kbd_clear_state(void) {
     s_raw_key = 0;
 }
 
+void kbd_discard_pending(void) {
+    hal_input_discard_pending();
+    kbd_clear_state();
+}
+
 void kbd_recover_i2c_bus(void) {
     // No-op in simulator
 }

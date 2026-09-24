@@ -76,6 +76,10 @@ void hal_input_release_buttons(uint32_t buttons);
 // Inject a typed character into the char ring buffer (for RPC control)
 void hal_input_inject_char(char c);
 
+// Drop queued chars and pending/active one-shot button injections (the
+// counterpart of keyboard.c's kbd_discard_pending FIFO drain).
+void hal_input_discard_pending(void);
+
 // ── Injection sequence numbers (test sync) ─────────────────────────────────
 // Every injection (click/press/release/char, and the menu click, which the
 // keyboard stub handles outside the button state) gets the next seq. An
