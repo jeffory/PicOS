@@ -109,26 +109,76 @@ static bool json_get_int(const char *json, const char *end, const char *key,
     return true;
 }
 
-// "requirement" (quoted) inside the "requirements" array.
-static bool json_has_requirement(const char *json, const char *end,
-                                 const char *requirement) {
+static bool id_char_ok(char c) {
+    return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') ||
+           (c >= '0' && c <= '9') || c == '.' || c == '_' || c == '-';
+}
+
+static void fold_lower(char *s) {
+    for (; *s; s++) {
+        if (*s >= 'A' && *s <= 'Z')
+            *s = (char)(*s - 'A' + 'a');
+    }
+}
+
+// The "requirements" array as a space-separated list of folded names.
+// Non-string elements and names outside [a-z0-9._-] are skipped; a name that
+// does not fit is dropped whole.  An unterminated or non-array value gives
+// an empty list.
+static void json_get_requirements(const char *json, const char *end,
+                                  char *out, size_t out_len) {
+    out[0] = '\0';
     const char *p = find_key(json, end, "requirements");
     if (!p)
-        return false;
-    while (p < end && *p != '[')
-        p++;
-    if (p >= end)
-        return false;
+        return;
+    p = skip_sep(p, end);
+    if (p >= end || *p != '[')
+        return;
     const char *close = p;
     while (close < end && *close != ']')
         close++;
     if (close >= end)
-        return false;  // unterminated array
-    char search[96];
-    int n = snprintf(search, sizeof(search), "\"%s\"", requirement);
-    if (n <= 0 || (size_t)n >= sizeof(search))
+        return;  // unterminated array
+
+    size_t used = 0;
+    for (p++; p < close; p++) {
+        if (*p != '"')
+            continue;
+        const char *q = p + 1;  // find the closing quote, skipping escapes
+        while (q < close && *q != '"')
+            q += (*q == '\\' && q + 1 < close) ? 2 : 1;
+        char name[48];
+        read_string(p + 1, q, name, sizeof(name));
+        bool truncated = (size_t)(q - (p + 1)) >= sizeof(name);
+        p = q;  // loop increment steps past the closing quote
+        fold_lower(name);
+        size_t n = strlen(name);
+        bool ok = n > 0 && !truncated;
+        for (size_t i = 0; ok && i < n; i++)
+            ok = id_char_ok(name[i]);
+        if (!ok || used + (used ? 1 : 0) + n + 1 > out_len)
+            continue;
+        if (used)
+            out[used++] = ' ';
+        memcpy(out + used, name, n + 1);
+        used += n;
+    }
+}
+
+bool app_requirements_has(const char *list, const char *name) {
+    if (!list || !name || !name[0])
         return false;
-    return find_bytes(p, close, search, (size_t)n) != NULL;
+    size_t n = strlen(name);
+    for (const char *p = list; *p;) {
+        const char *sp = strchr(p, ' ');
+        size_t len = sp ? (size_t)(sp - p) : strlen(p);
+        if (len == n && memcmp(p, name, n) == 0)
+            return true;
+        if (!sp)
+            break;
+        p = sp + 1;
+    }
+    return false;
 }
 
 static size_t bounded_len(const char *s, size_t max) {
@@ -157,10 +207,15 @@ void app_manifest_parse(const char *json, size_t len, const char *dir_name,
                                   sizeof(app->version)))
         copy_str(app->version, sizeof(app->version), "1.0");
 
+    if (json)
+        json_get_requirements(json, end, app->requirements,
+                              sizeof(app->requirements));
+    else
+        app->requirements[0] = '\0';
     app->has_root_filesystem =
-        json && json_has_requirement(json, end, "root-filesystem");
-    app->has_http = json && json_has_requirement(json, end, "http");
-    app->has_audio = json && json_has_requirement(json, end, "audio");
+        app_requirements_has(app->requirements, "root-filesystem");
+    app->has_http = app_requirements_has(app->requirements, "http");
+    app->has_audio = app_requirements_has(app->requirements, "audio");
     app->system_clock_khz = 0;
     app->min_psram_kb = 0;
     if (json) {
@@ -174,6 +229,7 @@ void app_manifest_parse(const char *json, size_t len, const char *dir_name,
 
 void app_manifest_defaults(const char *dir_name, app_entry_t *app) {
     snprintf(app->id, sizeof(app->id), "local.%s", dir_name);
+    app->requirements[0] = '\0';
     copy_str(app->name, sizeof(app->name), dir_name);
     app->description[0] = '\0';
     copy_str(app->version, sizeof(app->version), "?");
@@ -192,10 +248,7 @@ bool app_manifest_id_valid(const char *id) {
     if (n >= sizeof(((app_entry_t *)0)->id))
         return false;
     for (size_t i = 0; i < n; i++) {
-        char c = id[i];
-        bool ok = (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') ||
-                  (c >= '0' && c <= '9') || c == '.' || c == '_' || c == '-';
-        if (!ok)
+        if (!id_char_ok(id[i]))
             return false;
     }
     if (strcmp(id, ".") == 0 || strstr(id, ".."))

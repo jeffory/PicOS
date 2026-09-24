@@ -1,4 +1,5 @@
 #include "lua_runner.h"
+#include "app_identity.h"
 #include "launcher_types.h"
 #include "lua_bridge.h"
 #include "app_stack.h"
@@ -139,6 +140,9 @@ static void lua_vm_body(void *arg) {
   }
 
   // ── Set app globals ───────────────────────────────────────────────────────
+  // Copies for the app's convenience only: enforcement reads app_identity
+  // (installed by lua_run before the bridge was registered), so an app that
+  // rewrites these gains nothing.
   lua_pushstring(L, app->path);
   lua_setglobal(L, "APP_DIR");
   lua_pushstring(L, app->name);
@@ -195,7 +199,7 @@ static void lua_vm_body(void *arg) {
   lua_close(L);
 }
 
-static bool lua_run(const app_entry_t *app) {
+static bool lua_run_app(const app_entry_t *app) {
   printf("[LUA] Starting app '%s', PSRAM free: %zu\n",
          app->name, lua_psram_alloc_free_size());
 
@@ -254,6 +258,20 @@ static bool lua_run(const app_entry_t *app) {
   mp3_player_reset();
 
   return true;
+}
+
+// The app's identity (sandbox + per-app store) is installed before anything
+// of the app runs — in particular before lua_bridge_register — and cleared
+// only after lua_close() and the audio teardown.
+static bool lua_run(const app_entry_t *app) {
+  if (!app_identity_begin(app)) {
+    lua_show_launch_failure(app, "Failed to start app:",
+                            "invalid app id (or out of PSRAM)");
+    return false;
+  }
+  bool ok = lua_run_app(app);
+  app_identity_end();
+  return ok;
 }
 
 static bool lua_can_handle(const app_entry_t *app) {

@@ -97,6 +97,39 @@ static void test_requirements(void) {
   CHECK(!e.has_http);
 }
 
+// The set of requirement names, for requirements without a bool of their own
+// (Task 7 gates sysconfig / system-update on it).
+static void test_requirement_list(void) {
+  app_entry_t a = parse(
+      "{\"requirements\": [\"http\", \"audio\", \"sysconfig\", \"system-update\"]}");
+  CHECK_STR(a.requirements, "http audio sysconfig system-update");
+  CHECK(app_requirements_has(a.requirements, "http"));
+  CHECK(app_requirements_has(a.requirements, "sysconfig"));
+  CHECK(app_requirements_has(a.requirements, "system-update"));
+  CHECK(!app_requirements_has(a.requirements, "system"));  // whole names only
+  CHECK(!app_requirements_has(a.requirements, "update"));
+  CHECK(!app_requirements_has(a.requirements, "root-filesystem"));
+  CHECK(!app_requirements_has(a.requirements, ""));
+  CHECK(!app_requirements_has(NULL, "http"));
+
+  { app_entry_t t1 = parse("{}"); CHECK_STR(t1.requirements, ""); }
+  { app_entry_t t2 = parse("{\"requirements\": []}"); CHECK_STR(t2.requirements, ""); }
+  // Names outside [a-z0-9._-] (after folding) and non-strings are dropped;
+  // a name that does not fit is dropped whole, never cut.
+  app_entry_t b = parse(
+      "{\"requirements\": [\"HTTP\", 7, \"a b\", \"\", \"audio\"]}");
+  CHECK_STR(b.requirements, "http audio");
+  CHECK(b.has_http);  // the bools read the same folded set
+  char big[512];
+  int n = snprintf(big, sizeof(big), "{\"requirements\": [\"%0*d\", \"http\"]}",
+                   (int)sizeof(a.requirements) + 4, 0);
+  CHECK(n > 0 && (size_t)n < sizeof(big));
+  { app_entry_t t3 = parse(big); CHECK_STR(t3.requirements, "http"); }
+  // The unterminated / non-array forms give an empty set, as the bools do.
+  { app_entry_t t4 = parse("{\"requirements\": [\"http\""); CHECK_STR(t4.requirements, ""); }
+  { app_entry_t t5 = parse("{\"requirements\": \"http\"}"); CHECK_STR(t5.requirements, ""); }
+}
+
 static void test_ints(void) {
   CHECK_EQ_U32(parse("{\"min_psram_kb\":12}").min_psram_kb, 12);
   CHECK_EQ_U32(parse("{\"min_psram_kb\": \"12\"}").min_psram_kb, 0);  // atoi("\"12\"")
@@ -210,6 +243,7 @@ int main(void) {
   test_escapes();
   test_key_inside_value();
   test_requirements();
+  test_requirement_list();
   test_ints();
   test_truncation_and_bounds();
   test_id_valid();

@@ -1,5 +1,6 @@
 #include "native_loader.h"
 #include "launcher_types.h"
+#include "app_identity.h"
 #include "app_abi.h"
 #include "../drivers/audio.h"
 #include "../drivers/display.h"
@@ -145,7 +146,7 @@ extern _Atomic bool g_core1_paused;
 // Simulator: use Unicorn Engine to emulate the ARM ELF binary
 #include "unicorn_runner.h"
 
-static bool native_run(const app_entry_t *app) {
+static bool native_run_app(const app_entry_t *app) {
   printf("[NATIVE] Loading '%s' via Unicorn Engine\n", app->name);
   char elf_path[256];
   snprintf(elf_path, sizeof(elf_path), "%s/main.elf", app->path);
@@ -155,7 +156,7 @@ static bool native_run(const app_entry_t *app) {
 // Declared in main.c — feeds the watchdog and stamps Core 0's heartbeat.
 extern void core0_heartbeat(void);
 
-static bool native_run(const app_entry_t *app) {
+static bool native_run_app(const app_entry_t *app) {
   printf("[NATIVE] Loading '%s'\n", app->name);
   s_loading_app_name = app->name;
 
@@ -626,6 +627,20 @@ out:
   return ok;
 }
 #endif  // !PICOS_SIMULATOR
+
+// Same identity lifecycle as Lua apps: installed before the ELF is loaded,
+// cleared after the app has returned and been torn down.
+static bool native_run(const app_entry_t *app) {
+  if (!app_identity_begin(app)) {
+    // The launcher refuses invalid ids first; this is the backstop.
+    crashlog_write("NATIVE ERROR", app->name, "Failed to start app:",
+                   "invalid app id (or out of PSRAM)");
+    return false;
+  }
+  bool ok = native_run_app(app);
+  app_identity_end();
+  return ok;
+}
 
 static bool native_can_handle(const app_entry_t *app) {
   return app->type == APP_TYPE_NATIVE;
