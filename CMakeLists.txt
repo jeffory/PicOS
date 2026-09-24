@@ -262,6 +262,7 @@ add_executable(picocalc_os
     src/os/lua_bridge_zip.c
     src/os/zip_archive.c
     src/os/zip_util.c
+    src/os/zip_name.c
     src/os/lua_bridge_json.c
     src/os/ota_update.c
     src/fonts/font.c

@@ -36,13 +36,13 @@
 #include "miniz.h"
 
 #include "sdcard.h"
+#include "zip_name.h"
 
 // ── Hard limits ──────────────────────────────────────────────────────────────
 
 #define ZIP_MAX_ENTRIES        8192                  // entries per archive
 #define ZIP_MAX_TOTAL_UNCOMP   (256u * 1024u * 1024u) // total uncompressed bytes
 #define ZIP_MAX_READ_MEM       (4u * 1024u * 1024u)   // single in-memory read
-#define ZIP_MAX_NAME           255                    // entry name length
 #define ZIP_ERR_MAX            96                     // error string buffer
 
 // ── Types ────────────────────────────────────────────────────────────────────
@@ -131,12 +131,7 @@ bool zip_reader_extract_all(zip_reader_t *zr, const char *dest_dir,
 
 // ── Helpers ──────────────────────────────────────────────────────────────────
 
-// Strict entry-name validation. Rejects NULL/empty, names longer than
-// ZIP_MAX_NAME, leading '/', any '\\' or ':', control bytes, and any
-// ".", ".." or empty path component. A trailing '/' (directory entry) is
-// allowed. Note: unlike the old substring check, "foo..bar" is ACCEPTED —
-// only exact "." / ".." components are traversal hazards.
-bool zip_entry_name_valid(const char *name);
+// zip_entry_name_valid() and ZIP_MAX_NAME: zip_name.h (pure, host-tested).
 
 // Free a buffer returned by zip_reader_read_to_heap().
 void zip_reader_free(void *p);
