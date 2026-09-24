@@ -486,6 +486,7 @@ void __attribute__((naked)) isr_hardfault(void) {
 #include "drivers/rng.h"
 #include "fonts/font_registry.h"
 #include "hardware.h"
+#include "os/app_identity.h"
 #include "os/appconfig.h"
 #include "os/config.h"
 #include "os/core1_alloc.h"
@@ -815,10 +816,33 @@ static const picocalc_ui_t s_ui_impl = {
 // PSRAM wrapper functions
 static bool psram_pio_available(void) { return pio_psram_available(); }
 static bool psram_pio_bulk_available(void) { return pio_psram_bulk_available(); }
-static void psram_pio_read(uint32_t addr, uint8_t *dst, uint32_t len) { pio_psram_read(addr, dst, len); }
-static void psram_pio_write(uint32_t addr, const uint8_t *src, uint32_t len) { pio_psram_write(addr, src, len); }
-static void psram_pio_bulk_read(uint32_t addr, uint8_t *dst, uint32_t len) { pio_psram_bulk_read(addr, dst, len); }
-static void psram_pio_bulk_write(uint32_t addr, const uint8_t *src, uint32_t len) { pio_psram_bulk_write(addr, src, len); }
+
+// Native apps get [PIO_PSRAM_APP_BASE, chip end) only, as Lua does
+// (sys.pioPsramRead/Write): below it are the OS's MP3 ring and video pool.
+// A refused call does nothing (a read leaves dst untouched) and is logged.
+static bool psram_pio_app_range_ok(const char *fn, uint32_t addr, uint32_t len) {
+    uint32_t chip = pio_psram_available() ? pio_psram_size() : PIO_PSRAM_SIZE;
+    pio_psram_range_t r = pio_psram_app_range_check((int64_t)addr, (int64_t)len, chip);
+    if (r == PIO_PSRAM_RANGE_OK)
+        return true;
+    printf("[NATIVE] psram->%s(0x%lx, %lu) refused: %s (apps may use 0x%lx..0x%lx)\n",
+           fn, (unsigned long)addr, (unsigned long)len,
+           r == PIO_PSRAM_RANGE_RESERVED ? "reserved by the OS" : "out of range",
+           (unsigned long)PIO_PSRAM_APP_BASE, (unsigned long)chip);
+    return false;
+}
+static void psram_pio_read(uint32_t addr, uint8_t *dst, uint32_t len) {
+    if (psram_pio_app_range_ok("pioRead", addr, len)) pio_psram_read(addr, dst, len);
+}
+static void psram_pio_write(uint32_t addr, const uint8_t *src, uint32_t len) {
+    if (psram_pio_app_range_ok("pioWrite", addr, len)) pio_psram_write(addr, src, len);
+}
+static void psram_pio_bulk_read(uint32_t addr, uint8_t *dst, uint32_t len) {
+    if (psram_pio_app_range_ok("pioBulkRead", addr, len)) pio_psram_bulk_read(addr, dst, len);
+}
+static void psram_pio_bulk_write(uint32_t addr, const uint8_t *src, uint32_t len) {
+    if (psram_pio_app_range_ok("pioBulkWrite", addr, len)) pio_psram_bulk_write(addr, src, len);
+}
 static void *psram_qmi_alloc(uint32_t size) { return umm_malloc(size); }
 static void psram_qmi_free(void *ptr) { umm_free(ptr); }
 
@@ -1227,7 +1251,7 @@ static const picocalc_soundplayer_t s_soundplayer_impl = {
 // ── App config impl ───────────────────────────────────────────────────────────
 
 static const picocalc_appconfig_t s_appconfig_impl = {
-    .load     = appconfig_load,
+    .load     = app_config_load_own,  // the running app's own id only
     .save     = appconfig_save,
     .get      = appconfig_get,
     .set      = appconfig_set,
@@ -1237,6 +1261,17 @@ static const picocalc_appconfig_t s_appconfig_impl = {
 };
 
 // ── Crypto impl ───────────────────────────────────────────────────────────────
+
+// Fails closed like picocalc.crypto.randomBytes: without a seeded, working
+// DRBG buf is zeroed and false is returned (it used to be zeros, silently).
+static bool crypto_random_bytes_w(uint8_t *buf, uint32_t len) {
+    if (!rng_bytes(buf, len)) {
+        printf("[CRYPTO] randomBytes(%lu): no cryptographic RNG, buffer zeroed\n",
+               (unsigned long)len);
+        return false;
+    }
+    return true;
+}
 
 static pccrypto_aes_t crypto_aes_new_w(const uint8_t *key, uint32_t klen,
                                         const uint8_t *nonce) {
@@ -1281,7 +1316,7 @@ static const picocalc_crypto_t s_crypto_impl = {
     .sha1              = crypto_sha1,
     .hmacSha256        = crypto_hmac_sha256,
     .hmacSha1          = crypto_hmac_sha1,
-    .randomBytes       = crypto_random_bytes,
+    .randomBytes       = crypto_random_bytes_w,
     .deriveKey         = crypto_derive_key,
     .aesNew            = crypto_aes_new_w,
     .aesUpdate         = crypto_aes_update_w,

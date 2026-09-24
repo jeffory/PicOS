@@ -107,3 +107,10 @@ def test_players_are_stopped_on_exit(leaky):
     launcher (it held a mixer slot until the next Lua app's sound_init)."""
     assert leaky["audio"]["sound_players_active"] == 0, leaky["audio"]
 
+
+def test_appconfig_binds_only_own_id(leaky):
+    """Native gate: appconfig->load(<another app's id>) is refused and leaves
+    the store unbound (Lua apps always bind to their own id)."""
+    line = next(t for t in leaky["lines"] if t.startswith("LEAKY appconfig"))
+    assert line == "LEAKY appconfig other=0 bound=(none)", line
+

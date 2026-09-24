@@ -2296,7 +2296,8 @@ static void tramp_snd_mp3_free(uc_engine *uc) {
 static void tramp_appconfig_load(uc_engine *uc) {
     uint32_t id_addr = read_reg(uc, UC_ARM_REG_R0);
     char *app_id = uc_read_string(uc, id_addr);
-    write_reg(uc, UC_ARM_REG_R0, appconfig_load(app_id ? app_id : "") ? 1 : 0);
+    // Own id only, as on firmware (src/main.c appconfig impl).
+    write_reg(uc, UC_ARM_REG_R0, app_config_load_own(app_id) ? 1 : 0);
 }
 
 static void tramp_appconfig_save(uc_engine *uc) {
@@ -2826,25 +2827,27 @@ static void tramp_video_noop(uc_engine *uc) {
 // Crypto trampoline handlers (stubs — crypto not yet in simulator)
 // =============================================================================
 
+// bool randomBytes(buf, len): host /dev/urandom, in 4 KB chunks.  Fails
+// closed like firmware (src/main.c): no randomness -> buf zeroed, false.
 static void tramp_crypto_random_bytes(uc_engine *uc) {
     uint32_t buf_addr = read_reg(uc, UC_ARM_REG_R0);
     uint32_t len = read_reg(uc, UC_ARM_REG_R1);
-    if (buf_addr && len > 0 && len <= 4096) {
-        // Use /dev/urandom for host-side random bytes
-        uint8_t *buf = malloc(len);
-        if (buf) {
-            FILE *f = fopen("/dev/urandom", "rb");
-            if (f) {
-                fread(buf, 1, len, f);
-                fclose(f);
-            } else {
-                // Fallback: fill with rand()
-                for (uint32_t i = 0; i < len; i++) buf[i] = (uint8_t)rand();
-            }
-            uc_mem_write(uc, buf_addr, buf, len);
-            free(buf);
+    bool ok = buf_addr != 0 || len == 0;
+    FILE *f = (ok && len) ? fopen("/dev/urandom", "rb") : NULL;
+    if (len && !f) ok = false;
+    uint8_t chunk[4096];
+    for (uint32_t off = 0; buf_addr && off < len; off += sizeof(chunk)) {
+        uint32_t n = len - off < sizeof(chunk) ? len - off : (uint32_t)sizeof(chunk);
+        if (!ok || fread(chunk, 1, n, f) != n) {
+            ok = false;
+            memset(chunk, 0, sizeof(chunk));
         }
+        uc_mem_write(uc, buf_addr + off, chunk, n);
     }
+    if (f) fclose(f);
+    if (!ok && len)
+        fprintf(stderr, "[TRAMP] crypto.randomBytes(%u): no randomness, buffer zeroed\n", len);
+    write_reg(uc, UC_ARM_REG_R0, ok ? 1u : 0u);
 }
 
 // =============================================================================

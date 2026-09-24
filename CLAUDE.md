@@ -76,14 +76,14 @@ main()
 - `picocalc.fs` / `g_api.fs` — file open/read/write/close/exists/size/listDir (Lua file handles: see "File handles" under App Model)
 - `picocalc.sys` / `g_api.sys` — time, battery, log, reboot, system menu, poll (native apps), shouldExit
 - `picocalc.wifi` / `g_api.wifi` — connect/disconnect/status/IP/SSID/isAvailable
-- `picocalc.sysconfig` / `g_api.config` — system-wide key/value config (get/set/save/load); Lua only with the `"sysconfig"` requirement
+- `picocalc.sysconfig` — system-wide key/value config (get/set/save/load); Lua only, with the `"sysconfig"` requirement. The native API has no system-config table (there is no `g_api.config`)
 - `picocalc.audio` / `g_api.audio` — tone generation, PCM streaming (playTone/stopTone/setVolume/startStream/stopStream/pushSamples)
 - `picocalc.tcp` / `g_api.tcp` — raw TCP/TLS sockets (connect/write/read/close/available/getError/getEvents)
 - `picocalc.ui` / `g_api.ui` — modal dialogs (textInput/textInputSimple/confirm)
 - `g_api.http` — HTTP/HTTPS client (Phase 1; Lua exposes as `picocalc.network.http` OO objects)
 - `g_api.soundplayer` — sample/fileplayer/MP3 player (Phase 1; Lua exposes as `picocalc.sound`)
-- `g_api.appconfig` — per-app key/value config (Phase 1; Lua exposes as BOTH `picocalc.config` and `picocalc.appconfig` — same store, two names)
-- `g_api.crypto` — crypto primitives: SHA-256/SHA-1/HMAC/AES-CTR/ECDH (Phase 1; Lua exposes as `picocalc.crypto`)
+- `g_api.appconfig` — per-app key/value config (Phase 1; Lua exposes as BOTH `picocalc.config` and `picocalc.appconfig` — same store, two names). `load(id)` binds only the running app's own id (`app_config_load_own`, case-insensitive); another app's id is refused and leaves the binding unchanged
+- `g_api.crypto` — crypto primitives: SHA-256/SHA-1/HMAC/AES-CTR/ECDH (Phase 1; Lua exposes as `picocalc.crypto`). `randomBytes` returns `bool`: false (buffer zeroed) without a seeded, working DRBG
 - `g_api.graphics` — image loading and drawing (Phase 2; Lua exposes as `picocalc.graphics.image`)
 - `g_api.video` — MJPEG video playback (Phase 2; Lua exposes as `picocalc.video`)
 - `g_api.modplayer` — MOD tracker music (Phase 2; Lua exposes as `picocalc.modplayer`)
@@ -212,7 +212,7 @@ A debug hook fires every 256 opcodes (`lua_sethook` with `LUA_MASKCOUNT`). The h
 - Second 8MB PSRAM on the PicoCalc v2.0 mainboard, accessed via PIO1 SPI
 - Completely independent bus from QMI PSRAM/Flash XIP cache
 - Layout (`pio_psram.h`): MP3 PCM ring `0x0000` (32KB), video region `0x8000` (256KB, reserved), apps from `PIO_PSRAM_APP_BASE` = `0x48000` (288KB)
-- Lua `sys.pioPsramRead/Write` may only touch `[PIO_PSRAM_APP_BASE, chip end)`: anything overlapping the OS region, negative, or past the chip raises a Lua error (`pio_psram_app_range_check`, 64-bit, host-tested). Native `g_api.psram` is unchecked.
+- Lua `sys.pioPsramRead/Write` may only touch `[PIO_PSRAM_APP_BASE, chip end)`: anything overlapping the OS region, negative, or past the chip raises a Lua error (`pio_psram_app_range_check`, 64-bit, host-tested). Native `g_api.psram->pioRead/pioWrite/pioBulkRead/pioBulkWrite` apply the same check (`src/main.c`): a refused call does nothing (a read leaves `dst` untouched) and logs `[NATIVE] psram->… refused`.
 - Lua `sys.qmiPsramAlloc(size)` returns a bounds-checked buffer handle (userdata owning a `umm_malloc` block, freed by `qmiPsramFree` or GC); `qmiPsramRead/Write(handle, offset, …)` raise on out-of-range or freed handles. No raw pointers reach Lua.
 - DMA vs the XIP cache (`pio_psram_xip.h`): a source in cached QMI PSRAM (`0x11…`) has its lines cleaned (`xip_cache_clean_range`) and is read through the uncached alias; a cached destination gets whole lines DMA'd with `xip_cache_invalidate_range` before and after, and its partial end lines copied by the CPU from a bounce buffer (never invalidate a line shared with other data). Transfers hold the driver lock one 4KB segment at a time and yield it to a waiting core between segments.
 - `pio_psram_init()` called early in `main()`; non-fatal if chip absent
@@ -231,7 +231,7 @@ A debug hook fires every 256 opcodes (`lua_sethook` with `LUA_MASKCOUNT`). The h
 ### Config (`src/os/config.c`)
 - Flat JSON key/value store persisted at `/system/config.json`
 - `config_load()` at boot; `config_save()` writes back to SD
-- Exposed to Lua as `picocalc.sysconfig.get(key)`, `.set(key, value)`, `.save()`, `.load()` (NOT `picocalc.config` — that's the per-app store, see the naming warning above), registered only for apps whose `app.json` declares `"sysconfig"` (otherwise `picocalc.sysconfig` is nil). `wifi_pass` is write-only: `get("wifi_pass")` always returns nil, `set` works. Native apps' `g_api.config` is unrestricted.
+- Exposed to Lua as `picocalc.sysconfig.get(key)`, `.set(key, value)`, `.save()`, `.load()` (NOT `picocalc.config` — that's the per-app store, see the naming warning above), registered only for apps whose `app.json` declares `"sysconfig"` (otherwise `picocalc.sysconfig` is nil). `wifi_pass` is write-only: `get("wifi_pass")` always returns nil, `set` works. Native apps have no system-config API (only raw `fs` access, like a Lua `root-filesystem` app).
 - Well-known keys: `"wifi_ssid"`, `"wifi_pass"`, `"brightness"`, `"dim_timeout_s"` (idle screen-dim timeout in seconds; `"0"` disables; default 60)
 
 ### UI Widgets (`src/os/ui.c`, `text_input.c`)

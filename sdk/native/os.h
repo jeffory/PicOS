@@ -474,8 +474,11 @@ typedef struct {
                        const uint8_t *data, uint32_t dlen, uint8_t out[32]);
     void (*hmacSha1)(const uint8_t *key, uint32_t klen,
                      const uint8_t *data, uint32_t dlen, uint8_t out[20]);
-    // Fill buf with cryptographically random bytes.
-    void (*randomBytes)(uint8_t *buf, uint32_t len);
+    // Fill buf with cryptographically random bytes.  False (buf zeroed) when
+    // there is no seeded, working DRBG: never use the bytes then.  (Returned
+    // since 2026-09; the slot and calling convention are unchanged, so older
+    // apps that ignore the result still link and run.)
+    bool (*randomBytes)(uint8_t *buf, uint32_t len);
     // SSH session-key derivation (RFC 4253 §7.2). letter = 'A'–'F'.
     // K = shared secret mpint, H = exchange hash, session_id = initial H.
     void (*deriveKey)(char letter,

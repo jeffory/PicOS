@@ -9,7 +9,8 @@
 //
 // It also exercises the well-behaved paths through the same wrappers (a
 // file closed twice, an image freed twice: the second call must be a no-op)
-// and the native gates: appconfig->load of another app's id is refused.
+// and the native gates: appconfig->load of another app's id is refused, and
+// crypto->randomBytes returns whether it produced random bytes.
 #include "app_abi.h"
 #include "os.h"
 
@@ -77,5 +78,13 @@ void picos_main(const PicoCalcAPI *api, const char *app_dir,
         mod != NULL, blk != NULL);
     log("LEAKY appconfig other=%d bound=%s", (int)other,
         bound ? bound : "(none)");
+
+    // randomBytes reports success (false + zeroed buffer without an RNG).
+    uint8_t rnd[32];
+    bool rnd_ok = api->crypto->randomBytes(rnd, sizeof(rnd));
+    int nonzero = 0;
+    for (unsigned i = 0; i < sizeof(rnd); i++)
+        nonzero += rnd[i] != 0;
+    log("LEAKY random ok=%d nonzero=%d", (int)rnd_ok, nonzero > 0);
     log("LEAKY done");
 }
