@@ -240,7 +240,7 @@ static int l_ar_read(lua_State *L) {
     }
 
     // Decompressed straight into the result string's buffer (no heap copy
-    // to leak if an error unwinds, half the peak memory). Same cap as
+    // to leak if an error unwinds). Same cap as
     // zip_reader_read_to_heap: ZIP_MAX_READ_MEM, or max_len when smaller.
     zip_entry_info_t info;
     if (!zip_reader_stat_index(&ar->zr, idx, &info)) {

@@ -22,7 +22,8 @@ static int l_aes_ctr_update(lua_State *L) {
     const char *input = luaL_checklstring(L, 2, &len);
 
     // Straight into the result string's buffer: no temporary allocation to
-    // leak if an error unwinds, and no second copy.
+    // leak if an error unwinds (the result is still copied once into the
+    // string).
     luaL_Buffer b;
     uint8_t *output = (uint8_t *)luaL_buffinitsize(L, &b, len);
 

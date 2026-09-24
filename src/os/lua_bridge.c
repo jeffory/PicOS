@@ -207,16 +207,19 @@ void lua_bridge_raise_exit(lua_State *L) {
     // Modal loops (ui_confirm, text input, the system menu) watch the dev
     // flag; they unwind instead of waiting for a key the app will never read.
     dev_commands_set_exit();
-    // Re-raise before every instruction from now on. The main thread too:
-    // a coroutine that raised is dead once resume returns, and the thread
-    // that resumed it has its own hook count.
-    lua_bridge_install_hook(L, 1);
-    lua_rawgeti(L, LUA_REGISTRYINDEX, LUA_RIDX_MAINTHREAD);
-    lua_State *main = lua_tothread(L, -1);
-    lua_pop(L, 1);
-    if (main && main != L)
-      lua_bridge_install_hook(main, 1);
   }
+  // Re-raise before every instruction from now on, on every raise: hook
+  // counts are per thread, so a raise from a coroutine that was created
+  // before the first one (or never ran since) arms that thread too. The main
+  // thread as well: a coroutine that raised is dead once resume returns, and
+  // the thread that resumed it has its own count.
+  if (lua_gethookcount(L) != 1)
+    lua_bridge_install_hook(L, 1);
+  lua_rawgeti(L, LUA_REGISTRYINDEX, LUA_RIDX_MAINTHREAD);
+  lua_State *main = lua_tothread(L, -1);
+  lua_pop(L, 1);
+  if (main && main != L && lua_gethookcount(main) != 1)
+    lua_bridge_install_hook(main, 1);
   lua_pushlightuserdata(L, &lua_bridge_exit_tag);
   lua_error(L);
 #if defined(__GNUC__)
