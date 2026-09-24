@@ -22,7 +22,7 @@ static int l_ui_drawFooter(lua_State *L) {
 }
 
 static int l_ui_drawTabs(lua_State *L) {
-  int y = (int)luaL_checkinteger(L, 1);
+  int y = (int)lb_checkint(L, 1);
   luaL_checktype(L, 2, LUA_TTABLE);  // tabs array
   int active_index = (int)luaL_checkinteger(L, 3);
   int prev_key = (int)luaL_optinteger(L, 4, 0);
@@ -99,10 +99,10 @@ static int l_ui_confirm(lua_State *L) {
 }
 
 static int l_ui_drawSpinner(lua_State *L) {
-  int cx = (int)luaL_checkinteger(L, 1);
-  int cy = (int)luaL_checkinteger(L, 2);
-  int r = (int)luaL_optinteger(L, 3, 8);
-  int frame = (int)luaL_optinteger(L, 4, 0);
+  int cx = (int)lb_checkint(L, 1);
+  int cy = (int)lb_checkint(L, 2);
+  int r = (int)lb_optint(L, 3, 8);
+  int frame = (int)lb_optint(L, 4, 0);
   ui_draw_spinner(cx, cy, r, frame);
   return 0;
 }
@@ -118,10 +118,10 @@ static int l_ui_splash(lua_State *L) {
 
 // picocalc.ui.drawPanel(x, y, w, h, [title])
 static int l_ui_drawPanel(lua_State *L) {
-  int x = (int)luaL_checkinteger(L, 1);
-  int y = (int)luaL_checkinteger(L, 2);
-  int w = (int)luaL_checkinteger(L, 3);
-  int h = (int)luaL_checkinteger(L, 4);
+  int x = (int)lb_checkint(L, 1);
+  int y = (int)lb_checkint(L, 2);
+  int w = (int)lb_checkint(L, 3);
+  int h = (int)lb_checkint(L, 4);
   const char *title = luaL_optstring(L, 5, NULL);
   ui_widget_panel(x, y, w, h, title);
   return 0;
@@ -129,13 +129,13 @@ static int l_ui_drawPanel(lua_State *L) {
 
 // picocalc.ui.drawTextField(x, y, w, text, cursor_pos, scroll_offset, focused, show_cursor)
 static int l_ui_drawTextField(lua_State *L) {
-  int x = (int)luaL_checkinteger(L, 1);
-  int y = (int)luaL_checkinteger(L, 2);
-  int w = (int)luaL_checkinteger(L, 3);
+  int x = (int)lb_checkint(L, 1);
+  int y = (int)lb_checkint(L, 2);
+  int w = (int)lb_checkint(L, 3);
   size_t text_len = 0;
   const char *text = luaL_checklstring(L, 4, &text_len);
-  int cursor_pos   = (int)luaL_checkinteger(L, 5);
-  int scroll_off   = (int)luaL_checkinteger(L, 6);
+  int cursor_pos   = (int)lb_checkint(L, 5);
+  int scroll_off   = (int)lb_checkint(L, 6);
   bool focused     = lua_toboolean(L, 7);
   bool show_cursor = lua_toboolean(L, 8);
   ui_widget_textfield(x, y, w, text, (int)text_len, cursor_pos, scroll_off,
@@ -146,16 +146,16 @@ static int l_ui_drawTextField(lua_State *L) {
 // picocalc.ui.drawTextArea(x, y, w, h, text, segments_table, scroll_y,
 //                          cursor_row, cursor_col, focused, show_cursor)
 static int l_ui_drawTextArea(lua_State *L) {
-  int x = (int)luaL_checkinteger(L, 1);
-  int y = (int)luaL_checkinteger(L, 2);
-  int w = (int)luaL_checkinteger(L, 3);
-  int h = (int)luaL_checkinteger(L, 4);
+  int x = (int)lb_checkint(L, 1);
+  int y = (int)lb_checkint(L, 2);
+  int w = (int)lb_checkint(L, 3);
+  int h = (int)lb_checkint(L, 4);
   size_t text_len = 0;
   const char *text = luaL_checklstring(L, 5, &text_len);
   luaL_checktype(L, 6, LUA_TTABLE);
-  int scroll_y    = (int)luaL_checkinteger(L, 7);
-  int cursor_row  = (int)luaL_checkinteger(L, 8);
-  int cursor_col  = (int)luaL_checkinteger(L, 9);
+  int scroll_y    = (int)lb_checkint(L, 7);
+  int cursor_row  = (int)lb_checkint(L, 8);
+  int cursor_col  = (int)lb_checkint(L, 9);
   bool focused    = lua_toboolean(L, 10);
   bool show_cursor = lua_toboolean(L, 11);
 
@@ -187,9 +187,9 @@ static int l_ui_drawTextArea(lua_State *L) {
 
 // picocalc.ui.drawListItem(x, y, w, text, selected, focused)
 static int l_ui_drawListItem(lua_State *L) {
-  int x = (int)luaL_checkinteger(L, 1);
-  int y = (int)luaL_checkinteger(L, 2);
-  int w = (int)luaL_checkinteger(L, 3);
+  int x = (int)lb_checkint(L, 1);
+  int y = (int)lb_checkint(L, 2);
+  int w = (int)lb_checkint(L, 3);
   const char *text = luaL_checkstring(L, 4);
   bool selected = lua_toboolean(L, 5);
   bool focused  = lua_toboolean(L, 6);
@@ -199,10 +199,10 @@ static int l_ui_drawListItem(lua_State *L) {
 
 // picocalc.ui.drawProgress(x, y, w, h, progress, [fill_color])
 static int l_ui_drawProgress(lua_State *L) {
-  int x = (int)luaL_checkinteger(L, 1);
-  int y = (int)luaL_checkinteger(L, 2);
-  int w = (int)luaL_checkinteger(L, 3);
-  int h = (int)luaL_checkinteger(L, 4);
+  int x = (int)lb_checkint(L, 1);
+  int y = (int)lb_checkint(L, 2);
+  int w = (int)lb_checkint(L, 3);
+  int h = (int)lb_checkint(L, 4);
   float prog = (float)luaL_checknumber(L, 5);
   uint16_t fill = lua_isnoneornil(L, 6) ? COLOR_GREEN : l_checkcolor(L, 6);
   ui_widget_progress(x, y, w, h, prog, fill, UW_BORDER);
@@ -211,8 +211,8 @@ static int l_ui_drawProgress(lua_State *L) {
 
 // picocalc.ui.drawCheckbox(x, y, checked, focused)
 static int l_ui_drawCheckbox(lua_State *L) {
-  int x = (int)luaL_checkinteger(L, 1);
-  int y = (int)luaL_checkinteger(L, 2);
+  int x = (int)lb_checkint(L, 1);
+  int y = (int)lb_checkint(L, 2);
   bool checked = lua_toboolean(L, 3);
   bool focused = lua_toboolean(L, 4);
   ui_widget_checkbox(x, y, checked, focused);
@@ -221,8 +221,8 @@ static int l_ui_drawCheckbox(lua_State *L) {
 
 // picocalc.ui.drawRadio(x, y, selected, focused)
 static int l_ui_drawRadio(lua_State *L) {
-  int x = (int)luaL_checkinteger(L, 1);
-  int y = (int)luaL_checkinteger(L, 2);
+  int x = (int)lb_checkint(L, 1);
+  int y = (int)lb_checkint(L, 2);
   bool selected = lua_toboolean(L, 3);
   bool focused  = lua_toboolean(L, 4);
   ui_widget_radio(x, y, selected, focused);
@@ -231,9 +231,9 @@ static int l_ui_drawRadio(lua_State *L) {
 
 // picocalc.ui.drawDivider(x, y, w, [color])
 static int l_ui_drawDivider(lua_State *L) {
-  int x = (int)luaL_checkinteger(L, 1);
-  int y = (int)luaL_checkinteger(L, 2);
-  int w = (int)luaL_checkinteger(L, 3);
+  int x = (int)lb_checkint(L, 1);
+  int y = (int)lb_checkint(L, 2);
+  int w = (int)lb_checkint(L, 3);
   uint16_t color = lua_isnoneornil(L, 4) ? UW_BORDER : l_checkcolor(L, 4);
   ui_widget_divider(x, y, w, color);
   return 0;
@@ -241,7 +241,7 @@ static int l_ui_drawDivider(lua_State *L) {
 
 // picocalc.ui.drawToast(y, text, [bg_color])
 static int l_ui_drawToast(lua_State *L) {
-  int y = (int)luaL_checkinteger(L, 1);
+  int y = (int)lb_checkint(L, 1);
   const char *text = luaL_checkstring(L, 2);
   uint16_t bg = (lua_gettop(L) >= 3) ? (uint16_t)luaL_checkinteger(L, 3) : 0;
   ui_widget_toast(y, text, bg);
@@ -259,9 +259,9 @@ static int l_ui_toast(lua_State *L) {
 
 // picocalc.ui.drawButton(x, y, w, label, focused, [pressed])
 static int l_ui_drawButton(lua_State *L) {
-  int x = (int)luaL_checkinteger(L, 1);
-  int y = (int)luaL_checkinteger(L, 2);
-  int w = (int)luaL_checkinteger(L, 3);
+  int x = (int)lb_checkint(L, 1);
+  int y = (int)lb_checkint(L, 2);
+  int w = (int)lb_checkint(L, 3);
   const char *label = luaL_checkstring(L, 4);
   bool focused = lua_toboolean(L, 5);
   bool pressed = lua_toboolean(L, 6);
@@ -273,7 +273,7 @@ static int l_ui_drawButton(lua_State *L) {
 static int l_ui_wrapText(lua_State *L) {
   size_t text_len = 0;
   const char *text = luaL_checklstring(L, 1, &text_len);
-  int max_cols = (int)luaL_checkinteger(L, 2);
+  int max_cols = (int)lb_checkint(L, 2);
 
   // Max segments: worst case is 1 segment per character
   int max_segs = (int)(text_len / (max_cols > 0 ? max_cols : 1)) + 2;

@@ -31,8 +31,8 @@ static int l_perf_getFrameTime(lua_State *L) {
 
 // Convenience: draw FPS counter at specified position with color coding
 static int l_perf_drawFPS(lua_State *L) {
-  int x = (int)luaL_optinteger(L, 1, 250); // default top-right
-  int y = (int)luaL_optinteger(L, 2, 8);
+  int x = (int)lb_optint(L, 1, 250); // default top-right
+  int y = (int)lb_optint(L, 2, 8);
 
   int fps = perf_get_fps();
   char buf[16];
@@ -49,7 +49,7 @@ static int l_perf_drawFPS(lua_State *L) {
 
 // Set target FPS for automatic frame pacing (0 = no limit)
 static int l_perf_setTargetFPS(lua_State *L) {
-  int fps = (int)luaL_checkinteger(L, 1);
+  int fps = (int)lb_checkint(L, 1);
   if (fps < 0)
     fps = 0;
   perf_set_target_fps((uint32_t)fps);

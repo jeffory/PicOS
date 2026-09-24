@@ -35,9 +35,9 @@ static int l_terminal_gc(lua_State* L) {
 }
 
 static int l_terminal_new(lua_State* L) {
-    int cols = luaL_optinteger(L, 1, TERM_DEFAULT_COLS);
-    int rows = luaL_optinteger(L, 2, TERM_DEFAULT_ROWS);
-    int scrollback = luaL_optinteger(L, 3, TERM_DEFAULT_SCROLLBACK);
+    int cols = lb_optint(L, 1, TERM_DEFAULT_COLS);
+    int rows = lb_optint(L, 2, TERM_DEFAULT_ROWS);
+    int scrollback = lb_optint(L, 3, TERM_DEFAULT_SCROLLBACK);
 
     terminal_t* term = terminal_new(cols, rows, scrollback);
     if (!term) {
@@ -73,8 +73,8 @@ static int l_terminal_clear(lua_State* L) {
 
 static int l_terminal_setCursor(lua_State* L) {
     lua_terminal_t* t = check_terminal(L, 1);
-    int x = (int)luaL_checkinteger(L, 2);
-    int y = (int)luaL_checkinteger(L, 3);
+    int x = (int)lb_checkint(L, 2);
+    int y = (int)lb_checkint(L, 3);
     terminal_setCursor(t->term, x, y);
     return 0;
 }
@@ -107,7 +107,7 @@ static int l_terminal_getColors(lua_State* L) {
 
 static int l_terminal_scroll(lua_State* L) {
     lua_terminal_t* t = check_terminal(L, 1);
-    int lines = (int)luaL_checkinteger(L, 2);
+    int lines = (int)lb_checkint(L, 2);
     terminal_scroll(t->term, lines);
     return 0;
 }
@@ -207,7 +207,7 @@ static int l_terminal_getScrollbackCount(lua_State* L) {
 
 static int l_terminal_getScrollbackLine(lua_State* L) {
     lua_terminal_t* t = check_terminal(L, 1);
-    int line = (int)luaL_checkinteger(L, 2) - 1;
+    int line = (int)lb_checkint(L, 2) - 1;
     
     int count = terminal_getScrollbackCount(t->term);
     if (line < 0 || line >= count) {
@@ -240,7 +240,7 @@ static int l_terminal_getScrollbackOffset(lua_State* L) {
 
 static int l_terminal_setScrollbackOffset(lua_State* L) {
     lua_terminal_t* t = check_terminal(L, 1);
-    int offset = (int)luaL_checkinteger(L, 2);
+    int offset = (int)lb_checkint(L, 2);
     terminal_setScrollbackOffset(t->term, offset);
     return 0;
 }
@@ -378,14 +378,14 @@ static int l_terminal_setLineNumbers(lua_State* L) {
 
 static int l_terminal_setLineNumberStart(lua_State* L) {
     lua_terminal_t* t = check_terminal(L, 1);
-    int start = luaL_checkinteger(L, 2);
+    int start = lb_checkint(L, 2);
     terminal_setLineNumberStart(t->term, start);
     return 0;
 }
 
 static int l_terminal_setLineNumberCols(lua_State* L) {
     lua_terminal_t* t = check_terminal(L, 1);
-    int cols = luaL_checkinteger(L, 2);
+    int cols = lb_checkint(L, 2);
     terminal_setLineNumberCols(t->term, cols);
     return 0;
 }
@@ -422,15 +422,15 @@ static int l_terminal_setScrollbarColors(lua_State* L) {
 
 static int l_terminal_setScrollbarWidth(lua_State* L) {
     lua_terminal_t* t = check_terminal(L, 1);
-    int width = luaL_checkinteger(L, 2);
+    int width = lb_checkint(L, 2);
     terminal_setScrollbarWidth(t->term, width);
     return 0;
 }
 
 static int l_terminal_setScrollInfo(lua_State* L) {
     lua_terminal_t* t = check_terminal(L, 1);
-    int total_lines = luaL_checkinteger(L, 2);
-    int scroll_position = luaL_checkinteger(L, 3);
+    int total_lines = lb_checkint(L, 2);
+    int scroll_position = lb_checkint(L, 3);
     terminal_setScrollInfo(t->term, total_lines, scroll_position);
     return 0;
 }
@@ -438,8 +438,8 @@ static int l_terminal_setScrollInfo(lua_State* L) {
 // Render bounds
 static int l_terminal_setRenderBounds(lua_State* L) {
     lua_terminal_t* t = check_terminal(L, 1);
-    int y_start = luaL_checkinteger(L, 2);
-    int y_end = luaL_checkinteger(L, 3);
+    int y_start = lb_checkint(L, 2);
+    int y_end = lb_checkint(L, 3);
     terminal_setRenderBounds(t->term, y_start, y_end);
     return 0;
 }
@@ -454,7 +454,7 @@ static int l_terminal_setWordWrap(lua_State* L) {
 
 static int l_terminal_setWordWrapColumn(lua_State* L) {
     lua_terminal_t* t = check_terminal(L, 1);
-    int column = luaL_checkinteger(L, 2);
+    int column = lb_checkint(L, 2);
     terminal_setWordWrapColumn(t->term, column);
     return 0;
 }
@@ -481,8 +481,8 @@ static int l_terminal_getVisualRowCount(lua_State* L) {
 // Cell access (for syntax highlighting)
 static int l_terminal_setCell(lua_State* L) {
     lua_terminal_t* t = check_terminal(L, 1);
-    int x = (int)luaL_checkinteger(L, 2);
-    int y = (int)luaL_checkinteger(L, 3);
+    int x = (int)lb_checkint(L, 2);
+    int y = (int)lb_checkint(L, 3);
     const char* ch = luaL_checkstring(L, 4);
     if (x < 0 || x >= t->term->cols || y < 0 || y >= t->term->rows)
         return 0;
@@ -492,8 +492,8 @@ static int l_terminal_setCell(lua_State* L) {
 
 static int l_terminal_getCell(lua_State* L) {
     lua_terminal_t* t = check_terminal(L, 1);
-    int x = (int)luaL_checkinteger(L, 2);
-    int y = (int)luaL_checkinteger(L, 3);
+    int x = (int)lb_checkint(L, 2);
+    int y = (int)lb_checkint(L, 3);
     if (x < 0 || x >= t->term->cols || y < 0 || y >= t->term->rows) {
         lua_pushlstring(L, " ", 1);
         return 1;
@@ -507,8 +507,8 @@ static int l_terminal_getCell(lua_State* L) {
 
 static int l_terminal_setCellColors(lua_State* L) {
     lua_terminal_t* t = check_terminal(L, 1);
-    int x = (int)luaL_checkinteger(L, 2);
-    int y = (int)luaL_checkinteger(L, 3);
+    int x = (int)lb_checkint(L, 2);
+    int y = (int)lb_checkint(L, 3);
     uint16_t fg = (uint16_t)luaL_checkinteger(L, 4);
     uint16_t bg = (uint16_t)luaL_checkinteger(L, 5);
     if (x < 0 || x >= t->term->cols || y < 0 || y >= t->term->rows)
@@ -522,11 +522,11 @@ static int l_terminal_setCellColors(lua_State* L) {
 
 static int l_terminal_setRowColors(lua_State* L) {
     lua_terminal_t* t = check_terminal(L, 1);
-    int y = (int)luaL_checkinteger(L, 2);
+    int y = (int)lb_checkint(L, 2);
     luaL_checktype(L, 3, LUA_TTABLE);
     luaL_checktype(L, 4, LUA_TTABLE);
-    int start_x = (int)luaL_optinteger(L, 5, 0);
-    int count = (int)luaL_optinteger(L, 6, t->term->cols);
+    int start_x = (int)lb_optint(L, 5, 0);
+    int count = (int)lb_optint(L, 6, t->term->cols);
 
     if (y < 0 || y >= t->term->rows)
         return 0;

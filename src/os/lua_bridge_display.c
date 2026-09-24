@@ -52,15 +52,15 @@ static int l_display_fillCircle(lua_State *L) {
 }
 
 static int l_display_setScrollArea(lua_State *L) {
-  int top = (int)luaL_checkinteger(L, 1);
-  int height = (int)luaL_checkinteger(L, 2);
-  int bottom = (int)luaL_checkinteger(L, 3);
+  int top = (int)lb_checkint(L, 1);
+  int height = (int)lb_checkint(L, 2);
+  int bottom = (int)lb_checkint(L, 3);
   display_set_scroll_area(top, height, bottom);
   return 0;
 }
 
 static int l_display_setScrollOffset(lua_State *L) {
-  display_set_scroll_offset((int)luaL_checkinteger(L, 1));
+  display_set_scroll_offset((int)lb_checkint(L, 1));
   return 0;
 }
 
@@ -192,8 +192,8 @@ static int l_display_flush(lua_State *L) {
 // render on full flushes only — painting one here would smear it into an
 // arbitrary row band and it would never be cleanly erased.
 static int l_display_flushRows(lua_State *L) {
-  int y0 = (int)luaL_checkinteger(L, 1);
-  int y1 = (int)luaL_checkinteger(L, 2);
+  int y0 = (int)lb_checkint(L, 1);
+  int y1 = (int)lb_checkint(L, 2);
   display_flush_rows(y0, y1);
   if (s_screenshot_pending) {
     s_screenshot_pending = false;
@@ -207,8 +207,8 @@ static int l_display_flushRows(lua_State *L) {
 // display_flush_region).  Same screenshot hook, same no-toast rule as
 // flushRows.
 static int l_display_flushRegion(lua_State *L) {
-  int y0 = (int)luaL_checkinteger(L, 1);
-  int y1 = (int)luaL_checkinteger(L, 2);
+  int y0 = (int)lb_checkint(L, 1);
+  int y1 = (int)lb_checkint(L, 2);
   display_flush_region(y0, y1);
   if (s_screenshot_pending) {
     s_screenshot_pending = false;
@@ -228,7 +228,7 @@ static int l_display_getHeight(lua_State *L) {
 }
 
 static int l_display_setBrightness(lua_State *L) {
-  display_set_brightness((uint8_t)luaL_checkinteger(L, 1));
+  display_set_brightness((uint8_t)lb_checkint(L, 1));
   return 0;
 }
 
@@ -280,9 +280,9 @@ static int l_display_unloadFont(lua_State *L) {
 
 // Convenience: create RGB565 from r,g,b components
 static int l_display_rgb(lua_State *L) {
-  int r = luaL_checkinteger(L, 1);
-  int g = luaL_checkinteger(L, 2);
-  int b = luaL_checkinteger(L, 3);
+  int r = lb_checkint(L, 1);
+  int g = lb_checkint(L, 2);
+  int b = lb_checkint(L, 3);
   lua_pushinteger(L, RGB565(r, g, b));
   return 1;
 }
@@ -295,22 +295,22 @@ static int l_display_applyEffect(lua_State *L) {
   if (strcmp(name, "invert") == 0) {
     display_effect_invert();
   } else if (strcmp(name, "darken") == 0) {
-    uint8_t factor = (uint8_t)luaL_optinteger(L, 2, 128);
+    uint8_t factor = (uint8_t)lb_optint(L, 2, 128);
     display_effect_darken(factor);
   } else if (strcmp(name, "brighten") == 0) {
-    uint8_t factor = (uint8_t)luaL_optinteger(L, 2, 128);
+    uint8_t factor = (uint8_t)lb_optint(L, 2, 128);
     display_effect_brighten(factor);
   } else if (strcmp(name, "tint") == 0) {
-    uint8_t r = (uint8_t)luaL_checkinteger(L, 2);
-    uint8_t g = (uint8_t)luaL_checkinteger(L, 3);
-    uint8_t b = (uint8_t)luaL_checkinteger(L, 4);
-    uint8_t strength = (uint8_t)luaL_optinteger(L, 5, 128);
+    uint8_t r = (uint8_t)lb_checkint(L, 2);
+    uint8_t g = (uint8_t)lb_checkint(L, 3);
+    uint8_t b = (uint8_t)lb_checkint(L, 4);
+    uint8_t strength = (uint8_t)lb_optint(L, 5, 128);
     display_effect_tint(r, g, b, strength);
   } else if (strcmp(name, "fade") == 0) {
-    uint8_t r = (uint8_t)luaL_checkinteger(L, 2);
-    uint8_t g = (uint8_t)luaL_checkinteger(L, 3);
-    uint8_t b = (uint8_t)luaL_checkinteger(L, 4);
-    uint8_t factor = (uint8_t)luaL_optinteger(L, 5, 128);
+    uint8_t r = (uint8_t)lb_checkint(L, 2);
+    uint8_t g = (uint8_t)lb_checkint(L, 3);
+    uint8_t b = (uint8_t)lb_checkint(L, 4);
+    uint8_t factor = (uint8_t)lb_optint(L, 5, 128);
     display_effect_tint(r, g, b, factor); // fade = tint toward target color
   } else if (strcmp(name, "grayscale") == 0) {
     display_effect_grayscale();
@@ -320,7 +320,7 @@ static int l_display_applyEffect(lua_State *L) {
     if (!img->data) {
       return luaL_error(L, "blend: image has been freed");
     }
-    uint8_t alpha = (uint8_t)luaL_optinteger(L, 3, 128);
+    uint8_t alpha = (uint8_t)lb_optint(L, 3, 128);
     display_effect_blend(img->data, img->w, img->h, alpha);
   } else if (strcmp(name, "palette") == 0) {
     // Arg 2: table of 256 RGB565 color values
@@ -338,13 +338,13 @@ static int l_display_applyEffect(lua_State *L) {
     }
     display_effect_palette(lut, lut_size);
   } else if (strcmp(name, "dither") == 0) {
-    uint8_t levels = (uint8_t)luaL_optinteger(L, 2, 4);
+    uint8_t levels = (uint8_t)lb_optint(L, 2, 4);
     display_effect_dither(levels);
   } else if (strcmp(name, "scanline") == 0) {
-    uint8_t intensity = (uint8_t)luaL_optinteger(L, 2, 128);
+    uint8_t intensity = (uint8_t)lb_optint(L, 2, 128);
     display_effect_scanline(intensity);
   } else if (strcmp(name, "posterize") == 0) {
-    uint8_t levels = (uint8_t)luaL_optinteger(L, 2, 4);
+    uint8_t levels = (uint8_t)lb_optint(L, 2, 4);
     display_effect_posterize(levels);
   } else {
     return luaL_error(L, "unknown effect: %s", name);
