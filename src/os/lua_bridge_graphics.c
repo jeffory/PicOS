@@ -1487,6 +1487,10 @@ static int l_sprite_setSourceRect(lua_State *L) {
   int sh = lb_checkint(L, 5);
 
   if (!s->image) return 0;
+  // The image is anchored, but a finaliser that runs after the image's own
+  // can still get here with its pixels freed.
+  if (!s->image->data)
+    return luaL_error(L, "attempt to use a freed image");
 
   // Clamp to image bounds
   if (sx < 0) sx = 0;

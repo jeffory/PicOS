@@ -145,6 +145,18 @@ DESTROYED = {
         arm(function() return G.sprite.new() end,
             function(s) s:add() end)
     """,
+    "image_under_sprite_setSourceRect": """
+        -- sprite, then holder, then the image: the image is finalised
+        -- first, then the holder crops through the live sprite.
+        local s = G.sprite.new()
+        local holder = setmetatable({}, {__gc = function(h)
+            R.ran = true
+            R.ok, R.err = pcall(h.s.setSourceRect, h.s, 0, 0, 8, 8)
+        end})
+        holder.s = s
+        s:setImage(G.image.new(8, 8))
+        s, holder = nil, nil
+    """,
     "fileplayer": """
         arm(function() return pc.sound.fileplayer() end,
             function(fp) fp:load(APP_DIR .. '/s.wav') end)
