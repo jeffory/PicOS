@@ -1,6 +1,7 @@
 #include "launcher.h"
 #include "launcher_types.h"
 #include "crashlog.h"
+#include "app_manifest.h"
 #include "app_runner.h"
 #include "sim_hooks.h"
 #include "lua_runner.h"
@@ -50,67 +51,7 @@
 static app_entry_t *s_apps = NULL;
 static int s_app_count = 0;
 
-// Tiny JSON parser — just enough to pull "name", "description", "version"
-// from a simple flat JSON object.  Not a full parser.
-static bool json_get_string(const char *json, const char *key, char *out,
-                            int out_len) {
-  char search[64];
-  snprintf(search, sizeof(search), "\"%s\"", key);
-  const char *p = json;
-  while ((p = strstr(p, search)) != NULL) {
-    const char *q = p + strlen(search);
-    while (*q == ' ' || *q == ':' || *q == '\t')
-      q++;
-    if (*q == '"') {
-      q++; // skip opening quote
-      int i = 0;
-      while (*q && *q != '"' && i < out_len - 1)
-        out[i++] = *q++;
-      out[i] = '\0';
-      return true;
-    }
-    p++; // false match (key name inside a value), keep searching
-  }
-  return false;
-}
-
-static bool json_get_int(const char *json, const char *key, uint32_t *out) {
-  char search[64];
-  snprintf(search, sizeof(search), "\"%s\"", key);
-  const char *p = strstr(json, search);
-  if (!p)
-    return false;
-  p += strlen(search);
-  while (*p == ' ' || *p == ':' || *p == '\t')
-    p++;
-  *out = (uint32_t)atoi(p);
-  return true;
-}
-
-static bool json_has_requirement(const char *json, const char *requirement) {
-  const char *p = strstr(json, "\"requirements\"");
-  if (!p)
-    return false;
-  while (*p && *p != '[')
-    p++;
-  if (*p != '[')
-    return false;
-
-  char search[96];
-  snprintf(search, sizeof(search), "\"%s\"", requirement);
-  const char *bracket_start = p;
-
-  while (*p && *p != ']') {
-    if (strstr(p, search)) {
-      const char *found      = strstr(p, search);
-      const char *bracket_end = strchr(bracket_start, ']');
-      if (found < bracket_end)
-        return true;
-    }
-    p++;
-  }
-  return false;
-}
+// app.json is read by app_manifest.c (bounded, escape-aware, host-tested).
 
 static void on_app_dir(const sdcard_entry_t *entry, void *user) {
   (void)user;
@@ -142,11 +83,6 @@ static void on_app_dir(const sdcard_entry_t *entry, void *user) {
   app_entry_t *app = &s_apps[s_app_count];
   snprintf(app->path, sizeof(app->path), "/apps/%s", entry->name);
   app->type                = has_elf ? APP_TYPE_NATIVE : APP_TYPE_LUA;
-  app->has_root_filesystem = false;
-  app->has_http            = false;
-  app->has_audio           = false;
-  app->system_clock_khz    = 0;
-  app->min_psram_kb        = 0;
 
   // Try to load app.json for display name / description / id / requirements
   char json_path[160];
@@ -154,32 +90,12 @@ static void on_app_dir(const sdcard_entry_t *entry, void *user) {
   int json_len = 0;
   char *json = sdcard_read_file(json_path, &json_len);
   if (json) {
-    if (!json_get_string(json, "id", app->id, sizeof(app->id)))
-      snprintf(app->id, sizeof(app->id), "local.%s", entry->name);
-    if (!json_get_string(json, "name", app->name, sizeof(app->name)))
-      strncpy(app->name, entry->name, sizeof(app->name));
-    if (!json_get_string(json, "description", app->description,
-                         sizeof(app->description)))
-      app->description[0] = '\0';
-    if (!json_get_string(json, "version", app->version, sizeof(app->version)))
-      strncpy(app->version, "1.0", sizeof(app->version));
-
-    app->has_root_filesystem = json_has_requirement(json, "root-filesystem");
-    app->has_http            = json_has_requirement(json, "http");
-    app->has_audio           = json_has_requirement(json, "audio");
-    json_get_int(json, "system_clock_khz", &app->system_clock_khz);
-    json_get_int(json, "min_psram_kb", &app->min_psram_kb);
-    if (!json_get_string(json, "category", app->category, sizeof(app->category)))
-      app->category[0] = '\0';
-
+    app_manifest_parse(json, json_len > 0 ? (size_t)json_len : 0, entry->name,
+                       app);
     umm_free(json);
   } else {
     printf("[LAUNCHER] WARNING: failed to read '%s', using dir name\n", json_path);
-    snprintf(app->id, sizeof(app->id), "local.%s", entry->name);
-    strncpy(app->name, entry->name, sizeof(app->name));
-    app->description[0] = '\0';
-    strncpy(app->version, "?", sizeof(app->version));
-    app->category[0] = '\0';
+    app_manifest_defaults(entry->name, app);
   }
 
   // Try to load app icon (PNG first, then BMP)

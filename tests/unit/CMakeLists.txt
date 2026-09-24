@@ -60,6 +60,7 @@ set(SRC ${PICOS_ROOT}/src)
 picos_unit_test(test_font SOURCES ${SRC}/fonts/font.c INCLUDES ${SRC}/fonts)
 picos_unit_test(test_elf_plan SOURCES ${SRC}/os/elf_plan.c)
 picos_unit_test(test_fs_path SOURCES ${SRC}/os/fs_path.c)
+picos_unit_test(test_app_manifest SOURCES ${SRC}/os/app_manifest.c)
 
 if(PICOS_FUZZ)
     add_subdirectory(${PICOS_ROOT}/tests/fuzz ${CMAKE_CURRENT_BINARY_DIR}/fuzz)

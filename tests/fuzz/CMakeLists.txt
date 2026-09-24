@@ -30,3 +30,4 @@ function(picos_fuzz_target name)
 endfunction()
 
 picos_fuzz_target(fuzz_elf_plan SOURCES ${PICOS_ROOT}/src/os/elf_plan.c)
+picos_fuzz_target(fuzz_app_manifest SOURCES ${PICOS_ROOT}/src/os/app_manifest.c)

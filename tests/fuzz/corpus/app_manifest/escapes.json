@@ -1,0 +1,1 @@
+{"name": "Say \"hi\"", "id": "com.x\u0041", "requirements": ["http","audio","root-filesystem"], "min_psram_kb": 4096, "system_clock_khz": -5}
