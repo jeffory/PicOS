@@ -104,6 +104,14 @@ target_compile_options(test_sound PRIVATE -Wno-unused-parameter)
 picos_unit_test(test_fileplayer SOURCES ${SRC}/drivers/fileplayer.c
                 ${SRC}/drivers/wav.c ${SD_FAKE} INCLUDES ${SD_INCLUDES})
 target_link_libraries(test_fileplayer PRIVATE pthread)
+# The MOD player (mod_player.c + pocketmod): Core 0 load/free vs Core 1
+# update on two threads.
+picos_unit_test(test_mod_player SOURCES ${SRC}/drivers/mod_player.c ${SD_FAKE}
+                INCLUDES ${SD_INCLUDES} ${PICOS_ROOT}/third_party/pocketmod)
+target_link_libraries(test_mod_player PRIVATE pthread m)
+# pocketmod.h is third-party: not held to -Werror's extra warnings.
+target_compile_options(test_mod_player PRIVATE -Wno-error -Wno-unused-parameter
+                       -Wno-sign-compare -Wno-format)
 
 # OTA image authentication (ECDSA P-256 + strict .sha256), against the same
 # mbedTLS the firmware links (host build, cmake/picos_host_mbedtls.cmake) and
