@@ -114,3 +114,63 @@ def test_float_coordinates_land_on_rounded_pixel(simulator):
     assert _px(simulator, 0, 90) == BLACK
     assert _px(simulator, 1, 91) == BLACK
     assert _px(simulator, 2, 90) == WHITE
+
+
+# ── Task 30: narrow sinks, table-field errors, one rounding rule ──────────
+
+def test_narrow_sinks_clamp_instead_of_wrapping(simulator):
+    r = _run_fixture(simulator)
+
+    # sampleplayer volume is a uint8_t: 300 used to wrap to 44, -1 to 255
+    # (which the driver then capped at 100). Now 300 -> 255 -> capped 100.
+    assert r["SVOL_300"] == "100", r["SVOL_300"]
+    assert r["SVOL_NEG"] == "0", r["SVOL_NEG"]
+    # rgb clamps each component before packing: 256 used to lose red
+    # entirely ((256 & 0xF8) == 0), -3 / 300 would bleed across channels.
+    assert r["RGB_HI"] == str(0xF800), r["RGB_HI"]
+    assert r["RGB_NEG"] == str(0x07E0), r["RGB_NEG"]
+    # valueAtTime's time is unsigned: -1.5 used to wrap to ~4e9 (end value)
+    assert float(r["VAT_NEG"]) == 0.0, r["VAT_NEG"]
+
+
+def test_table_field_errors_name_the_argument(simulator):
+    r = _run_fixture(simulator)
+
+    # Used to read "bad argument #-1 ..." with no hint which field was bad.
+    assert "bad argument #1" in r["FIELD_ERR"], r["FIELD_ERR"]
+    assert "field 'y1'" in r["FIELD_ERR"] and NOT_FINITE in r["FIELD_ERR"], r["FIELD_ERR"]
+    assert "bad argument #1" in r["ENTRY_ERR"], r["ENTRY_ERR"]
+    assert "sample: " + NOT_FINITE in r["ENTRY_ERR"], r["ENTRY_ERR"]
+    # Numeric strings go through a float: "20000000" (> 2^24) is out of range
+    assert OUT_OF_RANGE in r["NUMSTR_BIG"], r["NUMSTR_BIG"]
+
+
+def test_display_primitives_round_like_everything_else(simulator):
+    r = _run_fixture(simulator)
+    time.sleep(0.3)
+
+    # NaN / inf used to go through an undefined (int) cast; now an error
+    for name, fn in (("FILL_NAN", "fillRect"), ("TEXT_INF", "drawText")):
+        assert r[name].startswith("err ") and NOT_FINITE in r[name], (name, r[name])
+        assert "bad argument #1 to '%s'" % fn in r[name], (name, r[name])
+
+    # fillRect(10.5, ...) used to truncate to x = 10 while img:draw(10.5, ...)
+    # rounded to 11; both land on x = 11 now.
+    assert _px(simulator, 10, 110) == WHITE
+    assert _px(simulator, 11, 110) == BLACK
+    assert _px(simulator, 12, 110) == WHITE
+    assert _px(simulator, 10, 114) == WHITE
+    assert _px(simulator, 11, 114) == BLACK
+
+
+def test_negative_ties_round_toward_positive_infinity(simulator):
+    _run_fixture(simulator)
+    time.sleep(0.3)
+
+    # b (2x2) at x = -1.5 -> -1: covers x -1..0
+    assert _px(simulator, 0, 100) == BLACK
+    assert _px(simulator, 1, 100) == WHITE
+    # b at x = -0.5 -> 0: covers x 0..1
+    assert _px(simulator, 0, 104) == BLACK
+    assert _px(simulator, 1, 105) == BLACK
+    assert _px(simulator, 2, 104) == WHITE
