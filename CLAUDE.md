@@ -177,7 +177,7 @@ A debug hook fires every 256 opcodes (`lua_sethook` with `LUA_MASKCOUNT`). The h
 - Raw TCP/TLS client layer, also Mongoose-based on Core 1
 - Pool of 4 connections (`TCP_MAX_CONNECTIONS`)
 - Non-blocking, cross-core (Core 0 requests, Core 1 handles)
-- Exposed as `picocalc.tcp` in the C API and via Lua bridge
+- Exposed as `picocalc.tcp` in the C API and via Lua bridge. Lua callbacks (`setConnectCallback` / `setReadCallback` / `setCloseCallback`) get the socket and fire from `tcp_lua_fire_pending`; events without a callback stay for `getEvents()`. `setConnectTimeout` (next `connect`, default 15 s) and `setReadTimeout` (default off) reach the connection. Data left in Mongoose while the ring was full moves on every poll; buffered data stays readable after the peer closes. A failed `mg_send` fails the socket. Native `tcp->close` releases the slot (the handle is invalid afterwards)
 
 ### Audio (`src/drivers/audio.c`, `sound.c`, `mp3_player.c`, `fileplayer.c`)
 - PWM audio output on GP26 (left) / GP27 (right)

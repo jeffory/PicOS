@@ -282,7 +282,8 @@ typedef struct {
     int     (*write)(pctcp_t c, const void *buf, int len);
     // Read data from the connection. Returns bytes read or 0 if none available.
     int     (*read)(pctcp_t c, void *buf, int len);
-    // Close the connection.
+    // Close the connection and release it; the handle is invalid afterwards
+    // (the slot returns to the pool once Core 1 has let go of it).
     void    (*close)(pctcp_t c);
     // Returns number of bytes available for reading.
     int     (*available)(pctcp_t c);

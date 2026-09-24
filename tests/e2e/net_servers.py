@@ -18,7 +18,8 @@ threads, and records what it saw so a test can assert on the server side too
     /echo      POST: 200 with the request body echoed back; the raw body is
                recorded in .posts
 - TcpEchoServer: echoes every byte. A line "FLOOD\\n" switches the
-  connection to a steady stream (1 KiB every 5 ms) until the peer goes.
+  connection to a steady stream (1 KiB every 5 ms) until the peer goes;
+  "BURST\\n" sends BURST_BODY (20000 bytes) once, then nothing.
   .open_count() is the number of connections the server still has open.
 - BlackholeServer: a listener whose accept queue is kept full, so a new
   connect() is never answered (SYNs are dropped): a connect timeout target
@@ -204,6 +205,8 @@ class HttpTestServer:
 class TcpEchoServer:
     FLOOD_CHUNK = b"F" * 1024
     FLOOD_INTERVAL_S = 0.005
+    # More than the firmware's TCP ring (TCP_RECV_BUF_DEFAULT, 8 KiB)
+    BURST_BODY = bytes((i * 7) & 0xFF for i in range(20000))
 
     def __init__(self):
         self._lsock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
@@ -282,6 +285,11 @@ class TcpEchoServer:
                 pending += data
                 if b"FLOOD\n" in pending:
                     flooding = True
+                    continue
+                if b"BURST\n" in pending:
+                    # One burst, then silence (the connection stays open).
+                    conn.sendall(self.BURST_BODY)
+                    pending = b""
                     continue
                 conn.sendall(data)
                 if len(pending) > 64:

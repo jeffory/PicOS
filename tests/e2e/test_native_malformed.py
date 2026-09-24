@@ -7,12 +7,17 @@ ARM PIE with elfgen.build_elf(), breaks one field, stages it as
 firmware's native_loader.c, so these cases pin the shared validation through
 a real launch:
 
-- the launch finishes with app.exited result "load_failed";
-- stderr carries "[UNICORN] ELF rejected: <reason>" with the exact
-  elf_strerror() text for the check the case targets (a case that trips an
-  earlier check would be testing the wrong thing);
-- nothing ran: no "Starting emulation" line, and the SD card is unchanged
-  (no file created, modified or removed);
+- the launch finishes with app.exited result "load_failed" and error equal
+  to the exact elf_strerror() text of the check the case targets (a case
+  that trips an earlier check would be testing the wrong thing). The
+  reason travels with the RPC outcome (unicorn_runner.c load_refused()), so
+  there is no race against the separately drained stderr pipe;
+- /system/error.log gains the firmware loader's "--- NATIVE ERROR [<app>]
+  ---" entry with that reason, and nothing else on the SD card changes (no
+  file created, modified or removed);
+- nothing ran: no "Starting emulation" line;
+- stderr also carries "[UNICORN] ELF rejected: <reason>" (secondary, polled
+  with a bound since stderr is drained by its own thread);
 - the simulator is still alive and answers ping, and the conftest health
   hook sees no crash log and no sanitizer report.
 
@@ -25,6 +30,7 @@ from __future__ import annotations
 
 import json
 import re
+import time
 from pathlib import Path
 
 import pytest
@@ -113,8 +119,28 @@ def sd_snapshot(sd: Path) -> dict:
     return out
 
 
+ERROR_LOG = "system/error.log"
+
+
 def stderr_since(sim, mark: int) -> str:
     return "\n".join(sim.get_output()["stderr"].splitlines()[mark:])
+
+
+def wait_stderr(sim, mark: int, pattern: str, timeout: float = 5.0) -> str:
+    """stderr after `mark` once it matches `pattern` (the pipe is drained by
+    a background thread, so a line can trail the RPC notification)."""
+    deadline = time.monotonic() + timeout
+    while True:
+        err = stderr_since(sim, mark)
+        if re.search(pattern, err) or time.monotonic() > deadline:
+            return err
+        time.sleep(0.05)
+
+
+def expected_error(reason: str, case: str) -> str:
+    # image_too_large carries the simulator's code-region size as detail
+    return (reason + ": > 8388608 byte code region"
+            if case == "image_too_large" else reason)
 
 
 def test_baseline_image_loads_and_returns(simulator, test_sd_card):
@@ -139,20 +165,34 @@ def test_malformed_elf_refused(simulator, test_sd_card, case):
     before = sd_snapshot(test_sd_card)
     mark = len(simulator.get_output()["stderr"].splitlines())
 
+    log_path = Path(test_sd_card) / ERROR_LOG
+    log_before = log_path.read_text() if log_path.exists() else ""
+
     simulator.launch_app(name)
     outcome = simulator.wait_for_exit(timeout=LOAD_TIMEOUT)
-    err = stderr_since(simulator, mark)
-    out = simulator.get_output()["stdout"]
+    want = expected_error(reason, case)
 
+    # Primary: the RPC-delivered outcome.
     assert outcome.get("found"), outcome
-    assert outcome.get("result") == "load_failed", (outcome, err)
-    rejected = re.findall(r"\[UNICORN\] ELF rejected: ([^\n]*)", err)
-    assert rejected, f"no '[UNICORN] ELF rejected' line on stderr:\n{err}"
-    # image_too_large appends " (> N byte code region)"
-    assert rejected[0] == reason or rejected[0].startswith(reason + " ("), (rejected, err)
-    assert "Starting emulation" not in out.split(f"Loading native app: /apps/{name}")[-1]
+    assert outcome.get("result") == "load_failed", outcome
+    assert outcome.get("error") == want, outcome
+
+    # The firmware's error.log record, and no other SD change.
+    added = (log_path.read_text() if log_path.exists() else "")[len(log_before):]
+    assert f"--- NATIVE ERROR [{name}] ---\n{reason}\n" in added, added
+    after = sd_snapshot(test_sd_card)
+    after.pop(ERROR_LOG, None)
+    before.pop(ERROR_LOG, None)
+    assert after == before, "the refused launch changed the SD card"
+
     assert simulator.ping(), "simulator stopped answering after the refusal"
-    assert sd_snapshot(test_sd_card) == before, "the refused launch changed the SD card"
+
+    # Secondary: the stderr line (bounded poll: separate pipe and thread).
+    err = wait_stderr(simulator, mark, r"\[UNICORN\] ELF rejected: ")
+    rejected = re.findall(r"\[UNICORN\] ELF rejected: ([^\n]*)", err)
+    assert rejected and rejected[0] == want, (rejected, err)
+    out = simulator.get_output()["stdout"]
+    assert "Starting emulation" not in out.split(f"Loading native app: /apps/{name}")[-1]
 
 
 def test_sim_survives_every_refusal_in_a_row(simulator, test_sd_card):
@@ -165,6 +205,7 @@ def test_sim_survives_every_refusal_in_a_row(simulator, test_sd_card):
         simulator.launch_app(f"badelf_{case}")
         outcome = simulator.wait_for_exit(timeout=LOAD_TIMEOUT)
         assert outcome.get("result") == "load_failed", (case, outcome)
+        assert outcome.get("error") == expected_error(CASES[case][1], case), (case, outcome)
     simulator.launch_app("goodelf")
     assert simulator.wait_for_exit(timeout=LOAD_TIMEOUT).get("result") == "returned"
     assert simulator.ping()

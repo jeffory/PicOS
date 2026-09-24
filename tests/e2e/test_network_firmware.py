@@ -32,7 +32,6 @@ import pytest
 
 from helpers import E2E_DIR, case_params, lua_case_names, new_simulator, \
     run_lua_app, stage_lua_app, known_bug
-from picos_simulator import binary_sanitizers
 from net_servers import (BlackholeServer, HttpTestServer, TcpEchoServer,
                          big_body)
 
@@ -51,14 +50,9 @@ _DRIVEN = {"http_leave_inflight", "http_after_inflight_exit",
            "tcp_leave_open", "http_read_timeout_hang", "unknown_case"}
 CASES = [n for n in lua_case_names(APP_SRC) if n not in _DRIVEN]
 
-# Every file:line below is against develop after d49ff75 (the firmware files
-# are unchanged since); re-derive them if the code moves.
-TCP_FREE_RACE = ("review: tcp_free race — tcp_free (tcp.c:52-59) queues "
-                 "CLOSE, then frees rx_buf and zeroes the slot before Core 1 "
-                 "runs it, so CONN_REQ_TCP_CLOSE (wifi.c:522) sees pcb == NULL "
-                 "and the Mongoose connection stays open with fn_data on the "
-                 "dead slot; its next event locks the NULL spinlock "
-                 "(tcp_ev_fn, tcp.c:167/174)")
+# Every file:line below is against develop after d49ff75 (the firmware
+# http.c and wifi.c HTTP paths are unchanged since); re-derive them if the
+# code moves.
 HTTP_TIMEOUT_UAF = ("review: HTTP timeout-path use-after-free — every "
                     "http_check_timeouts branch (connect http.c:766-774, read "
                     "777-785, transfer 787-795) sets is_closing and drops pcb "
@@ -105,35 +99,7 @@ KNOWN_BUGS = {
         "http.c:25-29; called at http.c:652) and sent with "
         "memcpy(tx_len) (http.c:141): truncated at the first NUL and a heap "
         "over-read",
-    "tcp_close_while_receiving": TCP_FREE_RACE,
-    "tcp_close_then_reuse_slot": TCP_FREE_RACE,
-    "tcp_connect_timeout":
-        "review: tcp:setConnectTimeout/setReadTimeout only store into the "
-        "Lua userdata (lua_bridge_tcp.c:195, 209) and never reach the "
-        "connection; the 15 s default applies",
 }
-
-
-# Found by this suite (not in the review): Lua's sock:connect() passes the
-# socket's own host buffer to tcp_connect, which strncpy()s it onto itself.
-# Harmless in practice, but undefined behaviour, and ASan aborts on it, so
-# under ASan every case that connects a TCP socket stops there.
-TCP_STRNCPY_OVERLAP = ("new: l_tcp_connect passes ud->conn->host as the host "
-                       "to tcp_connect, which strncpy()s it onto itself "
-                       "(lua_bridge_tcp.c:107 -> tcp.c:64); ASan aborts on "
-                       "the overlapping strncpy at every TCP connect")
-TCP_CONNECTING = {"tcp_echo", "tcp_read_after_close", "tcp_leave_open",
-                  "tcp_close_while_receiving", "tcp_close_then_reuse_slot",
-                  "tcp_connect_timeout"}
-
-
-def xfail_tcp_connect_under_asan(request):
-    """Strict xfail for a TCP-connecting test on an ASan build (see
-    TCP_STRNCPY_OVERLAP); the release and TSan builds run it normally."""
-    san = binary_sanitizers(request.config.getoption("--simulator-path")) or ""
-    if "address" in san.split(","):
-        request.node.add_marker(pytest.mark.xfail(strict=True,
-                                                  reason=TCP_STRNCPY_OVERLAP))
 
 
 @pytest.fixture
@@ -201,9 +167,7 @@ def test_firmware_stack_is_up(simulator):
 
 
 @pytest.mark.parametrize("case", case_params(CASES, KNOWN_BUGS))
-def test_case(request, servers, simulator, case):
-    if case in TCP_CONNECTING:
-        xfail_tcp_connect_under_asan(request)
+def test_case(servers, simulator, case):
     run = run_case(simulator, servers, case)
     run.check_case(case)
     assert run.outcome.get("result") == "returned", run.describe()
@@ -247,10 +211,8 @@ def test_read_timeout_fires_before_headers(request, servers, simulator_binary,
         f"(server saw {closed})")
 
 
-@known_bug(TCP_FREE_RACE)
-def test_tcp_close_releases_server_side(request, servers, simulator):
+def test_tcp_close_releases_server_side(servers, simulator):
     """sock:close() must close the connection: the echo server sees EOF."""
-    xfail_tcp_connect_under_asan(request)
     run = run_case(simulator, servers, "tcp_echo")
     run.check_case("tcp_echo")
     still_open = servers["echo"].wait_all_closed(timeout=2.0)
@@ -259,11 +221,9 @@ def test_tcp_close_releases_server_side(request, servers, simulator):
         f"(accepted {servers['echo'].accepted})")
 
 
-@known_bug(TCP_FREE_RACE)
-def test_tcp_app_exit_closes_sockets(request, servers, simulator):
+def test_tcp_app_exit_closes_sockets(servers, simulator):
     """An app that exits with sockets open must not leave them open:
     teardown GCs the sockets (tcp_free)."""
-    xfail_tcp_connect_under_asan(request)
     run = run_case(simulator, servers, "tcp_leave_open")
     run.check_case("tcp_leave_open")
     assert servers["echo"].accepted == 3

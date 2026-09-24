@@ -80,9 +80,11 @@ jobs:
         uses: actions/checkout@v4
 
       - name: ARM toolchain
+        # Same packages as release.yml / fetch-firmware-deps.sh.
         run: |
           sudo apt-get update -q
-          sudo apt-get install -y gcc-arm-none-eabi libnewlib-arm-none-eabi
+          sudo apt-get install -y gcc-arm-none-eabi libnewlib-arm-none-eabi \
+            libstdc++-arm-none-eabi-newlib
 
       - name: Build the SDK sample (sdk/native/main.c)
         run: make -C sdk/native

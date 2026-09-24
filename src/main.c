@@ -541,11 +541,17 @@ static pctcp_t native_tcp_connect(const char *host, uint16_t port,
     return native_tcp_connect_ex(host, port, use_ssl ? PCTCP_TLS : 0);
 }
 
+// Native close releases the slot through the close protocol (tcp.h): the
+// handle is invalid afterwards; the slot is reclaimed once Core 1 lets go.
+static void native_tcp_close(pctcp_t c) {
+    tcp_free((tcp_conn_t *)c);
+}
+
 static picocalc_tcp_t s_tcp_impl = {
     .connect = native_tcp_connect,
     .write = (int (*)(pctcp_t, const void *, int))tcp_write,
     .read = (int (*)(pctcp_t, void *, int))tcp_read,
-    .close = (void (*)(pctcp_t))tcp_close,
+    .close = native_tcp_close,
     .available = (int (*)(pctcp_t))tcp_bytes_available,
     .getError = (const char *(*)(pctcp_t))tcp_get_error,
     .getEvents = (uint32_t (*)(pctcp_t))tcp_take_pending,

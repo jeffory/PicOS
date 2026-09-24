@@ -1853,7 +1853,7 @@ static void tramp_tcp_read(uc_engine *uc) {
 static void tramp_tcp_close(uc_engine *uc) {
     uint32_t handle = read_reg(uc, UC_ARM_REG_R0);
     tcp_conn_t *c = handle_unwrap(handle);
-    if (c) { tcp_close(c); tcp_free(c); }
+    if (c) tcp_free(c);  // releases the slot (firmware: asynchronously)
     handle_free(handle);
 }
 

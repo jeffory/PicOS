@@ -13,6 +13,8 @@
 // PicOS includes
 #include "os.h"
 #include "elf_plan.h"
+#include "crashlog.h"
+#include "sim_hooks.h"
 #include "hal/hal_display.h"
 #include "hal/hal_input.h"
 #include "hal/hal_sdcard.h"
@@ -272,14 +274,37 @@ static void trampoline_hook(uc_engine *uc, uint32_t intno, void *user_data) {
 // ELF loader
 // =============================================================================
 
+// Name of the app being loaded, for load_refused().
+static const char *s_loading_app_name = NULL;
+
+// A load failure, reported like the firmware loader's show_error()
+// (native_loader.c): an "[UNICORN] ELF rejected" line on stderr, a
+// NATIVE ERROR entry in /system/error.log, and the test channel's outcome
+// (app.exited result "load_failed", error "<reason>[: <detail>]").
+static void load_refused(const char *reason, const char *detail) {
+    char msg[160];
+    if (detail && detail[0])
+        snprintf(msg, sizeof(msg), "%s: %s", reason, detail);
+    else
+        snprintf(msg, sizeof(msg), "%s", reason);
+    fprintf(stderr, "[UNICORN] ELF rejected: %s\n", msg);
+    crashlog_write("NATIVE ERROR", s_loading_app_name, reason, detail);
+    sim_app_outcome_set(SIM_APP_RESULT_LOAD_FAILED, msg);
+    sim_log_err("[NATIVE] %s: %s", s_loading_app_name ? s_loading_app_name : "?", msg);
+}
+
 static bool load_elf(uc_engine *uc, const char *path, uint32_t *out_entry) {
     // Resolve virtual SD card path to host filesystem path
     char full_path[1024];
-    if (!hal_sdcard_resolve(path, full_path, sizeof(full_path))) return false;
+    if (!hal_sdcard_resolve(path, full_path, sizeof(full_path))) {
+        load_refused("ELF: cannot open file", path);
+        return false;
+    }
 
     FILE *f = fopen(full_path, "rb");
     if (!f) {
         fprintf(stderr, "[UNICORN] Failed to open ELF: %s (resolved: %s)\n", path, full_path);
+        load_refused("ELF: cannot open file", path);
         return false;
     }
 
@@ -296,19 +321,20 @@ static bool load_elf(uc_engine *uc, const char *path, uint32_t *out_entry) {
     elf_err_t eerr = elf_plan_header(ehdr_buf, (uint32_t)got,
                                      (uint32_t)file_len, &plan);
     if (eerr != ELF_OK) {
-        fprintf(stderr, "[UNICORN] ELF rejected: %s\n", elf_strerror(eerr));
+        load_refused(elf_strerror(eerr), NULL);
         fclose(f);
         return false;
     }
 
     uint8_t *phdrs = (uint8_t *)malloc(plan.phdrs_size);
     if (!phdrs) {
+        load_refused("ELF: out of memory for phdr", NULL);
         fclose(f);
         return false;
     }
     if (fseek(f, (long)plan.phoff, SEEK_SET) != 0 ||
         fread(phdrs, plan.phdrs_size, 1, f) != 1) {
-        fprintf(stderr, "[UNICORN] Failed to read program headers\n");
+        load_refused("ELF: failed to read phdr table", NULL);
         free(phdrs);
         fclose(f);
         return false;
@@ -317,10 +343,11 @@ static bool load_elf(uc_engine *uc, const char *path, uint32_t *out_entry) {
     eerr = elf_plan_segments(&plan, phdrs, plan.phdrs_size,
                              (uint32_t)file_len, EMU_CODE_SIZE);
     if (eerr != ELF_OK) {
-        fprintf(stderr, "[UNICORN] ELF rejected: %s", elf_strerror(eerr));
+        char detail[48] = "";
         if (eerr == ELF_ERR_IMAGE_TOO_LARGE)
-            fprintf(stderr, " (> %u byte code region)", (uint32_t)EMU_CODE_SIZE);
-        fprintf(stderr, "\n");
+            snprintf(detail, sizeof(detail), "> %u byte code region",
+                     (uint32_t)EMU_CODE_SIZE);
+        load_refused(elf_strerror(eerr), detail[0] ? detail : NULL);
         free(phdrs);
         fclose(f);
         return false;
@@ -334,7 +361,7 @@ static bool load_elf(uc_engine *uc, const char *path, uint32_t *out_entry) {
     // Allocate a host-side buffer to build the image, then write it all at once
     uint8_t *image_buf = (uint8_t *)calloc(1, image_size);
     if (!image_buf) {
-        fprintf(stderr, "[UNICORN] Failed to allocate image buffer\n");
+        load_refused("ELF: out of memory for image", NULL);
         free(phdrs);
         fclose(f);
         return false;
@@ -347,7 +374,7 @@ static bool load_elf(uc_engine *uc, const char *path, uint32_t *out_entry) {
         fseek(f, (long)ph.p_offset, SEEK_SET);
         size_t off = ph.p_vaddr - mem_min;
         if (fread(image_buf + off, ph.p_filesz, 1, f) != 1) {
-            fprintf(stderr, "[UNICORN] Failed to read segment %d\n", i);
+            load_refused("ELF: failed to read segment", NULL);
             free(image_buf);
             free(phdrs);
             fclose(f);
@@ -360,7 +387,7 @@ static bool load_elf(uc_engine *uc, const char *path, uint32_t *out_entry) {
     elf_reloc_stats_t rstats;
     eerr = elf_relocate(&plan, &region, 1, &rstats);
     if (eerr != ELF_OK) {
-        fprintf(stderr, "[UNICORN] ELF rejected: %s\n", elf_strerror(eerr));
+        load_refused(elf_strerror(eerr), NULL);
         free(image_buf);
         free(phdrs);
         fclose(f);
@@ -452,6 +479,7 @@ static bool mem_error_hook(uc_engine *uc, uc_mem_type type,
 bool unicorn_run_app(const char *elf_path, const char *app_dir,
                      const char *app_id, const char *app_name) {
     printf("[UNICORN] Loading native app: %s\n", elf_path);
+    s_loading_app_name = app_name;
 
     uc_engine *uc;
     uc_err err;

@@ -180,7 +180,36 @@ uint32_t tcp_bytes_available(tcp_conn_t *c) {
 }
 
 const char *tcp_get_error(tcp_conn_t *c) {
-    return c ? c->err : NULL;
+    return (c && c->err[0]) ? c->err : NULL;
+}
+
+// ── Core 0 helpers (tcp.h) ──────────────────────────────────────────────────
+// This layer frees slots synchronously: nothing to reap.
+
+void tcp_reap(void) {}
+
+void tcp_close_all(void) {
+    for (int i = 0; i < TCP_MAX_CONNECTIONS; i++)
+        if (s_conns[i].in_use)
+            tcp_free(&s_conns[i]);
+}
+
+tcp_conn_state_t tcp_get_state(tcp_conn_t *c) {
+    return c ? c->state : TCP_STATE_IDLE;
+}
+
+uint32_t tcp_take_pending_bits(tcp_conn_t *c, uint32_t mask) {
+    if (!c)
+        return 0;
+    return __atomic_fetch_and(&c->pending, ~mask, __ATOMIC_RELAXED) & mask;
+}
+
+void tcp_set_connect_timeout(tcp_conn_t *c, uint32_t ms) {
+    if (c) c->connect_timeout_ms = ms;
+}
+
+void tcp_set_read_timeout(tcp_conn_t *c, uint32_t ms) {
+    if (c) c->read_timeout_ms = ms;
 }
 
 uint32_t tcp_take_pending(tcp_conn_t *c) {

@@ -473,6 +473,71 @@ case_fw("tcp_close_then_reuse_slot", function()
     b:close()
 end)
 
+-- TCP callbacks fire, with the socket as their argument (they used to be
+-- dropped: tcp_lua_fire_pending took the events and discarded them).
+case_fw("tcp_callbacks_fire", function()
+    local s = T.ok(pc.tcp.new(HOST, cfg.echo, false), "tcp.new")
+    local got = { connect = 0, read = 0, arg_ok = true, data = {} }
+    s:setConnectCallback(function(c)
+        got.connect = got.connect + 1
+        if c ~= s then got.arg_ok = false end
+    end)
+    s:setReadCallback(function(c)
+        got.read = got.read + 1
+        if c ~= s then got.arg_ok = false end
+        local d = c:read(4096)
+        if d then got.data[#got.data + 1] = d end
+    end)
+    T.ok(s:connect(), "connect")
+    T.ok(wait(function() return got.connect > 0 end, 3000),
+         "connect callback never fired")
+    T.eq(s:write("ping"), 4, "write")
+    T.ok(wait(function() return #table.concat(got.data) >= 4 end, 3000),
+         "read callback never delivered the echo")
+    T.eq(table.concat(got.data), "ping", "echo via the read callback")
+    T.ok(got.arg_ok, "callbacks get the socket")
+    s:close()
+end)
+
+-- Events without a callback stay for sock:getEvents().
+case_fw("tcp_get_events", function()
+    local s = tcp_open()
+    spin(50)  -- the hook fires pending callbacks meanwhile
+    local ev = s:getEvents()
+    T.ok(ev & pc.tcp.CB_CONNECT ~= 0, "getEvents lost CB_CONNECT (" .. ev .. ")")
+    s:close()
+end)
+
+-- The server sends 20000 bytes (more than the 8 KiB ring) and goes quiet
+-- while the app is not reading: the rest must still arrive once the app
+-- reads (MG_EV_READ fires only for new bytes; the poll drain moves them).
+case_fw("tcp_ring_refills_after_burst", function()
+    local s = tcp_open()
+    T.eq(s:write("BURST\n"), 6, "write")
+    spin(300)
+    local d = tcp_read_until(s, 20000, 3000)
+    T.eq(#d, 20000, "bytes received after the burst")
+    local want = {}
+    for i = 0, 19999 do want[#want + 1] = string.char((i * 7) & 0xFF) end
+    T.ok(d == table.concat(want), "burst bytes differ")
+    s:close()
+end)
+
+-- setReadTimeout reaches the connection: a connected socket that receives
+-- nothing fails with "read timeout".
+case_fw("tcp_read_timeout", function()
+    local s = tcp_open()
+    s:setReadTimeout(1)
+    local t0 = now()
+    T.ok(wait(function()
+        local e = s:error()
+        return e ~= nil and e:find("read timeout") ~= nil
+    end, 3000), "no read timeout within 3 s: " .. tostring(s:error()))
+    T.ok(now() - t0 >= 900, "timed out too early")
+    T.eq(s:isConnected(), false, "isConnected after the timeout")
+    s:close()
+end)
+
 case_fw("tcp_connect_timeout", function()
     local s = T.ok(pc.tcp.new(HOST, cfg.blackhole, false), "tcp.new")
     s:setConnectTimeout(1)

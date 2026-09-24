@@ -6,14 +6,13 @@
 #include "hardware/timer.h"
 
 #define TCP_MT "picocalc.tcp"
-
-#define TCP_DEFAULT_CONNECT_TIMEOUT_MS 10000
-#define TCP_DEFAULT_READ_TIMEOUT_MS   10000
+// Registry key of a weak-valued table: light userdata (the tcp_ud_t) → the
+// socket object, so tcp_lua_fire_pending can pass the object to callbacks
+// and keep it alive while they run, without keeping sockets from GC.
+#define TCP_OBJS "picocalc.tcp.objs"
 
 typedef struct {
-    tcp_conn_t *conn;
-    uint32_t connect_timeout_ms;
-    uint32_t read_timeout_ms;
+    tcp_conn_t *conn;   // NULL once closed/GC'd (the slot is then released)
     int cb_connect;
     int cb_read;
     int cb_closed;
@@ -58,13 +57,19 @@ static void tcp_ud_unref_all(lua_State *L, tcp_ud_t *ud) {
     }
 }
 
-static int l_tcp_gc(lua_State *L) {
-    tcp_ud_t *ud = check_tcp(L, 1);
-    tcp_ud_unref_all(L, ud);
+// Release the C slot (asynchronously: tcp_free only queues the close and the
+// slot is reclaimed once Core 1 has let go of it, see tcp.h).
+static void tcp_ud_release(tcp_ud_t *ud) {
     if (ud->conn) {
         tcp_free(ud->conn);
         ud->conn = NULL;
     }
+}
+
+static int l_tcp_gc(lua_State *L) {
+    tcp_ud_t *ud = check_tcp(L, 1);
+    tcp_ud_unref_all(L, ud);
+    tcp_ud_release(ud);
     return 0;
 }
 
@@ -86,14 +91,18 @@ static int l_tcp_new(lua_State *L) {
 
     tcp_ud_t *ud = (tcp_ud_t *)lua_newuserdata(L, sizeof(tcp_ud_t));
     ud->conn = conn;
-    ud->connect_timeout_ms = TCP_DEFAULT_CONNECT_TIMEOUT_MS;
-    ud->read_timeout_ms = TCP_DEFAULT_READ_TIMEOUT_MS;
     ud->cb_connect = LUA_NOREF;
     ud->cb_read = LUA_NOREF;
     ud->cb_closed = LUA_NOREF;
 
     luaL_getmetatable(L, TCP_MT);
     lua_setmetatable(L, -2);
+
+    lua_getfield(L, LUA_REGISTRYINDEX, TCP_OBJS);
+    lua_pushvalue(L, -2);
+    lua_rawsetp(L, -2, ud);
+    lua_pop(L, 1);
+    conn->lua_ud = ud;
     return 1;
 }
 
@@ -107,7 +116,9 @@ static int l_tcp_connect(lua_State *L) {
     bool ok = tcp_connect(ud->conn, ud->conn->host, ud->conn->port, ud->conn->use_ssl);
     lua_pushboolean(L, ok);
     if (!ok) {
-        lua_pushstring(L, ud->conn->err[0] ? ud->conn->err : "failed to queue connect");
+        const char *err = tcp_get_error(ud->conn);
+        lua_pushstring(L, err ? err
+                              : "cannot connect now (already connecting or connected)");
     }
     return ok ? 1 : 2;
 }
@@ -129,7 +140,8 @@ static int l_tcp_read(lua_State *L) {
     tcp_ud_t *ud = check_tcp_open(L, 1);
     int max_len = (int)luaL_optinteger(L, 2, 4096);
 
-    if (!ud->conn || ud->conn->state != TCP_STATE_CONNECTED) {
+    // Data the peer sent before closing stays readable.
+    if (max_len <= 0 || tcp_bytes_available(ud->conn) == 0) {
         lua_pushnil(L);
         return 1;
     }
@@ -165,34 +177,41 @@ static int l_tcp_available(lua_State *L) {
 
 static int l_tcp_close(lua_State *L) {
     tcp_ud_t *ud = check_tcp(L, 1);
-    if (ud->conn) {
-        tcp_close(ud->conn);
-        tcp_free(ud->conn);
-        ud->conn = NULL;
-    }
+    tcp_ud_release(ud);
+    tcp_ud_unref_all(L, ud);
     return 0;
 }
 
 static int l_tcp_error(lua_State *L) {
     tcp_ud_t *ud = check_tcp(L, 1);
-    if (!ud->conn || ud->conn->err[0] == '\0') {
+    const char *err = ud->conn ? tcp_get_error(ud->conn) : NULL;
+    if (!err) {
         lua_pushnil(L);
         return 1;
     }
-    lua_pushstring(L, ud->conn->err);
+    lua_pushstring(L, err);
     return 1;
 }
 
 static int l_tcp_isConnected(lua_State *L) {
     tcp_ud_t *ud = check_tcp(L, 1);
-    bool connected = ud->conn && ud->conn->state == TCP_STATE_CONNECTED;
+    bool connected = ud->conn &&
+                     tcp_get_state(ud->conn) == TCP_STATE_CONNECTED;
     lua_pushboolean(L, connected);
     return 1;
 }
 
+// Seconds (fractions allowed) → ms; negative counts as 0.
+static uint32_t tcp_secs_to_ms(lua_State *L, int idx) {
+    lua_Number s = luaL_checknumber(L, idx);
+    return s > 0 ? (uint32_t)(s * 1000.0) : 0;
+}
+
+// sock:setConnectTimeout(seconds) — applies to the next connect().
 static int l_tcp_setConnectTimeout(lua_State *L) {
     tcp_ud_t *ud = check_tcp(L, 1);
-    ud->connect_timeout_ms = (uint32_t)(luaL_checknumber(L, 2) * 1000.0);
+    uint32_t ms = tcp_secs_to_ms(L, 2);
+    if (ud->conn) tcp_set_connect_timeout(ud->conn, ms);
     return 0;
 }
 
@@ -204,9 +223,12 @@ static int l_tcp_setInsecure(lua_State *L) {
     return 0;
 }
 
+// sock:setReadTimeout(seconds) — fail a connected socket that receives
+// nothing for that long; 0 turns it off (the default).
 static int l_tcp_setReadTimeout(lua_State *L) {
     tcp_ud_t *ud = check_tcp(L, 1);
-    ud->read_timeout_ms = (uint32_t)(luaL_checknumber(L, 2) * 1000.0);
+    uint32_t ms = tcp_secs_to_ms(L, 2);
+    if (ud->conn) tcp_set_read_timeout(ud->conn, ms);
     return 0;
 }
 
@@ -241,8 +263,9 @@ static int l_tcp_waitConnected(lua_State *L) {
     uint32_t timeout_ms = (uint32_t)(luaL_optnumber(L, 2, 10.0) * 1000.0);
     uint32_t start = to_ms_since_boot(get_absolute_time());
 
-    while (ud->conn && ud->conn->state != TCP_STATE_CONNECTED) {
-        if (ud->conn->state == TCP_STATE_FAILED || ud->conn->state == TCP_STATE_CLOSED) {
+    while (ud->conn && tcp_get_state(ud->conn) != TCP_STATE_CONNECTED) {
+        tcp_conn_state_t st = tcp_get_state(ud->conn);
+        if (st == TCP_STATE_FAILED || st == TCP_STATE_CLOSED) {
             break;
         }
         if (to_ms_since_boot(get_absolute_time()) - start > timeout_ms) {
@@ -251,7 +274,8 @@ static int l_tcp_waitConnected(lua_State *L) {
         sleep_ms(10);
     }
 
-    lua_pushboolean(L, ud->conn && ud->conn->state == TCP_STATE_CONNECTED);
+    lua_pushboolean(L, ud->conn &&
+                           tcp_get_state(ud->conn) == TCP_STATE_CONNECTED);
     return 1;
 }
 
@@ -260,7 +284,7 @@ static int l_tcp_waitData(lua_State *L) {
     uint32_t timeout_ms = (uint32_t)(luaL_optnumber(L, 2, 10.0) * 1000.0);
     uint32_t start = to_ms_since_boot(get_absolute_time());
 
-    while (ud->conn && ud->conn->state == TCP_STATE_CONNECTED) {
+    while (ud->conn && tcp_get_state(ud->conn) == TCP_STATE_CONNECTED) {
         if (tcp_bytes_available(ud->conn) > 0) {
             break;
         }
@@ -299,17 +323,78 @@ static const luaL_Reg l_tcp_lib[] = {
     {NULL, NULL}
 };
 
-void tcp_lua_fire_pending(lua_State *L) {
-    for (int i = 0; i < TCP_MAX_CONNECTIONS; i++) {
-        tcp_conn_t *c = tcp_get_conn(i);
-        if (!c || !c->in_use || !c->rx_buf) continue;
+// Push the socket object for ud (false, nothing pushed, if it was collected).
+static bool push_tcp_obj(lua_State *L, tcp_ud_t *ud) {
+    lua_getfield(L, LUA_REGISTRYINDEX, TCP_OBJS);
+    if (lua_istable(L, -1) && lua_rawgetp(L, -1, ud) == LUA_TUSERDATA) {
+        lua_remove(L, -2);
+        return true;
+    }
+    lua_pop(L, lua_istable(L, -1) ? 2 : 1);
+    return false;
+}
 
-        uint32_t events = tcp_take_pending(c);
-        if (events == 0) continue;
+static void tcp_fire(lua_State *L, tcp_ud_t *ud, tcp_conn_t *c, int obj,
+                     int ref, const char *what) {
+    // A callback that ran before this one may have closed the socket.
+    if (ud->conn != c || ref == LUA_NOREF)
+        return;
+    lua_rawgeti(L, LUA_REGISTRYINDEX, ref);
+    lua_pushvalue(L, obj);
+    if (lua_pcall(L, 1, 0, 0) != LUA_OK) {
+        printf("[TCP-LUA] %s callback error: %s\n", what, lua_tostring(L, -1));
+        lua_pop(L, 1);
     }
 }
 
+// Reclaim released slots, then fire the callbacks for pending events.
+// Called from the instruction hook, sys.sleep and the terminal's wait loop;
+// never re-entered (a callback that sleeps or runs long enough for the hook
+// leaves later events for the outer call).  Only the events that have a
+// callback are taken, so sock:getEvents() still sees the others.
+void tcp_lua_fire_pending(lua_State *L) {
+    static bool s_firing = false;
+    if (s_firing)
+        return;
+    s_firing = true;
+    tcp_reap();
+    for (int i = 0; i < TCP_MAX_CONNECTIONS; i++) {
+        tcp_conn_t *c = tcp_get_conn(i);
+        if (!c || !c->lua_ud) continue;
+        tcp_ud_t *ud = (tcp_ud_t *)c->lua_ud;
+
+        uint32_t mask = 0;
+        if (ud->cb_connect != LUA_NOREF) mask |= TCP_CB_CONNECT;
+        if (ud->cb_read != LUA_NOREF) mask |= TCP_CB_READ;
+        if (ud->cb_closed != LUA_NOREF) mask |= TCP_CB_CLOSED | TCP_CB_FAILED;
+        if (!mask) continue;
+        uint32_t events = tcp_take_pending_bits(c, mask);
+        if (!events) continue;
+        if (!push_tcp_obj(L, ud)) continue;  // collected; __gc releases it
+        int obj = lua_gettop(L);             // keeps ud alive meanwhile
+
+        if (events & TCP_CB_CONNECT)
+            tcp_fire(L, ud, c, obj, ud->cb_connect, "connect");
+        if (events & TCP_CB_READ)
+            tcp_fire(L, ud, c, obj, ud->cb_read, "read");
+        if (events & (TCP_CB_CLOSED | TCP_CB_FAILED))
+            tcp_fire(L, ud, c, obj, ud->cb_closed, "close");
+        lua_settop(L, obj - 1);
+    }
+    s_firing = false;
+}
+
 void lua_bridge_tcp_init(lua_State *L) {
+    // Sockets a previous app (Lua or native) left behind.
+    tcp_close_all();
+
+    lua_newtable(L);                       // objs
+    lua_newtable(L);                       // its metatable
+    lua_pushliteral(L, "v");
+    lua_setfield(L, -2, "__mode");
+    lua_setmetatable(L, -2);
+    lua_setfield(L, LUA_REGISTRYINDEX, TCP_OBJS);
+
     static const luaL_Reg tcp_meta[] = {{"__gc", l_tcp_gc}, {NULL, NULL}};
     lb_register_type(L, TCP_MT, l_tcp_methods, tcp_meta);
 

@@ -468,65 +468,47 @@ static void drain_requests(void) {
 
       case CONN_REQ_TCP_CONNECT: {
         tcp_conn_t *tc = (tcp_conn_t *)req.conn;
-        if (tc) {
-          char url[320];
-          snprintf(url, sizeof(url), "%s://%s:%u",
-                   tc->use_ssl ? "tls" : "tcp", tc->host, tc->port);
-          printf("[TCP] Connecting to %s (SSL=%d)...\n", url, tc->use_ssl);
-          if (tc->use_ssl && !tc->insecure && !tls_clock_ready()) {
-            printf("[TCP] Refusing TLS to %s: clock not set\n", tc->host);
-            snprintf(tc->err, sizeof(tc->err), "%s", WIFI_TLS_ERR_CLOCK);
-            uint32_t save = spin_lock_blocking(tc->spinlock);
-            tc->state = TCP_STATE_FAILED;
-            tc->pending |= TCP_CB_FAILED;
-            spin_unlock(tc->spinlock, save);
-            break;
-          }
-          tc->state = TCP_STATE_CONNECTING;
-          struct mg_connection *nc = mg_connect(&s_mgr, url, tcp_ev_fn, tc);
-          if (!nc) {
-            printf("[TCP] mg_connect failed\n");
-            tc->state = TCP_STATE_FAILED;
-            snprintf(tc->err, sizeof(tc->err), "mg_connect failed");
-            break;
-          }
-          // A tls:// URL only sets nc->is_tls; without mg_tls_init no
-          // handshake runs. Same init as the HTTPS path above.
-          if (tc->use_ssl) {
-            if (!tls_start(nc, tc->host, tc->insecure)) {
-              printf("[TCP] TLS init failed\n");
-              nc->fn_data = NULL;  // keep MG_EV_CLOSE from marking it CLOSED
-              mg_close_conn(nc);
-              snprintf(tc->err, sizeof(tc->err), "TLS init failed");
-              uint32_t save = spin_lock_blocking(tc->spinlock);
-              tc->state = TCP_STATE_FAILED;
-              tc->pending |= TCP_CB_FAILED;
-              spin_unlock(tc->spinlock, save);
-              break;
-            }
-          }
-          tc->pcb = (void *)nc;
+        // Released (or failed) before Core 1 got here: nothing to connect.
+        if (!tc || !tcp_c1_begin_connect(tc)) break;
+        char url[320];
+        snprintf(url, sizeof(url), "%s://%s:%u",
+                 tc->use_ssl ? "tls" : "tcp", tc->host, tc->port);
+        printf("[TCP] Connecting to %s (SSL=%d)...\n", url, tc->use_ssl);
+        if (tc->use_ssl && !tc->insecure && !tls_clock_ready()) {
+          printf("[TCP] Refusing TLS to %s: clock not set\n", tc->host);
+          tcp_c1_fail(tc, WIFI_TLS_ERR_CLOCK);
+          break;
         }
+        struct mg_connection *nc = mg_connect(&s_mgr, url, tcp_ev_fn, tc);
+        if (!nc) {
+          tcp_c1_fail(tc, "mg_connect failed");
+          break;
+        }
+        // A tls:// URL only sets nc->is_tls; without mg_tls_init no
+        // handshake runs. Same init as the HTTPS path above.
+        if (tc->use_ssl && !tls_start(nc, tc->host, tc->insecure)) {
+          nc->fn_data = NULL;  // keep MG_EV_CLOSE from marking it CLOSED
+          mg_close_conn(nc);
+          tcp_c1_fail(tc, "TLS init failed");
+          break;
+        }
+        tc->pcb = (void *)nc;
         break;
       }
 
       case CONN_REQ_TCP_WRITE: {
         tcp_conn_t *tc = (tcp_conn_t *)req.conn;
-        if (tc && tc->pcb && req.data) {
-          mg_send((struct mg_connection *)tc->pcb, req.data, req.data_len);
-        }
+        if (tc && req.data)
+          tcp_c1_send(tc, req.data, req.data_len);
         if (req.data) umm_free(req.data);
         break;
       }
 
-      case CONN_REQ_TCP_CLOSE: {
-        tcp_conn_t *tc = (tcp_conn_t *)req.conn;
-        if (tc && tc->pcb) {
-          ((struct mg_connection *)tc->pcb)->is_closing = 1;
-          tc->pcb = NULL;
-        }
+      case CONN_REQ_TCP_CLOSE:
+        // The close handler: fn_data cleared, connection closed, then the
+        // slot is RELEASED for Core 0 to reclaim (tcp.h).
+        if (req.conn) tcp_c1_release((tcp_conn_t *)req.conn);
         break;
-      }
 
       case CONN_REQ_WIFI_CONNECT:
         s_driver_data.wifi.ssid = s_ssid;
