@@ -1065,13 +1065,7 @@ void display_effect_posterize(uint8_t levels) {
 // Native audio callback
 _Atomic(void (*)(void)) g_native_audio_callback = NULL;
 
-// Audio ring buffer stubs
-uint32_t audio_ring_free(void) { return 4096; }
-void audio_stream_debug(uint32_t *isr_count, uint32_t *underruns, uint32_t *ring_used) {
-    if (isr_count) *isr_count = 0;
-    if (underruns) *underruns = 0;
-    if (ring_used) *ring_used = 0;
-}
+// audio_ring_free / audio_stream_debug live in sim_audio.c.
 
 // umm_malloc stubs (simulator maps to standard malloc)
 size_t umm_free_heap_size(void) { return 8 * 1024 * 1024; }
@@ -1129,38 +1123,7 @@ void video_player_set_osd_timeout(void* player, uint32_t ms) { (void)player; (vo
 #include "os.h"
 PicoCalcAPI g_api = {0};
 
-// ── Image API stubs ─────────────────────────────────────────────────────────
-#include "image_api.h"
-
-pc_image_t *image_load(const char *path) {
-    (void)path;
-    printf("[SIM] image_load() not implemented in simulator\n");
-    return NULL;
-}
-
-pc_image_t *image_new_blank(int width, int height) {
-    (void)width; (void)height;
-    printf("[SIM] image_new_blank() not implemented in simulator\n");
-    return NULL;
-}
-
-void image_free(pc_image_t *img) {
-    (void)img;
-}
-
-void image_draw(const pc_image_t *img, int x, int y) {
-    (void)img; (void)x; (void)y;
-}
-
-void image_draw_region(const pc_image_t *img,
-                       int sx, int sy, int sw, int sh,
-                       int dx, int dy) {
-    (void)img; (void)sx; (void)sy; (void)sw; (void)sh; (void)dx; (void)dy;
-}
-
-void image_draw_scaled(const pc_image_t *img, int x, int y, int dst_w, int dst_h) {
-    (void)img; (void)x; (void)y; (void)dst_w; (void)dst_h;
-}
+// image_* is the real src/drivers/image_api.c (linked, not stubbed).
 
 // --- Basic runner stub ---
 #include "../../src/os/app_runner.h"

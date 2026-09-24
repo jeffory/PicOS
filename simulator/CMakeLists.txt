@@ -126,6 +126,20 @@ add_library(image_decoders_sim STATIC
     ${GIF_DIR}/src/AnimatedGIF.cpp
 )
 
+# PNGdec bundles its own zlib, whose crc32() clashes with Unicorn's crc32c.c.
+# Rename it on every PNGdec source so the two never meet at link time.
+set_source_files_properties(
+    ${PNGDEC_DIR}/src/PNGdec.cpp
+    ${PNGDEC_DIR}/src/adler32.c
+    ${PNGDEC_DIR}/src/crc32.c
+    ${PNGDEC_DIR}/src/infback.c
+    ${PNGDEC_DIR}/src/inffast.c
+    ${PNGDEC_DIR}/src/inflate.c
+    ${PNGDEC_DIR}/src/inftrees.c
+    ${PNGDEC_DIR}/src/zutil.c
+    PROPERTIES COMPILE_DEFINITIONS "crc32=pngdec_crc32"
+)
+
 target_include_directories(image_decoders_sim PUBLIC
     ${TGX_DIR}/src
     ${JPEGDEC_DIR}/src
@@ -360,9 +374,11 @@ set_source_files_properties(
     "MINIZ_NO_STDIO;MINIZ_NO_ARCHIVE_WRITING_APIS;MINIZ_NO_ZLIB_COMPATIBLE_NAMES"
 )
 
-# Unicorn Engine's crc32c.c and PNGdec's crc32.c both define crc32 —
-# they are unrelated implementations; allow the linker to pick the first one.
-target_link_options(picos_simulator PRIVATE -Wl,--allow-multiple-definition)
+# No --allow-multiple-definition: it silently let simulator stubs win over
+# the real implementations (audio_ring_free, image_*), so a duplicate symbol
+# must now be a link error. The one legitimate clash — Unicorn's crc32c.c and
+# PNGdec's bundled zlib both defining crc32 — is resolved by renaming
+# PNGdec's copy on its sources (the set_source_files_properties on the PNGdec sources).
 
 # ── Install / Run ───────────────────────────────────────────────────────────
 set_target_properties(picos_simulator PROPERTIES
