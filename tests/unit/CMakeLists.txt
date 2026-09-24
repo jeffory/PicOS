@@ -75,6 +75,11 @@ target_include_directories(numfmt_sweep PRIVATE ${SRC}/os)
 target_compile_options(numfmt_sweep PRIVATE -O2 -Wno-error)
 target_link_libraries(numfmt_sweep PRIVATE m)
 
+# The simulator's SD-root containment (host filesystem; sim_log_err faked).
+picos_unit_test(test_sim_sdcard SOURCES ${PICOS_ROOT}/simulator/hal/hal_sdcard.c
+                INCLUDES ${PICOS_ROOT}/simulator/hal ${SRC}
+                DEFINES PICOS_SIMULATOR)
+
 # Modules that use the SD card and umm_*: in-memory SD fake, umm on malloc.
 # simulator/stubs first so umm_malloc.h / pico/mutex.h resolve to the stubs.
 set(SD_FAKE ${CMAKE_CURRENT_SOURCE_DIR}/fakes/sdcard_fake.c

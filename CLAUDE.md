@@ -298,6 +298,11 @@ The `id` is a path component (`/data/<id>`), so it must be 1-79 characters of `[
 
 SD card auto-creates `/data/` and `/system/` on first mount.
 
+### Save slots (`picocalc.game.save`)
+- Each slot is `/data/<app_id>/saves/<name>.json` (the directory is created on first use); the id comes from the C-owned app identity, never a Lua global. Serialised with the shared `picocalc.json` encoder/decoder (`lua_json_encode_push` / `lua_json_decode_push` in `lua_bridge_json.c`).
+- Names must pass `fs_name_valid` (`src/os/fs_path.c`): 1–128 bytes of `[A-Za-z0-9._-]`, no `..`, no leading `.`. Anything else: `set` returns `false, "invalid save name"`, `get` nil, `exists`/`delete` false.
+- Migration: saves used to live in a shared `/saves/<name>.json`. When an app touches a name whose per-app slot is missing and the legacy file exists, the file is **moved** (renamed) into that app's slot — so the first app to use a name claims it. `list()` shows only the app's own slots, not unclaimed legacy files.
+
 Optional `"min_psram_kb": N` in `app.json` makes the launcher refuse to start the app (with an on-screen reason and an error.log entry) unless the PSRAM heap has a single free block of at least N KB. Use it for apps that need one large contiguous allocation; total free bytes are not the test, the largest block is.
 
 ### Error and crash records (`src/os/crashlog.c`)

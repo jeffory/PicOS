@@ -34,3 +34,18 @@ bool fs_path_allowed(const char *path, bool write, const char *app_dir,
         return in_data;
     return in_data || path_under(path, app_dir);
 }
+
+bool fs_name_valid(const char *name, size_t len, size_t max_len) {
+    if (!name || len == 0 || len > max_len || name[0] == '.')
+        return false;
+    for (size_t i = 0; i < len; i++) {
+        char c = name[i];
+        bool ok = (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') ||
+                  (c >= '0' && c <= '9') || c == '.' || c == '_' || c == '-';
+        if (!ok)
+            return false;
+        if (c == '.' && i + 1 < len && name[i + 1] == '.')
+            return false;
+    }
+    return true;
+}

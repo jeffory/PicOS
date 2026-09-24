@@ -772,8 +772,9 @@ function Panels.new(comicData, opts)
     return comic
 end
 
--- Save key is namespaced by app id because game.save writes to a single
--- global /saves directory.
+-- Save key is namespaced by app id because game.save used to write to a
+-- single global /saves directory. Saves are per-app now, but the key is kept
+-- so progress saved before that change is still found (and migrated).
 function Comic:saveKey()
     local id = (APP_ID or "app"):gsub("[^%w_%-]", "_")
     return "panels_" .. id .. "_" .. self.saveName:gsub("[^%w_%-]", "_")

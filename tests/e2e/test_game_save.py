@@ -1,42 +1,35 @@
-"""game.save name handling and isolation (audit §3.2).
+"""game.save name handling, isolation and round-tripping (audit §3.2).
 
 Hostile names must not reach outside the save area, and one app must not
-read another's slots. Today saves live in a shared /saves and names are
-spliced into the path unchecked; Task 6 validates names and moves saves to
-/data/<app_id>/saves, which will turn the strict xfails below into passes.
+read another's slots. Saves live in /data/<app_id>/saves/<name>.json and
+names are limited to [A-Za-z0-9._-]; a save left at the pre-Task-6 shared
+/saves/<name>.json is moved into the first app that asks for that name.
 
-A traversal that would leave the SD root entirely is refused by the
-simulator's SD containment (Task 3), so no case can write to the host.
+Names are refused at the bridge before any path is built; behind that, the
+simulator's SD containment (Task 3) keeps any stray path on the SD image.
 """
 
 import json
 
 import pytest
 
-from helpers import case_params, known_bug, lua_case_names, run_lua_app
+from helpers import case_params, lua_case_names, run_lua_app
 
 SAVE_CASES = lua_case_names("save_test")
 
-SAVE_BUG = ("review: Lua Critical — game.save builds /saves/%s.json from the "
-            "raw name (.. resolves; long names truncate); Task 6")
-SHARED_BUG = ("review: Lua Critical — all apps share /saves; Task 6 makes saves "
-              "per-app")
-
-SAVE_KNOWN_BUGS = {
-    "traversal_set_rejected": SAVE_BUG,
-    "traversal_exists_rejected": SAVE_BUG,
-    "traversal_get_rejected": SAVE_BUG,
-    "traversal_delete_rejected": SAVE_BUG,
-    "long_names_do_not_collide": SAVE_BUG,
-}
+SAVE_KNOWN_BUGS = {}
 
 SYSTEM_CONFIG = {"sentinel": "keep"}
+SAVE_DIR = ("data", "com.test.save", "saves")
 
 
 def _stage(sd):
     (sd / "system" / "config.json").write_text(json.dumps(SYSTEM_CONFIG))
+    saves = sd.joinpath(*SAVE_DIR)
+    saves.mkdir(parents=True, exist_ok=True)
+    (saves / "bad.json").write_text('{"a":')
     (sd / "saves").mkdir(exist_ok=True)
-    (sd / "saves" / "bad.json").write_text('{"a":')
+    (sd / "saves" / "legacy.json").write_text('{"high_score":695}')
 
 
 @pytest.fixture(scope="module")
@@ -64,7 +57,6 @@ def test_no_write_outside_sd_root(save_runs):
     assert not list(run.sd.parent.glob("*.json"))
 
 
-@known_bug(SAVE_BUG)
 def test_system_files_untouched(save_runs):
     run, _ = save_runs
     sysdir = run.sd / "system"
@@ -74,8 +66,25 @@ def test_system_files_untouched(save_runs):
     assert json.loads(cfg.read_text()) == SYSTEM_CONFIG
 
 
-@known_bug(SHARED_BUG)
 def test_other_app_cannot_read_slot(save_runs):
     _, peer = save_runs
     peer.assert_clean_exit()
     peer.check_case("isolation_peer_cannot_read")
+
+
+def test_saves_land_in_app_data_dir(save_runs):
+    run, _ = save_runs
+    saves = run.sd.joinpath(*SAVE_DIR)
+    for name in ("ok_slot", "slot1"):
+        f = saves / f"{name}.json"
+        assert f.exists(), f"{f} missing: {sorted(p.name for p in saves.iterdir())}"
+        assert not (run.sd / "saves" / f"{name}.json").exists()
+
+
+def test_legacy_save_moved_into_app(save_runs):
+    run, _ = save_runs
+    moved = run.sd.joinpath(*SAVE_DIR) / "legacy.json"
+    assert moved.exists(), "legacy save was not migrated"
+    assert json.loads(moved.read_text()) == {"high_score": 695}
+    assert not (run.sd / "saves" / "legacy.json").exists(), \
+        "legacy save left behind in the shared /saves"

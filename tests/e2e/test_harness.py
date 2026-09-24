@@ -284,12 +284,12 @@ def test_sd_escape_is_refused(harness_sim, test_sd_card):
     assert out["result"] == "returned", out
     entries = sim.get_log_lines(0)
     assert not outside.exists(), "game.save wrote outside the SD root"
-    assert "H:ESCAPE false failed to open file for writing" in _texts(entries)
-    assert any("[SIM] SD escape: /saves/../../escape_probe.json" in t
-               for t in _texts(entries, "err")), _texts(entries, "err")
-    # A '..' that stays inside the root still resolves.
-    assert "H:INSIDE true" in _texts(entries)
-    assert (test_sd_card / "saves" / "inside_probe.json").exists()
+    # game.save refuses both names before any path is built (Task 6); the
+    # simulator's SD-root containment itself is unit-tested (test_sim_sdcard).
+    assert "H:ESCAPE false invalid save name" in _texts(entries)
+    assert "H:INSIDE false invalid save name" in _texts(entries)
+    assert not (test_sd_card / "saves" / "inside_probe.json").exists()
+    assert not list(test_sd_card.rglob("*_probe.json"))
 
 
 # ── Slow clients ────────────────────────────────────────────────────────────

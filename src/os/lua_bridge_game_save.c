@@ -1,56 +1,97 @@
 #include "lua_bridge_internal.h"
 #include "../drivers/sdcard.h"
+#include "app_identity.h"
+#include "fs_path.h"
 #include "umm_malloc.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 
+// picocalc.game.save: per-app JSON save slots.
+//
+// A slot lives at /data/<app_id>/saves/<name>.json, next to the app's config
+// store; <app_id> comes from the C-owned app identity, never from a Lua
+// global. Names are one path component of [A-Za-z0-9._-] (fs_name_valid), so
+// no name can climb out of the directory or collide through truncation.
+//
+// Before this layout every app shared /saves/<name>.json. A slot still found
+// there is moved into the first app that touches that name (get, exists, set
+// or delete), so existing high scores survive the upgrade.
+
+#define SAVE_MAX_NAME 128
+// "/data/" + id (<80) + "/saves/" + name + ".json" + NUL
 #define SAVE_MAX_PATH 256
-#define SAVE_MAX_DATA 65536
+
+// Validates the name at arg 1 and writes the slot's path to `path`; when the
+// app's slot is missing but a legacy /saves/<name>.json exists, moves that
+// file into place first. Returns false for a bad name or no running app.
+static bool save_path(lua_State *L, char *path, size_t size) {
+    size_t len = 0;
+    const char *name = luaL_checklstring(L, 1, &len);
+    const app_identity_t *me = app_identity_current();
+    if (!me || !fs_name_valid(name, len, SAVE_MAX_NAME))
+        return false;
+
+    int n = snprintf(path, size, "%s/saves", me->data_dir);
+    if (n < 0 || (size_t)n >= size)
+        return false;
+    if (!sdcard_fexists(path)) {
+        sdcard_mkdir(me->data_dir);
+        sdcard_mkdir(path);
+    }
+    n = snprintf(path, size, "%s/saves/%s.json", me->data_dir, name);
+    if (n < 0 || (size_t)n >= size)
+        return false;
+
+    if (!sdcard_fexists(path)) {
+        char legacy[SAVE_MAX_PATH];
+        snprintf(legacy, sizeof(legacy), "/saves/%s.json", name);
+        if (sdcard_fexists(legacy) && sdcard_rename(legacy, path))
+            printf("[SAVE] migrated %s -> %s\n", legacy, path);
+    }
+    return true;
+}
 
 static int l_save_set(lua_State *L) {
-    const char *filename = luaL_checkstring(L, 1);
-    luaL_checktype(L, 2, LUA_TTABLE);
-
     char path[SAVE_MAX_PATH];
-    snprintf(path, sizeof(path), "/saves/%s.json", filename);
+    luaL_checktype(L, 2, LUA_TTABLE);
+    if (!save_path(L, path, sizeof(path))) {
+        lua_pushboolean(L, 0);
+        lua_pushstring(L, "invalid save name");
+        return 2;
+    }
 
-    // Uses the shared picocalc.json encoder. The previous implementation was a
-    // flat inline loop that emitted `null` for any non-scalar value, so a table
-    // with nested fields was silently written out as unrecoverable data loss.
+    // The shared picocalc.json encoder: nested tables, escaped strings,
+    // integers as integers, floats in their shortest round-trip form.
     lua_json_encode_push(L, 2, 0);
+    size_t json_len = 0;
+    const char *json_str = lua_tolstring(L, -1, &json_len);
 
-    const char *json_str = lua_tostring(L, -1);
-    size_t json_len = strlen(json_str);
-    
-    sdcard_mkdir("/saves");
-    
     sdfile_t file = sdcard_fopen(path, "w");
     if (!file) {
         lua_pushboolean(L, 0);
         lua_pushstring(L, "failed to open file for writing");
         return 2;
     }
-    
     int written = sdcard_fwrite(file, json_str, json_len);
     sdcard_fclose(file);
-    
+
     if (written != (int)json_len) {
         lua_pushboolean(L, 0);
         lua_pushstring(L, "failed to write data");
         return 2;
     }
-    
     lua_pushboolean(L, 1);
     return 1;
 }
 
 static int l_save_get(lua_State *L) {
-    const char *filename = luaL_checkstring(L, 1);
-    
     char path[SAVE_MAX_PATH];
-    snprintf(path, sizeof(path), "/saves/%s.json", filename);
-    
+    if (!save_path(L, path, sizeof(path))) {
+        lua_pushnil(L);
+        return 1;
+    }
+
     int size = 0;
     char *data = sdcard_read_file(path, &size);
     if (!data) {
@@ -58,9 +99,6 @@ static int l_save_get(lua_State *L) {
         return 1;
     }
 
-    // Uses the shared picocalc.json decoder. The previous implementation was a
-    // hand-rolled flat scanner that could only recover top-level scalars, so it
-    // could not read back anything the (now fixed) encoder writes.
     const char *err = NULL;
     bool ok = lua_json_decode_push(L, data, (size_t)size, &err);
     umm_free(data);
@@ -72,35 +110,23 @@ static int l_save_get(lua_State *L) {
         lua_pushnil(L);
         return 1;
     }
-
-    // Guard the contract: callers index the result, so a save file holding a
-    // bare scalar or array must not be handed back as one.
+    // Callers index the result, so a bare scalar or array is not a save.
     if (!lua_istable(L, -1)) {
         lua_pop(L, 1);
         lua_pushnil(L);
-        return 1;
     }
-
     return 1;
 }
 
 static int l_save_exists(lua_State *L) {
-    const char *filename = luaL_checkstring(L, 1);
-    
     char path[SAVE_MAX_PATH];
-    snprintf(path, sizeof(path), "/saves/%s.json", filename);
-    
-    lua_pushboolean(L, sdcard_fexists(path));
+    lua_pushboolean(L, save_path(L, path, sizeof(path)) && sdcard_fexists(path));
     return 1;
 }
 
 static int l_save_delete(lua_State *L) {
-    const char *filename = luaL_checkstring(L, 1);
-    
     char path[SAVE_MAX_PATH];
-    snprintf(path, sizeof(path), "/saves/%s.json", filename);
-    
-    lua_pushboolean(L, sdcard_delete(path));
+    lua_pushboolean(L, save_path(L, path, sizeof(path)) && sdcard_delete(path));
     return 1;
 }
 
@@ -108,10 +134,10 @@ static void save_list_callback(const sdcard_entry_t *entry, void *user);
 
 static int l_save_list(lua_State *L) {
     lua_newtable(L);
-    
+
     int idx = 1;
     sdcard_list_dir("/saves", save_list_callback, &idx);
-    
+
     return 1;
 }
 

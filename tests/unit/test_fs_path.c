@@ -5,6 +5,7 @@
 
 #include <stdbool.h>
 #include <stddef.h>
+#include <string.h>
 
 #define APP  "/apps/sandbox_test"
 #define DATA "/data/com.test.sandbox"
@@ -97,7 +98,32 @@ static void test_identity_case(void) {
                          false));
 }
 
+// A single path component an app may name (game.save slots).
+static void test_name_valid(void) {
+  static const struct { const char *s; bool want; } k[] = {
+    {"slot1", true},       {"A-z_0.9", true},     {"a.b.c", true},
+    {"high_score", true},  {"x.", true},
+    {"", false},           {".", false},          {"..", false},
+    {".hidden", false},    {"a..b", false},       {"../x", false},
+    {"a/b", false},        {"a\\b", false},       {"a b", false},
+    {"a:b", false},        {"caf\xc3\xa9", false}, {"a*", false},
+  };
+  for (size_t i = 0; i < sizeof(k) / sizeof(k[0]); i++) {
+    bool got = fs_name_valid(k[i].s, strlen(k[i].s), 16);
+    if (got != k[i].want)
+      printf("  name '%s' -> %d, want %d\n", k[i].s, got, k[i].want);
+    CHECK(got == k[i].want);
+  }
+  // Embedded NUL: the Lua length counts it, strlen would not.
+  CHECK(!fs_name_valid("a\0b", 3, 16));
+  // Length limit is inclusive.
+  CHECK(fs_name_valid("abcdefghijklmnop", 16, 16));
+  CHECK(!fs_name_valid("abcdefghijklmnopq", 17, 16));
+  CHECK(!fs_name_valid(NULL, 0, 16));
+}
+
 int main(void) {
+  test_name_valid();
   test_table();
   test_missing_identity();
   test_identity_case();

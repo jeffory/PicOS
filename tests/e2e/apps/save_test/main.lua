@@ -1,9 +1,11 @@
 -- game.save name handling (audit §3.2), picotest kit. No requirements.
 --
--- The harness stages /system/config.json {"sentinel":"keep"} and a corrupt
--- /saves/bad.json, and checks on the host that no hostile name touched
--- anything outside the save area. Today saves live in the shared /saves;
--- Task 6 moves them to /data/<app_id>/saves, which these cases allow for.
+-- Saves live in /data/<app_id>/saves/<name>.json; names are limited to
+-- [A-Za-z0-9._-], 1-128 bytes, no "..", no leading ".". The harness stages
+-- /system/config.json {"sentinel":"keep"}, a corrupt
+-- /data/com.test.save/saves/bad.json and a legacy /saves/legacy.json, and
+-- checks on the host that no hostile name touched anything outside the save
+-- area and that the saves landed in the app's data dir.
 local pc = picocalc
 local save = pc.game.save
 local T = pc.sys.loadlib("picotest")
@@ -18,6 +20,28 @@ end)
 
 T.case("corrupt_file_reads_nil", function()
     T.eq(save.get("bad"), nil, "a corrupt save must read as no save")
+end)
+
+T.case("legacy_save_migrates", function()
+    -- Staged at the pre-Task-6 location /saves/legacy.json.
+    T.ok(save.exists("legacy"), "legacy save not found")
+    local b = T.ok(save.get("legacy"), "legacy get")
+    T.eq(b.high_score, 695, "high_score")
+end)
+
+T.case("bad_names_rejected", function()
+    local bad = { "", ".", "..", ".hidden", "a\\b", "a\0b", "a b", "a:b",
+                  "x/../y", string.rep("n", 129) }
+    for _, n in ipairs(bad) do
+        local ok, err = save.set(n, { v = 1 })
+        T.ok(not ok, "set accepted " .. string.format("%q", n))
+        T.eq(err, "invalid save name", "set error for " .. string.format("%q", n))
+        T.eq(save.get(n), nil, "get " .. string.format("%q", n))
+        T.eq(save.exists(n), false, "exists " .. string.format("%q", n))
+        T.eq(save.delete(n), false, "delete " .. string.format("%q", n))
+    end
+    T.ok(save.set(string.rep("n", 128), { v = 1 }), "128-byte name refused")
+    T.ok(save.set("A-z_0.9", { v = 1 }), "charset name refused")
 end)
 
 T.case("subdir_name_rejected", function()

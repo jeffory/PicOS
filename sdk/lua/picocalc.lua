@@ -2438,29 +2438,36 @@ function picocalc.game.scene.clearGlobals() end
 
 -- ── Save files ────────────────────────────────────────────────────────────────
 
+---Per-app save slots, one JSON file each at `/data/<app id>/saves/<key>.json`.
+---Keys are 1-128 bytes of `[A-Za-z0-9._-]`, contain no `..` and do not start
+---with `.`; any other key is refused. A slot left in the old shared
+---`/saves/<key>.json` is moved into the first app that uses that key.
 ---@class picocalc.game.save
 picocalc.game.save = {}
 
----Write a value to the app's save file. `value` must be serialisable (string, number, boolean, table).
+---Write a table (nested tables, strings, numbers, booleans) to slot `key`.
 ---@param key string
----@param value any
+---@param value table
+---@return boolean ok
+---@return string? err  "invalid save name" or an I/O error
 function picocalc.game.save.set(key, value) end
 
----Read a value from the app's save file.
+---Read slot `key`; nil if it is missing, corrupt or `key` is invalid.
 ---@param key string
----@return any
+---@return table?
 function picocalc.game.save.get(key) end
 
----Return `true` if a save key exists.
+---Return `true` if slot `key` exists.
 ---@param key string
 ---@return boolean
 function picocalc.game.save.exists(key) end
 
----Delete a save key.
+---Delete slot `key`; returns false if it did not exist or `key` is invalid.
 ---@param key string
+---@return boolean
 function picocalc.game.save.delete(key) end
 
----Return a list of all save keys.
+---Return the names of this app's saved slots.
 ---@return string[]
 function picocalc.game.save.list() end
 
