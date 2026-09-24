@@ -162,8 +162,10 @@ typedef struct kbd_event_s {
 bool kbd_poll_event(kbd_event_t *out);
 
 // True while the key is held (down seen, up not yet). Letters are
-// case-insensitive. Works for any keycode the STM32 reports press and release
-// for, letters included.
+// case-insensitive. Reliable for buttons (arrows, Enter, Esc, F-keys,
+// modifiers). Letters and shifted symbols depend on the STM32 reporting their
+// release under the same keycode: pending hardware confirmation. A key that
+// sticks is cleared by kbd_clear_state().
 bool kbd_is_key_down(uint8_t keycode);
 
 // Drop queued events only (held state is kept). Called when an app starts so

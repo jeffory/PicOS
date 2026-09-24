@@ -402,8 +402,10 @@ function picocalc.input.getButtonsRepeated() end
 function picocalc.input.pollEvent() end
 
 ---True while a key is held. `k` is a one-character string (`"w"`; letters
----ignore case) or an integer keycode as `pollEvent` reports it. Works for
----letters as well as buttons. Updated by `update()`.
+---ignore case) or an integer keycode as `pollEvent` reports it. Updated by
+---`update()`. Reliable for buttons (arrows, Enter, Esc, F-keys, modifiers);
+---letters and shifted symbols rely on the keyboard reporting their release and
+---are pending hardware confirmation. `clearState()` clears a key that sticks.
 ---@param k string|integer
 ---@return boolean
 function picocalc.input.isKeyDown(k) end
