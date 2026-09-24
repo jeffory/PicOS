@@ -461,13 +461,17 @@ function picocalc.sys.resumeBackground() end
 function picocalc.sys.loadlib(name) end
 
 ---Read bytes from PIO PSRAM (second 8MB chip, if present) into a string.
----@param addr integer Byte address in PIO PSRAM
+---Apps may use addresses from 0x48000 (288 KB) to the end of the chip; the
+---range below is the OS's (MP3 ring, video) and raises an error, as does
+---anything negative or past the chip.
+---@param addr integer Byte address in PIO PSRAM (>= 0x48000)
 ---@param len integer Bytes to read
 ---@return string? data nil if PIO PSRAM unavailable
 function picocalc.sys.pioPsramRead(addr, len) end
 
 ---Write a string to PIO PSRAM. Returns bytes written (0 if unavailable).
----@param addr integer Byte address in PIO PSRAM
+---Same address rules as `pioPsramRead` (errors below 0x48000).
+---@param addr integer Byte address in PIO PSRAM (>= 0x48000)
 ---@param data string
 ---@return integer bytes_written
 function picocalc.sys.pioPsramWrite(addr, data) end
@@ -476,25 +480,27 @@ function picocalc.sys.pioPsramWrite(addr, data) end
 ---@return integer
 function picocalc.sys.pioPsramSize() end
 
----Allocate bytes from the QMI PSRAM (umm_malloc) heap.
----Returns a light-userdata pointer, or nil on OOM. Free with `qmiPsramFree`.
----@param size integer Bytes to allocate
----@return userdata? ptr
+---Allocate a buffer from the QMI PSRAM (umm_malloc) heap.
+---Returns a bounds-checked buffer handle, or nil on OOM. The block is freed
+---by `qmiPsramFree` or when the handle is garbage-collected.
+---@param size integer Bytes to allocate (> 0)
+---@return userdata? handle
 function picocalc.sys.qmiPsramAlloc(size) end
 
----Free a pointer from `qmiPsramAlloc`.
----@param ptr userdata
-function picocalc.sys.qmiPsramFree(ptr) end
+---Free a buffer from `qmiPsramAlloc` (idempotent; later access raises).
+---@param handle userdata
+function picocalc.sys.qmiPsramFree(handle) end
 
----Write a string into a QMI PSRAM allocation at `offset`. Returns bytes written.
----@param ptr userdata Pointer from qmiPsramAlloc
+---Write a string into a QMI PSRAM buffer at `offset`. Returns bytes written.
+---Raises if offset+#data is past the buffer or the buffer was freed.
+---@param ptr userdata Handle from qmiPsramAlloc
 ---@param offset integer Byte offset into the allocation
 ---@param data string
 ---@return integer bytes_written
 function picocalc.sys.qmiPsramWrite(ptr, offset, data) end
 
----Read bytes from a QMI PSRAM allocation into a string.
----@param ptr userdata Pointer from qmiPsramAlloc
+---Read bytes from a QMI PSRAM buffer into a string (raises when out of range).
+---@param ptr userdata Handle from qmiPsramAlloc
 ---@param offset integer Byte offset into the allocation
 ---@param len integer Bytes to read
 ---@return string? data

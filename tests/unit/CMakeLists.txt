@@ -63,6 +63,7 @@ picos_unit_test(test_fs_path SOURCES ${SRC}/os/fs_path.c)
 picos_unit_test(test_app_manifest SOURCES ${SRC}/os/app_manifest.c)
 picos_unit_test(test_wav SOURCES ${SRC}/drivers/wav.c INCLUDES ${SRC}/drivers)
 picos_unit_test(test_audio_ring INCLUDES ${SRC}/drivers)
+picos_unit_test(test_pio_psram_range INCLUDES ${SRC}/drivers)
 picos_unit_test(test_zip_name SOURCES ${SRC}/os/zip_name.c)
 picos_unit_test(test_text_wrap SOURCES ${SRC}/os/text_wrap.c)
 # Lua float formatting vs glibc (built without PICOS_LUA_SPRINTF: no luaconf).

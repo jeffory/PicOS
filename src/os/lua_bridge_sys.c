@@ -329,12 +329,36 @@ static int l_sys_loadlib(lua_State *L) {
   return 1;  // return the module's result
 }
 
-// picocalc.sys.pioPsramRead(addr, len) -> string or nil
+// ── PIO PSRAM (apps get [PIO_PSRAM_APP_BASE, chip end) only) ───────────────
+
+// Raise a Lua error unless [addr, addr+len) is app-accessible PIO PSRAM.
+// Checked even when the chip is absent (against its nominal size), so an
+// app's mistake shows up on every device.
+static void pio_check_app_range(lua_State *L, const char *fn,
+                                lua_Integer addr, lua_Integer len) {
+  uint32_t chip = pio_psram_available() ? pio_psram_size() : PIO_PSRAM_SIZE;
+  pio_psram_range_t r =
+      pio_psram_app_range_check((int64_t)addr, (int64_t)len, chip);
+  if (r == PIO_PSRAM_RANGE_OK)
+    return;
+  char msg[96];  // lua_pushfstring has no %x
+  if (r == PIO_PSRAM_RANGE_RESERVED)
+    snprintf(msg, sizeof(msg),
+             "%s: address range reserved by the OS (apps start at 0x%lx)",
+             fn, (unsigned long)PIO_PSRAM_APP_BASE);
+  else
+    snprintf(msg, sizeof(msg),
+             "%s: address/length out of range (apps may use 0x%lx..0x%lx)",
+             fn, (unsigned long)PIO_PSRAM_APP_BASE, (unsigned long)chip);
+  luaL_error(L, "%s", msg);
+}
+
+// picocalc.sys.pioPsramRead(addr, len) -> string, or nil without the chip
 static int l_sys_pio_psram_read(lua_State *L) {
-  if (!pio_psram_available()) { lua_pushnil(L); return 1; }
   lua_Integer addr = luaL_checkinteger(L, 1);
   lua_Integer len  = luaL_checkinteger(L, 2);
-  if (len <= 0 || addr < 0) { lua_pushnil(L); return 1; }
+  pio_check_app_range(L, "pioPsramRead", addr, len);
+  if (!pio_psram_available() || len == 0) { lua_pushnil(L); return 1; }
   luaL_Buffer buf;
   char *p = luaL_buffinitsize(L, &buf, (size_t)len);
   pio_psram_read((uint32_t)addr, (uint8_t *)p, (uint32_t)len);
@@ -342,13 +366,15 @@ static int l_sys_pio_psram_read(lua_State *L) {
   return 1;
 }
 
-// picocalc.sys.pioPsramWrite(addr, data) -> bytes_written
+// picocalc.sys.pioPsramWrite(addr, data) -> bytes_written (0 without the chip)
 static int l_sys_pio_psram_write(lua_State *L) {
-  if (!pio_psram_available()) { lua_pushinteger(L, 0); return 1; }
   lua_Integer addr = luaL_checkinteger(L, 1);
   size_t len;
   const char *data = luaL_checklstring(L, 2, &len);
-  if (len == 0 || addr < 0) { lua_pushinteger(L, 0); return 1; }
+  if (len > (size_t)PIO_PSRAM_SIZE)
+    return luaL_error(L, "pioPsramWrite: data too large");
+  pio_check_app_range(L, "pioPsramWrite", addr, (lua_Integer)len);
+  if (!pio_psram_available() || len == 0) { lua_pushinteger(L, 0); return 1; }
   pio_psram_write((uint32_t)addr, (const uint8_t *)data, (uint32_t)len);
   lua_pushinteger(L, (lua_Integer)len);
   return 1;
@@ -360,46 +386,82 @@ static int l_sys_pio_psram_size(lua_State *L) {
   return 1;
 }
 
-// QMI PSRAM test functions — allocate/write/read/free a test buffer in QMI PSRAM
-extern void *umm_malloc(size_t size);
-extern void  umm_free(void *ptr);
+// ── QMI PSRAM buffers ────────────────────────────────────────────────────────
+// sys.qmiPsramAlloc(size) returns a full userdata that owns a umm_malloc
+// block and knows its size: reads and writes are bounds-checked, a freed
+// buffer refuses access, and the block is released when the handle is
+// collected (or the app's Lua state closes).  No raw pointers reach Lua.
 
-// sys.qmiPsramAlloc(size) -> handle (light userdata) or nil
+#define QMI_BUF_MT "picocalc.sys.qmibuf"
+
+typedef struct {
+  uint8_t *p;
+  size_t size;
+} qmi_buf_t;
+
+static void qmi_buf_release(qmi_buf_t *b) {
+  if (b->p) {
+    umm_free(b->p);
+    b->p = NULL;
+    b->size = 0;
+  }
+}
+
+// The buffer's bytes [off, off+len), or a Lua error.
+static uint8_t *qmi_buf_span(lua_State *L, lua_Integer off, lua_Integer len) {
+  qmi_buf_t *b = (qmi_buf_t *)luaL_checkudata(L, 1, QMI_BUF_MT);
+  if (!b->p)
+    luaL_error(L, "qmiPsram: buffer freed");
+  int64_t o = (int64_t)off, n = (int64_t)len, size = (int64_t)b->size;
+  if (o < 0 || n < 0 || o > size || n > size - o)
+    luaL_error(L, "qmiPsram: offset/length out of range (buffer is %d bytes)",
+               (int)b->size);
+  return b->p + off;
+}
+
+// sys.qmiPsramAlloc(size) -> handle, or nil when out of PSRAM
 static int l_sys_qmi_psram_alloc(lua_State *L) {
-  size_t size = (size_t)luaL_checkinteger(L, 1);
-  void *p = umm_malloc(size);
-  if (!p) { lua_pushnil(L); return 1; }
-  lua_pushlightuserdata(L, p);
+  lua_Integer size = luaL_checkinteger(L, 1);
+  luaL_argcheck(L, size > 0, 1, "size must be positive");
+  qmi_buf_t *b = (qmi_buf_t *)lua_newuserdatauv(L, sizeof(*b), 0);
+  b->p = NULL;
+  b->size = 0;
+  luaL_setmetatable(L, QMI_BUF_MT);
+  b->p = (uint8_t *)umm_malloc((size_t)size);
+  if (!b->p) { lua_pushnil(L); return 1; }
+  b->size = (size_t)size;
   return 1;
 }
 
-// sys.qmiPsramFree(handle)
+// sys.qmiPsramFree(handle) — idempotent
 static int l_sys_qmi_psram_free(lua_State *L) {
-  void *p = lua_touserdata(L, 1);
-  if (p) umm_free(p);
+  qmi_buf_release((qmi_buf_t *)luaL_checkudata(L, 1, QMI_BUF_MT));
   return 0;
 }
 
 // sys.qmiPsramWrite(handle, offset, data) -> bytes written
 static int l_sys_qmi_psram_write(lua_State *L) {
-  uint8_t *p = (uint8_t *)lua_touserdata(L, 1);
-  if (!p) { lua_pushinteger(L, 0); return 1; }
   lua_Integer offset = luaL_checkinteger(L, 2);
   size_t len;
   const char *data = luaL_checklstring(L, 3, &len);
-  memcpy(p + offset, data, len);
+  uint8_t *dst = qmi_buf_span(L, offset, (lua_Integer)len);
+  memcpy(dst, data, len);
   lua_pushinteger(L, (lua_Integer)len);
   return 1;
 }
 
 // sys.qmiPsramRead(handle, offset, len) -> string
 static int l_sys_qmi_psram_read(lua_State *L) {
-  uint8_t *p = (uint8_t *)lua_touserdata(L, 1);
-  if (!p) { lua_pushnil(L); return 1; }
   lua_Integer offset = luaL_checkinteger(L, 2);
   lua_Integer len = luaL_checkinteger(L, 3);
-  lua_pushlstring(L, (const char *)(p + offset), (size_t)len);
+  const uint8_t *src = qmi_buf_span(L, offset, len);
+  lua_pushlstring(L, (const char *)src, (size_t)len);
   return 1;
+}
+
+static int l_qmi_buf_gc(lua_State *L) {
+  qmi_buf_release((qmi_buf_t *)luaL_checkudata(L, 1, QMI_BUF_MT));
+  return 0;
 }
 
 // picocalc.sys.resetIdleTimer() — mark the device as active so the idle
@@ -456,6 +518,13 @@ static bool sys_update_allowed(void) {
 void lua_bridge_sys_init(lua_State *L) {
   s_lua_callback_count = 0;
   system_menu_clear_items();
+
+  luaL_newmetatable(L, QMI_BUF_MT);
+  lua_pushcfunction(L, l_qmi_buf_gc);
+  lua_setfield(L, -2, "__gc");
+  lua_pushliteral(L, "qmibuf");
+  lua_setfield(L, -2, "__metatable");
+  lua_pop(L, 1);
 
   // picocalc.sys (picocalc is at the top of the stack)
   lua_newtable(L);

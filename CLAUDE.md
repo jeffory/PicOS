@@ -185,7 +185,9 @@ A debug hook fires every 256 opcodes (`lua_sethook` with `LUA_MASKCOUNT`). The h
 ### PIO PSRAM (`src/drivers/pio_psram.c`)
 - Second 8MB PSRAM on the PicoCalc v2.0 mainboard, accessed via PIO1 SPI
 - Completely independent bus from QMI PSRAM/Flash XIP cache
-- Used for: MP3 PCM ring buffer (addr 0x0000, 32KB) and video buffer pool (addr 0x8000)
+- Layout (`pio_psram.h`): MP3 PCM ring `0x0000` (32KB), video region `0x8000` (256KB, reserved), apps from `PIO_PSRAM_APP_BASE` = `0x48000` (288KB)
+- Lua `sys.pioPsramRead/Write` may only touch `[PIO_PSRAM_APP_BASE, chip end)`: anything overlapping the OS region, negative, or past the chip raises a Lua error (`pio_psram_app_range_check`, 64-bit, host-tested). Native `g_api.psram` is unchecked.
+- Lua `sys.qmiPsramAlloc(size)` returns a bounds-checked buffer handle (userdata owning a `umm_malloc` block, freed by `qmiPsramFree` or GC); `qmiPsramRead/Write(handle, offset, …)` raise on out-of-range or freed handles. No raw pointers reach Lua.
 - `pio_psram_init()` called early in `main()`; non-fatal if chip absent
 
 ### System Menu (`src/os/system_menu.c`)

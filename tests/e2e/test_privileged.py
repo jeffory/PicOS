@@ -38,6 +38,56 @@ T.case("applyUpdate_absent", function()
     T.eq(sys.applyUpdate, nil, "sys.applyUpdate without system-update")
 end)
 
+T.case("pio_write_mp3_ring_errors", function()
+    T.raises(function() sys.pioPsramWrite(0, "x") end, "reserved")
+end)
+
+T.case("pio_write_video_pool_errors", function()
+    T.raises(function() sys.pioPsramWrite(0x8000, "x") end, "reserved")
+end)
+
+T.case("pio_write_straddling_base_errors", function()
+    T.raises(function() sys.pioPsramWrite(APP_BASE - 1, "xy") end, "reserved")
+end)
+
+T.case("pio_read_reserved_errors", function()
+    T.raises(function() sys.pioPsramRead(0x100, 16) end, "reserved")
+end)
+
+T.case("pio_negative_errors", function()
+    T.raises(function() sys.pioPsramWrite(-1, "x") end, "range")
+    T.raises(function() sys.pioPsramRead(APP_BASE, -5) end, "range")
+end)
+
+T.case("pio_past_chip_errors", function()
+    -- 64-bit arithmetic: addr + len must not wrap into the app region.
+    T.raises(function() sys.pioPsramRead(0xFFFFFFFF, 2) end, "range")
+    T.raises(function() sys.pioPsramRead(APP_BASE, 0x7FFFFFFF) end, "range")
+end)
+
+T.case("pio_app_region_allowed", function()
+    local ok, err = pcall(sys.pioPsramWrite, APP_BASE, "x")
+    T.ok(ok, "write at PIO_PSRAM_APP_BASE: " .. tostring(err))
+end)
+
+T.case("qmi_handle_bounds", function()
+    local h = T.ok(sys.qmiPsramAlloc(64), "qmiPsramAlloc(64)")
+    T.eq(sys.qmiPsramWrite(h, 60, "abcd"), 4)
+    T.eq(sys.qmiPsramRead(h, 60, 4), "abcd")
+    T.raises(function() sys.qmiPsramWrite(h, 64, "x") end, "range")
+    T.raises(function() sys.qmiPsramWrite(h, -1, "x") end, "range")
+    T.raises(function() sys.qmiPsramRead(h, 60, 8) end, "range")
+    sys.qmiPsramFree(h)
+    T.raises(function() sys.qmiPsramWrite(h, 0, "x") end, "freed")
+    sys.qmiPsramFree(h)  -- double free is a no-op, not a heap corruption
+end)
+
+T.case("qmi_rejects_foreign_values", function()
+    T.raises(function() sys.qmiPsramFree("not a handle") end)
+    T.raises(function() sys.qmiPsramWrite({{}}, 0, "x") end)
+    T.raises(function() sys.qmiPsramRead(picocalc.json, 0, 1) end)
+end)
+
 T.done()
 """
 
