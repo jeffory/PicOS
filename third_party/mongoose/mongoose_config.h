@@ -8,3 +8,6 @@
 #define MG_ENABLE_SOCKET 0
 #define MG_IO_SIZE 8192
 #define MG_ENABLE_CUSTOM_CALLOC 1
+// mg_random() comes from src/drivers/rng.c (TRNG-seeded CTR_DRBG), not the
+// built-in get_rand_32() (xoroshiro) loop.
+#define MG_ENABLE_CUSTOM_RANDOM 1

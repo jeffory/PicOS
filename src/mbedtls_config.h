@@ -14,7 +14,9 @@ extern void umm_free(void *ptr);
 #define MBEDTLS_PLATFORM_CALLOC_MACRO      umm_calloc
 #define MBEDTLS_PLATFORM_EXIT_ALT
 #define MBEDTLS_NO_PLATFORM_ENTROPY        // disable /dev/urandom etc.
-#define MBEDTLS_ENTROPY_HARDWARE_ALT       // use pico_mbedtls mbedtls_hardware_poll (get_rand_64)
+// No MBEDTLS_ENTROPY_HARDWARE_ALT: pico_mbedtls's mbedtls_hardware_poll is
+// get_rand_64 (xoroshiro).  src/drivers/rng.c adds the RP2350 TRNG (health
+// tests on) as the entropy source of every DRBG it seeds.
 #define MBEDTLS_ENTROPY_C
 #define MBEDTLS_CTR_DRBG_C
 

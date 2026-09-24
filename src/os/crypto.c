@@ -1,8 +1,6 @@
 #include "crypto.h"
 #include "lua_psram_alloc.h"
 
-#include "mbedtls/ctr_drbg.h"
-#include "mbedtls/entropy.h"
 #include "mbedtls/sha256.h"
 #include "mbedtls/sha1.h"
 #include "mbedtls/md.h"
@@ -18,25 +16,9 @@
 
 #include <string.h>
 
-// ── Module-level RNG ─────────────────────────────────────────────────────────
-static mbedtls_ctr_drbg_context s_ctr_drbg;
-static mbedtls_entropy_context  s_entropy;
-static bool s_rng_seeded = false;
-
-static int ensure_rng(void) {
-    if (s_rng_seeded) return 0;
-    mbedtls_entropy_init(&s_entropy);
-    mbedtls_ctr_drbg_init(&s_ctr_drbg);
-    int ret = mbedtls_ctr_drbg_seed(&s_ctr_drbg, mbedtls_entropy_func,
-                                     &s_entropy, (const unsigned char *)"picos_crypto", 12);
-    if (ret != 0) {
-        mbedtls_ctr_drbg_free(&s_ctr_drbg);
-        mbedtls_entropy_free(&s_entropy);
-        return ret;
-    }
-    s_rng_seeded = true;
-    return 0;
-}
+// ── RNG ──────────────────────────────────────────────────────────────────────
+// TRNG-seeded CTR_DRBG, one per core (src/drivers/rng.c).
+#include "../drivers/rng.h"
 
 // ── Opaque struct definitions ─────────────────────────────────────────────────
 
@@ -86,8 +68,8 @@ void crypto_hmac_sha1(const uint8_t *key, uint32_t klen,
 }
 
 void crypto_random_bytes(uint8_t *buf, uint32_t len) {
-    if (ensure_rng() != 0) return;
-    mbedtls_ctr_drbg_random(&s_ctr_drbg, buf, len);
+    // On failure rng_bytes zeroes buf (callers get no error channel).
+    (void)rng_bytes(buf, len);
 }
 
 // ── SSH session-key derivation (RFC 4253 §7.2) ───────────────────────────────
@@ -115,7 +97,7 @@ void crypto_derive_key(char letter,
     have = 32;
 
     // Additional rounds if needed: SHA256(K || H || K1 || ... || Kn-1)
-    while (have < (int)out_len) {
+    while (have < out_len) {
         if (have + 32 > 256) break;  // safety: never write past result[]
         mbedtls_sha256_init(&ctx);
         mbedtls_sha256_starts(&ctx, 0);
@@ -203,11 +185,10 @@ void crypto_ecdh_get_public_key(crypto_ecdh_t *ctx, uint8_t *out, uint32_t *out_
 
     if (!ctx->has_keypair) {
         // Generate keypair (first call only)
-        if (ensure_rng() != 0) { *out_len = 0; return; }
         uint8_t tls_buf[128];
         size_t olen = 0;
         int ret = mbedtls_ecdh_make_public(&ctx->ctx, &olen, tls_buf, sizeof(tls_buf),
-                                            mbedtls_ctr_drbg_random, &s_ctr_drbg);
+                                            rng_mbedtls_random, NULL);
         if (ret != 0 || olen < 2) { *out_len = 0; return; }
         // Strip TLS 1-byte length prefix; save raw public key bytes
         uint32_t data_len = (uint32_t)(olen - 1);
@@ -227,7 +208,6 @@ int crypto_ecdh_compute_shared(crypto_ecdh_t *ctx,
                                 const uint8_t *remote, uint32_t rlen,
                                 uint8_t *out, uint32_t *out_len) {
     if (!ctx || !ctx->valid) return -1;
-    if (ensure_rng() != 0) return -1;
 
     // Wrap peer public key in TLS format: [1-byte length][point data]
     uint8_t tls_peer[128];
@@ -241,7 +221,7 @@ int crypto_ecdh_compute_shared(crypto_ecdh_t *ctx,
     uint8_t secret[32];
     size_t olen = 0;
     ret = mbedtls_ecdh_calc_secret(&ctx->ctx, &olen, secret, sizeof(secret),
-                                    mbedtls_ctr_drbg_random, &s_ctr_drbg);
+                                    rng_mbedtls_random, NULL);
     if (ret != 0) return ret;
 
     uint32_t copy_len = (uint32_t)olen;
@@ -304,6 +284,13 @@ bool crypto_rsa_verify(const uint8_t *pubkey, uint32_t pklen,
 
     ret = mbedtls_rsa_complete(&rsa);
     if (ret != 0) { mbedtls_rsa_free(&rsa); return false; }
+
+    // mbedtls_rsa_pkcs1_verify reads exactly rsa_len bytes from sig: a
+    // shorter buffer is an over-read, a longer one hides trailing bytes.
+    if (slen != (uint32_t)mbedtls_rsa_get_len(&rsa)) {
+        mbedtls_rsa_free(&rsa);
+        return false;
+    }
 
     // rsa-sha2-256: PKCS#1 v1.5 with SHA-256
     ret = mbedtls_rsa_pkcs1_verify(&rsa, MBEDTLS_MD_SHA256, 32, hash, sig);
