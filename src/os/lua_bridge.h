@@ -64,6 +64,20 @@ static inline bool lua_bridge_is_exit_sentinel(lua_State *L, int idx) {
 // raise (exit) and may run Lua callbacks.
 void lua_bridge_service(lua_State *L);
 
+// The count hook's form of it, also called by input.update(): the watchdog,
+// exit and Sym checks every time, the rest only when work is pending or the
+// last full pass is more than 5 ms old. Apps that spend their time in C
+// calls (few instructions, so few hook calls) are still served every frame.
+void lua_bridge_service_poll(lua_State *L);
+
+// Work for the service pass (a Lua callback to fire, a dev command to run).
+// Set from any core or thread (Core 1's audio trampolines, the simulator's
+// control socket); the next hook call runs the full pass.
+extern volatile bool g_lua_service_pending;
+static inline void lua_bridge_request_service(void) {
+  g_lua_service_pending = true;
+}
+
 // Frees the REPL scrollback (allocated on first repl.* use). The runner calls
 // it when the app exits.
 void lua_bridge_repl_release(void);

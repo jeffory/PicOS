@@ -40,11 +40,11 @@ static int l_input_getChar(lua_State *L) {
 
 static int l_input_update(lua_State *L) {
   kbd_poll();
-  // Bypass the 256-opcode Lua hook latency by serving the system menu
-  // instantly if a button press was detected during this explicit update.
-  if (kbd_consume_menu_press()) {
-    system_menu_show(L);
-  }
+  // The hook's service pass (time-gated; see lua_bridge.h): a Sym press
+  // detected by this poll opens the system menu at once, and an app that
+  // spends its frames in C calls (few instructions, few hook calls) still
+  // gets its callbacks and dev commands (MCP keypress, exit) every frame.
+  lua_bridge_service_poll(L);
   return 0;
 }
 

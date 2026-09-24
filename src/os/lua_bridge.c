@@ -171,8 +171,25 @@ void lb_register_type(lua_State *L, const char *mtname,
 // lua_bridge_exit_reset once the app's VM has returned.
 static bool s_exit_requested = false;
 
-// Instructions between two count-hook calls while the app runs normally.
-#define LUA_HOOK_COUNT 256
+// Instructions between two count-hook calls. Each call is a few flag reads
+// unless the full service pass is due (see lua_service below). The count
+// adapts (menu_lua_hook) so the hook fires about every LUA_HOOK_TARGET_US of
+// wall time: up to LUA_HOOK_COUNT_MAX in compute-bound code (the old fixed
+// 256 cost ~10-25% of VM time), down to LUA_HOOK_COUNT_MIN in apps that spend
+// their time in C calls (a draw loop runs a few instructions per frame, so a
+// large fixed count would delay exit_app and dev commands by seconds).
+#define LUA_HOOK_COUNT_MIN 128
+#define LUA_HOOK_COUNT_MAX 4096
+// At registration: start low; compute-bound code reaches the maximum within
+// a couple of hook calls, while an app that is idle from the start is not
+// left waiting for a large first count.
+#define LUA_HOOK_COUNT LUA_HOOK_COUNT_MIN
+#define LUA_HOOK_TARGET_US 1000u
+// Longest gap between two full service passes while the hook fires.
+#define LUA_SERVICE_PERIOD_US 5000u
+
+static int s_hook_count = LUA_HOOK_COUNT;  // the adaptive count (Core 0)
+static uint32_t s_last_hook_us = 0;
 
 static void menu_lua_hook(lua_State *L, lua_Debug *ar);
 
@@ -210,14 +227,34 @@ void lua_bridge_exit_reset(lua_State *L) {
   dev_commands_clear_exit();
   if (L)
     lua_bridge_install_hook(L, LUA_HOOK_COUNT);
+  s_hook_count = LUA_HOOK_COUNT;
 }
 
-// One service pass (see lua_bridge.h). WiFi is driven by Core 1 (wifi_poll
-// every 5 ms), so nothing here polls it.
-void lua_bridge_service(lua_State *L) {
-  watchdog_update(); // kick watchdog
-  if (s_exit_requested)
-    lua_bridge_raise_exit(L);  // an earlier exit was swallowed: raise again
+// ── Service pass (see lua_bridge.h) ─────────────────────────────────────────
+// The count hook fires every LUA_HOOK_COUNT instructions. It always does the
+// cheap part (watchdog, exit request, Sym press: flag reads) and runs the
+// full pass (HTTP/TCP slot scans, sound callbacks, the serial dev-command
+// poll, which takes the stdio mutex and TinyUSB on firmware, reboot flags,
+// screenshots, low-memory GC) only when work was flagged pending or
+// LUA_SERVICE_PERIOD_US has passed since the last full pass. The period is
+// the latency bound for anything that does not flag itself (HTTP/TCP
+// events, serial dev commands on firmware).
+volatile bool g_lua_service_pending = false;
+static uint32_t s_last_full_pass_us = 0;
+
+static inline uint32_t service_now_us(void) {
+#ifdef PICOS_SIMULATOR
+  extern uint64_t hal_get_time_us(void);
+  return (uint32_t)hal_get_time_us();
+#else
+  return time_us_32();
+#endif
+}
+
+// The expensive part. May raise (exit) and may run Lua callbacks.
+static void lua_service_full(lua_State *L) {
+  g_lua_service_pending = false;
+  s_last_full_pass_us = service_now_us();
   http_lua_fire_pending(L); // fire any queued HTTP Lua callbacks
   tcp_lua_fire_pending(L);  // fire any queued TCP Lua callbacks
   lua_bridge_sound_poll(L); // fire any pending sound finish/loop callbacks
@@ -253,8 +290,6 @@ void lua_bridge_service(lua_State *L) {
     dev_commands_clear_reboot_ota();
     printf("[DEV] reboot-ota ignored: an app is running (exit it first)\n");
   }
-  if (kbd_consume_menu_press())
-    system_menu_show(L);
   // Both screenshot triggers set s_screenshot_pending so the capture fires
   // inside l_display_flush — always on a fully-drawn, flushed frame.
   if (kbd_consume_screenshot_press())
@@ -281,11 +316,44 @@ void lua_bridge_service(lua_State *L) {
   }
 }
 
+// The cheap part plus, when due, the full pass.
+static void lua_service(lua_State *L, bool force) {
+  watchdog_update(); // kick watchdog
+  if (s_exit_requested || dev_commands_wants_exit())
+    lua_bridge_raise_exit(L);  // new, or an earlier one that was swallowed
+  if (force || g_lua_service_pending ||
+      (uint32_t)(service_now_us() - s_last_full_pass_us) >= LUA_SERVICE_PERIOD_US)
+    lua_service_full(L);
+  if (kbd_consume_menu_press())
+    system_menu_show(L);
+}
+
+void lua_bridge_service(lua_State *L) { lua_service(L, true); }
+
+void lua_bridge_service_poll(lua_State *L) { lua_service(L, false); }
+
 // Instruction-count hook: fires every LUA_HOOK_COUNT Lua opcodes (every
 // opcode once an exit was requested).
 static void menu_lua_hook(lua_State *L, lua_Debug *ar) {
   (void)ar;
-  lua_bridge_service(L);
+  if (!s_exit_requested) {
+    // Rescale the count when the gap since the last call is off target by
+    // more than 2x either way (so a steady app is left alone).
+    uint32_t now = service_now_us();
+    uint32_t dt = now - s_last_hook_us;
+    s_last_hook_us = now;
+    if (dt < LUA_HOOK_TARGET_US / 2 || dt > LUA_HOOK_TARGET_US * 2) {
+      uint64_t want = (uint64_t)s_hook_count * LUA_HOOK_TARGET_US / (dt ? dt : 1);
+      int count = want < LUA_HOOK_COUNT_MIN   ? LUA_HOOK_COUNT_MIN
+                  : want > LUA_HOOK_COUNT_MAX ? LUA_HOOK_COUNT_MAX
+                                              : (int)want;
+      if (count != s_hook_count) {
+        s_hook_count = count;
+        lua_bridge_install_hook(L, count);
+      }
+    }
+  }
+  lua_service(L, false);
 }
 
 
@@ -434,6 +502,7 @@ void lua_bridge_register(lua_State *L) {
   // Install instruction-count hook for menu button interception.
   // Fires every LUA_HOOK_COUNT Lua opcodes to catch menu button presses
   // even during tight loops, without requiring apps to poll input.
+  s_hook_count = LUA_HOOK_COUNT;
   lua_bridge_install_hook(L, LUA_HOOK_COUNT);
   printf("[LUA] lua_bridge_register complete\n");
 }

@@ -603,9 +603,10 @@ static int l_sound_fileplayer_resume(lua_State *L) {
 
 // ── Cross-core callback system ──────────────────────────────────────────────
 // Audio callbacks fire on Core 1 (sound_update / fileplayer_update).  Lua runs
-// on Core 0.  The trampoline sets a volatile pending flag; Core 0 polls it in
-// lua_bridge_sound_poll() (called from the Lua instruction-count hook every 256
-// opcodes) and fires the Lua function reference.
+// on Core 0.  The trampoline sets a volatile pending flag (and requests a
+// service pass); Core 0 polls it in lua_bridge_sound_poll(), run by the
+// service pass (count hook, sys.sleep, terminal waits, input.update), and
+// fires the Lua function reference.
 
 typedef struct {
     lua_State *L;
@@ -622,10 +623,12 @@ static sound_lua_cb_t s_fp_loop_cbs[MAX_FILEPLAYER_CBS];
 static sound_lua_cb_t s_sp_finish_cbs[MAX_SAMPLEPLAYER_CBS];
 static sound_lua_cb_t s_sp_loop_cbs[MAX_SAMPLEPLAYER_CBS];
 
-// Trampolines — run on Core 1, just set pending flag
+// Trampolines — run on Core 1, just set pending flags (the slot's, and the
+// service pass's so the next hook call fires it)
 static int trampoline_set_pending(void *arg) {
     sound_lua_cb_t *cb = (sound_lua_cb_t *)arg;
     cb->pending = 1;
+    lua_bridge_request_service();
     return 0;
 }
 
