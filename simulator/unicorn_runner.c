@@ -12,6 +12,7 @@
 
 // PicOS includes
 #include "os.h"
+#include "elf_plan.h"
 #include "hal/hal_display.h"
 #include "hal/hal_input.h"
 #include "hal/hal_sdcard.h"
@@ -56,79 +57,8 @@
 int g_emu_nested_stop = 0;
 
 // =============================================================================
-// Minimal ELF32 types (same as native_loader.c)
+// ELF validation/relocation: src/os/elf_plan.c (shared with the firmware loader)
 // =============================================================================
-
-typedef uint32_t Elf32_Addr;
-typedef uint16_t Elf32_Half;
-typedef uint32_t Elf32_Off;
-typedef uint32_t Elf32_Word;
-typedef int32_t  Elf32_Sword;
-
-#define EI_NIDENT 16
-
-typedef struct {
-    unsigned char e_ident[EI_NIDENT];
-    Elf32_Half    e_type;
-    Elf32_Half    e_machine;
-    Elf32_Word    e_version;
-    Elf32_Addr    e_entry;
-    Elf32_Off     e_phoff;
-    Elf32_Off     e_shoff;
-    Elf32_Word    e_flags;
-    Elf32_Half    e_ehsize;
-    Elf32_Half    e_phentsize;
-    Elf32_Half    e_phnum;
-    Elf32_Half    e_shentsize;
-    Elf32_Half    e_shnum;
-    Elf32_Half    e_shstrndx;
-} Elf32_Ehdr;
-
-typedef struct {
-    Elf32_Word p_type;
-    Elf32_Off  p_offset;
-    Elf32_Addr p_vaddr;
-    Elf32_Addr p_paddr;
-    Elf32_Word p_filesz;
-    Elf32_Word p_memsz;
-    Elf32_Word p_flags;
-    Elf32_Word p_align;
-} Elf32_Phdr;
-
-typedef struct {
-    Elf32_Sword d_tag;
-    union {
-        Elf32_Word d_val;
-        Elf32_Addr d_ptr;
-    } d_un;
-} Elf32_Dyn;
-
-typedef struct {
-    Elf32_Addr r_offset;
-    Elf32_Word r_info;
-} Elf32_Rel;
-
-typedef struct {
-    Elf32_Addr  r_offset;
-    Elf32_Word  r_info;
-    Elf32_Sword r_addend;
-} Elf32_Rela;
-
-#define ELFMAG0  0x7f
-#define ELFMAG1  'E'
-#define ELFMAG2  'L'
-#define ELFMAG3  'F'
-#define ET_DYN   3
-#define EM_ARM   40
-#define PT_LOAD  1
-#define PT_DYNAMIC 2
-#define DT_NULL  0
-#define DT_REL   17
-#define DT_RELSZ 18
-#define DT_RELA  7
-#define DT_RELASZ 8
-#define R_ARM_RELATIVE  23
-#define ELF32_R_TYPE(i) ((i) & 0xffu)
 
 // =============================================================================
 // Handle table: maps 32-bit emulated handles <-> 64-bit host pointers
@@ -356,80 +286,50 @@ static bool load_elf(uc_engine *uc, const char *path, uint32_t *out_entry) {
     fseek(f, 0, SEEK_END);
     long file_len = ftell(f);
     fseek(f, 0, SEEK_SET);
+    if (file_len < 0 || file_len > 0x7FFFFFFFL) file_len = 0;
 
-    // Read ELF header
-    Elf32_Ehdr ehdr;
-    if (fread(&ehdr, sizeof(ehdr), 1, f) != 1) {
-        fprintf(stderr, "[UNICORN] Failed to read ELF header\n");
-        fclose(f);
-        return false;
-    }
-
-    // Validate
-    if (ehdr.e_ident[0] != ELFMAG0 || ehdr.e_ident[1] != ELFMAG1 ||
-        ehdr.e_ident[2] != ELFMAG2 || ehdr.e_ident[3] != ELFMAG3) {
-        fprintf(stderr, "[UNICORN] Bad ELF magic\n");
-        fclose(f);
-        return false;
-    }
-    if (ehdr.e_type != ET_DYN) {
-        fprintf(stderr, "[UNICORN] ELF must be PIE (ET_DYN)\n");
-        fclose(f);
-        return false;
-    }
-    if (ehdr.e_machine != EM_ARM) {
-        fprintf(stderr, "[UNICORN] ELF must be ARM\n");
+    // Same validation as the firmware loader (elf_plan.c): a malformed image
+    // is refused here, before anything reaches Unicorn.
+    uint8_t ehdr_buf[ELF_EHDR_SIZE];
+    size_t got = fread(ehdr_buf, 1, sizeof(ehdr_buf), f);
+    elf_plan_t plan;
+    elf_err_t eerr = elf_plan_header(ehdr_buf, (uint32_t)got,
+                                     (uint32_t)file_len, &plan);
+    if (eerr != ELF_OK) {
+        fprintf(stderr, "[UNICORN] ELF rejected: %s\n", elf_strerror(eerr));
         fclose(f);
         return false;
     }
 
-    // Read program headers
-    uint32_t phdr_table_size = (uint32_t)ehdr.e_phentsize * (uint32_t)ehdr.e_phnum;
-    Elf32_Phdr *phdrs = (Elf32_Phdr *)malloc(phdr_table_size);
+    uint8_t *phdrs = (uint8_t *)malloc(plan.phdrs_size);
     if (!phdrs) {
         fclose(f);
         return false;
     }
-
-    fseek(f, ehdr.e_phoff, SEEK_SET);
-    if (fread(phdrs, phdr_table_size, 1, f) != 1) {
+    if (fseek(f, (long)plan.phoff, SEEK_SET) != 0 ||
+        fread(phdrs, plan.phdrs_size, 1, f) != 1) {
         fprintf(stderr, "[UNICORN] Failed to read program headers\n");
         free(phdrs);
         fclose(f);
         return false;
     }
 
-    // Find virtual address range
-    Elf32_Addr mem_min = 0xFFFFFFFFu;
-    Elf32_Addr mem_max = 0;
-    for (int i = 0; i < ehdr.e_phnum; i++) {
-        if (phdrs[i].p_type != PT_LOAD || phdrs[i].p_memsz == 0) continue;
-        if (phdrs[i].p_vaddr < mem_min) mem_min = phdrs[i].p_vaddr;
-        Elf32_Addr seg_end = phdrs[i].p_vaddr + phdrs[i].p_memsz;
-        if (seg_end > mem_max) mem_max = seg_end;
-    }
-
-    if (mem_max == 0) {
-        fprintf(stderr, "[UNICORN] No PT_LOAD segments\n");
+    eerr = elf_plan_segments(&plan, phdrs, plan.phdrs_size,
+                             (uint32_t)file_len, EMU_CODE_SIZE);
+    if (eerr != ELF_OK) {
+        fprintf(stderr, "[UNICORN] ELF rejected: %s", elf_strerror(eerr));
+        if (eerr == ELF_ERR_IMAGE_TOO_LARGE)
+            fprintf(stderr, " (> %u byte code region)", (uint32_t)EMU_CODE_SIZE);
+        fprintf(stderr, "\n");
         free(phdrs);
         fclose(f);
         return false;
     }
 
-    uint32_t image_size = mem_max - mem_min;
+    uint32_t mem_min = plan.mem_min;
+    uint32_t image_size = plan.image_size;
     printf("[UNICORN] ELF image: %u bytes (vaddr 0x%08x..0x%08x)\n",
-           image_size, mem_min, mem_max);
-
-    if (image_size > EMU_CODE_SIZE) {
-        fprintf(stderr, "[UNICORN] ELF image too large (%u bytes > %u byte code region)\n",
-                image_size, (uint32_t)EMU_CODE_SIZE);
-        free(phdrs);
-        fclose(f);
-        return false;
-    }
-
-    // Load base: remap from original vaddr to our code region
-    uint32_t load_bias = EMU_CODE_BASE - mem_min;
+           image_size, mem_min, plan.mem_max);
 
     // Allocate a host-side buffer to build the image, then write it all at once
     uint8_t *image_buf = (uint8_t *)calloc(1, image_size);
@@ -440,19 +340,13 @@ static bool load_elf(uc_engine *uc, const char *path, uint32_t *out_entry) {
         return false;
     }
 
-    // Copy PT_LOAD segments into the buffer
-    for (int i = 0; i < ehdr.e_phnum; i++) {
-        if (phdrs[i].p_type != PT_LOAD || phdrs[i].p_filesz == 0) continue;
-        if (phdrs[i].p_offset + phdrs[i].p_filesz > (uint32_t)file_len) {
-            fprintf(stderr, "[UNICORN] Segment data out of bounds\n");
-            free(image_buf);
-            free(phdrs);
-            fclose(f);
-            return false;
-        }
-        fseek(f, phdrs[i].p_offset, SEEK_SET);
-        size_t off = phdrs[i].p_vaddr - mem_min;
-        if (fread(image_buf + off, phdrs[i].p_filesz, 1, f) != 1) {
+    // Copy PT_LOAD segments into the buffer (bounds proven by elf_plan)
+    for (uint16_t i = 0; i < plan.phnum; i++) {
+        elf32_phdr_t ph = elf_plan_phdr(phdrs, i);
+        if (ph.p_type != ELF_PT_LOAD || ph.p_filesz == 0) continue;
+        fseek(f, (long)ph.p_offset, SEEK_SET);
+        size_t off = ph.p_vaddr - mem_min;
+        if (fread(image_buf + off, ph.p_filesz, 1, f) != 1) {
             fprintf(stderr, "[UNICORN] Failed to read segment %d\n", i);
             free(image_buf);
             free(phdrs);
@@ -461,52 +355,16 @@ static bool load_elf(uc_engine *uc, const char *path, uint32_t *out_entry) {
         }
     }
 
-    // Apply R_ARM_RELATIVE relocations
-    for (int i = 0; i < ehdr.e_phnum; i++) {
-        if (phdrs[i].p_type != PT_DYNAMIC) continue;
-
-        Elf32_Dyn *dyn = (Elf32_Dyn *)(image_buf + (phdrs[i].p_vaddr - mem_min));
-        Elf32_Addr rel_addr = 0;  Elf32_Word rel_size = 0;
-        Elf32_Addr rela_addr = 0; Elf32_Word rela_size = 0;
-
-        for (Elf32_Dyn *d = dyn; d->d_tag != DT_NULL; d++) {
-            switch (d->d_tag) {
-                case DT_REL:    rel_addr  = d->d_un.d_ptr; break;
-                case DT_RELSZ:  rel_size  = d->d_un.d_val; break;
-                case DT_RELA:   rela_addr = d->d_un.d_ptr; break;
-                case DT_RELASZ: rela_size = d->d_un.d_val; break;
-                default: break;
-            }
-        }
-
-        if (rel_addr && rel_size) {
-            Elf32_Rel *rel = (Elf32_Rel *)(image_buf + (rel_addr - mem_min));
-            uint32_t count = rel_size / sizeof(Elf32_Rel);
-            for (uint32_t j = 0; j < count; j++) {
-                if (ELF32_R_TYPE(rel[j].r_info) == R_ARM_RELATIVE) {
-                    uint32_t off = rel[j].r_offset - mem_min;
-                    if (off + 4 <= image_size) {
-                        uint32_t *target = (uint32_t *)(image_buf + off);
-                        *target += load_bias;
-                    }
-                }
-            }
-        }
-
-        if (rela_addr && rela_size) {
-            Elf32_Rela *rela = (Elf32_Rela *)(image_buf + (rela_addr - mem_min));
-            uint32_t count = rela_size / sizeof(Elf32_Rela);
-            for (uint32_t j = 0; j < count; j++) {
-                if (ELF32_R_TYPE(rela[j].r_info) == R_ARM_RELATIVE) {
-                    uint32_t off = rela[j].r_offset - mem_min;
-                    if (off + 4 <= image_size) {
-                        uint32_t *target = (uint32_t *)(image_buf + off);
-                        *target = (uint32_t)rela[j].r_addend + load_bias;
-                    }
-                }
-            }
-        }
-        break;
+    // Apply R_ARM_RELATIVE relocations: the image runs at EMU_CODE_BASE.
+    elf_region_t region = {mem_min, image_size, image_buf, EMU_CODE_BASE};
+    elf_reloc_stats_t rstats;
+    eerr = elf_relocate(&plan, &region, 1, &rstats);
+    if (eerr != ELF_OK) {
+        fprintf(stderr, "[UNICORN] ELF rejected: %s\n", elf_strerror(eerr));
+        free(image_buf);
+        free(phdrs);
+        fclose(f);
+        return false;
     }
 
     // Write the relocated image into Unicorn memory
@@ -539,9 +397,8 @@ static bool load_elf(uc_engine *uc, const char *path, uint32_t *out_entry) {
         // Non-fatal if it fails (mem_error_hook will handle individual pages)
     }
 
-    // Compute entry point
-    uint32_t entry_voff = (ehdr.e_entry & ~1u) - mem_min;
-    *out_entry = EMU_CODE_BASE + entry_voff;
+    // Compute entry point (inside the image, checked by elf_plan)
+    *out_entry = EMU_CODE_BASE + plan.entry_off;
     // Set Thumb bit
     *out_entry |= 1u;
 

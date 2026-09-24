@@ -1,7 +1,7 @@
 # PicOS Makefile
 # Automated setup, build, and deployment for ClockworkPi PicoCalc
 
-.PHONY: help setup build clean flash flash-ota rebuild check-env test-lua test-unit simulator simulator-asan simulator-tsan simulator-run simulator-clean
+.PHONY: help setup build clean flash flash-ota rebuild check-env test-lua test-unit fuzz fuzz-build simulator simulator-asan simulator-tsan simulator-run simulator-clean
 
 # ── Configuration ─────────────────────────────────────────────────────────────
 
@@ -42,6 +42,7 @@ help:
 	@echo "Testing:"
 	@echo "  make test-lua       - Test Lua app syntax before deployment"
 	@echo "  make test-unit      - Host unit tests (ctest, build_unit/)"
+	@echo "  make fuzz           - Run each libFuzzer target FUZZ_SECONDS (clang)"
 	@echo ""
 	@echo "Environment:"
 	@echo "  PICO_BOARD          - Target board (default: $(PICO_BOARD))"
@@ -339,3 +340,23 @@ test-unit:
 	@cmake --build $(UNIT_BUILD_DIR) -j$$(nproc 2>/dev/null || echo 4)
 	@ctest --test-dir $(UNIT_BUILD_DIR) --output-on-failure
 
+# libFuzzer targets (tests/fuzz): clang only. Each runs FUZZ_SECONDS on a
+# working corpus in build_fuzz/corpus/<name>, seeded from tests/fuzz/corpus.
+# Crashes land in build_fuzz/crash-<target>-*.
+FUZZ_BUILD_DIR := build_fuzz
+FUZZ_SECONDS ?= 60
+
+fuzz-build:
+	@cmake -S tests/unit -B $(FUZZ_BUILD_DIR) -DCMAKE_C_COMPILER=clang \
+		-DCMAKE_BUILD_TYPE=Debug -DPICOS_FUZZ=ON >/dev/null
+	@cmake --build $(FUZZ_BUILD_DIR) -j$$(nproc 2>/dev/null || echo 4)
+
+fuzz: fuzz-build
+	@set -e; for bin in $(FUZZ_BUILD_DIR)/fuzz/fuzz_*; do \
+		t=$$(basename $$bin); name=$${t#fuzz_}; \
+		mkdir -p $(FUZZ_BUILD_DIR)/corpus/$$name tests/fuzz/corpus/$$name; \
+		echo "== $$t ($(FUZZ_SECONDS)s)"; \
+		$$bin -max_total_time=$(FUZZ_SECONDS) -print_final_stats=1 \
+			-artifact_prefix=$(FUZZ_BUILD_DIR)/crash-$$t- \
+			$(FUZZ_BUILD_DIR)/corpus/$$name tests/fuzz/corpus/$$name; \
+	done

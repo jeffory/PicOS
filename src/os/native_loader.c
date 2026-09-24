@@ -10,6 +10,7 @@
 #include "umm_malloc.h"
 #include "crashlog.h"
 #include "app_stack.h"
+#include "elf_plan.h"
 #include "lua_psram_alloc.h"
 #include "pico/stdlib.h"
 #include "hardware/watchdog.h"
@@ -40,83 +41,10 @@
 #define NATIVE_MAX_IMAGE_SIZE (7u * 1024u * 1024u)
 
 // =============================================================================
-// Minimal ELF32 type definitions
-// (newlib-arm headers don't always ship <elf.h>)
+// ELF validation and relocation live in elf_plan.c (pure, host-tested and
+// fuzzed under tests/unit and tests/fuzz); this file does the I/O, placement
+// and cache maintenance around them.
 // =============================================================================
-
-typedef uint32_t Elf32_Addr;
-typedef uint16_t Elf32_Half;
-typedef uint32_t Elf32_Off;
-typedef uint32_t Elf32_Word;
-typedef int32_t  Elf32_Sword;
-
-#define EI_NIDENT 16
-
-typedef struct {
-    unsigned char e_ident[EI_NIDENT];
-    Elf32_Half    e_type;
-    Elf32_Half    e_machine;
-    Elf32_Word    e_version;
-    Elf32_Addr    e_entry;
-    Elf32_Off     e_phoff;
-    Elf32_Off     e_shoff;
-    Elf32_Word    e_flags;
-    Elf32_Half    e_ehsize;
-    Elf32_Half    e_phentsize;
-    Elf32_Half    e_phnum;
-    Elf32_Half    e_shentsize;
-    Elf32_Half    e_shnum;
-    Elf32_Half    e_shstrndx;
-} Elf32_Ehdr;
-
-typedef struct {
-    Elf32_Word p_type;
-    Elf32_Off  p_offset;
-    Elf32_Addr p_vaddr;
-    Elf32_Addr p_paddr;
-    Elf32_Word p_filesz;
-    Elf32_Word p_memsz;
-    Elf32_Word p_flags;
-    Elf32_Word p_align;
-} Elf32_Phdr;
-
-typedef struct {
-    Elf32_Sword d_tag;
-    union {
-        Elf32_Word d_val;
-        Elf32_Addr d_ptr;
-    } d_un;
-} Elf32_Dyn;
-
-typedef struct {
-    Elf32_Addr r_offset;
-    Elf32_Word r_info;
-} Elf32_Rel;
-
-typedef struct {
-    Elf32_Addr  r_offset;
-    Elf32_Word  r_info;
-    Elf32_Sword r_addend;
-} Elf32_Rela;
-
-// ELF constants
-#define ELFMAG0  0x7fu
-#define ELFMAG1  'E'
-#define ELFMAG2  'L'
-#define ELFMAG3  'F'
-#define ET_DYN   3
-#define EM_ARM   40
-#define PT_LOAD  1
-#define PT_DYNAMIC 2
-#define PF_X     0x1u   // Executable segment flag
-#define DT_NULL  0
-#define DT_REL   17
-#define DT_RELSZ 18
-#define DT_RELA  7
-#define DT_RELASZ 8
-// R_ARM_RELATIVE (type 23): *target += load_base_offset
-#define R_ARM_RELATIVE  23
-#define ELF32_R_TYPE(i) ((i) & 0xffu)
 
 // =============================================================================
 // Helpers
@@ -254,7 +182,7 @@ static bool native_run(const app_entry_t *app) {
   uint8_t *stack_buf = NULL;
   bool stack_in_sram = false;
   sdfile_t f = NULL;
-  Elf32_Phdr *phdr_table = NULL;
+  uint8_t *phdr_table = NULL;
 
   f = sdcard_fopen(elf_path, "rb");
   if (!f) {
@@ -266,102 +194,67 @@ static bool native_run(const app_entry_t *app) {
   printf("[NATIVE] ELF: %d bytes (streaming)\n", file_len);
 
   // ── 2. Validate ELF header ────────────────────────────────────────────────
-  if (file_len < (int)sizeof(Elf32_Ehdr)) {
+  uint8_t ehdr_buf[ELF_EHDR_SIZE];
+  if (file_len < (int)sizeof(ehdr_buf)) {
     show_error("ELF: file too small", NULL);
     goto out;
   }
-
-  Elf32_Ehdr ehdr;
-  if (sdcard_fread(f, &ehdr, sizeof(ehdr)) != sizeof(ehdr)) {
+  if (sdcard_fread(f, ehdr_buf, sizeof(ehdr_buf)) != (int)sizeof(ehdr_buf)) {
     show_error("ELF: failed to read header", NULL);
     goto out;
   }
 
-  if (ehdr.e_ident[0] != ELFMAG0 || ehdr.e_ident[1] != ELFMAG1 ||
-      ehdr.e_ident[2] != ELFMAG2 || ehdr.e_ident[3] != ELFMAG3) {
-    show_error("ELF: bad magic", NULL);
-    goto out;
-  }
-  if (ehdr.e_type != ET_DYN) {
-    show_error("ELF: must be PIE (ET_DYN)", NULL);
-    goto out;
-  }
-  if (ehdr.e_machine != EM_ARM) {
-    show_error("ELF: must be ARM", NULL);
+  elf_plan_t plan;
+  elf_err_t elf_err = elf_plan_header(ehdr_buf, sizeof(ehdr_buf),
+                                      (uint32_t)file_len, &plan);
+  if (elf_err != ELF_OK) {
+    show_error(elf_strerror(elf_err), NULL);
     goto out;
   }
 
-  // ── 3. Measure PT_LOAD virtual address range ──────────────────────────────
-  uint32_t phdr_table_size = (uint32_t)ehdr.e_phentsize * (uint32_t)ehdr.e_phnum;
-  if (ehdr.e_phoff + phdr_table_size > (uint32_t)file_len) {
-    show_error("ELF: phdr table out of bounds", NULL);
-    goto out;
-  }
-
-  phdr_table = (Elf32_Phdr *)umm_malloc(phdr_table_size);
+  // ── 3. Validate program headers, measure the PT_LOAD range ────────────────
+  phdr_table = (uint8_t *)umm_malloc(plan.phdrs_size);
   if (!phdr_table) {
     show_error("ELF: out of memory for phdr", NULL);
     goto out;
   }
 
-  if (!sdcard_fseek(f, ehdr.e_phoff) ||
-      sdcard_fread(f, phdr_table, phdr_table_size) != (int)phdr_table_size) {
+  if (!sdcard_fseek(f, plan.phoff) ||
+      sdcard_fread(f, phdr_table, plan.phdrs_size) != (int)plan.phdrs_size) {
     show_error("ELF: failed to read phdr table", NULL);
     goto out;
   }
 
-  Elf32_Addr mem_min = 0xFFFFFFFFu;
-  Elf32_Addr mem_max = 0;
-  bool found_load = false;
-
-  // Also identify code vs data segments for split loading
-  int code_seg_idx = -1;  // PT_LOAD with PF_X
-  Elf32_Addr code_vaddr = 0, code_vend = 0;
-  uint32_t code_memsz = 0;
-
-  for (int i = 0; i < ehdr.e_phnum; i++) {
-    const Elf32_Phdr *ph = &phdr_table[i];
-    if (ph->p_type != PT_LOAD || ph->p_memsz == 0)
-      continue;
-    if (ph->p_vaddr < mem_min)
-      mem_min = ph->p_vaddr;
-    Elf32_Addr seg_end = ph->p_vaddr + ph->p_memsz;
-    if (seg_end < ph->p_vaddr) {
-      show_error("ELF: segment vaddr overflow", NULL);
-      goto out;
-    }
-    if (seg_end > mem_max)
-      mem_max = seg_end;
-    found_load = true;
-
-    if ((ph->p_flags & PF_X) && code_seg_idx < 0) {
-      code_seg_idx = i;
-      code_vaddr = ph->p_vaddr;
-      code_vend  = seg_end;
-      code_memsz = ph->p_memsz;
-    }
-  }
-
-  if (!found_load) {
-    show_error("ELF: no PT_LOAD segments", NULL);
+  // Proves every PT_LOAD's file range and memory range (p_filesz <= p_memsz,
+  // no wrap), the entry point and PT_DYNAMIC lie inside the file / image.
+  elf_err = elf_plan_segments(&plan, phdr_table, plan.phdrs_size,
+                              (uint32_t)file_len, NATIVE_MAX_IMAGE_SIZE);
+  if (elf_err != ELF_OK) {
+    show_error(elf_strerror(elf_err), elf_err == ELF_ERR_IMAGE_TOO_LARGE
+                                          ? "limit is 7MB" : NULL);
     goto out;
   }
 
-  uint32_t image_size = mem_max - mem_min;
+  const uint32_t mem_min = plan.mem_min;
+  const uint32_t image_size = plan.image_size;
+  // Code segment for split loading (PT_LOAD with PF_X).
+  const int code_seg_idx = plan.code_idx;
+  const uint32_t code_vaddr = plan.code_vaddr;
+  const uint32_t code_memsz = plan.code_memsz;
+  const uint32_t code_vend = code_vaddr + code_memsz;
+
   printf("[NATIVE] Image: %lu bytes (vaddr 0x%08lx..0x%08lx)\n",
          (unsigned long)image_size,
-         (unsigned long)mem_min, (unsigned long)mem_max);
-
-  if (image_size > NATIVE_MAX_IMAGE_SIZE) {
-    show_error("ELF: image too large (>7MB)", NULL);
-    goto out;
-  }
+         (unsigned long)mem_min, (unsigned long)plan.mem_max);
 
   // ── 4. Split allocation: code in SRAM, data/BSS in PSRAM ────────────────
   bool split_mode = false;
 
   #define MAX_SRAM_CODE_SIZE  (16u * 1024)
-  if (code_seg_idx >= 0 && code_memsz > 0 && code_memsz <= MAX_SRAM_CODE_SIZE) {
+  // Split mode assumes the code segment is the lowest PT_LOAD and all other
+  // segments sit above it (data offsets are taken from its end).
+  if (code_seg_idx >= 0 && plan.code_first && code_memsz > 0 &&
+      code_memsz <= MAX_SRAM_CODE_SIZE) {
     code_buf = malloc(code_memsz);
     if (code_buf) {
       split_mode = true;
@@ -375,7 +268,7 @@ static bool native_run(const app_entry_t *app) {
 
   // PSRAM allocation: in split mode, only data/BSS; otherwise entire image
   uint32_t psram_size = split_mode ? (image_size - code_memsz) : image_size;
-  Elf32_Addr data_vaddr_start = split_mode ? code_vend : mem_min;
+  uint32_t data_vaddr_start = split_mode ? code_vend : mem_min;
 
   if (psram_size > 0) {
     load_base = (uint8_t *)umm_malloc(psram_size);
@@ -416,9 +309,10 @@ static bool native_run(const app_entry_t *app) {
     memset(exec_base, 0, image_size);
   }
 
-  for (int i = 0; i < ehdr.e_phnum; i++) {
-    const Elf32_Phdr *ph = &phdr_table[i];
-    if (ph->p_type != PT_LOAD || ph->p_filesz == 0)
+  for (uint16_t i = 0; i < plan.phnum; i++) {
+    const elf32_phdr_t seg = elf_plan_phdr(phdr_table, i);
+    const elf32_phdr_t *ph = &seg;
+    if (ph->p_type != ELF_PT_LOAD || ph->p_filesz == 0)
       continue;
     // Heartbeat per segment: a large segment (e.g. DOOM) takes seconds to
     // read, and Core 1 (paused) relays the watchdog only while it is fresh.
@@ -476,115 +370,29 @@ static bool native_run(const app_entry_t *app) {
       goto out;
     }
 
-    uint32_t code_bias = split_mode ? (uint32_t)code_buf - code_vaddr : 0;
-    uint32_t data_bias = split_mode ? (uint32_t)load_base - data_vaddr_start
-                                    : (uint32_t)load_base - mem_min;
-    uint32_t fallback_bias = split_mode ? 0 : (uint32_t)load_base - mem_min;
-
-    for (int i = 0; i < ehdr.e_phnum; i++) {
-      const Elf32_Phdr *ph = &phdr_table[i];
-      if (ph->p_type != PT_DYNAMIC)
-        continue;
-
-      const Elf32_Dyn *dyn;
-      if (split_mode && ph->p_vaddr >= code_vaddr && ph->p_vaddr < code_vend) {
-        dyn = (const Elf32_Dyn *)(code_buf + (ph->p_vaddr - code_vaddr));
-      } else if (split_mode) {
-        dyn = (const Elf32_Dyn *)(exec_base + (ph->p_vaddr - data_vaddr_start));
-      } else {
-        dyn = (const Elf32_Dyn *)(exec_base + (ph->p_vaddr - mem_min));
-      }
-
-      Elf32_Addr rel_addr = 0;  Elf32_Word rel_size = 0;
-      Elf32_Addr rela_addr = 0; Elf32_Word rela_size = 0;
-
-      for (const Elf32_Dyn *d = dyn; d->d_tag != DT_NULL; d++) {
-        switch (d->d_tag) {
-          case DT_REL:    rel_addr  = d->d_un.d_ptr; break;
-          case DT_RELSZ:  rel_size  = d->d_un.d_val; break;
-          case DT_RELA:   rela_addr = d->d_un.d_ptr; break;
-          case DT_RELASZ: rela_size = d->d_un.d_val; break;
-          default: break;
-        }
-      }
-
-      #define RESOLVE_TARGET(vaddr, write_ptr, target_ok) do { \
-        if (split_mode) { \
-          if ((vaddr) >= code_vaddr && (vaddr) < code_vend) { \
-            uint32_t _off = (vaddr) - code_vaddr; \
-            if (_off + sizeof(uint32_t) <= code_memsz) { \
-              write_ptr = (uint32_t *)(code_buf + _off); \
-              target_ok = true; \
-            } \
-          } else { \
-            uint32_t _off = (vaddr) - data_vaddr_start; \
-            if (_off + sizeof(uint32_t) <= psram_size) { \
-              write_ptr = (uint32_t *)(exec_base + _off); \
-              target_ok = true; \
-            } \
-          } \
-        } else { \
-          uint32_t _off = (vaddr) - mem_min; \
-          if (_off + sizeof(uint32_t) <= image_size) { \
-            write_ptr = (uint32_t *)(exec_base + _off); \
-            target_ok = true; \
-          } \
-        } \
-      } while(0)
-
-      #define SELECT_BIAS(pointed_vaddr) \
-        (split_mode ? ((pointed_vaddr) >= code_vaddr && (pointed_vaddr) < code_vend \
-                       ? code_bias : data_bias) \
-                    : fallback_bias)
-
-      if (rel_addr && rel_size) {
-        const Elf32_Rel *rel;
-        if (split_mode && rel_addr >= code_vaddr && rel_addr < code_vend)
-          rel = (const Elf32_Rel *)(code_buf + (rel_addr - code_vaddr));
-        else if (split_mode)
-          rel = (const Elf32_Rel *)(exec_base + (rel_addr - data_vaddr_start));
-        else
-          rel = (const Elf32_Rel *)(exec_base + (rel_addr - mem_min));
-
-        uint32_t count = rel_size / sizeof(Elf32_Rel);
-        for (uint32_t j = 0; j < count; j++) {
-          if (ELF32_R_TYPE(rel[j].r_info) == R_ARM_RELATIVE) {
-            uint32_t *target = NULL;
-            bool target_ok = false;
-            RESOLVE_TARGET(rel[j].r_offset, target, target_ok);
-            if (!target_ok) continue;
-            uint32_t pointed_vaddr = *target;
-            *target = pointed_vaddr + SELECT_BIAS(pointed_vaddr);
-          }
-        }
-      }
-
-      if (rela_addr && rela_size) {
-        const Elf32_Rela *rela;
-        if (split_mode && rela_addr >= code_vaddr && rela_addr < code_vend)
-          rela = (const Elf32_Rela *)(code_buf + (rela_addr - code_vaddr));
-        else if (split_mode)
-          rela = (const Elf32_Rela *)(exec_base + (rela_addr - data_vaddr_start));
-        else
-          rela = (const Elf32_Rela *)(exec_base + (rela_addr - mem_min));
-
-        uint32_t count = rela_size / sizeof(Elf32_Rela);
-        for (uint32_t j = 0; j < count; j++) {
-          if (ELF32_R_TYPE(rela[j].r_info) == R_ARM_RELATIVE) {
-            uint32_t *target = NULL;
-            bool target_ok = false;
-            RESOLVE_TARGET(rela[j].r_offset, target, target_ok);
-            if (!target_ok) continue;
-            uint32_t pointed_vaddr = (uint32_t)rela[j].r_addend;
-            *target = pointed_vaddr + SELECT_BIAS(pointed_vaddr);
-          }
-        }
-      }
-
-      #undef RESOLVE_TARGET
-      #undef SELECT_BIAS
-      break; 
+    // Writes go through exec_base (the uncached alias); relocated pointers
+    // use the address the region runs at.  A pointer outside both split
+    // regions takes the data bias (the last region), as before.
+    elf_region_t regions[2];
+    int nregions = 0;
+    if (split_mode) {
+      regions[nregions++] = (elf_region_t){code_vaddr, code_memsz, code_buf,
+                                           (uint32_t)(uintptr_t)code_buf};
+      regions[nregions++] = (elf_region_t){data_vaddr_start, psram_size,
+                                           exec_base,
+                                           (uint32_t)(uintptr_t)load_base};
+    } else {
+      regions[nregions++] = (elf_region_t){mem_min, image_size, exec_base,
+                                           (uint32_t)(uintptr_t)load_base};
     }
+    elf_reloc_stats_t rstats;
+    elf_err = elf_relocate(&plan, regions, nregions, &rstats);
+    if (elf_err != ELF_OK) {
+      show_error(elf_strerror(elf_err), NULL);
+      goto out;
+    }
+    printf("[NATIVE] Relocations: %lu applied, %lu symbolic left as-is\n",
+           (unsigned long)rstats.applied, (unsigned long)rstats.symbolic);
   }
 
   // ── 7. Invalidate XIP cache for the app image, compute entry point ──────
@@ -617,7 +425,7 @@ static bool native_run(const app_entry_t *app) {
     }
   }
 
-  uintptr_t entry_voff_raw = ehdr.e_entry & ~1u;
+  uintptr_t entry_voff_raw = plan.entry & ~1u;
   uintptr_t entry_addr;
   if (split_mode && entry_voff_raw >= code_vaddr && entry_voff_raw < code_vend) {
     entry_addr = (uintptr_t)code_buf + (entry_voff_raw - code_vaddr);

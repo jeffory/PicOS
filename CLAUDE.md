@@ -99,7 +99,7 @@ main()
 4. Shows scrollable menu with battery % header
 5. Dispatches via `AppRunner` vtable (`src/os/app_runner.h`):
    - **Lua apps** (`src/os/lua_runner.c`): allocates a 64 KB VM stack, reads `main.lua`, then runs the whole VM lifetime on that stack (PSP): fresh `lua_State`, `lua_bridge_register()`, `lua_pcall()`, error screen, `lua_close()`
-   - **Native apps** (`src/os/native_loader.c`): ELF32 PIE loader, relocates to PSRAM (code in SRAM if fits), runs on PSP (Process Stack Pointer)
+   - **Native apps** (`src/os/native_loader.c`): ELF32 PIE loader, relocates to PSRAM (code in SRAM if fits), runs on PSP (Process Stack Pointer). All header/segment/dynamic/relocation validation is in `src/os/elf_plan.c` (pure; shared with the simulator's `unicorn_runner.c`, host-tested in `tests/unit/test_elf_plan.c`, fuzzed by `tests/fuzz/fuzz_elf_plan.c`). Only `R_ARM_RELATIVE` is applied; `R_ARM_ABS32/GLOB_DAT/JUMP_SLOT` (undefined weak symbols in newlib's unwinder) are bounds-checked and left as-is; any other relocation type rejects the app
    - Both use `app_stack_run()` (`src/os/app_stack.c`): paints the stack, arms `PSPLIM` above a 32-byte guard (overflow = STKOF HardFault, crash record names `PSP (Lua VM)` / `PSP (native app)`), switches Thread mode to the PSP, calls the runtime, switches back. Only one runner is active, so there is one PSP user at a time; IRQs always use the MSP. The launcher itself stays on the MSP
 
 ### Lua Bridge (split across `src/os/lua_bridge_*.c`)

@@ -241,6 +241,7 @@ set(PICOS_CORE_SOURCES
     ${PICOS_ROOT}/src/os/lua_runner.c
     ${PICOS_ROOT}/src/os/app_stack.c
     ${PICOS_ROOT}/src/os/native_loader.c
+    ${PICOS_ROOT}/src/os/elf_plan.c
     ${PICOS_ROOT}/src/os/lua_bridge.c
     ${PICOS_ROOT}/src/os/lua_bridge_display.c
     ${PICOS_ROOT}/src/os/lua_bridge_input.c
