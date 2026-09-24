@@ -9,6 +9,7 @@
 
 #include "umm_malloc.h"
 #include "crashlog.h"
+#include "app_stack.h"
 #include "lua_psram_alloc.h"
 #include "pico/stdlib.h"
 #include "hardware/watchdog.h"
@@ -151,10 +152,11 @@ static void show_error(const char *line1, const char *line2) {
 // App stack (PSP-based isolation)
 // =============================================================================
 
-// Native apps run on the PSP (Process Stack Pointer).  Interrupt handlers
-// always use the MSP (Main Stack Pointer) regardless of SPSEL, so the two
-// stacks are completely independent: app stack pressure and interrupt stacking
-// do not interfere with each other.
+// Native apps run on the PSP (Process Stack Pointer) through app_stack_run()
+// (app_stack.c, shared with the Lua runner).  Interrupt handlers always use
+// the MSP (Main Stack Pointer) regardless of SPSEL, so the two stacks are
+// completely independent: app stack pressure and interrupt stacking do not
+// interfere with each other.
 //
 // 64 KB is allocated from PSRAM (via umm_malloc) at launch time, giving
 // plenty of headroom for deep recursion (e.g. Doom's BSP tree traversal).
@@ -164,11 +166,6 @@ static void show_error(const char *line1, const char *line2) {
 // allocation site).  Double the 8 KB static SRAM stack all native apps
 // originally ran on (Doom included), so it is not a regression for depth.
 #define NATIVE_STACK_SRAM_SIZE (16 * 1024)
-
-// Pointer to the dynamically-allocated stack buffer.  Read by the HardFault
-// handler (main.c) to detect PSP stack overflow.  NULL when no native app
-// is running.
-uint8_t *g_native_stack_base = NULL;
 
 // Where the running native app's image landed, read by the HardFault handler
 // (main.c) to report crash PC/LR as ELF-relative offsets so they can be
@@ -195,76 +192,18 @@ const uint8_t     *g_code_watch_live = NULL;   // uncached alias
 uint32_t           g_code_watch_size = 0;
 _Atomic(bool)      g_code_watch_active = false;
 
-// Stack canary: the bottom NATIVE_STACK_GUARD_WORDS words are filled with a
-// sentinel before launch and checked afterwards.  If the stack overflows into
-// this guard zone the corruption is detected and reported.  The stack grows
-// downward from the top of the buffer, so the bottom is the last area to be
-// reached by overflow.
-#define NATIVE_STACK_CANARY      0xDEADBEEFu
-#define NATIVE_STACK_GUARD_WORDS 8   // 32 bytes
+// Trampoline for app_stack_run(): unpacks the native entry point's four
+// arguments (app_stack_run passes a single pointer).
+typedef struct {
+  picos_app_entry_t fn;
+  const PicoCalcAPI *api;
+  const char *app_dir, *app_id, *app_name;
+} native_launch_t;
 
-// launch_on_psp() — naked trampoline that:
-//   1. Saves r4-r7 + LR onto the current MSP (OS stack).
-//   2. Loads the two extra args (app_id, app_name) before switching stacks.
-//   3. Sets PSP = psp_top and sets CONTROL.SPSEL=1 so Thread mode uses PSP.
-//   4. Calls fn(api, app_dir, app_id, app_name) — runs entirely on PSP.
-//   5. Clears CONTROL.SPSEL=0 to restore Thread mode to MSP.
-//   6. Pops r4-r7 + PC from MSP and returns to native_run normally.
-//
-// Signature (AAPCS):
-//   r0  = psp_top   (top of app stack buffer)
-//   r1  = fn        (Thumb entry point, bit-0 = 1)
-//   r2  = api       (1st app arg)
-//   r3  = app_dir   (2nd app arg)
-//   [sp+0]  = app_id   (3rd app arg, on caller's stack before this push)
-//   [sp+4]  = app_name (4th app arg)
-#ifndef PICOS_SIMULATOR
-__attribute__((naked, noinline))
-static void launch_on_psp(uint32_t psp_top, picos_app_entry_t fn,
-                          const PicoCalcAPI *api, const char *app_dir,
-                          const char *app_id, const char *app_name)
-{
-    __asm__ (
-        "push   {r4-r7, lr}     \n\t"   /* save callee-saved + LR on MSP     */
-        "ldr    r4, [sp, #20]   \n\t"   /* load app_id   (was [sp+0] pre-push)*/
-        "ldr    r5, [sp, #24]   \n\t"   /* load app_name (was [sp+4] pre-push)*/
-        "mov    r6, r1          \n\t"   /* save fn before r1 is clobbered     */
-        "mrs    r7, control     \n\t"   /* save original CONTROL register     */
-        /* ── switch Thread mode to PSP ──────────────────────────────── */
-        "msr    psp, r0         \n\t"   /* PSP = psp_top                      */
-        "orr    r0, r7, #2      \n\t"   /* CONTROL | SPSEL                    */
-        "msr    control, r0     \n\t"   /* SPSEL = 1 → Thread uses PSP        */
-        "isb                    \n\t"   /* sync pipeline after CONTROL write  */
-        /* ── call fn(api, app_dir, app_id, app_name) ────────────────── */
-        "mov    r0, r2          \n\t"
-        "mov    r1, r3          \n\t"
-        "mov    r2, r4          \n\t"
-        "mov    r3, r5          \n\t"
-        "blx    r6              \n\t"   /* app runs here on PSP               */
-        /* r4-r7 are callee-saved so entry_fn has restored them         */
-        /* ── restore Thread mode to MSP ─────────────────────────────── */
-        "mrs    r0, control     \n\t"
-        "bic    r0, r0, #2      \n\t"   /* clear SPSEL                        */
-        "msr    control, r0     \n\t"   /* SPSEL = 0 → Thread uses MSP again  */
-        "isb                    \n\t"
-        "pop    {r4-r7, pc}     \n\t"   /* restore from MSP, return           */
-    );
+static void __attribute__((unused)) native_launch_thunk(void *p) {
+  const native_launch_t *l = (const native_launch_t *)p;
+  l->fn(l->api, l->app_dir, l->app_id, l->app_name);
 }
-#else
-// Simulator stub - native apps not supported on PC
-static void launch_on_psp(uint32_t psp_top, picos_app_entry_t fn,
-                          const PicoCalcAPI *api, const char *app_dir,
-                          const char *app_id, const char *app_name)
-{
-    (void)psp_top;
-    (void)fn;
-    (void)api;
-    (void)app_dir;
-    (void)app_id;
-    (void)app_name;
-    printf("[NATIVE] Native apps are not supported in the simulator\n");
-}
-#endif
 
 // =============================================================================
 // ELF loader
@@ -799,46 +738,32 @@ static bool native_run(const app_entry_t *app) {
   printf("[NATIVE] App stack: %lu KB in %s @ %p\n",
          (unsigned long)(stack_size / 1024), stack_in_sram ? "SRAM" : "PSRAM",
          (void *)stack_buf);
-  g_native_stack_base = stack_buf;
-
-  uint32_t *guard = (uint32_t *)stack_buf;
-  for (int i = 0; i < NATIVE_STACK_GUARD_WORDS; i++)
-    guard[i] = NATIVE_STACK_CANARY;
-
-  uint32_t stack_top = (uint32_t)(stack_buf + stack_size);
-
   g_core1_pause = false;
 
-  // ARMv8-M PSP limit just above the canary words: an app push past it
-  // faults with CFSR.STKOF (HardFault, recorded as a stack overflow) instead
-  // of silently running through the canaries into whatever lies below.
-  // Set here rather than inside the naked trampoline, which has no spare
-  // argument register; nothing else uses PSP. Cleared once the app returns.
-  uint32_t psp_limit =
-      ((uint32_t)(uintptr_t)(guard + NATIVE_STACK_GUARD_WORDS) + 7u) & ~7u;
-  __asm volatile ("msr psplim, %0" : : "r"(psp_limit));
-
-  launch_on_psp(stack_top, entry_fn,
-                (const PicoCalcAPI *)&g_api, app->path, app->id, app->name);
-
-  __asm volatile ("msr psplim, %0" : : "r"(0u));
+  // app_stack_run paints the stack, arms PSPLIM just above its 32-byte guard
+  // (an app push past it faults with CFSR.STKOF, recorded as a stack
+  // overflow, instead of silently running into whatever lies below) and
+  // runs the entry point on the PSP.
+  native_launch_t launch = {entry_fn, (const PicoCalcAPI *)&g_api, app->path,
+                            app->id, app->name};
+  app_stack_run(stack_buf, stack_size, APP_STACK_NATIVE, native_launch_thunk,
+                &launch);
 
   ok = true;
-  for (int i = 0; i < NATIVE_STACK_GUARD_WORDS; i++) {
-    if (guard[i] != NATIVE_STACK_CANARY) {
-      printf("[NATIVE] ERROR: stack overflow detected in '%s' "
-             "(canary[%d] = 0x%08lx)\n",
-             app->name, i, (unsigned long)guard[i]);
-      char detail[96];
-      snprintf(detail, sizeof(detail),
-               "guard canary[%d] = 0x%08lx after return (%luK %s stack)",
-               i, (unsigned long)guard[i], (unsigned long)(stack_size / 1024u),
-               stack_in_sram ? "SRAM" : "PSRAM");
-      crashlog_write("NATIVE ERROR", app->name,
-                     "stack overflow detected after app returned", detail);
-      ok = false;
-      break;
-    }
+  printf("[NATIVE] Stack high-water: %lu of %lu bytes\n",
+         (unsigned long)app_stack_high_water(stack_buf, stack_size),
+         (unsigned long)stack_size);
+  if (!app_stack_guard_intact(stack_buf)) {
+    printf("[NATIVE] ERROR: stack overflow detected in '%s' (guard words "
+           "overwritten)\n", app->name);
+    char detail[96];
+    snprintf(detail, sizeof(detail),
+             "stack guard overwritten after return (%luK %s stack)",
+             (unsigned long)(stack_size / 1024u),
+             stack_in_sram ? "SRAM" : "PSRAM");
+    crashlog_write("NATIVE ERROR", app->name,
+                   "stack overflow detected after app returned", detail);
+    ok = false;
   }
 
   printf("[NATIVE] App '%s' returned%s\n", app->name,
@@ -849,7 +774,6 @@ out:
   __dmb(); // ensure all app writes visible before clearing callback
   atomic_store(&g_native_audio_callback, NULL);
   atomic_store(&g_code_watch_active, false);
-  g_native_stack_base = NULL;
   g_native_code_base = g_native_code_limit = 0;
   g_native_data_base = g_native_data_limit = 0;
   g_native_code_vaddr = g_native_data_vaddr = 0;

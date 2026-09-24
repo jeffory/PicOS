@@ -59,10 +59,10 @@ void runtime_init_per_core_install_stack_guard(void *stack_bottom) {
 // to UART+USB so we can identify the crash address.  UART stdio is polling-
 // based, so this works even with interrupts disabled inside the fault handler.
 
-// Native app stack base pointer (defined in native_loader.c).
-// Dynamically allocated from PSRAM; NULL when no native app is running.
-// Used to detect PSP stack overflow in the hardfault handler.
-extern uint8_t *g_native_stack_base;
+// The app runtime's PSP stack (g_app_stack_base/owner, app_stack.h): the
+// native app or the Lua VM. NULL when no app runtime is on the PSP. Used to
+// bound PSP overflow checks and to name the stack in the crash record.
+#include "os/app_stack.h"
 
 // Native app image placement (defined in native_loader.c) — lets the
 // hardfault handler report crash PC/LR as ELF-relative offsets.
@@ -106,9 +106,10 @@ static uint32_t native_addr_to_elf_vaddr(uint32_t addr) {
 #define CRASH_F_BOOTING     (1u << 15) // fault hit before boot completed
 #define CRASH_BOOT_ATTEMPT_SHIFT 13    // bits 14-13: that boot's attempt no.
 #define CRASH_BOOT_ATTEMPT_MASK  (3u << CRASH_BOOT_ATTEMPT_SHIFT)
-#define CRASH_F_PSP         (1u << 12) // fault frame on PSP (native app)
+#define CRASH_F_PSP         (1u << 12) // fault frame on PSP (app runtime)
 #define CRASH_F_HFSR_FORCED (1u << 11) // HFSR bit 30
 #define CRASH_F_HFSR_VECTBL (1u << 10) // HFSR bit 1
+#define CRASH_F_PSP_LUA     (1u << 9)  // ...and the PSP was the Lua VM's stack
 
 // Boot-loop detection (main): while booting, scratch[0] holds
 // BOOT_MAGIC | attempt; it is zeroed once the launcher is about to run.
@@ -184,6 +185,9 @@ static void __attribute__((used)) hardfault_c(uint32_t *frame, uint32_t exc_retu
   // reboot and can be dumped to SD on next boot (layout above hardfault_c).
   watchdog_hw->scratch[0] = CRASH_TAG | boot_bits
                           | ((exc_return & 4u) ? CRASH_F_PSP : 0u)
+                          | (((exc_return & 4u) &&
+                              g_app_stack_owner == APP_STACK_LUA)
+                                 ? CRASH_F_PSP_LUA : 0u)
                           | ((hfsr & (1u << 30)) ? CRASH_F_HFSR_FORCED : 0u)
                           | ((hfsr & (1u << 1)) ? CRASH_F_HFSR_VECTBL : 0u)
                           | (sfsr & 0xFFu);
@@ -210,8 +214,9 @@ static void __attribute__((used)) hardfault_c(uint32_t *frame, uint32_t exc_retu
   // frame.  Pre-fault SP = frame + 32 (8 words × 4 bytes).
   uint32_t sp_at_fault = (uint32_t)(uintptr_t)frame + 32u;
 
-  // Determine which stack was active: EXC_RETURN bit 2 = 1 means PSP (native
-  // app), 0 means MSP (OS).  Compare SP against the correct stack bounds.
+  // Determine which stack was active: EXC_RETURN bit 2 = 1 means PSP (the
+  // native app or the Lua VM, see app_stack.h), 0 means MSP (OS).  Compare
+  // SP against the correct stack bounds.
   // Each core has its own MSP: Core 0 in SCRATCH_Y (__StackBottom), Core 1 in
   // SCRATCH_X (__StackOneBottom) — comparing against the wrong core's bounds
   // yields false OVERFLOW reports for Core 1 faults.
@@ -220,8 +225,8 @@ static void __attribute__((used)) hardfault_c(uint32_t *frame, uint32_t exc_retu
   bool stack_overflow;
   uint32_t stack_limit;
   if (on_psp) {
-    stack_limit = (uint32_t)(uintptr_t)g_native_stack_base;
-    stack_overflow = g_native_stack_base && (sp_at_fault < stack_limit);
+    stack_limit = (uint32_t)(uintptr_t)g_app_stack_base;
+    stack_overflow = g_app_stack_base && (sp_at_fault < stack_limit);
   } else if (core == 1) {
     stack_limit = (uint32_t)(uintptr_t)&__StackOneBottom;
     stack_overflow = (sp_at_fault < stack_limit);
@@ -322,7 +327,10 @@ static void __attribute__((used)) hardfault_c(uint32_t *frame, uint32_t exc_retu
   display_draw_text(4, 48, ln, stack_overflow ? 0xF800 : 0xFFFF, 0x0000);
 
   snprintf(ln, sizeof(ln), "Stack: %s core %lu",
-           on_psp ? "PSP (native app)" : "MSP (OS)", (unsigned long)core);
+           !on_psp ? "MSP (OS)"
+           : g_app_stack_owner == APP_STACK_LUA ? "PSP (Lua VM)"
+                                                : "PSP (native app)",
+           (unsigned long)core);
   display_draw_text(4, 62, ln, 0x07E0, 0x0000); // green
 
   snprintf(ln, sizeof(ln), "CFSR %08lx  HFSR %08lx", (unsigned long)cfsr, (unsigned long)hfsr);
@@ -1697,6 +1705,9 @@ static void crash_log_save(const char *app_name) {
                 | ((flags & CRASH_F_HFSR_VECTBL) ? (1u << 1) : 0u);
   uint32_t sfsr = flags & 0xFFu;
   bool was_psp = (flags & CRASH_F_PSP) != 0;
+  const char *stack_name = !was_psp                     ? "MSP (OS)"
+                           : (flags & CRASH_F_PSP_LUA) ? "PSP (Lua VM)"
+                                                       : "PSP (native app)";
   uint32_t crash_uptime_sec = s_crash_data[7];
   // A stack-limit violation taken while stacking the exception frame leaves
   // the frame contents UNKNOWN (ARMv8-M), so the stacked PC/LR are not
@@ -1727,7 +1738,7 @@ static void crash_log_save(const char *app_name) {
     (unsigned long)s_crash_data[2], unreliable,
     (unsigned long)s_crash_data[5], (unsigned long)cfsr,
     (unsigned long)hfsr, (unsigned long)sfsr,
-    was_psp ? "PSP (native app)" : "MSP (OS)");
+    stack_name);
 
   if (flags & CRASH_F_BOOTING)
     n += snprintf(line+n, CRASH_LINE_CAP-n, "  During boot (attempt %lu)\n",
@@ -1782,6 +1793,10 @@ static void crash_log_save(const char *app_name) {
 }
 
 int main(void) {
+  // Paint the free part of the 4 KB main stack so the `stack` dev command
+  // can report its high-water mark (the launcher and IRQs stay on the MSP).
+  app_stack_paint_msp();
+
   // ── Boot-loop detection using watchdog scratch[0] ──────────────────────────
   // scratch[0] encoding:
   //   CRASH_TAG   (0xFA17xxxx) = HardFault record present (see hardfault_c);

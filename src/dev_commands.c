@@ -6,6 +6,7 @@
 #include "drivers/sdcard.h"
 #include "drivers/wifi.h"
 #include "os/launcher.h"
+#include "os/app_stack.h"
 #include "os/os.h"
 #include "os/zip_util.h"
 #include "tusb.h"
@@ -420,6 +421,20 @@ bool dev_commands_process(void) {
 
     if (strcmp(s_cmd_buf, "ping") == 0) {
         printf("[DEV] pong\n");
+    } else if (strcmp(s_cmd_buf, "stack") == 0) {
+        // Peak use of Core 0's 4 KB main stack since boot, and of the app
+        // runtime's PSP stack since launch (when an app is running).
+        printf("[DEV] Stack: msp_peak=%lu msp_size=%lu",
+               (unsigned long)app_stack_msp_high_water(),
+               (unsigned long)PICO_STACK_SIZE);
+        uint8_t *base = g_app_stack_base;
+        uint32_t size = g_app_stack_size;
+        if (base)
+            printf(" app=%s app_peak=%lu app_size=%lu",
+                   g_app_stack_owner == APP_STACK_LUA ? "lua" : "native",
+                   (unsigned long)app_stack_high_water(base, size),
+                   (unsigned long)size);
+        printf("\n");
     } else if (strcmp(s_cmd_buf, "ver") == 0) {
         printf("[DEV] PicOS build %s %s\n", __DATE__, __TIME__);
     } else if (strcmp(s_cmd_buf, "status") == 0) {
@@ -706,6 +721,7 @@ bool dev_commands_process(void) {
         printf("[DEV] Available commands:\n");
         printf("[DEV]   ping           - Check device is responding\n");
         printf("[DEV]   ver            - Show firmware build date/time\n");
+        printf("[DEV]   stack          - Main-stack and app-stack peak use\n");
         printf("[DEV]   exit           - Signal current app to exit\n");
         printf("[DEV]   usb            - Enable USB storage mode\n");
         printf("[DEV]   reboot         - Reboot device\n");
