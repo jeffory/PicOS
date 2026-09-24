@@ -330,7 +330,10 @@ void sound_update(void) {
             uint32_t end_bytes = player->play_end * bytes_per_frame;
             if (end_bytes < effective_end) effective_end = end_bytes;
         }
-        uint32_t effective_start = player->play_start * bytes_per_frame;
+        // Clamped like src/drivers/sound.c: a start at or past the end
+        // plays from the beginning.
+        uint64_t start_bytes = (uint64_t)player->play_start * bytes_per_frame;
+        uint32_t effective_start = start_bytes < effective_end ? (uint32_t)start_bytes : 0;
 
         // Calculate how many source frames to generate for target sample rate
         float rate_ratio = (float)sample->sample_rate / SIM_SAMPLE_RATE * player->rate;

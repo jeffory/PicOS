@@ -107,13 +107,19 @@ void sound_mixer_process(int32_t *out_l, int32_t *out_r, int frames) {
         sound_sample_t *sample = player->sample;
         uint32_t bpf = (sample->bits_per_sample / 8) * sample->channels;
 
+        // The play range, clamped to the sample on both ends: a start at or
+        // past the end (setPlayRange(start) beyond the sample, or start >=
+        // end) used to send the loop reset below to data past the buffer.
         uint32_t effective_end = sample->length;
         if (player->play_end > 0) {
-            uint32_t end_bytes = player->play_end * bpf;
+            uint64_t end_bytes = (uint64_t)player->play_end * bpf;
             if (end_bytes < effective_end)
-                effective_end = end_bytes;
+                effective_end = (uint32_t)end_bytes;
         }
-        uint32_t effective_start = player->play_start > 0 ? player->play_start * bpf : 0;
+        if (bpf == 0 || effective_end < bpf)
+            continue;  // nothing playable
+        uint64_t start_bytes = (uint64_t)player->play_start * bpf;
+        uint32_t effective_start = start_bytes < effective_end ? (uint32_t)start_bytes : 0;
         if (player->position < effective_start)
             player->position = effective_start;
 

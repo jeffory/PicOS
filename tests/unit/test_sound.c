@@ -203,6 +203,40 @@ static void test_init_reclaims_everything(void) {
   sound_init();
 }
 
+// Task 11 review (Task 14): setPlayRange(start, ...) with start past the
+// sample's end made effective_start > effective_end, and the loop reset
+// then read sample->data out of bounds (ASan: heap-buffer-overflow).
+static void test_play_range_is_clamped(void) {
+  sound_init();
+  sound_player_t *p = sound_player_create();
+  sound_sample_t *s = blank(0.01f);           // 220 frames of 1000
+  CHECK(p && s);
+  sound_player_set_sample(p, s);
+  uint32_t frames = sound_sample_get_length(s);
+
+  sound_player_set_play_range(p, frames + 1000, 0);   // start past the end
+  sound_player_play(p, 0);
+  for (int i = 0; i < 20; i++) mix();
+  CHECK(sound_player_is_playing(p));
+
+  sound_player_set_play_range(p, frames + 1000, frames + 2000);
+  sound_player_play(p, 0);
+  for (int i = 0; i < 20; i++) mix();
+
+  sound_player_set_play_range(p, 50, 10);             // start after end
+  sound_player_play(p, 3);
+  for (int i = 0; i < 40; i++) mix();
+
+  sound_player_set_play_range(p, 10, 50);             // a real range
+  sound_player_play(p, 0);
+  mix();
+  CHECK_EQ_INT(s_l[0], 1000);
+  CHECK(p->position >= 10 * 2 && p->position < 50 * 2);
+
+  sound_player_destroy(p);
+  sound_sample_destroy(s);
+}
+
 int main(void) {
   test_destroy_detaches_playing_player();
   test_destroy_detaches_every_player();
@@ -212,6 +246,7 @@ int main(void) {
   test_reload_live_sample();
   test_volume_is_0_to_100();
   test_init_reclaims_everything();
+  test_play_range_is_clamped();
   CHECK(s_stream_starts > 0);
   return check_report("test_sound");
 }
