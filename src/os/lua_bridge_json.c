@@ -285,6 +285,10 @@ static lua_Integer enc_array_len(lua_State *L, int idx) {
 }
 
 static void enc_table(lua_State *L, json_enc_t *e, int idx, int depth) {
+  // Each level keeps a key and a value on the stack; a C function is only
+  // guaranteed LUA_MINSTACK slots, so grow it (writes past the end corrupt
+  // the heap).
+  luaL_checkstack(L, 4, "json.encode: nesting too deep");
   if (depth >= JSON_MAX_DEPTH)
     luaL_error(L, "json.encode: nesting deeper than %d (cycle?)", JSON_MAX_DEPTH);
 
@@ -625,6 +629,8 @@ static bool dec_object(lua_State *L, json_dec_t *d, int depth) {
 
 static bool dec_value(lua_State *L, json_dec_t *d, int depth) {
   if (depth >= JSON_MAX_DEPTH) return dec_fail(d, "nesting too deep");
+  // A table (and a key) per level: beyond LUA_MINSTACK without growing.
+  if (!lua_checkstack(L, 4)) return dec_fail(d, "nesting too deep");
 
   dec_skip_ws(d);
   if (d->pos >= d->len) return dec_fail(d, "unexpected end of input");
