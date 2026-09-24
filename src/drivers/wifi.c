@@ -793,8 +793,10 @@ void wifi_poll(void) {
   // We're already on Core 1 here, so call mg_wifi_disconnect() directly.
   if (s_disconnect_pending) {
     s_disconnect_pending = false;
-    c1_disconnect();
+    // Before c1_disconnect: its synchronous link-down (tcpip_cb) must see an
+    // intended disconnect, not warn "WiFi disconnected" (as wifi_disconnect).
     s_status = WIFI_STATUS_DISCONNECTED;
+    c1_disconnect();
     { uint32_t save = spin_lock_blocking(s_state_lock);
       s_ssid[0] = '\0';
       s_ip[0] = '\0';
