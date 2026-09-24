@@ -898,6 +898,24 @@ static char *h_set_time_multiplier(const char *params) {
     return strdup(buf);
 }
 
+// step_time {ms}: advance the --virtual-time clock (a paused one included)
+// by ms. Returns {"now_ms"}; step_time {ms:0} reads the clock.
+static char *h_step_time(const char *params) {
+    int ms = 0;
+    json_get_int(params, "ms", &ms);
+    if (ms < 0)
+        return strdup("{\"jsonrpc\":\"2.0\",\"error\":{\"code\":-32602,"
+                      "\"message\":\"ms must be >= 0\"}}");
+    uint64_t now_ms = 0;
+    if (!hal_time_step((uint32_t)ms, &now_ms))
+        return strdup("{\"jsonrpc\":\"2.0\",\"error\":{\"code\":-32002,"
+                      "\"message\":\"step_time needs --virtual-time\"}}");
+    char buf[96];
+    snprintf(buf, sizeof(buf), "{\"jsonrpc\":\"2.0\",\"result\":{\"now_ms\":%llu}}",
+             (unsigned long long)now_ms);
+    return strdup(buf);
+}
+
 // ── Terminal buffer dump ─────────────────────────────────────────────────────
 
 static char *h_get_terminal_buffer(const char *params) {
@@ -1259,6 +1277,7 @@ static struct {
     { "set_wifi_state",     h_set_wifi_state },
     { "get_log_buffer",     h_get_log_buffer },
     { "set_time_multiplier",h_set_time_multiplier },
+    { "step_time",          h_step_time },
     { "get_terminal_buffer", h_get_terminal_buffer },
     { "shutdown",           h_shutdown },
     { "clear_log_buffer",   h_clear_log_buffer },

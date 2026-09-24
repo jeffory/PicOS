@@ -133,6 +133,7 @@ class PicosSimulator:
         tcp_port: int = 0,
         timeout: float = 10.0,
         test_mode: bool = False,
+        virtual_time: Optional[bool] = None,
         crash_log_path: Optional[str] = None,
         unix_socket: Optional[str] = "none",
         extra_args: Sequence[str] = (),
@@ -146,6 +147,19 @@ class PicosSimulator:
         # --test-mode: Lua error screens and launch refusals return at once
         # (their text goes to the log's "err" source) and idle dim is off.
         self.test_mode = test_mode
+        # --virtual-time (needs test_mode): the clock the OS and apps see is
+        # virtual. sleep_ms(n) advances it by n instead of waiting (paced at
+        # set_time_multiplier x real time, default 50x; 0 pauses it for
+        # step_time). Off by default: audio playback and network I/O stay on
+        # real time, and apps with time-boxed input waits would expire before
+        # a test could type. None = $PICOS_SIM_VIRTUAL_TIME=1 turns it on for
+        # every test-mode simulator (a whole-suite experiment knob).
+        if virtual_time is None:
+            virtual_time = test_mode and os.environ.get(
+                "PICOS_SIM_VIRTUAL_TIME") == "1"
+        if virtual_time and not test_mode:
+            raise ValueError("virtual_time requires test_mode")
+        self.virtual_time = virtual_time
         # --crash-log: where the sim's SIGSEGV/SIGABRT handler writes its
         # backtrace. Read from disk after a crash (a dead sim can't answer
         # get_crash_log). None = the sim's per-PID default under /tmp.
@@ -215,6 +229,8 @@ class PicosSimulator:
         ]
         if self.test_mode:
             cmd.append("--test-mode")
+        if self.virtual_time:
+            cmd.append("--virtual-time")
         if self.crash_log_path:
             cmd += ["--crash-log", str(self.crash_log_path)]
         if self.unix_socket:
@@ -854,10 +870,23 @@ class PicosSimulator:
         return self.call("get_heap_info")
 
     def set_time_multiplier(self, multiplier: float) -> dict:
-        """Scale hal_sleep_ms() delays only. It does NOT change the clock Lua
-        sees (sys.sleep, getTimeMs use real wall time), so it cannot speed up
-        or slow down app timing."""
+        """Set the speed of simulated time.
+
+        With --virtual-time: virtual time runs at `multiplier` x real time
+        while the OS sleeps (sleep_ms(n) advances the clock by n and waits
+        n / multiplier real ms; default 50), stretches without a sleep past
+        50 ms advance it at min(multiplier, 1) x real time, and 0 pauses the
+        clock: sleeps then return only as step_time() moves it.
+
+        Without --virtual-time: it only scales hal_sleep_ms() delays; the
+        clock Lua sees (sys.sleep, getTimeMs) stays the wall clock."""
         return self.call("set_time_multiplier", {"multiplier": multiplier})
+
+    def step_time(self, ms: int) -> dict:
+        """Advance the virtual clock by `ms` (--virtual-time only; the sim
+        refuses it on the wall clock). Returns {"now_ms": N}, the clock
+        after the step; step_time(0) reads it."""
+        return self.call("step_time", {"ms": int(ms)})
 
     # ── Build Helper ──────────────────────────────────────────────────────────
 

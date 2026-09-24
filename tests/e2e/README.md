@@ -167,6 +167,18 @@ Prefer these over `time.sleep`:
 | N frames presented | `sim.wait_frames(n)` |
 | injected key consumed | `seq = sim.keypress(k)["input_seq"]; sim.wait_input_consumed(seq)` |
 | app staged after boot | `stage_lua_app(sd, name, code, requirements=[...])` then `launch_app` (the sim rescans on a miss) |
+| app running | `sim.call("get_running_app")` → always `{running, name}` |
+| timed behaviour (animations, sleeps, repeat) | a `virtual_time=True` sim: `sys.sleep` runs at 50x and reads back exact; `sim.set_time_multiplier(0)` pauses, `sim.step_time(ms)` advances |
+
+Virtual time (`sim_factory(sd, virtual_time=True)`) is opt-in. Only the
+OS/app thread moves the clock; audio playback and network I/O stay on real
+time, so suites that time audio (`test_fileplayer.py`) or rely on network
+timeouts keep the wall clock. On a paused clock an app that never sleeps
+(panels.lua) sees time move only on `step_time`; sync on input with explicit
+`inject_button` press/release plus `wait_input_consumed` (a click's 80 ms
+auto-release is also on the sim clock), as `test_panels.py` does.
+`--test-mode` (every suite sim) also seeds `math.random` and the string hash
+with constants and pins the clock to 2026-01-01T00:00:00Z at boot.
 
 ## Writing a Lua test app (picotest)
 

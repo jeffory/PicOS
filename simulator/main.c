@@ -57,6 +57,7 @@ static char g_sd_card_path[512] = SIM_DEFAULT_SD_CARD;
 static char g_launch_app[128] = "";  // App to auto-launch
 static int g_auto_launch_done = 0;   // Flag to track if auto-launch was attempted
 static int g_show_splash = 0;        // Show boot splash screen
+static int g_virtual_time = 0;       // --virtual-time (needs --test-mode)
 static int g_tcp_port = 7878;        // TCP port for RPC socket
 static char g_instance_id[64] = "";  // Instance ID for unique socket paths
 static char g_unix_socket[256] = ""; // --unix-socket PATH|none ("" = default)
@@ -145,7 +146,11 @@ static void print_usage(const char* program) {
     printf("  --unix-socket PATH   UNIX control socket path, or 'none' to disable\n");
     printf("  --crash-log PATH     Crash log file path (default: /tmp/picos_sim_crash_<pid>.log)\n");
     printf("  --show-splash        Show boot splash screen with delays\n");
-    printf("  --test-mode          Error screens return at once; idle dim off\n");
+    printf("  --test-mode          Error screens return at once; idle dim off;\n"
+           "                       math.random seeded and the clock pinned to\n"
+           "                       2026-01-01T00:00:00Z at boot\n");
+    printf("  --virtual-time       (with --test-mode) virtual clock: Core 0 sleeps\n"
+           "                       advance it instead of waiting (step_time RPC)\n");
     printf("  --debug              Enable debug logging\n");
     printf("  --real-umm           Run umm_* on the firmware's umm_malloc (device heap\n"
            "                       size, 200 B blocks) instead of the counting allocator\n");
@@ -194,6 +199,8 @@ static void parse_args(int argc, char** argv) {
             g_show_splash = 1;
         } else if (strcmp(argv[i], "--test-mode") == 0) {
             sim_set_test_mode(true);
+        } else if (strcmp(argv[i], "--virtual-time") == 0) {
+            g_virtual_time = 1;
         } else if (strcmp(argv[i], "--debug") == 0) {
             hal_set_debug_mode(1);
         } else if (strcmp(argv[i], "--real-umm") == 0) {
@@ -209,6 +216,12 @@ static void parse_args(int argc, char** argv) {
             exit(1);
         }
     }
+
+    if (g_virtual_time && !sim_test_mode()) {
+        fprintf(stderr, "--virtual-time requires --test-mode\n");
+        exit(1);
+    }
+    hal_timing_set_virtual(g_virtual_time != 0);
 
     // Default the crash log to a per-process path so parallel instances never
     // read each other's crashes, and a stale file cannot outlive the process.

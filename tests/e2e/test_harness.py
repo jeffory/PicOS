@@ -426,10 +426,83 @@ def test_stalled_client_is_disconnected_without_stalling_sys_log(harness_sim):
     sim.wait_for_exit(timeout=15.0)
 
 
-# ── Test-mode determinism ───────────────────────────────────────────────────
+# ── Virtual time (--virtual-time, audit R14) and test-mode determinism ──────
+
+VT_APP = """
+local sys = picocalc.sys
+local t0 = sys.getTimeMs()
+sys.sleep(5000)
+local t1 = sys.getTimeMs()
+sys.log("VT:SLEPT " .. (t1 - t0))
+"""
 
 # 2026-01-01T00:00:00Z: the date --test-mode pins the clock to at boot.
 TEST_EPOCH = 1767225600
+
+
+@pytest.fixture
+def vt_sim(sim_factory, test_sd_card):
+    """A --test-mode --virtual-time simulator on the per-test SD card."""
+    return sim_factory(test_sd_card, virtual_time=True)
+
+
+def test_virtual_sleep_advances_the_clock_without_waiting(vt_sim, test_sd_card):
+    stage_lua_app(test_sd_card, "vt_sleep", VT_APP)
+    start = time.monotonic()
+    vt_sim.launch_app("vt_sleep")
+    text = vt_sim.wait_for_log(r"^VT:SLEPT \d+$", timeout=10.0)
+    wall = time.monotonic() - start
+    outcome = vt_sim.wait_for_exit(timeout=10.0)
+    assert outcome["result"] == "returned", outcome
+    slept = int(text.split()[1])
+    # Only the sleep advances the clock: stretches without a sleep shorter
+    # than the busy threshold (50 ms) add nothing.
+    assert 5000 <= slept < 5100, slept
+    assert wall < 2.5, f"sys.sleep(5000) took {wall:.2f}s of wall clock"
+
+
+def test_real_time_test_mode_sleep_still_waits(sim_factory, test_sd_card):
+    """Without --virtual-time the clock is the wall clock (default)."""
+    sim = sim_factory(test_sd_card)
+    stage_lua_app(test_sd_card, "vt_short", VT_APP.replace("5000", "400"))
+    start = time.monotonic()
+    sim.launch_app("vt_short")
+    sim.wait_for_log(r"^VT:SLEPT \d+$", timeout=10.0)
+    assert time.monotonic() - start >= 0.4
+
+
+def test_step_time_advances_a_paused_clock(vt_sim, test_sd_card):
+    sim = vt_sim
+    stage_lua_app(test_sd_card, "vt_step", """
+local sys = picocalc.sys
+sys.log("VT:READY")
+sys.sleep(1000)
+sys.log("VT:WOKE")
+""")
+    sim.set_time_multiplier(0)
+    base = sim.step_time(0)["now_ms"]
+    time.sleep(0.2)  # wall time passes; the paused clock must not
+    assert sim.step_time(0)["now_ms"] == base
+    assert sim.step_time(250)["now_ms"] == base + 250
+
+    sim.launch_app("vt_step")
+    sim.wait_for_log(r"^VT:READY$", timeout=5.0)
+    time.sleep(0.3)
+    assert not [e for e in sim.get_log_lines(0) if e["text"] == "VT:WOKE"], \
+        "sys.sleep returned while the clock was paused"
+    sim.step_time(600)
+    time.sleep(0.2)
+    assert not [e for e in sim.get_log_lines(0) if e["text"] == "VT:WOKE"], \
+        "sys.sleep(1000) returned after 600 ms of virtual time"
+    sim.step_time(400)
+    sim.wait_for_log(r"^VT:WOKE$", timeout=5.0)
+    sim.set_time_multiplier(1)
+    assert sim.wait_for_exit(timeout=5.0)["result"] == "returned"
+
+
+def test_step_time_is_refused_on_the_wall_clock(harness_sim):
+    with pytest.raises(Exception, match="virtual"):
+        harness_sim.step_time(10)
 
 
 DETERMINISM_APP = """
