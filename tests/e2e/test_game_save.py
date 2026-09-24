@@ -2,8 +2,9 @@
 
 Hostile names must not reach outside the save area, and one app must not
 read another's slots. Saves live in /data/<app_id>/saves/<name>.json and
-names are limited to [A-Za-z0-9._-]; a save left at the pre-Task-6 shared
-/saves/<name>.json is moved into the first app that asks for that name.
+names are limited to [A-Za-z0-9._-]. A save left at the pre-Task-6 shared
+/saves/<name>.json is copied (never moved or modified) into an app's slot
+the first time that app reads the name; set and delete never migrate.
 
 Names are refused at the bridge before any path is built; behind that, the
 simulator's SD containment (Task 3) keeps any stray path on the SD image.
@@ -21,6 +22,11 @@ SAVE_KNOWN_BUGS = {}
 
 SYSTEM_CONFIG = {"sentinel": "keep"}
 SAVE_DIR = ("data", "com.test.save", "saves")
+LEGACY = {
+    "legacy": '{"high_score":695}',
+    "legacy_set": '{"owner":"older app"}',
+    "legacy_del": '{"owner":"older app"}',
+}
 
 
 def _stage(sd):
@@ -29,7 +35,8 @@ def _stage(sd):
     saves.mkdir(parents=True, exist_ok=True)
     (saves / "bad.json").write_text('{"a":')
     (sd / "saves").mkdir(exist_ok=True)
-    (sd / "saves" / "legacy.json").write_text('{"high_score":695}')
+    for name, body in LEGACY.items():
+        (sd / "saves" / f"{name}.json").write_text(body)
 
 
 @pytest.fixture(scope="module")
@@ -83,10 +90,21 @@ def test_saves_land_in_app_data_dir(save_runs):
     assert not (saves / "list_b.json").exists(), "delete left list_b.json"
 
 
-def test_legacy_save_moved_into_app(save_runs):
+def test_legacy_saves_untouched(save_runs):
+    """game.save never modifies or removes a file in the shared /saves."""
     run, _ = save_runs
-    moved = run.sd.joinpath(*SAVE_DIR) / "legacy.json"
-    assert moved.exists(), "legacy save was not migrated"
-    assert json.loads(moved.read_text()) == {"high_score": 695}
-    assert not (run.sd / "saves" / "legacy.json").exists(), \
-        "legacy save left behind in the shared /saves"
+    for name, body in LEGACY.items():
+        f = run.sd / "saves" / f"{name}.json"
+        assert f.exists(), f"game.save removed legacy {f.name}"
+        assert f.read_text() == body, f"game.save changed legacy {f.name}"
+
+
+def test_legacy_migration_markers(save_runs):
+    run, _ = save_runs
+    saves = run.sd.joinpath(*SAVE_DIR)
+    # Copied on get, then deleted by the app: the marker stops a re-copy.
+    assert (saves / ".migrated-legacy").exists()
+    assert not (saves / "legacy.json").exists(), "deleted slot came back"
+    # set wrote the app's own data over nothing; the legacy file stayed put.
+    assert json.loads((saves / "legacy_set.json").read_text()) == {"v": 1}
+    assert not (saves / "legacy_del.json").exists()

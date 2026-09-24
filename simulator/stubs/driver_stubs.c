@@ -747,7 +747,32 @@ bool sdcard_rename(const char* oldpath, const char* newpath) {
 bool sdcard_copy(const char* src, const char* dst,
                  void (*progress_cb)(uint32_t done, uint32_t total, void* user),
                  void* user) {
-    (void)src; (void)dst; (void)progress_cb; (void)user; return false;
+    // Mirrors src/drivers/sdcard.c: chunked copy, progress callback per
+    // chunk, dst removed on failure.
+    char full_src[1024], full_dst[1024];
+    if (!hal_sdcard_resolve(src, full_src, sizeof(full_src)) ||
+        !hal_sdcard_resolve(dst, full_dst, sizeof(full_dst)))
+        return false;
+    struct stat st;
+    if (stat(full_src, &st) != 0 || S_ISDIR(st.st_mode)) return false;
+    FILE* in = fopen(full_src, "rb");
+    if (!in) return false;
+    FILE* out = fopen(full_dst, "wb");
+    if (!out) { fclose(in); return false; }
+    uint32_t total = (uint32_t)st.st_size, done = 0;
+    char buf[4096];
+    bool ok = true;
+    size_t n;
+    while ((n = fread(buf, 1, sizeof(buf), in)) > 0) {
+        if (fwrite(buf, 1, n, out) != n) { ok = false; break; }
+        done += (uint32_t)n;
+        if (progress_cb) progress_cb(done, total, user);
+    }
+    if (ferror(in)) ok = false;
+    fclose(in);
+    if (fclose(out) != 0) ok = false;
+    if (!ok) remove(full_dst);
+    return ok;
 }
 bool sdcard_stat(const char* path, sdcard_stat_t* out) {
     char full_path[1024];

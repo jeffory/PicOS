@@ -3,7 +3,7 @@
 -- Saves live in /data/<app_id>/saves/<name>.json; names are limited to
 -- [A-Za-z0-9._-], 1-128 bytes, no "..", no leading ".". The harness stages
 -- /system/config.json {"sentinel":"keep"}, a corrupt
--- /data/com.test.save/saves/bad.json and a legacy /saves/legacy.json, and
+-- /data/com.test.save/saves/bad.json and legacy /saves/legacy*.json, and
 -- checks on the host that no hostile name touched anything outside the save
 -- area and that the saves landed in the app's data dir.
 local pc = picocalc
@@ -82,10 +82,34 @@ T.case("list_returns_saved_names", function()
 end)
 
 T.case("legacy_save_migrates", function()
-    -- Staged at the pre-Task-6 location /saves/legacy.json.
+    -- Staged at the pre-Task-6 location /saves/legacy.json; get/exists copy it
+    -- into this app's slot and leave the original in place.
     T.ok(save.exists("legacy"), "legacy save not found")
     local b = T.ok(save.get("legacy"), "legacy get")
     T.eq(b.high_score, 695, "high_score")
+end)
+
+T.case("legacy_delete_not_undone", function()
+    T.ok(save.delete("legacy"), "delete the migrated slot")
+    T.eq(save.exists("legacy"), false, "exists re-copied the legacy save")
+    T.eq(save.get("legacy"), nil, "get re-copied the legacy save")
+    for _, n in ipairs(save.list()) do
+        T.ok(n:sub(1, 1) ~= ".", "list() shows marker " .. n)
+    end
+end)
+
+T.case("set_on_legacy_name", function()
+    -- /saves/legacy_set.json is staged; set must not touch it.
+    T.ok(save.set("legacy_set", { v = 1 }), "set")
+    local b = T.ok(save.get("legacy_set"), "get")
+    T.eq(b.v, 1, "get returned the legacy file, not the new save")
+end)
+
+T.case("delete_on_legacy_name", function()
+    -- /saves/legacy_del.json is staged; delete must not touch it, and must not
+    -- let a later get pull it in either.
+    T.eq(save.delete("legacy_del"), false, "delete of a slot the app never had")
+    T.eq(save.get("legacy_del"), nil, "get after delete copied the legacy save")
 end)
 
 T.case("bad_names_rejected", function()

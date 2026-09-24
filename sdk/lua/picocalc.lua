@@ -2441,7 +2441,8 @@ function picocalc.game.scene.clearGlobals() end
 ---Per-app save slots, one JSON file each at `/data/<app id>/saves/<key>.json`.
 ---Keys are 1-128 bytes of `[A-Za-z0-9._-]`, contain no `..` and do not start
 ---with `.`; any other key is refused. A slot left in the old shared
----`/saves/<key>.json` is moved into the first app that uses that key.
+---`/saves/<key>.json` is copied (never moved) into an app's slot the first
+---time that app reads the key with `get`/`exists`.
 ---@class picocalc.game.save
 picocalc.game.save = {}
 

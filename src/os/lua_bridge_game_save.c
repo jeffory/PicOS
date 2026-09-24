@@ -14,59 +14,103 @@
 // global. Names are one path component of [A-Za-z0-9._-] (fs_name_valid), so
 // no name can climb out of the directory or collide through truncation.
 //
-// Before this layout every app shared /saves/<name>.json. A slot still found
-// there is moved into the first app that touches that name (get, exists, set
-// or delete), so existing high scores survive the upgrade.
+// Before this layout every app shared /saves/<name>.json. game.save never
+// modifies or removes a file there. The first time an app reads (get/exists)
+// a name it has no slot for, the legacy file is COPIED into its slot, so the
+// original stays available to whichever app really owned it. A marker
+// saves/.migrated-<name> records that the app has settled that name (copied
+// it, or written or deleted its own slot), so a later delete is never undone
+// by a fresh copy. Markers start with '.', which no slot name can, so list()
+// never shows them.
 
 #define SAVE_MAX_NAME 128
-// "/data/" + id (<80) + "/saves/" + name + ".json" + NUL
+// "/data/" + id (<80) + "/saves/" + ".migrated-" + name + NUL
 #define SAVE_MAX_PATH 256
 
-// Validates the name at arg 1 and writes the slot's path to `path`; when the
-// app's slot is missing but a legacy /saves/<name>.json exists, moves that
-// file into place first. Returns false for a bad name or no running app.
-static bool save_path(lua_State *L, char *path, size_t size) {
+typedef enum { SLOT_READ, SLOT_WRITE } slot_use_t;
+
+// The name at arg 1, if valid for the running app; NULL otherwise. Pure.
+static const char *slot_name(lua_State *L, const app_identity_t **me) {
     size_t len = 0;
     const char *name = luaL_checklstring(L, 1, &len);
-    const app_identity_t *me = app_identity_current();
-    if (!me || !fs_name_valid(name, len, SAVE_MAX_NAME))
+    *me = app_identity_current();
+    if (!*me || !fs_name_valid(name, len, SAVE_MAX_NAME))
+        return NULL;
+    return name;
+}
+
+static bool build(char *out, size_t size, const char *fmt,
+                  const char *dir, const char *name) {
+    int n = snprintf(out, size, fmt, dir, name);
+    return n >= 0 && (size_t)n < size;
+}
+
+static void touch(const char *path) {
+    sdfile_t f = sdcard_fopen(path, "w");
+    if (f)
+        sdcard_fclose(f);
+}
+
+// Creates the app's saves directory and writes the slot's path to `path`.
+// For SLOT_READ, copies a legacy save into a missing, unsettled slot; for
+// SLOT_WRITE (set/delete), settles the name without copying. The legacy file
+// itself is only ever read.
+static bool slot_prepare(const app_identity_t *me, const char *name,
+                         slot_use_t use, char *path, size_t size) {
+    // The marker is the longest path; if it fits, so do the others.
+    char aux[SAVE_MAX_PATH];
+    if (!build(path, size, "%s/saves/%s.json", me->data_dir, name) ||
+        !build(aux, sizeof(aux), "%s/saves/.migrated-%s", me->data_dir, name))
         return false;
 
-    int n = snprintf(path, size, "%s/saves", me->data_dir);
-    if (n < 0 || (size_t)n >= size)
-        return false;
-    if (!sdcard_fexists(path)) {
+    snprintf(aux, sizeof(aux), "%s/saves", me->data_dir);
+    if (!sdcard_fexists(aux)) {
         sdcard_mkdir(me->data_dir);
-        sdcard_mkdir(path);
+        sdcard_mkdir(aux);
     }
-    n = snprintf(path, size, "%s/saves/%s.json", me->data_dir, name);
-    if (n < 0 || (size_t)n >= size)
-        return false;
 
-    if (!sdcard_fexists(path)) {
-        char legacy[SAVE_MAX_PATH];
-        snprintf(legacy, sizeof(legacy), "/saves/%s.json", name);
-        if (sdcard_fexists(legacy) && sdcard_rename(legacy, path))
-            printf("[SAVE] migrated %s -> %s\n", legacy, path);
+    char legacy[SAVE_MAX_PATH];
+    snprintf(legacy, sizeof(legacy), "/saves/%s.json", name);
+    snprintf(aux, sizeof(aux), "%s/saves/.migrated-%s", me->data_dir, name);
+    if (sdcard_fexists(aux) || !sdcard_fexists(legacy))
+        return true;  // settled, or nothing to migrate
+
+    if (use == SLOT_WRITE) {
+        touch(aux);
+    } else if (!sdcard_fexists(path)) {
+        if (sdcard_copy(legacy, path, NULL, NULL)) {
+            touch(aux);
+            printf("[SAVE] copied %s -> %s\n", legacy, path);
+        }
+    } else {
+        touch(aux);  // the app already has its own slot
     }
     return true;
 }
 
 static int l_save_set(lua_State *L) {
-    char path[SAVE_MAX_PATH];
+    const app_identity_t *me;
+    const char *name = slot_name(L, &me);
     luaL_checktype(L, 2, LUA_TTABLE);
-    if (!save_path(L, path, sizeof(path))) {
+    if (!name) {
         lua_pushboolean(L, 0);
         lua_pushstring(L, "invalid save name");
         return 2;
     }
 
-    // The shared picocalc.json encoder: nested tables, escaped strings,
-    // integers as integers, floats in their shortest round-trip form.
+    // Encode first: a table the encoder rejects (cycle, NaN, function) raises
+    // before anything on the SD card changes. The shared picocalc.json
+    // encoder handles nesting, escaping, integers and whole floats.
     lua_json_encode_push(L, 2, 0);
     size_t json_len = 0;
     const char *json_str = lua_tolstring(L, -1, &json_len);
 
+    char path[SAVE_MAX_PATH];
+    if (!slot_prepare(me, name, SLOT_WRITE, path, sizeof(path))) {
+        lua_pushboolean(L, 0);
+        lua_pushstring(L, "invalid save name");
+        return 2;
+    }
     sdfile_t file = sdcard_fopen(path, "w");
     if (!file) {
         lua_pushboolean(L, 0);
@@ -86,8 +130,10 @@ static int l_save_set(lua_State *L) {
 }
 
 static int l_save_get(lua_State *L) {
+    const app_identity_t *me;
+    const char *name = slot_name(L, &me);
     char path[SAVE_MAX_PATH];
-    if (!save_path(L, path, sizeof(path))) {
+    if (!name || !slot_prepare(me, name, SLOT_READ, path, sizeof(path))) {
         lua_pushnil(L);
         return 1;
     }
@@ -119,14 +165,22 @@ static int l_save_get(lua_State *L) {
 }
 
 static int l_save_exists(lua_State *L) {
+    const app_identity_t *me;
+    const char *name = slot_name(L, &me);
     char path[SAVE_MAX_PATH];
-    lua_pushboolean(L, save_path(L, path, sizeof(path)) && sdcard_fexists(path));
+    lua_pushboolean(L, name &&
+                           slot_prepare(me, name, SLOT_READ, path, sizeof(path)) &&
+                           sdcard_fexists(path));
     return 1;
 }
 
 static int l_save_delete(lua_State *L) {
+    const app_identity_t *me;
+    const char *name = slot_name(L, &me);
     char path[SAVE_MAX_PATH];
-    lua_pushboolean(L, save_path(L, path, sizeof(path)) && sdcard_delete(path));
+    lua_pushboolean(L, name &&
+                           slot_prepare(me, name, SLOT_WRITE, path, sizeof(path)) &&
+                           sdcard_delete(path));
     return 1;
 }
 
