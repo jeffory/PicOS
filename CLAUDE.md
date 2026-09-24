@@ -344,7 +344,10 @@ Status constants: `picocalc.network.kStatusNotConnected` (0), `kStatusConnected`
 - `picocalc.crypto` is **absent** (Lua and native) — mbedTLS is firmware-only (`simulator/CMakeLists.txt` excludes `lua_bridge_crypto.c`; native crypto trampolines are stubs except `randomBytes`).
 - Display post-effects (`effectInvert`…`effectPosterize`) are no-ops on the native (Unicorn) path; Lua-side effects work.
 - Hardware vertical scroll (`setScrollArea`/`setScrollOffset`/`getScrollOffset`) is emulated: flushes land in a GRAM analog and presents/screenshots are composed through the scroll registers, mirroring the ST7365P ring semantics for the visible 320 lines (the real chip's extra 160 frame-memory lines are not modelled).
-- The launcher caches the app list at boot — newly staged apps need a sim restart.
+- The launcher caches the app list at boot, but the `launch_app` RPC rescans `/apps` once when a name is not found, so newly staged apps launch without a restart; `rescan_apps` forces a rescan (e.g. after editing an existing app's `app.json`).
+- Boot mirrors `src/main.c`: `config_load()`, idle-dim init, network, Core 1, `system_menu_init()`, launcher. Idle dim stays inert (the keyboard stub never polls it).
+- SD paths resolve `..` lexically and anything that would leave the SD root is refused (`[SIM] SD escape: <path>` on the `err` log source).
+- Test control channel (`simulator/sim_socket_handler.c`, `sim_test_control.c`): `get_log_buffer {since_seq, tail}` returns `{lines:[{seq,t_ms,src,text}], next_seq, dropped, more}` with `src` = `lua`/`native`/`os`/`err`; `subscribe {"logs":true}` pushes `log {seq,src,text}` notifications; `app.exited` carries `{name, id, found, result: returned|error|exit_sentinel|load_failed, error, runtime_ms}`; `launch_app` returns `{queued, busy}`; `display_stats.present_count`; `inject_*` return `input_seq` and `get_input_state` reports `consumed_seq`. `--test-mode` makes Lua error screens and launch refusals return at once (the text is on the `err` source). Python client: `tests/e2e/picos_simulator.py`.
 - `picocalc.video` is stubbed (no decoder): `player()` returns nil-backed handles; every video trampoline is a no-op.
 - Everything else (zip including read-in-place archive handles, modplayer, display clip rect, drawPlane, tilemap, sprites) mirrors firmware, including `g_api.version = 7`.
 

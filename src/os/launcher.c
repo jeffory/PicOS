@@ -2,6 +2,7 @@
 #include "launcher_types.h"
 #include "crashlog.h"
 #include "app_runner.h"
+#include "sim_hooks.h"
 #include "lua_runner.h"
 #include "native_loader.h"
 #include "zip_archive.h"
@@ -641,6 +642,7 @@ static bool run_app(int idx) {
   app_entry_t *app = &s_apps[idx];
   s_running_app_name = app->name;
   s_app_launch_time_ms = to_ms_since_boot(get_absolute_time());
+  sim_app_outcome_begin(app->name, app->id);
 
   // Free any PSRAM used by the MP3 player (from a previous Lua app)
   // so we have maximum memory for the next app.
@@ -666,6 +668,9 @@ static bool run_app(int idx) {
                (unsigned long)app->min_psram_kb, (unsigned long)largest_kb);
       crashlog_write("APP FAILED", app->name, "not enough PSRAM to launch",
                      detail);
+      sim_log_err("[LAUNCHER] %s: not enough PSRAM to launch: %s", app->name,
+                  detail);
+      sim_app_outcome_set(SIM_APP_RESULT_LOAD_FAILED, detail);
       display_clear(COLOR_BLACK);
       display_draw_text(8, 8, "Not enough memory to launch:", COLOR_RED,
                         COLOR_BLACK);
@@ -675,7 +680,7 @@ static bool run_app(int idx) {
       display_draw_text(8, 76, "Reboot to defragment the heap.", COLOR_GRAY,
                         COLOR_BLACK);
       display_flush();
-      for (int i = 0; i < 30; i++) {
+      for (int i = 0; i < 30 && !sim_test_mode(); i++) {
         watchdog_update();
         sleep_ms(100);
       }
@@ -743,6 +748,7 @@ static bool run_app(int idx) {
 
   // The runner returned, so whatever happened has been reported already.
   crashlog_clear_running();
+  sim_app_outcome_end(ok);
 
   // ── Shared post-exit cleanup ──────────────────────────────────────────────
   display_clear_clip_rect();      // don't let an app's clip rect leak back to the launcher

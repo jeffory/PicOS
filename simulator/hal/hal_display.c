@@ -9,6 +9,7 @@ static SDL_Window* g_window = NULL;
 static SDL_Renderer* g_renderer = NULL;
 static SDL_Texture* g_texture = NULL;
 static uint16_t* g_framebuffer = NULL;
+static _Atomic uint32_t g_present_count = 0;
 
 bool hal_display_init(const char* title) {
     // Create window
@@ -115,8 +116,13 @@ uint16_t* hal_display_get_framebuffer(void) {
     return g_framebuffer;
 }
 
+uint32_t hal_display_get_present_count(void) {
+    return g_present_count;
+}
+
 void hal_display_present(void) {
     if (!g_framebuffer || !g_texture || !g_renderer) return;
+    g_present_count++;
     
     // Update texture with framebuffer data
     SDL_UpdateTexture(g_texture, NULL, g_framebuffer, DISPLAY_WIDTH * sizeof(uint16_t));

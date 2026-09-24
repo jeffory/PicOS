@@ -1155,8 +1155,14 @@ async def wait_for_exit(app_name: str = "", timeout: float = 60.0, device: str |
         if notif:
             params = notif.get("params", {})
             name = params.get("name", "?")
-            ok = params.get("ok", False)
-            return f"App '{name}' exited (ok={ok})"
+            result = params.get("result", "?")
+            error = params.get("error")
+            msg = f"App '{name}' exited (result={result}"
+            if not params.get("found", True):
+                msg += ", not found"
+            if error:
+                msg += f", error={error}"
+            return msg + ")"
         return f"Timeout after {timeout}s — app still running"
     except Exception as e:
         return f"Error: {e}"
@@ -1478,14 +1484,18 @@ async def get_log_buffer(lines: int = 100, device: str | None = None) -> str:
         return "\n".join(buf[-lines:])
     try:
         conn = get_connection()
-        result = await asyncio.to_thread(conn.call, "get_log_buffer", timeout=5)
-        log_lines = result.get("lines", [])
-        if isinstance(log_lines, str) and log_lines:
-            log_lines = log_lines.strip().split("\n")
+        result = await asyncio.to_thread(
+            conn.call, "get_log_buffer", {"tail": lines}, timeout=5)
+        # Entries are {seq, t_ms, src, text}; src is lua/native/os/err.
+        log_lines = [
+            l if isinstance(l, str)
+            else (l.get("text", "") if l.get("src") in ("lua", "native")
+                  else f"[{l.get('src')}] {l.get('text', '')}")
+            for l in result.get("lines", [])
+        ]
         if not log_lines:
             return "(no log lines)"
-        shown = log_lines[-lines:] if len(log_lines) > lines else log_lines
-        return "\n".join(shown)
+        return "\n".join(log_lines[-lines:])
     except Exception as e:
         return f"Error: {e}"
 
@@ -2040,8 +2050,10 @@ async def push_app(local_dir: str, app_name: str = "",
             shutil.copytree(src, dest, ignore=_PUSH_APP_EXCLUDE)
             n = sum(1 for p in dest.rglob("*") if p.is_file())
             return (f"Copied {n} files to simulator: {dest}\n"
-                    "Note: the launcher caches the app list at boot — restart "
-                    "the simulator if this is a new app.")
+                    "Note: launch_app rescans /apps when the name is not "
+                    "found, so new apps launch without a restart; after "
+                    "changing an existing app's app.json, call the "
+                    "rescan_apps RPC.")
         except Exception as e:
             return f"Error: {e}"
 

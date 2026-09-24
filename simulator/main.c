@@ -29,7 +29,12 @@
 #include "drivers/fileplayer.h"
 #include "drivers/mp3_player.h"
 #include "drivers/http.h"
+#include "drivers/keyboard.h"
 #include "appconfig.h"
+#include "config.h"
+#include "idle_dim.h"
+#include "system_menu.h"
+#include "sim_test_control.h"
 
 // Simulator configuration
 #define SIM_WINDOW_TITLE "PicOS Simulator"
@@ -120,6 +125,7 @@ static void print_usage(const char* program) {
     printf("  --instance-id ID     Unique instance ID (for parallel simulators)\n");
     printf("  --crash-log PATH     Crash log file path (default: /tmp/picos_sim_crash.log)\n");
     printf("  --show-splash        Show boot splash screen with delays\n");
+    printf("  --test-mode          Error screens return at once; idle dim off\n");
     printf("  --debug              Enable debug logging\n");
     printf("  --help               Show this help\n");
 }
@@ -150,6 +156,8 @@ static void parse_args(int argc, char** argv) {
             i++;
         } else if (strcmp(argv[i], "--show-splash") == 0) {
             g_show_splash = 1;
+        } else if (strcmp(argv[i], "--test-mode") == 0) {
+            sim_set_test_mode(true);
         } else if (strcmp(argv[i], "--debug") == 0) {
             hal_set_debug_mode(1);
         } else {
@@ -455,15 +463,43 @@ int main(int argc, char** argv) {
     
     hal_timing_init();
 
+    // Wire global API struct (required by Lua bridge modules)
+    sim_wire_g_api();
+
+    // Initialize Lua heap (required for Lua apps)
+    lua_psram_alloc_init();
+    printf("[Core0] Lua heap initialized\n");
+    fflush(stdout);
+
+    // ── Boot order below mirrors src/main.c: config, idle dim, network,
+    //    Core 1, system menu, launcher. ──
+
+    // Load persisted settings from /system/config.json
+    config_load();
+
+    // Idle screen dimming. The keyboard stub never polls it, so it stays
+    // inert in the simulator; --test-mode disables it outright.
+    {
+        uint32_t dim_timeout_s = 60;
+        const char *dt = config_get("dim_timeout_s");
+        if (dt)
+            dim_timeout_s = (uint32_t)atoi(dt);
+        if (sim_test_mode())
+            dim_timeout_s = 0;
+        uint8_t brightness = config_parse_brightness(config_get("brightness"));
+        kbd_set_backlight(brightness);
+        idle_dim_init(brightness, dim_timeout_s);
+    }
+
     // Initialize toast system and networking (before Core 1 starts)
     extern void toast_init(void);
     extern void http_init(void);
     extern void tcp_init(void);
     extern void wifi_init(void);
     toast_init();
+    wifi_init();
     http_init();
     tcp_init();
-    wifi_init();
 
     // Start Core 1 thread (simulates second core)
     thread_t core1;
@@ -476,27 +512,15 @@ int main(int argc, char** argv) {
         SDL_Quit();
         return 1;
     }
-    
+
     printf("[Core0] Starting main loop...\n");
     fflush(stdout);
-    
+
     // Set up exit flag for keyboard stub
     set_simulator_exit_flag(&g_running);
-    
-    // Wire global API struct (required by Lua bridge modules)
-    sim_wire_g_api();
 
-    // Initialize Lua heap (required for Lua apps)
-    printf("[Core0] Initializing Lua heap...\n");
-    fflush(stdout);
-    lua_psram_alloc_init();
-    printf("[Core0] Lua heap initialized\n");
-    fflush(stdout);
-    
-    // Run the app launcher
-    // If --launch was specified, the launcher will handle it after scanning apps
-    printf("[Core0] About to start launcher...\n");
-    fflush(stdout);
+    system_menu_init();
+
     printf("[Core0] Starting launcher...\n");
     fflush(stdout);
 

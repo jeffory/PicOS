@@ -1,4 +1,5 @@
 #pragma once
+#include <stdbool.h>
 #include <stddef.h>
 
 // Initialize the RPC socket server.
@@ -9,6 +10,11 @@ void sim_socket_poll(void);
 void sim_socket_shutdown(void);
 void sim_socket_close(void);
 void sim_socket_notify(const char *method, const char *params_json);
+// Queue an already-framed notification line to clients that subscribed to
+// logs (subscribe {"logs":true}). Never blocks on a slow client.
+void sim_socket_notify_log_subscribers(const char *json_line, size_t len);
+// From an RPC handler: (un)subscribe the requesting client to logs.
+void sim_socket_set_log_subscription(bool on);
 
 // Returns the actual TCP port bound (useful when tcp_port=0 for auto-assign)
 int sim_socket_get_port(void);

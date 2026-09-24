@@ -76,4 +76,17 @@ void hal_input_release_buttons(uint32_t buttons);
 // Inject a typed character into the char ring buffer (for RPC control)
 void hal_input_inject_char(char c);
 
+// ── Injection sequence numbers (test sync) ─────────────────────────────────
+// Every injection (click/press/release/char, and the menu click, which the
+// keyboard stub handles outside the button state) gets the next seq. An
+// injection is consumed once the OS has read it: a button event when
+// hal_input_read_buttons() returns with it published, a char when
+// hal_input_get_char()/hal_input_poll_char() hands it out, the menu click
+// when kbd_consume_menu_press() takes it.
+uint32_t hal_input_last_issued_seq(void);
+// consumed: highest seq such that it and every earlier seq are consumed.
+void hal_input_get_seq_state(uint32_t *issued, uint32_t *consumed);
+void hal_input_note_menu_injected(void);
+void hal_input_note_menu_consumed(void);
+
 #endif // HAL_INPUT_H

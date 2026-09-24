@@ -159,6 +159,7 @@ void kbd_apply_clock(void) {
 bool kbd_consume_menu_press(void) {
     if (s_menu_pressed) {
         s_menu_pressed = false;
+        hal_input_note_menu_consumed();
         return true;
     }
     return false;
@@ -193,6 +194,8 @@ void kbd_inject_buttons(uint32_t buttons) {
     if (buttons & BTN_MENU) {
         s_menu_pressed = true;
         buttons &= ~BTN_MENU;
+        hal_input_note_menu_injected();
+        if (!buttons) return;
     }
     // Inject through HAL only — the next kbd_poll picks them up atomically.
     // (Writing s_buttons/s_buttons_pressed directly here would double-fire

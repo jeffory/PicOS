@@ -1,6 +1,7 @@
 #include "lua_bridge_internal.h"
 #include "lua_psram_alloc.h"
 #include "crashlog.h"
+#include "sim_hooks.h"
 
 char lua_bridge_exit_tag; // address used as sentinel, value irrelevant
 #include "../drivers/display.h"
@@ -352,6 +353,7 @@ void lua_bridge_show_error(lua_State *L, const char *context) {
   const char *app = lua_isstring(L, -1) ? lua_tostring(L, -1) : "unknown";
   crashlog_write_lua_error(app, context, buf);
   lua_pop(L, 1);
+  sim_app_report_error(context, buf);
 
   display_clear(COLOR_BLACK);
   display_draw_text(4, 4, context, COLOR_RED, COLOR_BLACK);
@@ -377,6 +379,11 @@ void lua_bridge_show_error(lua_State *L, const char *context) {
   display_draw_text(4, FB_HEIGHT - 12, "Press Esc to continue", COLOR_GRAY,
                     COLOR_BLACK);
   display_flush();
+
+  if (sim_test_mode()) {  // tests read the error from the log, not the screen
+    lua_pop(L, 1);
+    return;
+  }
 
   // Drain any keys already held when the error occurred.
   // Timeout after ~2s in case the keyboard I2C is dead and state is stale.

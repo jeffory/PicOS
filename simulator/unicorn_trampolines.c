@@ -1617,10 +1617,10 @@ static void tramp_sys_log(uc_engine *uc) {
     // Also route into the MCP log ring buffer (get_log_buffer) — this was
     // dead-wired before: sim_log_append() existed but nothing ever called
     // it for native-app logs, so get_log_buffer() always returned empty.
-    extern void sim_log_append(const char *line);
+    extern void sim_log_append_src(const char *src, const char *text);
     char log_line[1040];
     snprintf(log_line, sizeof(log_line), "[APP] %s", output);
-    sim_log_append(log_line);
+    sim_log_append_src("native", log_line);
 }
 
 static void tramp_sys_poll(uc_engine *uc) {

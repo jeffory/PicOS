@@ -14,13 +14,11 @@
 #include <pthread.h>
 #include <time.h>
 #include <stdbool.h>
+#include <poll.h>
 
 #define MAX_CLIENTS 8
-// Large enough to hold a full base64-encoded screenshot response (PNG or
-// raw RGB565 framebuffer, ~273KB base64) in one shot — queue_response()
-// aborts and silently truncates the message if the socket's kernel send
-// buffer is still full after one flush attempt, so undersizing this
-// caused truncated PNGs on anything but a near-empty screen.
+// Per-client write buffer. Responses stream through it (queue_response waits
+// for the client to drain it); notifications must fit whole or are dropped.
 #define WRITE_BUF_SIZE (512 * 1024)
 #define READ_BUF_INIT 4096
 #define READ_BUF_MAX (256 * 1024)  // 256KB max for large base64 payloads
@@ -34,6 +32,7 @@ typedef struct {
     char *read_buf;
     int read_buf_used;
     int read_buf_cap;
+    bool sub_logs;      // subscribed to `log` notifications
 } client_t;
 
 static client_t s_clients[MAX_CLIENTS];
@@ -41,7 +40,15 @@ static int s_unix_fd = -1;
 static int s_tcp_fd = -1;
 static int s_max_fd = -1;
 static fd_set s_read_fds;
-static pthread_mutex_t s_notify_mutex = PTHREAD_MUTEX_INITIALIZER;
+// Guards every client's fd and write buffer. The socket thread writes RPC
+// responses and flushes; the main/Core-1 threads queue notifications. A
+// response is copied into the buffer under one hold of this lock, so a
+// notification can never land in the middle of it.
+static pthread_mutex_t s_clients_mutex = PTHREAD_MUTEX_INITIALIZER;
+// Client whose request is being dispatched (socket thread only).
+static client_t *s_dispatch_client = NULL;
+// How long a response may wait for a slow client to drain its buffer.
+#define RESPONSE_FLUSH_TIMEOUT_MS 5000
 static int s_actual_tcp_port = 0;
 static char s_unix_sock_path[256] = DEFAULT_UNIX_SOCK_PATH;
 
@@ -57,26 +64,32 @@ static void set_nonblocking(int fd) {
 
 static int add_client(int fd) {
     set_nonblocking(fd);
+    pthread_mutex_lock(&s_clients_mutex);
     for (int i = 0; i < MAX_CLIENTS; i++) {
         if (s_clients[i].fd <= 0) {
             s_clients[i].fd = fd;
             s_clients[i].write_buf_used = 0;
             s_clients[i].read_buf_used = 0;
             s_clients[i].read_buf_cap = READ_BUF_INIT;
+            s_clients[i].sub_logs = false;
             s_clients[i].read_buf = malloc(READ_BUF_INIT);
             if (!s_clients[i].read_buf) {
                 close(fd);
                 s_clients[i].fd = -1;
+                pthread_mutex_unlock(&s_clients_mutex);
                 return -1;
             }
+            pthread_mutex_unlock(&s_clients_mutex);
             return 0;
         }
     }
+    pthread_mutex_unlock(&s_clients_mutex);
     close(fd);
     return -1;
 }
 
 static void remove_client(int i) {
+    pthread_mutex_lock(&s_clients_mutex);
     if (s_clients[i].fd > 0) {
         close(s_clients[i].fd);
         s_clients[i].fd = -1;
@@ -85,9 +98,12 @@ static void remove_client(int i) {
         free(s_clients[i].read_buf);
         s_clients[i].read_buf = NULL;
         s_clients[i].read_buf_cap = 0;
+        s_clients[i].sub_logs = false;
     }
+    pthread_mutex_unlock(&s_clients_mutex);
 }
 
+// Caller holds s_clients_mutex.
 static int flush_write_buf(client_t *c) {
     if (c->write_buf_used <= 0) return 0;
     ssize_t n = send(c->fd, c->write_buf, c->write_buf_used, MSG_NOSIGNAL);
@@ -102,15 +118,38 @@ static int flush_write_buf(client_t *c) {
     return 0;
 }
 
-static int queue_response(client_t *c, const char *json, size_t len) {
+// Caller holds s_clients_mutex. Copies the whole message or nothing.
+// may_block (RPC responses, socket thread): stream through the buffer,
+// waiting up to RESPONSE_FLUSH_TIMEOUT_MS for the client to drain it.
+// !may_block (notifications, other threads): one flush attempt; if the
+// message still does not fit it is dropped, never truncated.
+static int queue_response(client_t *c, const char *json, size_t len, bool may_block) {
     if (c->fd <= 0) return -1;
     if (len == 0) len = strlen(json);
+    if (!may_block) {
+        size_t avail = WRITE_BUF_SIZE - 1 - c->write_buf_used;
+        if (avail < len) {
+            if (flush_write_buf(c) < 0) return -1;
+            avail = WRITE_BUF_SIZE - 1 - c->write_buf_used;
+            if (avail < len) return -1;
+        }
+        memcpy(c->write_buf + c->write_buf_used, json, len);
+        c->write_buf_used += (int)len;
+        return 0;
+    }
+    int waited_ms = 0;
     while (len > 0) {
         size_t avail = WRITE_BUF_SIZE - 1 - c->write_buf_used;
         if (avail == 0) {
             if (flush_write_buf(c) < 0) return -1;
             avail = WRITE_BUF_SIZE - 1 - c->write_buf_used;
-            if (avail == 0) return -1;
+            if (avail == 0) {
+                if (waited_ms >= RESPONSE_FLUSH_TIMEOUT_MS) return -1;
+                struct pollfd pfd = { .fd = c->fd, .events = POLLOUT };
+                poll(&pfd, 1, 10);
+                waited_ms += 10;
+                continue;
+            }
         }
         size_t chunk = len < avail ? len : avail;
         memcpy(c->write_buf + c->write_buf_used, json, chunk);
@@ -121,14 +160,26 @@ static int queue_response(client_t *c, const char *json, size_t len) {
     return 0;
 }
 
-static void queue_notification(const char *json, size_t len) {
-    pthread_mutex_lock(&s_notify_mutex);
+static void queue_notification(const char *json, size_t len, bool logs_only) {
+    pthread_mutex_lock(&s_clients_mutex);
     for (int i = 0; i < MAX_CLIENTS; i++) {
-        if (s_clients[i].fd > 0) {
-            queue_response(&s_clients[i], json, len);
+        if (s_clients[i].fd > 0 && (!logs_only || s_clients[i].sub_logs)) {
+            queue_response(&s_clients[i], json, len, false);
         }
     }
-    pthread_mutex_unlock(&s_notify_mutex);
+    pthread_mutex_unlock(&s_clients_mutex);
+}
+
+void sim_socket_notify_log_subscribers(const char *json_line, size_t len) {
+    queue_notification(json_line, len, true);
+}
+
+void sim_socket_set_log_subscription(bool on) {
+    // Only called from a handler, i.e. on the socket thread mid-dispatch.
+    if (!s_dispatch_client) return;
+    pthread_mutex_lock(&s_clients_mutex);
+    s_dispatch_client->sub_logs = on;
+    pthread_mutex_unlock(&s_clients_mutex);
 }
 
 static void process_requests(client_t *c) {
@@ -157,16 +208,23 @@ static void process_requests(client_t *c) {
         *newline = '\0';
         size_t msg_len = newline - c->read_buf;
 
+        s_dispatch_client = c;
         char *resp = sim_handler_dispatch(c->read_buf, c->read_buf + msg_len);
+        s_dispatch_client = NULL;
 
         c->read_buf_used -= (int)(msg_len + 1);
         memmove(c->read_buf, newline + 1, c->read_buf_used);
         if (resp) {
-            if (queue_response(c, resp, 0) < 0) {
-                free(resp);
-                return;
-            }
+            pthread_mutex_lock(&s_clients_mutex);
+            size_t rlen = strlen(resp);
+            int rc = queue_response(c, resp, rlen, true);
+            // Some error paths return an unterminated line; the protocol is
+            // newline-delimited, so a client would otherwise wait forever.
+            if (rc == 0 && rlen > 0 && resp[rlen - 1] != '\n')
+                rc = queue_response(c, "\n", 1, true);
+            pthread_mutex_unlock(&s_clients_mutex);
             free(resp);
+            if (rc < 0) return;
         }
     }
 }
@@ -275,7 +333,10 @@ void sim_socket_poll(void) {
     // inside fflush() while holding the stdio lock, and the main thread then
     // blocks in printf() waiting for it.
     int n = select(max_fd + 1, &read_fds, NULL, NULL, &tv);
-    if (n <= 0) return;
+    // No early return when nothing is readable: notifications queued by
+    // other threads must still be flushed. (They used to sit in the write
+    // buffer until the client happened to send another request.)
+    if (n < 0) FD_ZERO(&read_fds);
 
     if (s_unix_fd >= 0 && FD_ISSET(s_unix_fd, &read_fds)) {
         int fd = accept(s_unix_fd, NULL, NULL);
@@ -313,11 +374,10 @@ void sim_socket_poll(void) {
 
         process_requests(c);
 
-        if (c->fd > 0 && c->write_buf_used > 0) {
-            if (flush_write_buf(c) < 0) {
-                remove_client(i);
-            }
-        }
+        pthread_mutex_lock(&s_clients_mutex);
+        int flush_rc = (c->fd > 0 && c->write_buf_used > 0) ? flush_write_buf(c) : 0;
+        pthread_mutex_unlock(&s_clients_mutex);
+        if (flush_rc < 0) remove_client(i);
     }
 }
 
@@ -347,8 +407,14 @@ void sim_socket_close(void) {
 }
 
 void sim_socket_notify(const char *method, const char *params_json) {
-    static char buf[4096];
-    int len = snprintf(buf, sizeof(buf), "{\"jsonrpc\":\"2.0\",\"method\":\"%s\",\"params\":%s}\n",
-                       method, params_json ? params_json : "{}");
-    queue_notification(buf, (size_t)len);
+    // Heap-built: notifications come from several threads, and log/app
+    // params can exceed any fixed buffer.
+    const char *params = params_json ? params_json : "{}";
+    size_t cap = strlen(method) + strlen(params) + 64;
+    char *buf = malloc(cap);
+    if (!buf) return;
+    int len = snprintf(buf, cap, "{\"jsonrpc\":\"2.0\",\"method\":\"%s\",\"params\":%s}\n",
+                       method, params);
+    if (len > 0) queue_notification(buf, (size_t)len, false);
+    free(buf);
 }

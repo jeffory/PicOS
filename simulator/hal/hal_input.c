@@ -36,6 +36,22 @@ static int g_char_head = 0;
 static int g_char_tail = 0;
 static pthread_mutex_t s_input_mutex = PTHREAD_MUTEX_INITIALIZER;
 
+// Injection seqs (see hal_input.h). 0 = nothing outstanding in that slot.
+// Button events that are published but not yet read share one "lowest
+// unread" seq; queued same-button re-injections keep their own until they
+// are published; each char slot carries its injection's seq.
+static uint32_t g_seq_issued = 0;
+static uint32_t g_btn_unread_seq = 0;
+static uint32_t g_btn_pending_seq = 0;
+static uint32_t g_char_seq[256];
+static uint32_t g_menu_seq = 0;
+
+static uint32_t min_nonzero(uint32_t a, uint32_t b) {
+    if (!a) return b;
+    if (!b) return a;
+    return a < b ? a : b;
+}
+
 // Key mapping table
 static struct {
     SDL_Keycode sdl_key;
@@ -104,6 +120,7 @@ void hal_input_handle_event(const SDL_Event* event) {
             int next = (g_char_head + 1) % sizeof(g_char_buffer);
             if (next != g_char_tail) {
                 g_char_buffer[g_char_head] = (char)key;
+                g_char_seq[g_char_head] = 0;
                 g_char_head = next;
             }
         }
@@ -137,6 +154,8 @@ static void retire_and_publish_injected_click_locked(uint32_t now_ms) {
         g_injected_click = g_injected_click_pending;
         g_injected_click_pending = 0;
         g_injected_click_since_ms = now_ms;
+        g_btn_unread_seq = min_nonzero(g_btn_unread_seq, g_btn_pending_seq);
+        g_btn_pending_seq = 0;
     }
 }
 
@@ -157,6 +176,7 @@ void hal_input_read_buttons(uint32_t* out_buttons, uint32_t* out_pressed) {
     if (out_buttons) *out_buttons = g_buttons;
     if (out_pressed) *out_pressed = g_buttons_pressed;
     g_buttons_pressed = 0;
+    g_btn_unread_seq = 0;  // everything published is now read
     pthread_mutex_unlock(&s_input_mutex);
 }
 
@@ -167,6 +187,9 @@ void hal_input_inject_buttons(uint32_t buttons) {
     retire_and_publish_injected_click_locked(hal_get_time_ms());
     uint32_t already_active = buttons & g_injected_click;
     uint32_t fresh = buttons & ~already_active;
+    uint32_t seq = ++g_seq_issued;
+    if (fresh) g_btn_unread_seq = min_nonzero(g_btn_unread_seq, seq);
+    if (already_active) g_btn_pending_seq = min_nonzero(g_btn_pending_seq, seq);
     if (fresh) {
         g_buttons |= fresh;
         g_buttons_pressed |= fresh;
@@ -194,6 +217,7 @@ void hal_input_hold_buttons(uint32_t buttons) {
     g_buttons |= buttons;
     g_buttons_pressed |= buttons;
     g_injected_latched |= buttons;
+    g_btn_unread_seq = min_nonzero(g_btn_unread_seq, ++g_seq_issued);
     // A held button must not be auto-released by an earlier click of the
     // same key, nor resurrected later by a queued re-injection of it.
     g_injected_click &= ~buttons;
@@ -203,6 +227,7 @@ void hal_input_hold_buttons(uint32_t buttons) {
 
 void hal_input_release_buttons(uint32_t buttons) {
     pthread_mutex_lock(&s_input_mutex);
+    g_btn_unread_seq = min_nonzero(g_btn_unread_seq, ++g_seq_issued);
     g_buttons &= ~buttons;
     g_injected_click &= ~buttons;
     g_injected_click_pending &= ~buttons;
@@ -212,9 +237,11 @@ void hal_input_release_buttons(uint32_t buttons) {
 
 void hal_input_inject_char(char c) {
     pthread_mutex_lock(&s_input_mutex);
+    uint32_t seq = ++g_seq_issued;
     int next = (g_char_head + 1) % sizeof(g_char_buffer);
     if (next != g_char_tail) {
         g_char_buffer[g_char_head] = c;
+        g_char_seq[g_char_head] = seq;
         g_char_head = next;
     }
     pthread_mutex_unlock(&s_input_mutex);
@@ -258,4 +285,38 @@ bool hal_input_poll_char(char* out_char) {
     g_char_tail = (g_char_tail + 1) % sizeof(g_char_buffer);
     pthread_mutex_unlock(&s_input_mutex);
     return true;
+}
+
+uint32_t hal_input_last_issued_seq(void) {
+    pthread_mutex_lock(&s_input_mutex);
+    uint32_t seq = g_seq_issued;
+    pthread_mutex_unlock(&s_input_mutex);
+    return seq;
+}
+
+void hal_input_get_seq_state(uint32_t *issued, uint32_t *consumed) {
+    pthread_mutex_lock(&s_input_mutex);
+    uint32_t lowest = min_nonzero(g_btn_unread_seq, g_btn_pending_seq);
+    lowest = min_nonzero(lowest, g_menu_seq);
+    for (int i = g_char_tail; i != g_char_head; i = (i + 1) % (int)sizeof(g_char_buffer)) {
+        if (g_char_seq[i]) {  // the ring is FIFO: the first tracked char is the oldest
+            lowest = min_nonzero(lowest, g_char_seq[i]);
+            break;
+        }
+    }
+    if (issued) *issued = g_seq_issued;
+    if (consumed) *consumed = lowest ? lowest - 1 : g_seq_issued;
+    pthread_mutex_unlock(&s_input_mutex);
+}
+
+void hal_input_note_menu_injected(void) {
+    pthread_mutex_lock(&s_input_mutex);
+    g_menu_seq = min_nonzero(g_menu_seq, ++g_seq_issued);
+    pthread_mutex_unlock(&s_input_mutex);
+}
+
+void hal_input_note_menu_consumed(void) {
+    pthread_mutex_lock(&s_input_mutex);
+    g_menu_seq = 0;
+    pthread_mutex_unlock(&s_input_mutex);
 }

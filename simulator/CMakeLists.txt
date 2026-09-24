@@ -315,6 +315,7 @@ add_executable(picos_simulator
     main.c
     sim_socket.c
     sim_socket_handler.c
+    sim_test_control.c
     unicorn_runner.c
     unicorn_trampolines.c
     ${PICOS_CORE_SOURCES}

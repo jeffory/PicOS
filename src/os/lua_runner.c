@@ -4,6 +4,7 @@
 #include "app_stack.h"
 #include "lua_psram_alloc.h"
 #include "crashlog.h"
+#include "sim_hooks.h"
 #include "config.h"
 #include "system_menu.h"
 #include "../drivers/audio.h"
@@ -33,12 +34,22 @@ static void lua_show_launch_failure(const app_entry_t *app, const char *line1,
   char heap[96];
   crashlog_describe_heap(heap, sizeof(heap));
   crashlog_write("LUA ERROR", app->name, line1, line2);
+#ifdef PICOS_SIMULATOR
+  {
+    char err[192];
+    snprintf(err, sizeof(err), "%s %s", line1, line2 ? line2 : "");
+    sim_log_err("%s", err);
+    sim_app_outcome_set(SIM_APP_RESULT_LOAD_FAILED, err);
+  }
+#endif
 
   display_clear(C_BG);
   display_draw_text(8, 8, line1, COLOR_RED, C_BG);
   if (line2) display_draw_text(8, 20, line2, COLOR_WHITE, C_BG);
   display_draw_text(8, 36, heap, COLOR_GRAY, C_BG);
   display_flush();
+  if (sim_test_mode())
+    return;
   for (int i = 0; i < 30; i++) {
     watchdog_update();
     sleep_ms(100);
@@ -78,6 +89,21 @@ typedef struct {
   bool ran;           // the app body ran (false: failed before it)
 } lua_vm_ctx_t;
 
+#ifdef PICOS_SIMULATOR
+// pcall message handler (simulator only): hand the traceback to the test
+// control channel and return the error value unchanged, so the error screen
+// and /system/error.log read exactly as on firmware.
+static int sim_traceback_msgh(lua_State *L) {
+  const char *msg = lua_tostring(L, 1);
+  if (msg) {
+    luaL_traceback(L, L, msg, 1);
+    sim_app_outcome_traceback(lua_tostring(L, -1));
+    lua_pop(L, 1);
+  }
+  return 1;
+}
+#endif
+
 // Runs on the Lua VM stack (PSP).
 static void lua_vm_body(void *arg) {
   lua_vm_ctx_t *ctx = (lua_vm_ctx_t *)arg;
@@ -99,6 +125,7 @@ static void lua_vm_body(void *arg) {
   lua_pushcfunction(L, (lua_CFunction)lua_bridge_register);
   if (lua_pcall(L, 0, 0, 0) != LUA_OK) {
     lua_bridge_show_error(L, "Init error:");
+    sim_app_outcome_set(SIM_APP_RESULT_LOAD_FAILED, NULL);
     lua_close(L);
     umm_free(ctx->lua_src);
     return;
@@ -132,19 +159,30 @@ static void lua_vm_body(void *arg) {
   if (load_err != LUA_OK) {
     lua_bridge_show_error(L, load_err == LUA_ERRMEM ? "Out of memory loading app:"
                                                     : "Load error:");
+    sim_app_outcome_set(SIM_APP_RESULT_LOAD_FAILED, NULL);
     lua_close(L);
     return;
   }
 
   ctx->ran = true;
+#ifdef PICOS_SIMULATOR
+  lua_pushcfunction(L, sim_traceback_msgh);
+  lua_insert(L, -2);  // handler below the chunk
+  int run_err = lua_pcall(L, 0, 0, -2);
+  lua_remove(L, run_err == LUA_OK ? -1 : -2);  // drop the handler
+#else
   int run_err = lua_pcall(L, 0, 0, 0);
+#endif
   if (run_err != LUA_OK) {
     if (!lua_bridge_is_exit_sentinel(L, -1)) {
       lua_bridge_show_error(L, run_err == LUA_ERRMEM ? "Out of memory:"
                                                      : "Runtime error:");
     } else {
       lua_pop(L, 1); // discard exit sentinel
+      sim_app_outcome_set(SIM_APP_RESULT_EXIT_SENTINEL, NULL);
     }
+  } else {
+    sim_app_outcome_set(SIM_APP_RESULT_RETURNED, NULL);
   }
 
   lua_close(L);

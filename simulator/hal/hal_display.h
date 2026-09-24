@@ -31,6 +31,8 @@ uint16_t* hal_display_get_framebuffer(void);
 
 // Present framebuffer to screen
 void hal_display_present(void);
+// Number of hal_display_present() calls since boot (frames the panel showed).
+uint32_t hal_display_get_present_count(void);
 
 // Clear framebuffer to black
 void hal_display_clear(void);
