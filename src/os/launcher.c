@@ -494,8 +494,17 @@ void launcher_apply_clock(uint32_t khz) {
   g_core1_pause = true;
   for (int i = 0; i < 200 && !g_core1_paused; i++)
     sleep_ms(1);
-  if (!g_core1_paused)
-    printf("[LAUNCHER] Core 1 pause timeout (200ms) during clock change\n");
+  if (!g_core1_paused) {
+    // Changing VREG/PLL/QMI timing under a running Core 1 risks corrupting
+    // its PSRAM/SD/WiFi traffic mid-transfer. Nothing has been touched yet
+    // (no VREG, no QMI/PIO PSRAM timing, no PLL), so give up cleanly: the
+    // app runs at the current clock.
+    printf("[LAUNCHER] Core 1 pause timeout (200ms): clock change to %lu MHz "
+           "aborted, staying at %lu MHz\n",
+           (unsigned long)(khz / 1000), (unsigned long)(current_khz / 1000));
+    g_core1_pause = false;
+    return;
+  }
 
   // 2. Up-clocking: Raise voltage BEFORE increasing frequency
   if (khz > current_khz) {

@@ -209,6 +209,17 @@ static void copy_str(char *dst, size_t n, const char *src) {
     snprintf(dst, n, "%s", src ? src : "");
 }
 
+// The clocks launcher_apply_clock has been validated at (VREG step, PLL
+// solution, QMI/PIO PSRAM and LCD timing), plus 0 = the OS default.
+bool app_manifest_clock_valid(uint32_t khz) {
+    static const uint32_t k_clocks[] = {0, 125000, 150000, 200000, 250000,
+                                        300000};
+    for (size_t i = 0; i < sizeof(k_clocks) / sizeof(k_clocks[0]); i++)
+        if (khz == k_clocks[i])
+            return true;
+    return false;
+}
+
 void app_manifest_parse(const char *json, size_t len, const char *dir_name,
                         app_entry_t *app) {
     const char *end = json ? json + bounded_len(json, len) : json;
@@ -239,6 +250,12 @@ void app_manifest_parse(const char *json, size_t len, const char *dir_name,
     if (json) {
         json_get_int(json, end, "system_clock_khz", &app->system_clock_khz);
         json_get_int(json, end, "min_psram_kb", &app->min_psram_kb);
+    }
+    if (!app_manifest_clock_valid(app->system_clock_khz)) {
+        printf("[MANIFEST] %s: system_clock_khz %ld is not a supported clock "
+               "(125000/150000/200000/250000/300000); using the default\n",
+               dir_name ? dir_name : "?", (long)(int32_t)app->system_clock_khz);
+        app->system_clock_khz = 0;
     }
     if (!json || !json_get_string(json, end, "category", app->category,
                                   sizeof(app->category)))

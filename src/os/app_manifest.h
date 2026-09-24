@@ -9,6 +9,7 @@
 
 #include <stdbool.h>
 #include <stddef.h>
+#include <stdint.h>
 
 #include "launcher_types.h"
 
@@ -26,6 +27,11 @@
 // names from the "requirements" array, space-separated.
 void app_manifest_parse(const char *json, size_t len, const char *dir_name,
                         app_entry_t *app);
+
+// system_clock_khz is one of the validated clocks: 0 (the OS default),
+// 125000, 150000, 200000, 250000 or 300000. app_manifest_parse turns any
+// other value (out of table, negative, huge) into 0 and logs it.
+bool app_manifest_clock_valid(uint32_t khz);
 
 // The same fields when there is no readable app.json: id "local.<dir>"
 // (sanitised, folded),

@@ -170,6 +170,23 @@ static void test_ints(void) {
   CHECK_EQ_U32(parse("{\"system_clock_khz\":\n 300000}").system_clock_khz, 300000);
 }
 
+// system_clock_khz: only the validated clocks; anything else is the default.
+static void test_system_clock_table(void) {
+  static const uint32_t ok[] = {125000, 150000, 200000, 250000, 300000};
+  char j[64];
+  for (unsigned i = 0; i < sizeof(ok) / sizeof(ok[0]); i++) {
+    snprintf(j, sizeof(j), "{\"system_clock_khz\": %lu}", (unsigned long)ok[i]);
+    CHECK_EQ_U32(parse(j).system_clock_khz, ok[i]);
+  }
+  CHECK_EQ_U32(parse("{\"system_clock_khz\": 0}").system_clock_khz, 0);
+  CHECK_EQ_U32(parse("{\"system_clock_khz\": 999999}").system_clock_khz, 0);
+  CHECK_EQ_U32(parse("{\"system_clock_khz\": -200000}").system_clock_khz, 0);
+  CHECK_EQ_U32(parse("{\"system_clock_khz\": 133000}").system_clock_khz, 0);
+  CHECK_EQ_U32(parse("{\"system_clock_khz\": 400000}").system_clock_khz, 0);
+  CHECK_EQ_U32(parse("{\"system_clock_khz\": 1}").system_clock_khz, 0);
+  CHECK_EQ_U32(parse("{\"system_clock_khz\": \"250000\"}").system_clock_khz, 0);
+}
+
 static void test_truncation_and_bounds(void) {
   // Values longer than the field are truncated, NUL-terminated.
   char big[400];
@@ -282,6 +299,7 @@ int main(void) {
   test_requirement_list();
   test_id_folding();
   test_ints();
+  test_system_clock_table();
   test_truncation_and_bounds();
   test_id_valid();
   test_real_manifests();
