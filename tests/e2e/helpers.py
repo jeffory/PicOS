@@ -245,16 +245,33 @@ def run_lua_app(sim, name: str, timeout: float = 30.0) -> LuaRun:
     if res_file.exists():
         res_file.unlink()
 
-    start_seq = sim.get_log_buffer(tail=1).get("next_seq", 0)
-    sim.launch_app(name)
+    log = []
     try:
+        start_seq = sim.get_log_buffer(tail=1).get("next_seq", 0)
+        sim.launch_app(name)
         outcome = sim.wait_for_exit(timeout=timeout)
     except TimeoutError as e:
         outcome = {"name": name, "result": "timeout", "error": str(e)}
+    except Exception as e:
+        # A simulator that died mid-run drops the connection (RuntimeError
+        # "Not connected"). Report the crash evidence, not the socket error.
+        # The socket can close a moment before the process is reapable.
+        if sim.process is not None:
+            try:
+                sim.process.wait(timeout=2)
+            except Exception:
+                pass
+        if sim.is_alive():
+            raise
+        outcome = {"name": name, "result": "simulator_died",
+                   "error": f"{type(e).__name__}: {e}"}
     problems = sim.health_problems()
-    log = []
-    if not problems:
+    if not problems and sim.is_alive():
         log = sim.get_log_lines(start_seq)
+    elif problems:
+        stderr = sim.get_output()["stderr"].strip()
+        if stderr:
+            problems.append("stderr tail:\n" + "\n".join(stderr.splitlines()[-40:]))
 
     run = LuaRun(name=name, outcome=outcome, results=None, log=log,
                  problems=problems, sd=sd)

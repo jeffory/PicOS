@@ -124,6 +124,59 @@ def test_flaky_failure_is_quarantined_not_retried(pytester, simulator_binary):
                                  "*test_flake (call): quarantined flake: known flake*"])
 
 
+CRASHER_APP = (
+    'local T = picocalc.sys.loadlib("picotest")\n'
+    'T.case("before", function() end)\n'
+    'T.case("crash", function() picocalc.sys.triggerFault() end)\n'
+    'T.case("after", function() end)\n'
+    'T.done()\n')
+
+
+def test_crash_mid_lua_suite_fails_every_case_with_evidence(pytester, simulator_binary):
+    """A simulator that dies during a lua_suite run fails every case id, and
+    each failure carries the crash log and stderr, not a socket error."""
+    result = _inner(pytester, simulator_binary, f"""
+        import pytest
+        from helpers import stage_lua_app
+
+        APP = {CRASHER_APP!r}
+
+        @pytest.fixture(scope="module")
+        def run(lua_suite):
+            return lua_suite("crasher", setup=lambda sd: stage_lua_app(sd, "crasher", APP))
+
+        @pytest.mark.parametrize("case", ["before", "crash", "after"])
+        def test_case(run, case):
+            run.check_case(case)
+    """)
+    result.assert_outcomes(failed=3)
+    out = result.stdout.str()
+    # Each failure is the crash report, not an escaped socket error.
+    assert "E       RuntimeError" not in out, out
+    assert out.count("E       AssertionError: app crasher: outcome") == 3, out
+    assert out.count("Signal: SIGSEGV") >= 3, out         # crash log per case
+    assert out.count("stderr tail:") >= 3, out            # stderr per case
+    assert out.count("simulator_died") >= 3, out
+
+
+def test_sim_factory_sims_are_health_checked(pytester, simulator_binary):
+    """Simulators started through sim_factory (a function, not a simulator
+    fixture value) are still health-checked after the call."""
+    result = _inner(pytester, simulator_binary, """
+        import os, signal, time
+        from helpers import build_sd_card
+        def test_dies(sim_factory, tmp_path):
+            sim = sim_factory(build_sd_card(tmp_path / "sd"))
+            os.kill(sim.process.pid, signal.SIGSEGV)
+            deadline = time.time() + 5
+            while sim.process.poll() is None and time.time() < deadline:
+                time.sleep(0.05)
+    """)
+    result.assert_outcomes(failed=1)
+    out = result.stdout.str()
+    assert "Simulator health check failed" in out and "Signal: SIGSEGV" in out, out
+
+
 def test_sanitizer_report_is_detected(simulator):
     """health_problems() flags a sanitizer line on the simulator's stderr."""
     assert simulator.health_problems() == []

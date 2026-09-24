@@ -107,6 +107,7 @@ def sim_factory(request, simulator_binary, tmp_path):
         sim = new_simulator(request.config, simulator_binary, sd_path, crash,
                             **kwargs)
         sims.append(sim)
+        _register(request.node, sim)
         return sim
 
     yield start
@@ -146,6 +147,7 @@ def sim_module_factory(request, simulator_binary, tmp_path_factory):
         sim = new_simulator(request.config, simulator_binary, sd,
                             base / "crash.log", **kwargs)
         sims.append(sim)
+        _register(request.node, sim)
         return sim
 
     yield start
@@ -204,10 +206,30 @@ def update_baselines(request):
 # ── Health check and failure diagnostics (audit R2) ─────────────────────────
 
 
+def _register(node, sim):
+    """Record a factory-made simulator on a collection node (the test item
+    for sim_factory, the module for sim_module_factory) so the health hook
+    finds it; factories hand tests a function, not the simulator."""
+    if not hasattr(node, "_picos_sims"):
+        node._picos_sims = []
+    node._picos_sims.append(sim)
+
+
 def _sims_of(item) -> list:
-    """Every PicosSimulator the test used, including via other fixtures."""
+    """Every PicosSimulator the test used: fixture values that are
+    simulators, plus simulators registered by sim_factory on the item and
+    by sim_module_factory on its module. (lua_suite stops its simulator
+    before returning; its health lands in LuaRun.problems instead.)"""
     funcargs = getattr(item, "funcargs", {}) or {}
-    return [v for v in funcargs.values() if isinstance(v, PicosSimulator)]
+    found = [v for v in funcargs.values() if isinstance(v, PicosSimulator)]
+    for node in item.listchain():
+        found += getattr(node, "_picos_sims", [])
+    seen, out = set(), []
+    for sim in found:
+        if id(sim) not in seen:
+            seen.add(id(sim))
+            out.append(sim)
+    return out
 
 
 def _tail(text: str, n: int = 200) -> str:
