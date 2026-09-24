@@ -477,8 +477,12 @@ static void release_player_cbs(lua_State *L, sound_player_t *player);
 static int l_sound_sampleplayer_gc(lua_State *L) {
     sound_player_t **ud = luaL_checkudata(L, 1, PLAYER_USERDATA);
     if (*ud) {
-        release_player_cbs(L, *ud);
+        // Free first (detaches the player's callbacks under the mixer lock,
+        // so Core 1 stops firing them), then give the slots back: releasing
+        // first left a window for a callback into a slot being reused.
+        sound_player_t detached = **ud;  // the callback args playerFree clears
         g_api.soundplayer->playerFree(*ud);
+        release_player_cbs(L, &detached);
         *ud = NULL;
     }
     return 0;
