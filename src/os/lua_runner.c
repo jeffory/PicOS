@@ -26,6 +26,9 @@
 #include <stdio.h>
 #include <string.h>
 
+// main.c: Core 1's pause request (picocalc.sys.pauseBackground sets it).
+extern _Atomic bool g_core1_pause;
+
 #define C_BG COLOR_BLACK
 
 // Launch-time failure before the VM exists: show it, log it, pause so it can
@@ -199,6 +202,15 @@ static void lua_vm_body(void *arg) {
   } else {
     sim_app_outcome_set(exiting ? SIM_APP_RESULT_EXIT_SENTINEL
                                 : SIM_APP_RESULT_RETURNED, NULL);
+  }
+
+  // sys.pauseBackground() without a resumeBackground() would leave Core 1
+  // (WiFi, HTTP, audio decode) stopped for the launcher and every later app.
+  // Resume before lua_close: its __gc handlers close HTTP/TCP slots, which
+  // Core 1 has to acknowledge.
+  if (g_core1_pause) {
+    g_core1_pause = false;
+    printf("[LUA] '%s' left Core 1 paused: resumed\n", app->name);
   }
 
   lua_close(L);
