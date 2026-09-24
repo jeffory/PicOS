@@ -191,3 +191,25 @@ picocalc.sys.log("SLEEP_RETURNED")
     assert after is not None, "system menu did not open during sys.sleep(30000)"
     simulator.keypress("esc")
     _assert_exited(_exit_and_wait(simulator))
+
+
+def test_menu_exit_escapes_pcall_loop(simulator):
+    """The system menu's Exit App, chosen while the app's loop runs inside
+    pcall, ends the app (the menu raises the sentinel inside that pcall)."""
+    code = BUSY + """
+local d = picocalc.display
+d.clear(d.WHITE)
+d.flush()
+picocalc.sys.log("EXIT_READY")
+while true do pcall(busy) end
+"""
+    _run_until_ready(simulator, "menu_exit", code)
+    before = simulator.call("get_pixel", {"x": 6, "y": 40})
+    simulator.keypress("menu")
+    assert _pixel_changes(simulator, 6, 40, before, timeout=3.0), \
+        "system menu did not open"
+    # Up wraps from the first item to the last one, Exit App.
+    for key in ("up", "enter"):
+        seq = simulator.keypress(key)["input_seq"]
+        simulator.wait_input_consumed(seq, timeout=3)
+    _assert_exited(simulator.wait_for_exit(timeout=EXIT_TIMEOUT))
