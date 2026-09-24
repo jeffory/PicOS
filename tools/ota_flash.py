@@ -2,21 +2,26 @@
 """PicOS OTA firmware flasher — stage, reboot, verify.
 
 Pushes a raw firmware image to a USB-connected device over the SD-staged
-OTA path: uploads /system/update.sha256 and /system/update.bin via the
+OTA path: signs it (ECDSA P-256, tools/sign_update.py — the TEST key by
+default, which dev firmware trusts; --key for another), uploads
+/system/update.sha256, /system/update.sig and /system/update.bin via the
 firmware's putb64 serial command, then sends `reboot-ota`, which validates
-the staged image and sets the one-shot OTA token before rebooting.  On boot
-the firmware (token present) verifies the hash, pre-reads the image into
-PSRAM, reflashes itself and resets (see src/os/ota_update.c).  On success
-the device renames the staged files to *.flashed.  A staged image WITHOUT
-the token is never flashed: the boot renames it to *.stale.  Firmware older
-than `reboot-ota` answers "Unknown command"; the tool then falls back to a
-plain `reboot` (those builds flash any staged image at boot).
+the staged image (checksum + signature) and sets the one-shot OTA token
+before rebooting.  On boot the firmware (token present) pre-reads the image
+into PSRAM, re-checks the checksum and signature over those bytes, reflashes
+itself and resets (see src/os/ota_update.c).  On success the device renames
+the staged files to *.flashed; a refused image is renamed to *.rejected and
+logged to /system/error.log.  A staged image WITHOUT the token is never
+flashed: the boot renames it to *.stale.  Firmware older than `reboot-ota`
+answers "Unknown command"; the tool then falls back to a plain `reboot`
+(those builds flash any staged image at boot and ignore the .sig).
 
 Reuses the serial transfer helpers from picos_mcp.py (same directory) so
 chunk/ACK pacing, integrity checks and transfer retries live in one place.
 
 Usage:
     python3 tools/ota_flash.py [build/picocalc_os.bin] [--device /dev/ttyACM0]
+                               [--key tests/keys/picos-update-TEST-private.pem]
 
 Notes:
   - Hardware only.  The simulator has no flash; this tool never falls back
@@ -39,8 +44,9 @@ from pathlib import Path
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import picos_mcp as pm  # noqa: E402
+import sign_update  # noqa: E402
 
-OTA_MAX_SIZE = 2 * 1024 * 1024  # must match OTA_MAX_SIZE in ota_update.c
+OTA_MAX_SIZE = 2 * 1024 * 1024  # must match OTA_MAX_SIZE in ota_verify.h
 OTA_MIN_SIZE = 256
 
 
@@ -109,6 +115,7 @@ def request_ota_reboot(port: str) -> None:
                 line = raw.decode("utf-8", errors="replace").rstrip("\r\n")
                 lines.append(line)
                 if "Unknown command" in line or "reboot-ota failed" in line \
+                        or "reboot-ota ignored" in line \
                         or "Triggering update" in line:
                     break
         finally:
@@ -119,7 +126,7 @@ def request_ota_reboot(port: str) -> None:
     if "Unknown command" in text:
         print("  (firmware predates reboot-ota — using plain reboot)")
         pm.do_command_hardware("reboot", port, timeout=2)
-    elif "reboot-ota failed" in text:
+    elif "reboot-ota failed" in text or "reboot-ota ignored" in text:
         fail("device refused the staged update:\n" + text)
 
 
@@ -150,11 +157,14 @@ def wait_for_reflash(old_port: str, old_ver: str | None, timeout: float) -> None
         ver = get_ver(port)
         if not ver:
             continue
-            # Success signal: the staged image was renamed to *.flashed (stale
-        # ones were deleted before staging).  update.bin still present, or
-        # renamed to *.stale, means the device booted WITHOUT applying it.
-        for leftover, why in (("/system/update.bin", "rejected (hash "
-                               "mismatch or validation failure)"),
+            # Success signal: the staged image was renamed to *.flashed (old
+        # leftovers were deleted before staging).  *.rejected (checksum or
+        # signature refused at boot), *.stale (no OTA token) or update.bin
+        # still present mean the device booted WITHOUT applying it.
+        for leftover, why in (("/system/update.bin.rejected", "rejected "
+                               "(checksum/signature refused — wrong --key "
+                               "for this firmware?)"),
+                              ("/system/update.bin", "not applied"),
                               ("/system/update.bin.stale", "ignored: the "
                                "boot saw no OTA request token")):
             try:
@@ -187,6 +197,9 @@ def main() -> None:
                     help="seconds to wait for reflash + reboot (default 240)")
     ap.add_argument("--no-verify", action="store_true",
                     help="stage and reboot, but do not wait for the device")
+    ap.add_argument("--key", type=Path, default=sign_update.TEST_PRIVATE,
+                    help="P-256 private key to sign with (default: the TEST "
+                         "key that local/dev builds embed)")
     args = ap.parse_args()
 
     fw = Path(args.firmware)
@@ -215,17 +228,25 @@ def main() -> None:
     if old_ver:
         print(f"Current:  {old_ver}")
 
+    try:
+        sig = sign_update.sign_bytes(data, args.key)
+    except RuntimeError as e:
+        fail(f"signing with {args.key} failed: {e}")
+    print(f"Signed:   {args.key.name} ({len(sig)}-byte ECDSA P-256 signature)")
+
     # Clear leftovers so the post-reboot check means this run.
-    for old in ("/system/update.bin.flashed", "/system/update.sha256.flashed",
-                "/system/update.bin.stale", "/system/update.sha256.stale"):
-        try:
-            pm.do_command_hardware(f"rm {old}", port, timeout=2)
-        except Exception:
-            pass
+    for base in ("update.bin", "update.sha256", "update.sig"):
+        for suffix in (".flashed", ".stale", ".rejected"):
+            try:
+                pm.do_command_hardware(f"rm /system/{base}{suffix}", port,
+                                       timeout=2)
+            except Exception:
+                pass
 
     sha = hashlib.sha256(data).hexdigest()
     print(f"SHA-256:  {sha[:16]}…")
     pm.do_put_file_b64(port, (sha + "\n").encode(), "/system/update.sha256")
+    pm.do_put_file_b64(port, sig, "/system/update.sig")
 
     print(f"Uploading {len(data) / 1024:.0f} KB to /system/update.bin...")
     start = time.monotonic()
@@ -238,8 +259,8 @@ def main() -> None:
     pm.do_put_file_b64(port, data, "/system/update.bin", progress=progress)
     print(f"\n  Uploaded in {time.monotonic() - start:.0f}s (fnv1a verified)")
 
-    print("Rebooting — the device verifies the SHA-256 and reflashes on "
-          "boot. DO NOT power off.")
+    print("Rebooting — the device verifies the SHA-256 and signature and "
+          "reflashes on boot. DO NOT power off.")
     request_ota_reboot(port)
 
     if args.no_verify:

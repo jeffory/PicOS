@@ -1130,14 +1130,14 @@ void* umm_calloc(size_t num, size_t size) {
 // Lua bridge stubs — network/tcp now provided by real lua_bridge_network.c/tcp.c
 void lua_bridge_crypto_init(void) {}
 
-// OTA stubs (flashing is firmware-only).  Signatures match ota_update.h.
+// OTA: flashing is firmware-only, but the validation sys.applyUpdate runs
+// before its confirm is the firmware's own code (ota_verify.c: size, vector
+// table, strict .sha256, ECDSA signature against the TEST update key), so
+// E2E catches regressions.  Signatures match ota_update.h.
 #include "../../src/os/ota_update.h"
+#include "../../src/os/ota_verify.h"
 bool ota_prepare_update(const char *bin_path, const char **out_err) {
-    if (!sdcard_fexists(bin_path)) {
-        *out_err = "Firmware file not found";
-        return false;
-    }
-    return true;
+    return ota_prepare_check(bin_path, OTA_HASH_PATH, OTA_SIG_PATH, out_err);
 }
 bool ota_trigger_update(const char *bin_path, const char **out_err) {
     (void)bin_path;

@@ -195,13 +195,18 @@ flash:
 
 # ── OTA flash ─────────────────────────────────────────────────────────────────
 # Builds, then pushes build/picocalc_os.bin to a USB-connected device over the
-# SD-staged OTA path (upload + reboot; the device verifies the SHA-256 and
-# reflashes itself on boot). The device must be at the launcher.
-# Optional: FLASH_DEVICE=/dev/ttyACM0 to skip auto-detection.
+# SD-staged OTA path (signs the image, uploads it with its .sha256/.sig and
+# reboots; the device checks the SHA-256 and ECDSA signature and reflashes
+# itself on boot). The device must be at the launcher.
+# Optional: FLASH_DEVICE=/dev/ttyACM0 to skip auto-detection;
+#           OTA_KEY=<private.pem> to sign with a key other than the TEST key
+#           (it must match the PICOS_UPDATE_PUBKEY_PEM the RUNNING firmware
+#           was built with).
 
 flash-ota: build
 	@python3 tools/ota_flash.py $(BUILD_DIR)/picocalc_os.bin \
-		$(if $(FLASH_DEVICE),--device $(FLASH_DEVICE),)
+		$(if $(FLASH_DEVICE),--device $(FLASH_DEVICE),) \
+		$(if $(OTA_KEY),--key $(OTA_KEY),)
 
 # ── Lua App Testing ───────────────────────────────────────────────────────────
 

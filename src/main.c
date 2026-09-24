@@ -2065,10 +2065,10 @@ int main(void) {
     ui_draw_splash("Applying firmware update...", "DO NOT POWER OFF!");
     watchdog_update();
     if (!ota_apply_update()) {
-      // Update failed — show error briefly, continue normal boot
-      display_clear(COLOR_BLACK);
-      display_draw_text(8, 8, "Firmware update failed!", COLOR_RED, COLOR_BLACK);
-      display_draw_text(8, 24, "Booting previous firmware.", COLOR_GRAY, COLOR_BLACK);
+      // Update failed — ota_apply_update left "Update failed!" and the
+      // reason on screen; show it briefly, continue normal boot.
+      display_draw_text(8, 188, "Booting previous firmware.", COLOR_GRAY,
+                        COLOR_BLACK);
       display_flush();
       watchdog_update();
       sleep_ms(3000);

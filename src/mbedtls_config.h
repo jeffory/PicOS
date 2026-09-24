@@ -47,6 +47,8 @@ extern void umm_free(void *ptr);
 #define MBEDTLS_OID_C
 #define MBEDTLS_PK_C
 #define MBEDTLS_PK_PARSE_C
+#define MBEDTLS_PEM_PARSE_C                // PEM CA bundle + OTA update public key
+#define MBEDTLS_BASE64_C                   // required by PEM_PARSE_C
 #define MBEDTLS_SHA224_C                   // SHA-224 (often needed alongside SHA-256)
 #define MBEDTLS_SHA256_C
 #define MBEDTLS_SHA384_C                   // Required for P-384 curve (Wikipedia)

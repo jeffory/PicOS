@@ -34,6 +34,31 @@ else()
 endif()
 message(STATUS "PicOS version: ${PICOS_VERSION}")
 
+# ── OTA update signing key (public half, embedded in flash) ──────────────────
+# The firmware flashes /system/update.bin only if /system/update.sig verifies
+# against this P-256 key (src/os/ota_verify.c).  The default is the TEST key
+# in tests/keys, whose private half is in the repo: fine for local builds and
+# `make flash-ota` (tools/ota_flash.py signs with it), never for a release.
+# Release builds pass the real key and PICOS_REQUIRE_RELEASE_UPDATE_KEY=ON.
+include(cmake/picos_update_key.cmake)
+set(PICOS_UPDATE_PUBKEY_PEM "${PICOS_TEST_UPDATE_PUBKEY}" CACHE FILEPATH
+    "P-256 public key (PEM) that OTA images must be signed with")
+option(PICOS_REQUIRE_RELEASE_UPDATE_KEY
+       "Refuse to build with the TEST update key (release builds)" OFF)
+file(READ "${PICOS_UPDATE_PUBKEY_PEM}" _picos_key_text)
+file(READ "${PICOS_TEST_UPDATE_PUBKEY}" _picos_test_key_text)
+if(_picos_key_text STREQUAL _picos_test_key_text)
+    if(PICOS_REQUIRE_RELEASE_UPDATE_KEY)
+        message(FATAL_ERROR "PICOS_REQUIRE_RELEASE_UPDATE_KEY is ON but "
+            "PICOS_UPDATE_PUBKEY_PEM is the TEST key (${PICOS_UPDATE_PUBKEY_PEM})")
+    endif()
+    message(STATUS "OTA update key: TEST key (dev build — its private key is public)")
+else()
+    message(STATUS "OTA update key: ${PICOS_UPDATE_PUBKEY_PEM}")
+endif()
+picos_generate_update_pubkey(${CMAKE_BINARY_DIR}/generated/ota_pubkey.c
+                             ${PICOS_UPDATE_PUBKEY_PEM})
+
 # ── Lua 5.4 ──────────────────────────────────────────────────────────────────
 # Lua is added as a git submodule or downloaded into third_party/lua-5.4/
 # See README.md for setup instructions.
@@ -267,6 +292,8 @@ add_executable(picocalc_os
     src/os/zip_name.c
     src/os/lua_bridge_json.c
     src/os/ota_update.c
+    src/os/ota_verify.c
+    ${CMAKE_BINARY_DIR}/generated/ota_pubkey.c
     src/fonts/font.c
     src/fonts/font_registry.c
     src/fonts/font_6x8.c

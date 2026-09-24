@@ -47,7 +47,7 @@ function(picos_unit_test name)
     target_include_directories(${name} PRIVATE
         ${CMAKE_CURRENT_SOURCE_DIR} ${PICOS_ROOT}/src/os ${T_INCLUDES})
     target_compile_definitions(${name} PRIVATE
-        PICOS_ROOT="${PICOS_ROOT}" ${T_DEFINES})
+        PICOS_ROOT="${PICOS_ROOT}" PICOS_HOST_TEST ${T_DEFINES})
     target_compile_options(${name} PRIVATE ${PICOS_UNIT_SAN_FLAGS})
     target_link_options(${name} PRIVATE ${PICOS_UNIT_SAN_FLAGS})
     add_test(NAME ${name} COMMAND ${name})
@@ -90,6 +90,19 @@ picos_unit_test(test_config SOURCES ${SRC}/os/config.c ${SD_FAKE}
                 INCLUDES ${SD_INCLUDES})
 picos_unit_test(test_appconfig SOURCES ${SRC}/os/appconfig.c ${SD_FAKE}
                 INCLUDES ${SD_INCLUDES})
+
+# OTA image authentication (ECDSA P-256 + strict .sha256), against the same
+# mbedTLS the firmware links (host build, cmake/picos_host_mbedtls.cmake) and
+# the TEST public key the dev firmware embeds.
+include(${PICOS_ROOT}/cmake/picos_host_mbedtls.cmake)
+include(${PICOS_ROOT}/cmake/picos_update_key.cmake)
+picos_generate_update_pubkey(${CMAKE_CURRENT_BINARY_DIR}/ota_pubkey.c
+                             ${PICOS_TEST_UPDATE_PUBKEY})
+picos_unit_test(test_ota_verify
+                SOURCES ${SRC}/os/ota_verify.c ${CMAKE_CURRENT_BINARY_DIR}/ota_pubkey.c
+                        ${SD_FAKE}
+                INCLUDES ${SD_INCLUDES})
+target_link_libraries(test_ota_verify PRIVATE picos_host_mbedtls)
 
 if(PICOS_FUZZ)
     add_subdirectory(${PICOS_ROOT}/tests/fuzz ${CMAKE_CURRENT_BINARY_DIR}/fuzz)

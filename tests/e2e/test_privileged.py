@@ -5,7 +5,9 @@ Medium "wifi_pass readable", Audio/storage Medium "PIO PSRAM has no bounds").
 - `picocalc.sysconfig` exists only with the "sysconfig" requirement, and even
   then `wifi_pass` is write-only.
 - `sys.applyUpdate` exists only with "system-update" AND an OS app id
-  (the updater/store), and asks for confirmation before flashing.
+  (the updater/store), refuses an image without a valid .sha256 and ECDSA
+  signature (the TEST update key in the simulator), and asks for confirmation
+  before flashing.
 - `sys.pioPsramRead/Write` refuse the OS-reserved range (MP3 ring + video
   pool below PIO_PSRAM_APP_BASE) and anything past the chip.
 - `sys.qmiPsram*` handles are bounds-checked userdata, not raw pointers.
@@ -15,7 +17,11 @@ Each group is an inline picotest app staged onto one module simulator (the
 simulator rescans /apps when a launch misses).
 """
 
+import hashlib
 import json
+import struct
+import subprocess
+import sys
 import time
 from pathlib import Path
 
@@ -24,6 +30,41 @@ import pytest
 from helpers import run_lua_app, stage_lua_app
 
 APP_BASE = 288 * 1024  # PIO_PSRAM_APP_BASE (src/drivers/pio_psram.h)
+
+ROOT = Path(__file__).resolve().parents[2]
+SIGN_TOOL = ROOT / "tools" / "sign_update.py"
+TEST_KEY = ROOT / "tests" / "keys" / "picos-update-TEST-private.pem"
+OTHER_KEY = ROOT / "tests" / "keys" / "picos-update-TEST-other-private.pem"
+
+
+def fake_firmware(size=4096, fill=0):
+    """An image that passes the vector-table check (SP in SRAM, reset vector
+    in flash); the simulator never flashes it."""
+    return struct.pack("<II", 0x20082000, 0x10000101) + bytes([fill]) * (size - 8)
+
+
+def sign(data: bytes, key: Path, tmp: Path) -> bytes:
+    """DER ECDSA-P256 signature via tools/sign_update.py (openssl CLI)."""
+    img, out = tmp / "img.bin", tmp / "img.sig"
+    img.write_bytes(data)
+    subprocess.run([sys.executable, str(SIGN_TOOL), "sign", str(img),
+                    "--key", str(key), "--out", str(out)],
+                   check=True, capture_output=True)
+    return out.read_bytes()
+
+
+def stage_update_files(sd, image: bytes, tmp: Path, *, sha: "bytes|None" = b"",
+                       sig: "bytes|None" = b""):
+    """Write /system/update.sha256 and /system/update.sig for `image`.
+    sha/sig b"" = correct value, None = absent, other bytes = verbatim."""
+    system = Path(sd) / "system"
+    for name in ("update.sha256", "update.sig"):
+        (system / name).unlink(missing_ok=True)
+    if sha is not None:
+        (system / "update.sha256").write_bytes(
+            sha or (hashlib.sha256(image).hexdigest() + "\n").encode())
+    if sig is not None:
+        (system / "update.sig").write_bytes(sig or sign(image, TEST_KEY, tmp))
 
 PLAIN_APP = f"""
 local T = picocalc.sys.loadlib("picotest")
@@ -195,12 +236,15 @@ def test_os_updater_without_requirement_has_no_apply_update(sim):
     _passed(run_lua_app(sim, "priv_upd_noreq"))
 
 
-def test_apply_update_asks_before_flashing(sim):
-    """The OS updater id with system-update gets applyUpdate, and it shows a
-    confirmation naming the file; Esc cancels without flashing."""
+def test_apply_update_asks_before_flashing(sim, tmp_path):
+    """The OS updater id with system-update gets applyUpdate, and for an image
+    that is correctly signed it shows a confirmation naming the file; Esc
+    cancels without flashing."""
+    image = fake_firmware()
+    stage_update_files(sim.sd_card_path, image, tmp_path)
     stage_lua_app(sim.sd_card_path, "priv_upd_ok", UPDATE_CONFIRM_APP,
                   requirements=["system-update", "root-filesystem"],
-                  id="com.picos.updater", files={"fw.bin": b"\0" * 4096})
+                  id="com.picos.updater", files={"fw.bin": image})
     seq = sim.get_log_buffer(tail=1).get("next_seq", 0)
     sim.launch_app("priv_upd_ok")
     sim.wait_for_log("T7:CONFIRM_NEXT", timeout=15, since_seq=seq)
@@ -227,12 +271,14 @@ T.done()
 """
 
 
-def test_confirm_ignores_keys_queued_before_it(sim):
+def test_confirm_ignores_keys_queued_before_it(sim, tmp_path):
     """A "yes" typed (queued) before the confirm dialog appears must not
     answer it: an app could show "press Enter", sleep, then applyUpdate."""
+    image = fake_firmware()
+    stage_update_files(sim.sd_card_path, image, tmp_path)
     stage_lua_app(sim.sd_card_path, "priv_upd_queued", QUEUED_KEYS_APP,
                   requirements=["system-update", "root-filesystem"],
-                  id="com.picos.store", files={"fw.bin": b"\0" * 4096})
+                  id="com.picos.store", files={"fw.bin": image})
     seq = sim.get_log_buffer(tail=1).get("next_seq", 0)
     sim.launch_app("priv_upd_queued")
     sim.wait_for_log("T7:QUEUE_NOW", timeout=15, since_seq=seq)
@@ -248,6 +294,72 @@ def test_confirm_ignores_keys_queued_before_it(sim):
                       "test_results.json").read_text())
     case = {c["name"]: c for c in res["cases"]}["queued_keys_do_not_confirm"]
     assert case["status"] == "PASS", case
+
+
+# ── OTA signature (review: Network Critical "applyUpdate flashes unsigned
+#    firmware") ─────────────────────────────────────────────────────────────
+# The simulator runs the firmware's own ota_verify.c against the TEST update
+# key, so these refusals are the device's.  A refused image never reaches the
+# confirm dialog: applyUpdate returns false at once.
+
+UPDATE_REFUSED_APP = """
+local T = picocalc.sys.loadlib("picotest")
+T.case("refused", function()
+    local ok, err = picocalc.sys.applyUpdate(APP_DIR .. "/fw.bin")
+    picocalc.sys.log("T8:ERR " .. tostring(err))
+    T.eq(ok, false)
+    T.ok(type(err) == "string" and err:find(EXPECT, 1, true),
+         "error names the problem: " .. tostring(err))
+end)
+T.done()
+"""
+
+
+def _tampered(image: bytes) -> bytes:
+    b = bytearray(image)
+    b[2000] ^= 0x01
+    return bytes(b)
+
+
+@pytest.mark.parametrize("case,expect", [
+    ("unsigned", "Missing signature file"),
+    ("empty_sig", "Missing signature file"),
+    ("wrong_key", "Bad signature"),
+    ("tampered", "Bad signature"),
+    ("truncated_sig", "Bad signature"),
+    ("no_checksum", "Missing checksum file"),
+    ("sha256sum_format", "Malformed checksum file"),
+])
+def test_apply_update_refuses_unsigned_or_bad_image(sim, tmp_path, case, expect):
+    good = fake_firmware()
+    image = good
+    sha, sig = b"", b""
+    if case == "unsigned":
+        sig = None
+    elif case == "empty_sig":
+        sig = None  # written as a 0-byte file below
+    elif case == "wrong_key":
+        sig = sign(good, OTHER_KEY, tmp_path)
+    elif case == "tampered":
+        # Attacker controls the image AND its .sha256, but not the key.
+        image = _tampered(good)
+        sig = sign(good, TEST_KEY, tmp_path)
+    elif case == "truncated_sig":
+        sig = sign(good, TEST_KEY, tmp_path)[:-3]
+    elif case == "no_checksum":
+        sha = None
+    elif case == "sha256sum_format":
+        sha = (hashlib.sha256(good).hexdigest() + "  picocalc_os.bin\n").encode()
+    stage_update_files(sim.sd_card_path, image, tmp_path, sha=sha, sig=sig)
+    if case == "empty_sig":
+        (Path(sim.sd_card_path) / "system" / "update.sig").write_bytes(b"")
+    name = f"priv_upd_{case}"
+    stage_lua_app(sim.sd_card_path, name,
+                  UPDATE_REFUSED_APP.replace("EXPECT", json.dumps(expect)),
+                  requirements=["system-update", "root-filesystem"],
+                  id="com.picos.updater", files={"fw.bin": image})
+    # No dialog: the app must finish on its own.
+    _passed(run_lua_app(sim, name, timeout=20))
 
 
 # ── fs.browse start path (sandbox residual a) ───────────────────────────────

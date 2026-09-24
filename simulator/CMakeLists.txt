@@ -318,6 +318,18 @@ list(REMOVE_ITEM PICOS_CORE_SOURCES
     ${PICOS_ROOT}/src/os/lua_bridge_crypto.c
 )
 
+# OTA image checks (sys.applyUpdate): the firmware's own ota_verify.c against a
+# host mbedTLS and the TEST update key, so the simulator refuses exactly what
+# the device refuses (flashing itself stays firmware-only).
+include(${PICOS_ROOT}/cmake/picos_host_mbedtls.cmake)
+include(${PICOS_ROOT}/cmake/picos_update_key.cmake)
+picos_generate_update_pubkey(${CMAKE_BINARY_DIR}/generated/ota_pubkey.c
+                             ${PICOS_TEST_UPDATE_PUBKEY})
+list(APPEND PICOS_CORE_SOURCES
+    ${PICOS_ROOT}/src/os/ota_verify.c
+    ${CMAKE_BINARY_DIR}/generated/ota_pubkey.c
+)
+
 add_executable(picos_simulator
     main.c
     sim_socket.c
@@ -354,6 +366,7 @@ target_link_libraries(picos_simulator PRIVATE
     SDL2_image::SDL2_image
     Threads::Threads
     CURL::libcurl
+    picos_host_mbedtls
 )
 
 target_compile_definitions(picos_simulator PRIVATE

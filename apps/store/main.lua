@@ -26,6 +26,7 @@ local MAX_RETRIES   = 3
 -- Firmware update paths (from old updater)
 local BIN_PATH  = "/system/update.bin"
 local HASH_PATH = "/system/update.sha256"
+local SIG_PATH  = "/system/update.sig"
 
 -- ── Screen dimensions and colors ───────────────────────────────────────────
 
@@ -882,17 +883,30 @@ local function start_firmware_update()
                 "/releases/download/" .. tag .. "/picocalc_os.bin"
     fw_hash_url = "https://github.com/" .. repo ..
                   "/releases/download/" .. tag .. "/picocalc_os.sha256"
+    local fw_sig_url = "https://github.com/" .. repo ..
+                       "/releases/download/" .. tag .. "/picocalc_os.sig"
 
     if fs.exists(BIN_PATH) then fs.delete(BIN_PATH) end
     if fs.exists(HASH_PATH) then fs.delete(HASH_PATH) end
+    if fs.exists(SIG_PATH) then fs.delete(SIG_PATH) end
 
-    -- The OS refuses to flash an image without /system/update.sha256, so
-    -- fetch the release's checksum first (small, in memory), then the image.
+    -- The OS refuses to flash an image without /system/update.sha256 and a
+    -- valid /system/update.sig (ECDSA signature by the PicOS update key), so
+    -- fetch both (small, in memory) before the image; a release missing
+    -- either is not offered for install.
     fetch_small_text(fw_hash_url, 0, function(body, herr)
-        local hash = body and body:match("^%s*(%x+)")
+        local hash = body and body:match("^%s*(%x+)%s*$")
         if not hash or #hash ~= 64 then
             print("[STORE] Firmware checksum download failed: " ..
                   tostring(herr or "no SHA-256 in response"))
+            download_retry_needed = true
+            return
+        end
+      fetch_small_text(fw_sig_url, 0, function(sig, serr)
+        -- DER ECDSA P-256 signature: 8..72 bytes, starts with SEQUENCE.
+        if not sig or #sig < 8 or #sig > 128 or sig:byte(1) ~= 0x30 then
+            print("[STORE] Firmware signature download failed: " ..
+                  tostring(serr or "no signature in response"))
             download_retry_needed = true
             return
         end
@@ -921,10 +935,21 @@ local function start_firmware_update()
             fs.write(hf, hash:lower() .. "\n")
             fs.close(hf)
 
+            local sf = fs.open(SIG_PATH, "w")
+            if not sf then
+                fs.delete(BIN_PATH)
+                fs.delete(HASH_PATH)
+                download_retry_needed = true
+                return
+            end
+            fs.write(sf, sig)
+            fs.close(sf)
+
             download_complete = true
             download_stage = nil
             current_screen = SCR_FW_CONFIRM
         end)
+      end)
     end)
 end
 

@@ -234,7 +234,8 @@ static int l_sys_getVersion(lua_State *L) {
 }
 
 // sys.applyUpdate(path) — flash firmware.  Registered only for OS apps
-// (sys_update_allowed); validates the image and its checksum file, then asks
+// (sys_update_allowed); validates the image, its checksum and its signature
+// (ota_prepare_update → ota_verify.c), then asks
 // the user before rebooting into the updater.
 static int l_sys_applyUpdate(lua_State *L) {
   const char *path = luaL_checkstring(L, 1);

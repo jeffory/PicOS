@@ -424,8 +424,10 @@ function picocalc.sys.getMemInfo() end
 function picocalc.sys.getVersion() end
 
 ---Apply an OTA firmware update from a raw `.bin` image. Needs
----`/system/update.sha256` (the SHA-256 of the image) and asks the user to
----confirm; reboots on success. **Only present** for OS apps (id
+---`/system/update.sha256` (exactly 64 hex digits, the SHA-256 of the image)
+---and `/system/update.sig` (DER ECDSA P-256 signature of the image by the
+---PicOS update key the firmware was built with); refuses the image otherwise.
+---Then asks the user to confirm; reboots on success. **Only present** for OS apps (id
 ---`com.picos.updater`/`com.picos.store`, or under `/system/`) that declare the
 ---`"system-update"` requirement; nil otherwise.
 ---@param path string Absolute SD card path to the `.bin` file
