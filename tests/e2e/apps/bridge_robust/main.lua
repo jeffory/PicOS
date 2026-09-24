@@ -82,4 +82,41 @@ T.case("fs_copy_failing_progress_callback", function()
     pc.fs.delete(dst)
 end)
 
+-- ── Sound handles ────────────────────────────────────────────────────────
+-- There is one MP3 player: mp3player() returned a new handle to it every
+-- call, and collecting any of them stopped the player under the others.
+T.case("mp3player_single_handle", function()
+    local a = pc.sound.mp3player()
+    local b = pc.sound.mp3player()
+    T.ok(rawequal(a, b), "two handles for the one MP3 player")
+end)
+
+T.case("mp3player_collected_second_handle_keeps_music", function()
+    local a = T.ok(pc.sound.mp3player())
+    T.ok(a:load(APP_DIR .. "/long.mp3"), "load long.mp3")
+    a:play()
+    T.ok(a:isPlaying(), "not playing after play()")
+    do local b = pc.sound.mp3player() end
+    collectgarbage("collect")
+    collectgarbage("collect")
+    T.ok(a:isPlaying(), "collecting a second handle stopped the music")
+    a:stop()
+end)
+
+-- A collected fileplayer kept its callback slots (two per kind), so the third
+-- fileplayer ever given a callback failed with "too many ... callbacks".
+T.case("fileplayer_callback_slots_released_on_gc", function()
+    for i = 1, 4 do
+        local fp = T.ok(pc.sound.fileplayer(), "fileplayer " .. i)
+        fp:setFinishCallback(function() end)
+        fp:setLoopCallback(function() end)
+        fp = nil
+        collectgarbage("collect")
+        collectgarbage("collect")
+    end
+    local fp = T.ok(pc.sound.fileplayer())
+    fp:setFinishCallback(function() end)
+    fp:setLoopCallback(function() end)
+end)
+
 T.done()

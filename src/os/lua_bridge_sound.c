@@ -785,23 +785,54 @@ static int l_sound_fileplayer_getRate(lua_State *L) {
 static int l_sound_fileplayer_gc(lua_State *L) {
     fileplayer_t **ud = luaL_checkudata(L, 1, FILEPLAYER_USERDATA);
     if (*ud) {
+        // As for sampleplayers: free first (fileplayer_destroy detaches the
+        // callbacks under the player lock), then give the Lua callback slots
+        // back. They used to stay taken, so the third fileplayer ever given
+        // a callback failed with "too many ... callbacks".
+        void *finish_arg = (*ud)->finish_callback_arg;
+        void *loop_arg = (*ud)->loop_callback_arg;
         g_api.soundplayer->filePlayerFree(*ud);
+        release_cb(L, s_fp_finish_cbs, MAX_FILEPLAYER_CBS, finish_arg);
+        release_cb(L, s_fp_loop_cbs, MAX_FILEPLAYER_CBS, loop_arg);
         *ud = NULL;
     }
     return 0;
 }
 
+// There is one MP3 player (mp3_player_create returns the same &s_player and
+// mp3_player_destroy stops it), so collecting one of two handles used to stop
+// the other's music. As for picocalc.modplayer (lua_bridge_mod.c):
+// mp3player() hands out one Lua handle, returned again while it is alive; the
+// registry holds it in a weak-valued table keyed by &s_mp3_owner, and only
+// the owning handle's __gc stops the player. A handle that became unreachable
+// but whose finaliser has not run yet is already gone from the weak table, so
+// an mp3player() in that window makes a new owner and the stale finaliser
+// must not stop it. Compared, never dereferenced.
+static const void *s_mp3_owner = NULL;
+
 static int l_sound_mp3player_new(lua_State *L) {
+    lua_rawgetp(L, LUA_REGISTRYINDEX, &s_mp3_owner);  // weak cache
+    if (lua_rawgeti(L, -1, 1) == LUA_TUSERDATA) {
+        mp3_player_t **live = luaL_checkudata(L, -1, MP3PLAYER_USERDATA);
+        if (*live && (const void *)live == s_mp3_owner)
+            return 1;  // the one live handle
+    }
+    lua_pop(L, 1);  // cache[1]: nil, or a handle that no longer owns the player
+
+    // The userdata first: if it raises (out of memory) nothing is created.
+    mp3_player_t **ud = lua_newuserdatauv(L, sizeof(mp3_player_t *), 0);
+    *ud = NULL;
+    luaL_setmetatable(L, MP3PLAYER_USERDATA);
     mp3_player_t *player = (mp3_player_t *)g_api.soundplayer->mp3PlayerNew();
     if (!player) {
         lua_pushnil(L);
         lua_pushstring(L, "failed to create mp3 player");
         return 2;
     }
-
-    mp3_player_t **ud = lua_newuserdata(L, sizeof(mp3_player_t *));
     *ud = player;
-    luaL_setmetatable(L, MP3PLAYER_USERDATA);
+    s_mp3_owner = ud;
+    lua_pushvalue(L, -1);
+    lua_rawseti(L, -3, 1);  // cache[1] = handle
     return 1;
 }
 
@@ -889,12 +920,15 @@ static int l_sound_mp3player_setLoop(lua_State *L) {
     return 0;
 }
 
+// Only the owning handle stops the player (see s_mp3_owner); a stale handle
+// just goes dead.
 static int l_sound_mp3player_gc(lua_State *L) {
     mp3_player_t **ud = luaL_checkudata(L, 1, MP3PLAYER_USERDATA);
-    if (*ud) {
+    if (*ud && (const void *)ud == s_mp3_owner) {
         g_api.soundplayer->mp3PlayerFree(*ud);
-        *ud = NULL;
+        s_mp3_owner = NULL;
     }
+    *ud = NULL;
     return 0;
 }
 
@@ -1027,6 +1061,16 @@ void lua_bridge_sound_init(lua_State *L) {
 
     fileplayer_init();
     mp3_player_init();
+
+    // A fresh lua_State: the previous app's mp3player handle was finalised
+    // by lua_close (which cleared s_mp3_owner); this is the safety net.
+    s_mp3_owner = NULL;
+    lua_newtable(L);  // weak-valued handle cache
+    lua_createtable(L, 0, 1);
+    lua_pushliteral(L, "v");
+    lua_setfield(L, -2, "__mode");
+    lua_setmetatable(L, -2);
+    lua_rawsetp(L, LUA_REGISTRYINDEX, &s_mp3_owner);
 
     register_subtable(L, "sound", sound_funcs);
 }
