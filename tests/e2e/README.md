@@ -102,6 +102,13 @@ compiles `sdk/native/main.c` and the probe and runs
 `tools/check_native_abi.py --cc arm-none-eabi-gcc`, which compares the three
 ABI copies (`src/os/os.h`, `sdk/native/os.h`, the trampolines' version write).
 
+`test_native_resources.py` runs `apps/native_leaky` (source
+`native/leaky.c`, built by the same Makefile), which opens files, makes
+images, players, a terminal and a `qmiAlloc` block and returns without
+freeing any of them, between runs of the Lua `apps/mem_report` (PSRAM free,
+largest block, how many of 16 simultaneous opens succeed) under
+`--real-umm`: after the native app exits, everything must be back.
+
 `test_native_malformed.py` stages one `elfgen.build_elf(...)` image per
 malformation (`specs/test-audit-2026-09-24.md` §3.5 plus the other
 `elf_plan` refusals) as `/apps/badelf_<case>/main.elf` and asserts the launch

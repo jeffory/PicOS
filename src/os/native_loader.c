@@ -8,7 +8,18 @@
 #include "../drivers/keyboard.h"
 #include "../drivers/sdcard.h"
 #include "../drivers/tcp.h"
+#include "../drivers/sound.h"
+#include "../drivers/fileplayer.h"
+#include "../drivers/mp3_player.h"
+#include "../drivers/image_api.h"
+#include "../drivers/video_player.h"
+#include "../drivers/mod_player.h"
+#include "../dev_commands.h"
 #include "../os/os.h"
+#include "terminal.h"
+#ifndef PICOS_SIMULATOR
+#include "crypto.h"
+#endif
 
 #include "umm_malloc.h"
 #include "crashlog.h"
@@ -137,6 +148,79 @@ static void __attribute__((unused)) native_launch_thunk(void *p) {
 }
 
 // =============================================================================
+// Per-launch resource tracking (native_loader.h)
+// =============================================================================
+
+void native_res_release(int kind, void *h) {
+  switch (kind) {
+  case NATIVE_RES_IMAGE:      image_free((pc_image_t *)h); break;
+  case NATIVE_RES_SAMPLE:     sound_sample_destroy((sound_sample_t *)h); break;
+  case NATIVE_RES_PLAYER:     sound_player_destroy((sound_player_t *)h); break;
+  case NATIVE_RES_FILEPLAYER: fileplayer_destroy((fileplayer_t *)h); break;
+  case NATIVE_RES_MP3:        mp3_player_destroy((mp3_player_t *)h); break;
+  case NATIVE_RES_VIDEO:      video_player_destroy((video_player_t *)h); break;
+  case NATIVE_RES_MOD:        mod_player_destroy((mod_player_t *)h); break;
+  case NATIVE_RES_TERMINAL:   terminal_free((terminal_t *)h); break;
+#ifndef PICOS_SIMULATOR
+  // The simulator has no crypto, and its qmiAlloc is the emulator's own
+  // heap (gone with the Unicorn instance): neither is ever tracked there.
+  case NATIVE_RES_QMI:        umm_free(h); break;
+  case NATIVE_RES_AES:        crypto_aes_free((crypto_aes_t *)h); break;
+  case NATIVE_RES_ECDH:       crypto_ecdh_free((crypto_ecdh_t *)h); break;
+#endif
+  default:
+    printf("[NATIVE] BUG: release of unknown handle kind %d\n", kind);
+    break;
+  }
+}
+
+void *native_res_adopt(int kind, void *h) {
+  if (h && !app_res_track(kind, h)) {
+    printf("[NATIVE] out of PSRAM tracking handle (kind %d): refused\n", kind);
+    native_res_release(kind, h);
+    return NULL;
+  }
+  return h;
+}
+
+void native_res_drop(int kind, void *h) {
+  if (app_res_untrack(kind, h))
+    native_res_release(kind, h);
+}
+
+void *native_file_adopt(void *f) {
+  if (f && !app_files_track(f)) {
+    sdcard_fclose((sdfile_t)f);
+    return NULL;
+  }
+  return f;
+}
+
+void native_file_drop(void *f) {
+  if (app_files_untrack(f))
+    sdcard_fclose((sdfile_t)f);
+}
+
+void native_res_release_all(const char *app_name) {
+  int n = app_res_release_all(native_res_release);
+  int files = app_files_close_all();
+  if (n || files)
+    printf("[NATIVE] '%s' exited holding %d handle(s) and %d file(s): "
+           "released\n", app_name, n, files);
+}
+
+// Everything the app may have left behind that the OS can reclaim without
+// Core 1 paused: its handles, then the audio engines' per-app state (as the
+// Lua runner does after lua_close).  The pool-wide HTTP/TCP close and the
+// tone/stream stop are the caller's (their order differs per build).
+static void native_teardown(const app_entry_t *app) {
+  native_res_release_all(app->name);
+  fileplayer_reset();
+  sound_init();
+  mp3_player_reset();
+}
+
+// =============================================================================
 // ELF loader
 // =============================================================================
 
@@ -152,11 +236,160 @@ static bool native_run_app(const app_entry_t *app) {
   printf("[NATIVE] Loading '%s' via Unicorn Engine\n", app->name);
   char elf_path[256];
   snprintf(elf_path, sizeof(elf_path), "%s/main.elf", app->path);
-  return unicorn_run_app(elf_path, app->path, app->id, app->name);
+  bool ok = unicorn_run_app(elf_path, app->path, app->id, app->name);
+  // Same teardown as firmware (below), minus the Core 1 pause.
+  atomic_store(&g_native_audio_callback, NULL);
+  native_teardown(app);
+  http_close_all(NULL);
+  tcp_close_all();
+  audio_stop_stream();
+  audio_stop_tone();
+  return ok;
 }
 #else
 // Declared in main.c — feeds the watchdog and stamps Core 0's heartbeat.
 extern void core0_heartbeat(void);
+
+// ── The app's API: g_api with tracking create/free entries ──────────────────
+// A per-launch copy (PSRAM, ~1 KB) of g_api and of the sub-tables that hand
+// out objects; every other entry and table is g_api's own, so the layout and
+// all other behaviour are identical.  Creators go through g_api and adopt the
+// result; frees untrack first (native_res_drop), so a double free or a stray
+// pointer from the app is ignored instead of corrupting the heap.
+typedef struct {
+  PicoCalcAPI api;
+  picocalc_fs_t fs;
+  picocalc_psram_t psram;
+  picocalc_graphics_t graphics;
+  picocalc_soundplayer_t soundplayer;
+  picocalc_video_t video;
+  picocalc_modplayer_t modplayer;
+  picocalc_terminal_t terminal;
+  picocalc_crypto_t crypto;
+} native_api_t;
+
+static pcfile_t napi_fs_open(const char *path, const char *mode) {
+  return native_file_adopt(g_api.fs->open(path, mode));
+}
+static void napi_fs_close(pcfile_t f) { native_file_drop(f); }
+
+static void *napi_qmi_alloc(uint32_t size) {
+  return native_res_adopt(NATIVE_RES_QMI, g_api.psram->qmiAlloc(size));
+}
+static void napi_qmi_free(void *p) { native_res_drop(NATIVE_RES_QMI, p); }
+
+static pcimage_t napi_gfx_load(const char *path) {
+  return native_res_adopt(NATIVE_RES_IMAGE, g_api.graphics->load(path));
+}
+static pcimage_t napi_gfx_new_blank(int w, int h) {
+  return native_res_adopt(NATIVE_RES_IMAGE, g_api.graphics->newBlank(w, h));
+}
+static void napi_gfx_free(pcimage_t img) { native_res_drop(NATIVE_RES_IMAGE, img); }
+
+static pcsound_sample_t napi_sample_load(const char *path) {
+  return native_res_adopt(NATIVE_RES_SAMPLE, g_api.soundplayer->sampleLoad(path));
+}
+static void napi_sample_free(pcsound_sample_t s) {
+  native_res_drop(NATIVE_RES_SAMPLE, s);
+}
+static pcsound_player_t napi_player_new(void) {
+  return native_res_adopt(NATIVE_RES_PLAYER, g_api.soundplayer->playerNew());
+}
+static void napi_player_free(pcsound_player_t p) {
+  native_res_drop(NATIVE_RES_PLAYER, p);
+}
+static pcfileplayer_t napi_fileplayer_new(void) {
+  return native_res_adopt(NATIVE_RES_FILEPLAYER,
+                          g_api.soundplayer->filePlayerNew());
+}
+static void napi_fileplayer_free(pcfileplayer_t fp) {
+  native_res_drop(NATIVE_RES_FILEPLAYER, fp);
+}
+static pcmp3player_t napi_mp3_new(void) {
+  return native_res_adopt(NATIVE_RES_MP3, g_api.soundplayer->mp3PlayerNew());
+}
+static void napi_mp3_free(pcmp3player_t mp) { native_res_drop(NATIVE_RES_MP3, mp); }
+
+static pcvideo_t napi_video_new(void) {
+  return native_res_adopt(NATIVE_RES_VIDEO, g_api.video->newPlayer());
+}
+static void napi_video_free(pcvideo_t vp) { native_res_drop(NATIVE_RES_VIDEO, vp); }
+
+static pcmodplayer_t napi_mod_create(void) {
+  return native_res_adopt(NATIVE_RES_MOD, g_api.modplayer->create());
+}
+static void napi_mod_destroy(pcmodplayer_t mp) { native_res_drop(NATIVE_RES_MOD, mp); }
+
+static terminal_t *napi_term_create(int cols, int rows, int scrollback) {
+  return (terminal_t *)native_res_adopt(
+      NATIVE_RES_TERMINAL, g_api.terminal->create(cols, rows, scrollback));
+}
+static void napi_term_free(terminal_t *t) { native_res_drop(NATIVE_RES_TERMINAL, t); }
+
+static pccrypto_aes_t napi_aes_new(const uint8_t *key, uint32_t klen,
+                                   const uint8_t *nonce) {
+  return native_res_adopt(NATIVE_RES_AES, g_api.crypto->aesNew(key, klen, nonce));
+}
+static void napi_aes_free(pccrypto_aes_t ctx) { native_res_drop(NATIVE_RES_AES, ctx); }
+static pccrypto_ecdh_t napi_ecdh_x25519(void) {
+  return native_res_adopt(NATIVE_RES_ECDH, g_api.crypto->ecdhX25519());
+}
+static pccrypto_ecdh_t napi_ecdh_p256(void) {
+  return native_res_adopt(NATIVE_RES_ECDH, g_api.crypto->ecdhP256());
+}
+static void napi_ecdh_free(pccrypto_ecdh_t ctx) { native_res_drop(NATIVE_RES_ECDH, ctx); }
+
+// NULL when PSRAM has no ~1 KB block.  Free with umm_free after the app's
+// handles have been released.
+static native_api_t *native_api_new(void) {
+  native_api_t *n = (native_api_t *)umm_malloc(sizeof(*n));
+  if (!n)
+    return NULL;
+  n->api = g_api;
+  n->fs = *g_api.fs;
+  n->fs.open = napi_fs_open;
+  n->fs.close = napi_fs_close;
+  n->api.fs = &n->fs;
+  n->psram = *g_api.psram;
+  n->psram.qmiAlloc = napi_qmi_alloc;
+  n->psram.qmiFree = napi_qmi_free;
+  n->api.psram = &n->psram;
+  n->graphics = *g_api.graphics;
+  n->graphics.load = napi_gfx_load;
+  n->graphics.newBlank = napi_gfx_new_blank;
+  n->graphics.free = napi_gfx_free;
+  n->api.graphics = &n->graphics;
+  n->soundplayer = *g_api.soundplayer;
+  n->soundplayer.sampleLoad = napi_sample_load;
+  n->soundplayer.sampleFree = napi_sample_free;
+  n->soundplayer.playerNew = napi_player_new;
+  n->soundplayer.playerFree = napi_player_free;
+  n->soundplayer.filePlayerNew = napi_fileplayer_new;
+  n->soundplayer.filePlayerFree = napi_fileplayer_free;
+  n->soundplayer.mp3PlayerNew = napi_mp3_new;
+  n->soundplayer.mp3PlayerFree = napi_mp3_free;
+  n->api.soundplayer = &n->soundplayer;
+  n->video = *g_api.video;
+  n->video.newPlayer = napi_video_new;
+  n->video.free = napi_video_free;
+  n->api.video = &n->video;
+  n->modplayer = *g_api.modplayer;
+  n->modplayer.create = napi_mod_create;
+  n->modplayer.destroy = napi_mod_destroy;
+  n->api.modplayer = &n->modplayer;
+  n->terminal = *g_api.terminal;
+  n->terminal.create = napi_term_create;
+  n->terminal.free = napi_term_free;
+  n->api.terminal = &n->terminal;
+  n->crypto = *g_api.crypto;
+  n->crypto.aesNew = napi_aes_new;
+  n->crypto.aesFree = napi_aes_free;
+  n->crypto.ecdhX25519 = napi_ecdh_x25519;
+  n->crypto.ecdhP256 = napi_ecdh_p256;
+  n->crypto.ecdhFree = napi_ecdh_free;
+  n->api.crypto = &n->crypto;
+  return n;
+}
 
 static bool native_run_app(const app_entry_t *app) {
   printf("[NATIVE] Loading '%s'\n", app->name);
@@ -186,6 +419,7 @@ static bool native_run_app(const app_entry_t *app) {
   bool stack_in_sram = false;
   sdfile_t f = NULL;
   uint8_t *phdr_table = NULL;
+  native_api_t *napi = NULL;
 
   f = sdcard_fopen(elf_path, "rb");
   if (!f) {
@@ -553,6 +787,12 @@ static bool native_run_app(const app_entry_t *app) {
     show_error("Out of memory for app stack", detail);
     goto out;
   }
+  napi = native_api_new();
+  if (!napi) {
+    show_error("Out of memory for the app's API table", NULL);
+    goto out;
+  }
+
   printf("[NATIVE] App stack: %lu KB in %s @ %p\n",
          (unsigned long)(stack_size / 1024), stack_in_sram ? "SRAM" : "PSRAM",
          (void *)stack_buf);
@@ -562,8 +802,8 @@ static bool native_run_app(const app_entry_t *app) {
   // (an app push past it faults with CFSR.STKOF, recorded as a stack
   // overflow, instead of silently running into whatever lies below) and
   // runs the entry point on the PSP.
-  native_launch_t launch = {entry_fn, (const PicoCalcAPI *)&g_api, app->path,
-                            app->id, app->name};
+  native_launch_t launch = {entry_fn, &napi->api, app->path, app->id,
+                            app->name};
   app_stack_run(stack_buf, stack_size, APP_STACK_NATIVE, native_launch_thunk,
                 &launch);
 
@@ -595,6 +835,10 @@ out:
   g_native_code_base = g_native_code_limit = 0;
   g_native_data_base = g_native_data_limit = 0;
   g_native_code_vaddr = g_native_data_vaddr = 0;
+  // Free what the app left open (its own cleanup, if any, has run: it
+  // returned), then the audio engines' per-app state.  Core 1 still runs:
+  // the players' locks are what make this safe against its updates.
+  native_teardown(app);
   // Release the app's HTTP/TCP connections while Core 1 still runs: it has
   // to acknowledge each close before the slot can be reclaimed.
   http_close_all(NULL);
@@ -626,6 +870,8 @@ out:
     umm_free(load_base);
   if (phdr_table)
     umm_free(phdr_table);
+  if (napi)
+    umm_free(napi);
   if (f)
     sdcard_fclose(f);
   g_core1_pause = false;
@@ -644,6 +890,12 @@ static bool native_run(const app_entry_t *app) {
     return false;
   }
   bool ok = native_run_app(app);
+  // sys->poll drops a reboot-ota that arrives while an app runs; an app that
+  // never polls leaves it latched for the launcher, so drop it here too.
+  if (dev_commands_wants_reboot_ota()) {
+    dev_commands_clear_reboot_ota();
+    printf("[DEV] reboot-ota ignored: it arrived while an app was running\n");
+  }
   app_identity_end();
   return ok;
 }

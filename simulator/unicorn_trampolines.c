@@ -29,6 +29,8 @@
 #include "appconfig.h"
 #include "image_api.h"
 #include "font_registry.h"
+#include "app_identity.h"
+#include "native_loader.h"
 
 // From unicorn_runner.c
 extern uc_engine *g_uc;
@@ -1045,6 +1047,24 @@ static void tramp_input_get_char(uc_engine *uc) {
 }
 
 // =============================================================================
+// Per-app handle tracking (src/os/native_loader.h)
+// =============================================================================
+// Objects the app creates are tracked against it, as the firmware's per-launch
+// API table does, so the loader frees whatever the app leaks when it returns.
+// An app-side free of an untracked object (double free, stray handle) is a
+// no-op.
+
+static uint32_t wrap_tracked(int kind, void *obj) {
+    return handle_wrap(native_res_adopt(kind, obj));
+}
+
+static void drop_tracked(int kind, uint32_t handle) {
+    void *obj = handle_unwrap(handle);
+    if (obj) native_res_drop(kind, obj);
+    handle_free(handle);
+}
+
+// =============================================================================
 // Filesystem trampoline handlers
 // =============================================================================
 
@@ -1053,7 +1073,7 @@ static void tramp_fs_open(uc_engine *uc) {
     uint32_t mode_addr = read_reg(uc, UC_ARM_REG_R1);
     char *path = uc_read_string(uc, path_addr);
     char *mode = uc_read_string(uc, mode_addr);
-    void *f = sdcard_fopen(path ? path : "", mode ? mode : "r");
+    void *f = native_file_adopt(sdcard_fopen(path ? path : "", mode ? mode : "r"));
     uint32_t handle = f ? handle_wrap(f) : 0;
     fprintf(stderr, "[TRAMP] fs_open('%s', '%s') -> %s (handle=%u)\n",
             path ? path : "(null)", mode ? mode : "(null)",
@@ -1108,7 +1128,7 @@ static void tramp_fs_close(uc_engine *uc) {
     uint32_t handle = read_reg(uc, UC_ARM_REG_R0);
     void *f = handle_unwrap(handle);
     if (f) {
-        sdcard_fclose(f);
+        native_file_drop(f);
         handle_free(handle);
     }
 }
@@ -2054,20 +2074,17 @@ static void tramp_snd_sample_load(uc_engine *uc) {
             s = NULL;
         }
     }
-    write_reg(uc, UC_ARM_REG_R0, handle_wrap(s));
+    write_reg(uc, UC_ARM_REG_R0, wrap_tracked(NATIVE_RES_SAMPLE, s));
 }
 
 static void tramp_snd_sample_free(uc_engine *uc) {
-    uint32_t handle = read_reg(uc, UC_ARM_REG_R0);
-    sound_sample_t *s = handle_unwrap(handle);
-    if (s) sound_sample_destroy(s);
-    handle_free(handle);
+    drop_tracked(NATIVE_RES_SAMPLE, read_reg(uc, UC_ARM_REG_R0));
 }
 
 // --- Sample player ---
 static void tramp_snd_player_new(uc_engine *uc) {
     sound_player_t *p = sound_player_create();
-    write_reg(uc, UC_ARM_REG_R0, handle_wrap(p));
+    write_reg(uc, UC_ARM_REG_R0, wrap_tracked(NATIVE_RES_PLAYER, p));
 }
 
 static void tramp_snd_player_set_sample(uc_engine *uc) {
@@ -2116,16 +2133,13 @@ static void tramp_snd_player_set_loop(uc_engine *uc) {
 }
 
 static void tramp_snd_player_free(uc_engine *uc) {
-    uint32_t handle = read_reg(uc, UC_ARM_REG_R0);
-    sound_player_t *p = handle_unwrap(handle);
-    if (p) sound_player_destroy(p);
-    handle_free(handle);
+    drop_tracked(NATIVE_RES_PLAYER, read_reg(uc, UC_ARM_REG_R0));
 }
 
 // --- File player ---
 static void tramp_snd_fp_new(uc_engine *uc) {
     fileplayer_t *fp = fileplayer_create();
-    write_reg(uc, UC_ARM_REG_R0, handle_wrap(fp));
+    write_reg(uc, UC_ARM_REG_R0, wrap_tracked(NATIVE_RES_FILEPLAYER, fp));
 }
 
 static void tramp_snd_fp_load(uc_engine *uc) {
@@ -2203,16 +2217,13 @@ static void tramp_snd_fp_did_underrun(uc_engine *uc) {
 }
 
 static void tramp_snd_fp_free(uc_engine *uc) {
-    uint32_t handle = read_reg(uc, UC_ARM_REG_R0);
-    fileplayer_t *fp = handle_unwrap(handle);
-    if (fp) fileplayer_destroy(fp);
-    handle_free(handle);
+    drop_tracked(NATIVE_RES_FILEPLAYER, read_reg(uc, UC_ARM_REG_R0));
 }
 
 // --- MP3 player ---
 static void tramp_snd_mp3_new(uc_engine *uc) {
     mp3_player_t *mp = mp3_player_create();
-    write_reg(uc, UC_ARM_REG_R0, handle_wrap(mp));
+    write_reg(uc, UC_ARM_REG_R0, wrap_tracked(NATIVE_RES_MP3, mp));
 }
 
 static void tramp_snd_mp3_load(uc_engine *uc) {
@@ -2275,10 +2286,7 @@ static void tramp_snd_mp3_set_loop(uc_engine *uc) {
 }
 
 static void tramp_snd_mp3_free(uc_engine *uc) {
-    uint32_t handle = read_reg(uc, UC_ARM_REG_R0);
-    mp3_player_t *mp = handle_unwrap(handle);
-    if (mp) mp3_player_destroy(mp);
-    handle_free(handle);
+    drop_tracked(NATIVE_RES_MP3, read_reg(uc, UC_ARM_REG_R0));
 }
 
 // =============================================================================
@@ -2335,14 +2343,11 @@ static void tramp_term_create(uc_engine *uc) {
     int rows = (int)read_reg(uc, UC_ARM_REG_R1);
     int scrollback = (int)read_reg(uc, UC_ARM_REG_R2);
     terminal_t *t = terminal_new(cols, rows, scrollback);
-    write_reg(uc, UC_ARM_REG_R0, handle_wrap(t));
+    write_reg(uc, UC_ARM_REG_R0, wrap_tracked(NATIVE_RES_TERMINAL, t));
 }
 
 static void tramp_term_free(uc_engine *uc) {
-    uint32_t handle = read_reg(uc, UC_ARM_REG_R0);
-    terminal_t *t = handle_unwrap(handle);
-    if (t) terminal_free(t);
-    handle_free(handle);
+    drop_tracked(NATIVE_RES_TERMINAL, read_reg(uc, UC_ARM_REG_R0));
 }
 
 static void tramp_term_clear(uc_engine *uc) {
@@ -2638,24 +2643,18 @@ static void tramp_gfx_load(uc_engine *uc) {
     uint32_t path_addr = read_reg(uc, UC_ARM_REG_R0);
     char *path = uc_read_string(uc, path_addr);
     pc_image_t *img = path ? image_load(path) : NULL;
-    write_reg(uc, UC_ARM_REG_R0, handle_wrap(img));
+    write_reg(uc, UC_ARM_REG_R0, wrap_tracked(NATIVE_RES_IMAGE, img));
 }
 
 static void tramp_gfx_new_blank(uc_engine *uc) {
     int w = (int)read_reg(uc, UC_ARM_REG_R0);
     int h = (int)read_reg(uc, UC_ARM_REG_R1);
     pc_image_t *img = image_new_blank(w, h);
-    write_reg(uc, UC_ARM_REG_R0, handle_wrap(img));
+    write_reg(uc, UC_ARM_REG_R0, wrap_tracked(NATIVE_RES_IMAGE, img));
 }
 
 static void tramp_gfx_free(uc_engine *uc) {
-    uint32_t handle = read_reg(uc, UC_ARM_REG_R0);
-    pc_image_t *img = handle_unwrap(handle);
-    if (img) {
-        extern void image_free(pc_image_t *);
-        image_free(img);
-    }
-    handle_free(handle);
+    drop_tracked(NATIVE_RES_IMAGE, read_reg(uc, UC_ARM_REG_R0));
 }
 
 static void tramp_gfx_width(uc_engine *uc) {
@@ -2720,13 +2719,10 @@ static void tramp_gfx_draw_scaled(uc_engine *uc) {
 
 static void tramp_video_new_player(uc_engine *uc) {
     void *vp = video_player_create();
-    write_reg(uc, UC_ARM_REG_R0, handle_wrap(vp));
+    write_reg(uc, UC_ARM_REG_R0, wrap_tracked(NATIVE_RES_VIDEO, vp));
 }
 static void tramp_video_free(uc_engine *uc) {
-    uint32_t h = read_reg(uc, UC_ARM_REG_R0);
-    void *vp = handle_unwrap(h);
-    if (vp) video_player_destroy(vp);
-    handle_free(h);
+    drop_tracked(NATIVE_RES_VIDEO, read_reg(uc, UC_ARM_REG_R0));
 }
 static void tramp_video_load(uc_engine *uc) {
     uint32_t h = read_reg(uc, UC_ARM_REG_R0);
@@ -2875,13 +2871,10 @@ static void tramp_stub(uc_engine *uc, uint32_t slot) {
 static void tramp_modplayer_create(uc_engine *uc) {
     mod_player_init();  // idempotent; sim main.c never calls it
     void *p = mod_player_create();
-    write_reg(uc, UC_ARM_REG_R0, p ? handle_wrap(p) : 0);
+    write_reg(uc, UC_ARM_REG_R0, wrap_tracked(NATIVE_RES_MOD, p));
 }
 static void tramp_modplayer_destroy(uc_engine *uc) {
-    uint32_t h = read_reg(uc, UC_ARM_REG_R0);
-    void *p = handle_unwrap(h);
-    if (p) mod_player_destroy(p);
-    handle_free(h);
+    drop_tracked(NATIVE_RES_MOD, read_reg(uc, UC_ARM_REG_R0));
 }
 static void tramp_modplayer_load(uc_engine *uc) {
     void *p = handle_unwrap(read_reg(uc, UC_ARM_REG_R0));
