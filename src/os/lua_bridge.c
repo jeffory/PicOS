@@ -166,11 +166,60 @@ void lb_register_type(lua_State *L, const char *mtname,
   lua_pop(L, 1);
 }
 
-// Instruction-count hook: fires every 256 Lua opcodes.
+// ── Exit request (see lua_bridge.h) ─────────────────────────────────────────
+// Core 0 only: set by lua_bridge_raise_exit, cleared by the runner through
+// lua_bridge_exit_reset once the app's VM has returned.
+static bool s_exit_requested = false;
+
+// Instructions between two count-hook calls while the app runs normally.
+#define LUA_HOOK_COUNT 256
+
+static void menu_lua_hook(lua_State *L, lua_Debug *ar);
+
+static void lua_bridge_install_hook(lua_State *L, int count) {
+  lua_sethook(L, menu_lua_hook, LUA_MASKCOUNT, count);
+}
+
+bool lua_bridge_exit_requested(void) { return s_exit_requested; }
+
+void lua_bridge_raise_exit(lua_State *L) {
+  if (!s_exit_requested) {
+    s_exit_requested = true;
+    // Modal loops (ui_confirm, text input, the system menu) watch the dev
+    // flag; they unwind instead of waiting for a key the app will never read.
+    dev_commands_set_exit();
+    // Re-raise before every instruction from now on. The main thread too:
+    // a coroutine that raised is dead once resume returns, and the thread
+    // that resumed it has its own hook count.
+    lua_bridge_install_hook(L, 1);
+    lua_rawgeti(L, LUA_REGISTRYINDEX, LUA_RIDX_MAINTHREAD);
+    lua_State *main = lua_tothread(L, -1);
+    lua_pop(L, 1);
+    if (main && main != L)
+      lua_bridge_install_hook(main, 1);
+  }
+  lua_pushlightuserdata(L, &lua_bridge_exit_tag);
+  lua_error(L);
+#if defined(__GNUC__)
+  __builtin_unreachable();
+#endif
+}
+
+void lua_bridge_exit_reset(lua_State *L) {
+  s_exit_requested = false;
+  dev_commands_clear_exit();
+  if (L)
+    lua_bridge_install_hook(L, LUA_HOOK_COUNT);
+}
+
+// Instruction-count hook: fires every LUA_HOOK_COUNT Lua opcodes (every
+// opcode once an exit was requested).
 // WiFi is now driven by Core 1 (wifi_poll every 5 ms) — no call needed here.
 static void menu_lua_hook(lua_State *L, lua_Debug *ar) {
   (void)ar;
-  watchdog_update(); // kick watchdog — fires every 256 Lua opcodes
+  watchdog_update(); // kick watchdog
+  if (s_exit_requested)
+    lua_bridge_raise_exit(L);  // an earlier exit was swallowed: raise again
   http_lua_fire_pending(L); // fire any queued HTTP Lua callbacks
   tcp_lua_fire_pending(L);  // fire any queued TCP Lua callbacks
   lua_bridge_sound_poll(L); // fire any pending sound finish/loop callbacks
@@ -184,10 +233,9 @@ static void menu_lua_hook(lua_State *L, lua_Debug *ar) {
     dev_commands_set_exit();
   }
 #endif
-  if (dev_commands_wants_exit()) {
-    dev_commands_clear_exit();
+  // A callback above may have called sys.exit() inside its own pcall.
+  if (s_exit_requested || dev_commands_wants_exit())
     lua_bridge_raise_exit(L);
-  }
   if (dev_commands_wants_reboot()) {
     printf("[DEV] Rebooting...\n");
     crashlog_clear_running(); // intentional — not an unclean exit
@@ -371,9 +419,9 @@ void lua_bridge_register(lua_State *L) {
   lua_setglobal(L, "picocalc");
 
   // Install instruction-count hook for menu button interception.
-  // Fires every 256 Lua opcodes (~100µs-1ms) to catch menu button presses
+  // Fires every LUA_HOOK_COUNT Lua opcodes to catch menu button presses
   // even during tight loops, without requiring apps to poll input.
-  lua_sethook(L, menu_lua_hook, LUA_MASKCOUNT, 256);
+  lua_bridge_install_hook(L, LUA_HOOK_COUNT);
   printf("[LUA] lua_bridge_register complete\n");
 }
 

@@ -184,19 +184,25 @@ static void lua_vm_body(void *arg) {
 #else
   int run_err = lua_pcall(L, 0, 0, 0);
 #endif
+  // An exit request is final even when the app caught the sentinel and then
+  // raised something else ("error(e)" on a swallowed exit): no error screen.
+  bool exiting = lua_bridge_exit_requested();
+  lua_bridge_exit_reset(L);  // lua_close's __gc handlers run uninterrupted
   if (run_err != LUA_OK) {
-    if (!lua_bridge_is_exit_sentinel(L, -1)) {
+    if (!exiting && !lua_bridge_is_exit_sentinel(L, -1)) {
       lua_bridge_show_error(L, run_err == LUA_ERRMEM ? "Out of memory:"
                                                      : "Runtime error:");
     } else {
-      lua_pop(L, 1); // discard exit sentinel
+      lua_pop(L, 1); // discard exit sentinel (or what replaced it)
       sim_app_outcome_set(SIM_APP_RESULT_EXIT_SENTINEL, NULL);
     }
   } else {
-    sim_app_outcome_set(SIM_APP_RESULT_RETURNED, NULL);
+    sim_app_outcome_set(exiting ? SIM_APP_RESULT_EXIT_SENTINEL
+                                : SIM_APP_RESULT_RETURNED, NULL);
   }
 
   lua_close(L);
+  lua_bridge_exit_reset(NULL);  // a __gc handler may have called sys.exit()
 }
 
 static bool lua_run_app(const app_entry_t *app) {

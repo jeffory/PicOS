@@ -27,13 +27,28 @@
 // Call this once after lua_newstate(), before running any app code.
 void lua_bridge_register(lua_State *L);
 
-// Exit sentinel: a unique light userdata used as the error object when an app
-// requests a clean exit. Use lua_bridge_is_exit_sentinel() to test.
+// ── App exit ─────────────────────────────────────────────────────────────────
+// sys.exit(), the system menu's "Exit App" and the dev `exit` command
+// (exit_app) all end in lua_bridge_raise_exit. The request is sticky: it sets
+// a flag the Lua runner owns (cleared only when the app's VM has returned),
+// raises the exit sentinel (a unique light userdata) as an ordinary Lua
+// error, and drops the count hook to every instruction. A pcall/xpcall (or
+// coroutine.resume, or a C callback's lua_pcall) that swallows the sentinel
+// cannot keep the app alive: the next instruction outside it raises again,
+// so the error climbs one protected call per instruction until it reaches
+// the runner. Modal loops see the request through dev_commands_wants_exit(),
+// which it also sets.
 extern char lua_bridge_exit_tag; // address used as sentinel, value irrelevant
-static inline void lua_bridge_raise_exit(lua_State *L) {
-  lua_pushlightuserdata(L, &lua_bridge_exit_tag);
-  lua_error(L);
-}
+#if defined(__GNUC__)
+__attribute__((noreturn))
+#endif
+void lua_bridge_raise_exit(lua_State *L);
+// True from the first exit request until the runner resets it.
+bool lua_bridge_exit_requested(void);
+// Runner only, after the app's pcall returned: clears the request (and the
+// dev exit flag) and restores the normal count hook, so __gc handlers run
+// during lua_close are not interrupted.
+void lua_bridge_exit_reset(lua_State *L);
 static inline bool lua_bridge_is_exit_sentinel(lua_State *L, int idx) {
   return lua_islightuserdata(L, idx) &&
          lua_touserdata(L, idx) == &lua_bridge_exit_tag;
