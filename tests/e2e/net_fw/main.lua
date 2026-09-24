@@ -333,25 +333,42 @@ case_fw("http_connect_timeout", function()
     check_stack_alive("after connect timeouts")
 end)
 
--- §3.6: setReadTimeout(1) on /hang reports an error within 3 s.
-case_fw("http_read_timeout", function()
+-- §3.6 read timeout, before the headers: GET /hang with setReadTimeout(1),
+-- then just wait. The Python side (test_read_timeout_fires_before_headers)
+-- checks that the server saw the client hang up; the simulator's health is
+-- deliberately not part of that verdict (http_read_timeout_mid_body owns
+-- the crash that follows a timeout).
+case_fw("http_read_timeout_hang", function()
     local r = request("/hang", { read_timeout = 1 })
+    -- Long enough that the app's own exit (which closes the socket) cannot
+    -- pass for a timeout inside the Python side's 2.5 s limit.
+    wait(function() return false end, 4500)
+end)
+
+-- The read-timeout branch of http_check_timeouts, reached today: /stall
+-- sends the headers and 10 of 1000 body bytes, then nothing (state BODY).
+-- The timeout must be reported, and the stack must survive the teardown.
+case_fw("http_read_timeout_mid_body", function()
+    local r = request("/stall", { read_timeout = 1 })
     T.ok(spin(3000, function() return r.closed or r.complete end),
          "no read timeout within 3 s (err=" .. tostring(r.conn:getError()) .. ")")
-    T.ok(r.err and r.err:find("timeout"), "error " .. tostring(r.err))
+    T.ok(r.err and r.err:find("read timeout"), "error " .. tostring(r.err))
     spin(200)
     check_stack_alive("after a read timeout")
 end)
 
+-- Keep-alive only: the connect timeout is long (10 s) so it cannot fire
+-- inside the 3 s window, and the app's teardown closes the connection
+-- through http_free's queued CLOSE; the timeout-path crash is not involved.
 case_fw("http_keepalive_reuse", function()
     local conn = net.http.new(HOST, cfg.http, false, "ka")
     local r1 = request("/ok", { conn = conn, keepalive = true,
-                                connect_timeout = 2 })
+                                connect_timeout = 10 })
     T.ok(wait(function() return r1.complete end, 3000), "first request")
     T.eq(body(r1), "hello picos", "first body")
     local r2 = request("/ok", { conn = conn, keepalive = true,
-                                connect_timeout = 2 })
-    T.ok(wait(function() return r2.complete or r2.closed end, 4000),
+                                connect_timeout = 10 })
+    T.ok(wait(function() return r2.complete or r2.closed end, 3000),
          "second request on the kept-alive connection never finished")
     T.eq(r2.err, nil, "second request error")
     T.eq(body(r2), "hello picos", "second body")
@@ -461,8 +478,12 @@ case_fw("tcp_connect_timeout", function()
     s:setConnectTimeout(1)
     T.ok(s:connect(), "connect refused")
     local t0 = now()
-    local failed = wait(function() return s:error() ~= nil end, 3000)
-    T.ok(failed, "no connect timeout within 3 s (setConnectTimeout(1))")
+    local failed = wait(function()
+        local e = s:error()
+        return e ~= nil and e:find("timeout") ~= nil
+    end, 3000)
+    T.ok(failed, "no connect timeout within 3 s (setConnectTimeout(1)); "
+         .. "error: " .. tostring(s:error()))
     T.ok(now() - t0 < 3000, "took too long")
 end)
 

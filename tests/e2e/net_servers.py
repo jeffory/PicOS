@@ -11,7 +11,9 @@ threads, and records what it saw so a test can assert on the server side too
     /chunked   200, Transfer-Encoding: chunked, body "alphabetagamma"
     /close     200, no Content-Length, body then close (close-delimited)
     /drip      200, Content-Length 400, one byte every 50 ms
-    /hang      reads the request, never answers (until the server stops)
+    /hang      reads the request, never answers; records when the client
+               hangs up in .hang_closed (monotonic seconds since the request)
+    /stall     headers (Content-Length 1000) and 10 body bytes, then silence
     /reset     headers (Content-Length 1000), 10 body bytes, then RST
     /echo      POST: 200 with the request body echoed back; the raw body is
                recorded in .posts
@@ -106,6 +108,26 @@ class _Handler(BaseHTTPRequestHandler):
                     self.wfile.flush()
                     time.sleep(DRIP_INTERVAL_S)
             elif path == "/hang":
+                # Never answer; notice the client hanging up (EOF/RST).
+                t0 = time.monotonic()
+                self.connection.settimeout(0.05)
+                while not srv.stopping.is_set():
+                    try:
+                        if self.connection.recv(1) == b"":
+                            srv.hang_closed.append(time.monotonic() - t0)
+                            break
+                    except socket.timeout:
+                        continue
+                    except OSError:
+                        srv.hang_closed.append(time.monotonic() - t0)
+                        break
+                self.close_connection = True
+            elif path == "/stall":
+                self.send_response(200)
+                self.send_header("Content-Length", "1000")
+                self.end_headers()
+                self.wfile.write(b"0123456789")
+                self.wfile.flush()
                 srv.stopping.wait()
                 self.close_connection = True
             elif path == "/reset":
@@ -149,6 +171,7 @@ class HttpTestServer:
         self._srv = _Server(("127.0.0.1", 0), _Handler)
         self._srv.hits = []
         self._srv.posts = []
+        self._srv.hang_closed = []
         self._srv.stopping = threading.Event()
         self.port = self._srv.server_address[1]
         self._thread = threading.Thread(target=self._srv.serve_forever,
@@ -162,6 +185,11 @@ class HttpTestServer:
     @property
     def posts(self) -> list:
         return self._srv.posts
+
+    @property
+    def hang_closed(self) -> list:
+        """Seconds from each /hang request to the client hanging up."""
+        return self._srv.hang_closed
 
     def start(self):
         self._thread.start()
