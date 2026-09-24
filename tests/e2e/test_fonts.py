@@ -16,14 +16,14 @@ the single source for firmware and simulator alike, and the old page 0/1
 goldens recorded simulator-only output that no build can produce any more.
 """
 import time
-from pathlib import Path
 
 import numpy as np
 import pytest
-from PIL import Image
+
+from helpers import GOLDEN_DIR as FIXTURES_DIR, compare_golden
 
 BUTTON_HOLD_S = 0.13
-GOLDEN_DIR = Path("tests/e2e/fixtures/fonts")
+GOLDEN_DIR = FIXTURES_DIR / "fonts"
 BUILTIN_NAMES = ["6x8", "8x12", "scientifica", "scientifica-bold"]
 
 
@@ -55,19 +55,7 @@ def test_builtin_font_golden(simulator, update_baselines, page):
     _goto_page(simulator, page, 0)
 
     got = _screenshot_array(simulator)
-    golden_path = GOLDEN_DIR / f"builtin_{page}.png"
-    GOLDEN_DIR.mkdir(parents=True, exist_ok=True)
-    if update_baselines or not golden_path.exists():
-        Image.fromarray(got).save(golden_path)
-        pytest.skip(f"golden written: {golden_path}")
-
-    want = np.array(Image.open(golden_path).convert("RGB"))
-    assert want.shape == got.shape
-    diff = np.argwhere(np.any(want != got, axis=-1))
-    assert diff.size == 0, (
-        f"page {page} differs from golden in {len(diff)} pixels, "
-        f"first at (x={diff[0][1]}, y={diff[0][0]})"
-    )
+    compare_golden(got, GOLDEN_DIR / f"builtin_{page}.png", update_baselines)
 
 
 def test_builtin_width_matches_measure(simulator):
@@ -136,10 +124,9 @@ def test_font_state_reset_between_apps(simulator):
     for page in range(1, 6):
         _goto_page(simulator, page, page - 1)
     simulator.keypress("esc")
-    # The simulator has no wait_for_exit RPC; the fixture logs FT:DONE as it
-    # returns to the launcher, which is what runs the font-state reset.
-    simulator.wait_for_log("FT:DONE", timeout=10)
-    time.sleep(0.5)
+    # app.exited fires after the launcher's post-app reset has run.
+    outcome = simulator.wait_for_exit(timeout=10)
+    assert outcome["result"] == "returned", outcome
     exits = [l for l in _lines(simulator) if l.startswith("FT:EXIT ")]
     assert exits == ["FT:EXIT font=1 leak=4"], exits
 

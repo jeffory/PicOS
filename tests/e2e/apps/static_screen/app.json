@@ -1,0 +1,7 @@
+{
+    "id": "com.picos.static_screen",
+    "name": "Static Screen",
+    "description": "E2E fixture: redraws one fixed frame until 'q' or Esc",
+    "version": "1.0",
+    "author": "PicOS E2E"
+}

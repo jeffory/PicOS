@@ -12,6 +12,8 @@ import time
 
 import pytest
 
+from helpers import lua_case_names
+
 
 # Injected buttons are HELD for 80ms so extra polls cannot consume them, which
 # means two presses of the same key inside that window coalesce into a single
@@ -38,25 +40,33 @@ def _px(sim, x, y):
 
 # ── picocalc.json ────────────────────────────────────────────────────────────
 
+JSON_CASES = lua_case_names("json_test")
 
-def test_json_module(simulator):
+
+def _stage_legacy_save(sd):
+    # A save written by the OLD flat encoder (the shipped guineapig shape),
+    # so gamesave_legacy_flat_loads really runs instead of skipping.
+    (sd / "saves").mkdir(exist_ok=True)
+    (sd / "saves" / "legacy_flat.json").write_text('{"high_score":695}')
+
+
+@pytest.fixture(scope="module")
+def json_run(lua_suite):
+    return lua_suite("json_test", setup=_stage_legacy_save)
+
+
+@pytest.mark.parametrize("case", JSON_CASES)
+def test_json_module(json_run, case):
     """json.encode/decode round-trips, and game.save keeps nested tables.
 
     game.save's old encoder emitted `null` for any non-scalar value, so a table
     with nested fields was written out as unrecoverable data loss.
     """
-    simulator.clear_log()
-    simulator.launch_app("json_test")
-    simulator.wait_for_log("JT:DONE", timeout=30)
+    json_run.check_case(case)
 
-    lines = _lines(simulator)
-    done = [l for l in lines if "JT:DONE" in l]
-    assert done, "json_test never reported JT:DONE"
 
-    failures = [l for l in lines if "FAIL" in l and l.strip().startswith("JT:")]
-    assert not failures, "json fixture failures:\n" + "\n".join(failures)
-
-    assert "fail=0" in done[-1], done[-1]
+def test_json_suite_complete(json_run):
+    json_run.assert_all_passed(JSON_CASES)
 
 
 # ── applyEffect parity ───────────────────────────────────────────────────────

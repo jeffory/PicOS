@@ -1,9 +1,28 @@
 """Test basic launcher functionality."""
 
 import time
+
 import numpy as np
-import pytest
-from display import DisplayVerifier
+
+
+# Launcher list geometry (src/os/launcher.c).
+LIST_Y = 48
+ITEM_H = 28
+ROW_PROBE_X = 6
+C_SEL_BG = ((40 >> 3) << 11) | ((80 >> 2) << 5) | (160 >> 3)   # RGB565(40, 80, 160)
+
+
+def _px(sim, xy):
+    return sim.call("get_pixel", {"x": xy[0], "y": xy[1]})["rgb565"]
+
+
+def _wait_px(sim, xy, pred, timeout=5.0):
+    deadline = time.time() + timeout
+    while True:
+        px = _px(sim, xy)
+        if pred(px) or time.time() >= deadline:
+            return px
+        time.sleep(0.02)
 
 
 def wait_for_launcher(simulator, timeout=5):
@@ -70,26 +89,25 @@ class TestLauncher:
         assert screenshot.size == (320, 320)
 
     def test_navigate_launcher(self, simulator):
-        """Test navigating the launcher menu with arrow keys."""
+        """Down moves the selection highlight from row 0 to row 1.
+
+        Probes the left margin of each list row (x=6, left of the icon),
+        which is painted in the row background: C_SEL_BG for the selected
+        row. (A whole-screen diff can't fail: the description text scrolls.)
+        """
         wait_for_launcher(simulator, timeout=8)
+        assert len(simulator.list_apps()) > 1, "manifest SD should hold many apps"
 
-        apps = simulator.list_apps()
-        if len(apps) <= 1:
-            pytest.skip("Need multiple apps to test navigation")
+        row0 = (ROW_PROBE_X, LIST_Y + 1)
+        row1 = (ROW_PROBE_X, LIST_Y + ITEM_H + 1)
+        assert _wait_px(simulator, row0, lambda p: p == C_SEL_BG) == C_SEL_BG, \
+            "row 0 should start selected"
+        assert _px(simulator, row1) != C_SEL_BG
 
-        # Take a snapshot before navigation
-        simulator.call("display_diff", {"action": "capture"})
-
-        # Navigate down
         simulator.keypress("down")
-        time.sleep(0.3)
-
-        # Check if display changed using display_diff
-        result_after = simulator.call("display_diff", {"action": "compare"})
-        changed_pixels = result_after.get("changed_pixels", 0)
-
-        assert changed_pixels > 0, \
-            "Navigation should change the display (selection highlight)"
+        assert _wait_px(simulator, row1, lambda p: p == C_SEL_BG) == C_SEL_BG, \
+            "Down did not move the highlight to row 1"
+        assert _px(simulator, row0) != C_SEL_BG, "row 0 is still highlighted"
 
     def test_launch_by_directory_name(self, simulator):
         """Regression test: launcher_launch_by_name matches directory names."""

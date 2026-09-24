@@ -7,92 +7,59 @@ Regression targets:
 - Heap info reporting
 """
 
+import json
 import time
+from pathlib import Path
+
 import pytest
+
+from helpers import (HEAP_METRICS_XFAIL, assert_heap_metrics_live, log_texts,
+                     lua_case_names, run_lua_app)
+
+SYS_CASES = lua_case_names("sys_test")
+
+
+@pytest.fixture(scope="module")
+def sys_run(lua_suite):
+    return lua_suite("sys_test")
 
 
 class TestSystemLua:
-    """Test system functions via the sys_test Lua app."""
+    """sys_test (picotest kit): one pytest id per Lua case."""
 
-    def test_sys_operations(self, simulator):
-        """Run the sys_test app and verify all sys operations pass."""
-        simulator.clear_log()
-        simulator.launch_app("sys_test")
+    @pytest.mark.parametrize("case", SYS_CASES)
+    def test_sys_case(self, sys_run, case):
+        sys_run.check_case(case)
 
-        try:
-            simulator.wait_for_log("SYS_TESTS_DONE", timeout=15)
-        except TimeoutError:
-            logs = simulator.get_log_buffer()
-            pytest.fail(f"sys_test did not complete in time. Logs: {logs}")
-
-        logs = simulator.get_log_buffer()
-        lines = [
-            (l if isinstance(l, str) else l.get("text", ""))
-            for l in logs.get("lines", [])
-        ]
-
-        results = [l for l in lines if l.startswith("PASS:") or l.startswith("FAIL:")]
-
-        expected_tests = [
-            "getTimeMs", "sleep", "getVersion", "log",
-            "getClock", "getMemInfo", "config", "exit_sentinel",
-        ]
-
-        failures = [r for r in results if r.startswith("FAIL:")]
-        assert not failures, f"Sys test failures: {failures}"
-
-        passed = {r.split(":")[1] for r in results if r.startswith("PASS:")}
-        for name in expected_tests:
-            assert name in passed, f"Missing result for test '{name}'. Got: {results}"
+    def test_sys_suite_complete(self, sys_run):
+        sys_run.assert_all_passed(SYS_CASES)
 
 
 class TestAppLifecycle:
     """Test app launch, exit, and running state via RPC."""
 
     def test_launch_and_exit(self, simulator):
-        """Test launching an app and exiting back to launcher."""
-        # Launch a quick app
-        simulator.clear_log()
-        simulator.launch_app("sys_test")
-
-        # Wait for it to finish
-        try:
-            simulator.wait_for_log("SYS_TESTS_DONE", timeout=15)
-        except TimeoutError:
-            pass
-
-        time.sleep(1)
-        # Simulator should still be responsive after app exits
-        result = simulator.call("ping")
-        assert "uptime_ms" in result
+        """An app runs to completion and the launcher gets control back."""
+        run = run_lua_app(simulator, "sys_test", timeout=15)
+        run.assert_clean_exit()
+        status = simulator.call("get_running_app")
+        assert not (status and status.get("name")), status
 
     def test_launch_nonexistent_app(self, simulator):
-        """Test that launching a nonexistent app doesn't crash."""
-        simulator.clear_log()
-        # The launch_app RPC should handle this gracefully
-        try:
-            simulator.call("launch_app", {"name": "nonexistent_app_xyz"})
-        except RuntimeError:
-            pass  # Expected to fail gracefully
-        time.sleep(0.5)
-        # Simulator should still be responsive
-        result = simulator.call("ping")
-        assert "uptime_ms" in result
+        """Launching an unknown app reports found:false and the sim lives."""
+        simulator.launch_app("nonexistent_app_xyz")
+        outcome = simulator.wait_for_exit(timeout=10)
+        assert outcome["found"] is False, outcome
+        assert outcome["result"] == "load_failed", outcome
+        assert "nonexistent_app_xyz" in (outcome.get("error") or ""), outcome
+        assert "uptime_ms" in simulator.call("ping")
 
     def test_rapid_app_launch_exit(self, simulator):
-        """Test rapid launch/exit cycles don't leak resources."""
+        """Back-to-back launches each run to completion."""
         for i in range(3):
-            simulator.clear_log()
-            simulator.launch_app("sys_test")
-            try:
-                simulator.wait_for_log("SYS_TESTS_DONE", timeout=15)
-            except TimeoutError:
-                pass
-            time.sleep(0.5)
-
-        # Simulator should still be responsive
-        result = simulator.call("ping")
-        assert "uptime_ms" in result
+            run = run_lua_app(simulator, "sys_test", timeout=15)
+            assert run.outcome.get("result") == "returned", f"cycle {i}: {run.describe()}"
+            assert run.done, f"cycle {i}: {run.describe()}"
 
 
 class TestHeapInfo:
@@ -106,25 +73,17 @@ class TestHeapInfo:
         assert "psram_total_kb" in result
         assert result["psram_total_kb"] >= 0
 
+    @HEAP_METRICS_XFAIL
     def test_heap_info_after_app(self, simulator):
-        """Test heap info doesn't show leaks after app cycle."""
-        result_before = simulator.call("get_heap_info")
-        free_before = result_before.get("lua_heap_free_kb", 0)
-
-        simulator.launch_app("sys_test")
-        time.sleep(2)  # Wait for app to complete
-
-        result_after = simulator.call("get_heap_info")
-        free_after = result_after.get("lua_heap_free_kb", 0)
-
-        # Allow some tolerance (Lua GC may not have fully collected)
-        # but a major leak (>100KB) would be concerning
-        if free_before > 0:
-            leak = free_before - free_after
-            assert leak < 100, (
-                f"Possible heap leak: {leak}KB lost "
-                f"(before={free_before}KB, after={free_after}KB)"
-            )
+        """An app cycle leaves no more than 100 KB behind."""
+        assert_heap_metrics_live(simulator)
+        free_before = simulator.call("get_heap_info")["lua_heap_free_kb"]
+        run_lua_app(simulator, "sys_test", timeout=15).assert_clean_exit()
+        free_after = simulator.call("get_heap_info")["lua_heap_free_kb"]
+        leak = free_before - free_after
+        assert leak < 100, (
+            f"Possible heap leak: {leak}KB lost "
+            f"(before={free_before}KB, after={free_after}KB)")
 
 
 class TestLogBuffer:
@@ -136,39 +95,23 @@ class TestLogBuffer:
         logs = simulator.get_log_buffer()
         assert logs.get("count", -1) == 0
 
-        # Launch an app that logs
-        simulator.launch_app("sys_test")
-        try:
-            simulator.wait_for_log("SYS_TESTS_DONE", timeout=15)
-        except TimeoutError:
-            pass
+        run_lua_app(simulator, "sys_test", timeout=15).assert_clean_exit()
 
         logs = simulator.get_log_buffer()
         assert logs.get("count", 0) > 0
         assert len(logs.get("lines", [])) > 0
 
     def test_log_content_matches(self, simulator):
-        """Test that log buffer content matches what apps log."""
+        """Log buffer content matches what the app logged, in order."""
         simulator.clear_log()
-        simulator.launch_app("sys_test")
+        run_lua_app(simulator, "sys_test", timeout=15).assert_clean_exit()
+        lines = log_texts(simulator.get_log_buffer()["lines"])
 
-        try:
-            simulator.wait_for_log("SYS_TESTS_DONE", timeout=15)
-        except TimeoutError:
-            pass
-
-        logs = simulator.get_log_buffer()
-        lines = [
-            (l if isinstance(l, str) else l.get("text", ""))
-            for l in logs.get("lines", [])
-        ]
-
-        # Should contain at least one PASS: line
-        pass_lines = [l for l in lines if l.startswith("PASS:")]
-        assert len(pass_lines) > 0, f"No PASS lines found in logs: {lines}"
-
-        # Should end with the done marker
-        assert "SYS_TESTS_DONE" in lines, f"Done marker not in logs: {lines}"
+        case_lines = [l for l in lines if l.startswith("[T] CASE ")]
+        assert len(case_lines) == len(SYS_CASES), lines
+        assert any(l.startswith("LOG_MARKER_") for l in lines), lines
+        done = [i for i, l in enumerate(lines) if l.startswith("[T] DONE ")]
+        assert done and done[0] > lines.index(case_lines[-1]), lines
 
 
 class TestWifiState:
@@ -188,17 +131,13 @@ class TestWifiState:
 
     def test_set_wifi_error_injection(self, simulator):
         """Test WiFi error injection for network fault testing."""
-        # Set WiFi to disconnected mode (error injection)
-        result = simulator.call("set_wifi_state", {
-            "status": "disconnected",
-        })
+        result = simulator.call("set_wifi_state", {"status": "disconnected"})
         assert result.get("ok")
+        assert simulator.call("get_wifi_state")["status"] == "disconnected"
 
-        # Restore to normal
-        result = simulator.call("set_wifi_state", {
-            "status": "connected",
-        })
+        result = simulator.call("set_wifi_state", {"status": "connected"})
         assert result.get("ok")
+        assert simulator.call("get_wifi_state")["status"] != "disconnected"
 
 
 class TestButtonInjection:
@@ -231,97 +170,84 @@ class TestButtonInjection:
         assert "buttons_released" in result
 
 
+def _wait_pixel(sim, x, y, pred, timeout=5.0):
+    """Poll get_pixel until pred(pixel) holds; return the last pixel."""
+    deadline = time.time() + timeout
+    while True:
+        px = sim.call("get_pixel", {"x": x, "y": y})
+        if pred(px) or time.time() >= deadline:
+            return px
+        time.sleep(0.02)
+
+
+def _brightness(px):
+    return px["r"] + px["g"] + px["b"]
+
+
+# A point outside the menu panel (200 px wide, centred) on static_screen's
+# white field.
+PROBE = (6, 40)
+
+
 class TestSystemMenu:
-    """Test system menu overlay triggered by Sym/Menu key."""
+    """System menu overlay triggered by the Sym/Menu key, over static_screen
+    (every frame identical, so any change is the menu's)."""
+
+    def _open_static(self, sim):
+        sim.launch_app("static_screen")
+        sim.wait_for_log("^SS:READY$", timeout=10)
+        white = _wait_pixel(sim, *PROBE, lambda p: p["rgb565"] == 0xFFFF)
+        assert white["rgb565"] == 0xFFFF, white
 
     def test_menu_open_and_dismiss(self, simulator):
-        """Test that menu key opens overlay and ESC dismisses it."""
-        # Launch an app first (menu only works during app execution)
-        simulator.clear_log()
-        simulator.launch_app("hello")
-        time.sleep(1)
-
-        # Capture display before menu
+        """Menu changes the display; Esc restores the exact app frame."""
+        self._open_static(simulator)
+        simulator.wait_frames(2)
         simulator.call("display_diff", {"action": "capture"})
 
-        # Open system menu
         simulator.keypress("menu")
-        time.sleep(0.5)
-
-        # Display should have changed (darkened overlay)
+        _wait_pixel(simulator, *PROBE, lambda p: p["rgb565"] != 0xFFFF)
         diff = simulator.call("display_diff", {"action": "compare"})
-        assert diff["changed_pixels"] > 0, (
-            "Menu overlay should change the display"
-        )
+        assert diff["changed_pixels"] > 1000, diff
 
-        # Dismiss with ESC
         simulator.keypress("esc")
-        time.sleep(0.5)
-
-        # App should still be running
-        result = simulator.call("ping")
-        assert "uptime_ms" in result
+        _wait_pixel(simulator, *PROBE, lambda p: p["rgb565"] == 0xFFFF)
+        simulator.wait_frames(2)
+        diff = simulator.call("display_diff", {"action": "compare"})
+        assert diff["changed_pixels"] == 0, (
+            f"frame after dismissing the menu differs from before: {diff}")
+        status = simulator.call("get_running_app")
+        assert status and status.get("name"), \
+            f"the app should still be running after Esc: {status}"
 
     def test_menu_darkens_display(self, simulator):
-        """Test that system menu overlay darkens the screen."""
-        simulator.clear_log()
-        simulator.launch_app("hello")
-        time.sleep(1)
+        """The overlay darkens the app frame outside the menu panel."""
+        self._open_static(simulator)
+        before = simulator.call("get_pixel", {"x": PROBE[0], "y": PROBE[1]})
 
-        # Get brightness of a center pixel before menu
-        px_before = simulator.call("get_pixel", {"x": 160, "y": 160})
-        brightness_before = px_before["r"] + px_before["g"] + px_before["b"]
-
-        # Open system menu
         simulator.keypress("menu")
-        time.sleep(0.5)
+        after = _wait_pixel(simulator, *PROBE,
+                            lambda p: _brightness(p) < _brightness(before))
+        assert _brightness(after) <= 0.75 * _brightness(before), (
+            f"menu did not darken the frame: before={before} after={after}")
 
-        # Get same pixel — should be darker (display_darken halves brightness)
-        px_after = simulator.call("get_pixel", {"x": 160, "y": 160})
-        brightness_after = px_after["r"] + px_after["g"] + px_after["b"]
-
-        # The menu overlay adds its own elements, but the background should be
-        # darker. Check that it changed at minimum.
-        assert brightness_after != brightness_before or True, (
-            "Display should change when menu is open"
-        )
-
-        # Dismiss menu
         simulator.keypress("esc")
 
 
 class TestConfigPersistence:
-    """Test config persistence across app restarts."""
+    """Per-app config written by one run is read back from disk by the next."""
 
     def test_config_survives_app_restart(self, simulator):
-        """Test that config values persist across app launches."""
-        # Launch sys_test which sets "e2e_test_key" to "updated"
-        simulator.clear_log()
-        simulator.launch_app("sys_test")
-        try:
-            simulator.wait_for_log("SYS_TESTS_DONE", timeout=15)
-        except TimeoutError:
-            pass
+        first = run_lua_app(simulator, "sys_test", timeout=15)
+        first.assert_all_passed(SYS_CASES)
+        cfg_file = (Path(simulator.sd_card_path) / "data" / "com.picos.sys_test"
+                    / "config.json")
+        saved = json.loads(cfg_file.read_text())
+        assert saved.get("e2e_runs") == "1", saved
 
-        time.sleep(1)
-
-        # Now launch sys_test again — config.get("e2e_test_key") should
-        # still return "updated" from the previous run.
-        # The sys_test app already tests this indirectly (set then get),
-        # but we verify the simulator stayed responsive between launches.
-        simulator.clear_log()
-        simulator.launch_app("sys_test")
-        try:
-            simulator.wait_for_log("SYS_TESTS_DONE", timeout=15)
-        except TimeoutError:
-            pass
-
-        logs = simulator.get_log_buffer()
-        lines = [
-            (l if isinstance(l, str) else l.get("text", ""))
-            for l in logs.get("lines", [])
-        ]
-
-        # All tests should still pass on second run
-        failures = [l for l in lines if l.startswith("FAIL:")]
-        assert not failures, f"Config test failures on second run: {failures}"
+        second = run_lua_app(simulator, "sys_test", timeout=15)
+        second.assert_all_passed(SYS_CASES)
+        texts = log_texts(second.log)
+        assert "SYS:RUNS prev=1" in texts, (
+            "second run did not load the first run's saved value\n"
+            + second.describe())
