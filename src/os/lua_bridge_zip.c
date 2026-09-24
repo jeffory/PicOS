@@ -4,7 +4,7 @@
 // the engine.
 
 #include "lua_bridge_zip.h"
-#include "lauxlib.h"
+#include "lua_bridge_internal.h"  // fs_sandbox_check, lb_register_type
 #include "zip_util.h"
 
 #include <string.h>
@@ -12,9 +12,6 @@
 #ifndef PICOS_SIMULATOR
 #include "hardware/watchdog.h"
 #endif
-
-// Forward declaration for sandbox check (defined in lua_bridge_fs.c)
-extern bool fs_sandbox_check(lua_State *L, const char *path, bool write);
 
 // ── picocalc.zip.list(zip_path) → array of {name, size, compressed_size} ─────
 static int l_zip_list(lua_State *L) {
@@ -127,9 +124,8 @@ static int l_zip_extract(lua_State *L) {
 }
 
 // ── Read-in-place archive handles: picocalc.zip.open(path) ───────────────────
-// Full userdata with a metatable (__gc + __close + closed-handle checks) — a
-// deliberate contrast to fs.open's bare lightuserdata, which cannot free
-// itself when an app errors out mid-file.
+// Full userdata with a metatable (__gc + __close + closed-handle checks), so
+// an archive frees itself when an app errors out mid-file.
 
 #define ZIP_MT "picocalc.zip.archive"
 #define ZIP_LUA_MAX_OPEN 4
@@ -360,16 +356,9 @@ void lua_bridge_zip_init(lua_State *L) {
     // lua_close() running their __gc; this is the safety net.
     s_lua_zip_open_count = 0;
 
-    if (luaL_newmetatable(L, ZIP_MT)) {
-        lua_newtable(L);
-        luaL_setfuncs(L, archive_methods, 0);
-        lua_setfield(L, -2, "__index");
-        lua_pushcfunction(L, l_ar_gc);
-        lua_setfield(L, -2, "__gc");
-        lua_pushcfunction(L, l_ar_gc);
-        lua_setfield(L, -2, "__close");
-    }
-    lua_pop(L, 1);
+    static const luaL_Reg archive_meta[] = {
+        {"__gc", l_ar_gc}, {"__close", l_ar_gc}, {NULL, NULL}};
+    lb_register_type(L, ZIP_MT, archive_methods, archive_meta);
 
     // Assumes the `picocalc` table is on top of the stack
     lua_newtable(L);

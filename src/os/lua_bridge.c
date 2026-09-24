@@ -134,6 +134,38 @@ void register_subtable(lua_State *L, const char *name,
   lua_setfield(L, -2, name);
 }
 
+// Register a userdata (or table) type under the registry key `mtname`.
+// The metatable holds only the metamethods in `meta` (__gc, __close,
+// __tostring, ...); the methods live in a separate table that becomes
+// __index, so obj:__gc() is "attempt to call a nil value" instead of a
+// second finaliser run. __metatable = false hides the metatable from
+// getmetatable/setmetatable. Every function in `meta` gets the methods
+// table as upvalue 1, so a type with a custom __index function (sprite,
+// animator) looks methods up with lua_rawget(L, lua_upvalueindex(1)) and
+// never through the metatable. Leaves the stack as it found it.
+void lb_register_type(lua_State *L, const char *mtname,
+                      const luaL_Reg *methods, const luaL_Reg *meta) {
+  luaL_newmetatable(L, mtname);  // mt
+  lua_newtable(L);               // mt, methods
+  if (methods)
+    luaL_setfuncs(L, methods, 0);
+  if (meta) {
+    lua_pushvalue(L, -2);        // mt, methods, mt
+    lua_pushvalue(L, -2);        // mt, methods, mt, methods (upvalue)
+    luaL_setfuncs(L, meta, 1);   // mt, methods, mt
+    lua_pop(L, 1);               // mt, methods
+  }
+  if (lua_getfield(L, -2, "__index") == LUA_TNIL) {
+    lua_pop(L, 1);               // mt, methods
+    lua_setfield(L, -2, "__index");
+  } else {
+    lua_pop(L, 2);               // meta supplied its own __index
+  }
+  lua_pushboolean(L, 0);
+  lua_setfield(L, -2, "__metatable");
+  lua_pop(L, 1);
+}
+
 // Instruction-count hook: fires every 256 Lua opcodes.
 // WiFi is now driven by Core 1 (wifi_poll every 5 ms) — no call needed here.
 static void menu_lua_hook(lua_State *L, lua_Debug *ar) {

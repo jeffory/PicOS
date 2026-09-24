@@ -190,13 +190,7 @@ static const luaL_Reg l_fs_file_meta[] = {
     {NULL, NULL}};
 
 static void fs_file_register_mt(lua_State *L) {
-  luaL_newmetatable(L, FS_FILE_MT);
-  luaL_setfuncs(L, l_fs_file_meta, 0);
-  luaL_newlib(L, l_fs_file_methods);
-  lua_setfield(L, -2, "__index");
-  lua_pushboolean(L, 0);
-  lua_setfield(L, -2, "__metatable");
-  lua_pop(L, 1);
+  lb_register_type(L, FS_FILE_MT, l_fs_file_methods, l_fs_file_meta);
 }
 
 static int l_fs_exists(lua_State *L) {

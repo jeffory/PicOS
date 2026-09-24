@@ -524,7 +524,7 @@ static int l_http_setConnectionClosedCallback(lua_State *L) {
   return set_http_cb(L, &ud->cb_closed);
 }
 
-// Methods bound via HTTP_MT.__index
+// Methods: HTTP_MT.__index (a separate table; see lb_register_type)
 static const luaL_Reg l_http_methods[] = {
     {"close", l_http_close},
     {"setKeepAlive", l_http_setKeepAlive},
@@ -649,13 +649,8 @@ void lua_bridge_network_init(lua_State *L) {
   lua_pop(L, 1);
 
   // Install HTTP connection metatable
-  luaL_newmetatable(L, HTTP_MT);
-  lua_pushvalue(L, -1);
-  lua_setfield(L, -2, "__index");
-  luaL_setfuncs(L, l_http_methods, 0);
-  lua_pushcfunction(L, l_http_gc);
-  lua_setfield(L, -2, "__gc");
-  lua_pop(L, 1);
+  static const luaL_Reg http_meta[] = {{"__gc", l_http_gc}, {NULL, NULL}};
+  lb_register_type(L, HTTP_MT, l_http_methods, http_meta);
 
   // Build picocalc.network table
   lua_newtable(L);

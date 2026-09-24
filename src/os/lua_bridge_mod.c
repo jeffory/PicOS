@@ -102,7 +102,11 @@ static const luaL_Reg modplayer_methods[] = {
     {"setVolume",  l_mod_set_volume},
     {"getVolume",  l_mod_get_volume},
     {"setLoop",    l_mod_set_loop},
-    {"__gc",       l_mod_gc},
+    {NULL, NULL}
+};
+
+static const luaL_Reg modplayer_meta[] = {
+    {"__gc", l_mod_gc},
     {NULL, NULL}
 };
 
@@ -113,11 +117,7 @@ static const luaL_Reg modplayer_funcs[] = {
 
 void lua_bridge_mod_init(lua_State *L) {
     // Create the modplayer metatable
-    luaL_newmetatable(L, MODPLAYER_USERDATA);
-    lua_pushvalue(L, -1);
-    lua_setfield(L, -2, "__index");
-    luaL_setfuncs(L, modplayer_methods, 0);
-    lua_pop(L, 1);
+    lb_register_type(L, MODPLAYER_USERDATA, modplayer_methods, modplayer_meta);
 
     // Register picocalc.modplayer subtable
     register_subtable(L, "modplayer", modplayer_funcs);

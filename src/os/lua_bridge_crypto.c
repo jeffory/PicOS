@@ -349,22 +349,14 @@ static const luaL_Reg l_crypto_lib[] = {
 
 void lua_bridge_crypto_init(lua_State *L) {
     // AES-CTR metatable
-    luaL_newmetatable(L, AES_CTR_MT);
-    lua_pushvalue(L, -1);
-    lua_setfield(L, -2, "__index");
-    luaL_setfuncs(L, l_aes_ctr_methods, 0);
-    lua_pushcfunction(L, l_aes_ctr_free);
-    lua_setfield(L, -2, "__gc");
-    lua_pop(L, 1);
+    static const luaL_Reg aes_ctr_meta[] = {{"__gc", l_aes_ctr_free},
+                                            {NULL, NULL}};
+    lb_register_type(L, AES_CTR_MT, l_aes_ctr_methods, aes_ctr_meta);
 
     // ECDH metatable
-    luaL_newmetatable(L, ECDH_MT);
-    lua_pushvalue(L, -1);
-    lua_setfield(L, -2, "__index");
-    luaL_setfuncs(L, l_ecdh_methods, 0);
-    lua_pushcfunction(L, l_ecdh_free);
-    lua_setfield(L, -2, "__gc");
-    lua_pop(L, 1);
+    static const luaL_Reg ecdh_meta[] = {{"__gc", l_ecdh_free},
+                                         {NULL, NULL}};
+    lb_register_type(L, ECDH_MT, l_ecdh_methods, ecdh_meta);
 
     // Register crypto subtable
     register_subtable(L, "crypto", l_crypto_lib);

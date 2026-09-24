@@ -76,6 +76,11 @@ void tcp_lua_fire_pending(lua_State *L);
 extern bool s_screenshot_pending;
 
 void register_subtable(lua_State *L, const char *name, const luaL_Reg *funcs);
+// Every bridge type registers through this (see lua_bridge.c): methods in a
+// separate __index table, metamethods only in the metatable, metatable
+// locked. Each type's check_* accessor must also reject a destroyed object.
+void lb_register_type(lua_State *L, const char *mtname,
+                      const luaL_Reg *methods, const luaL_Reg *meta);
 
 void lua_bridge_display_init(lua_State *L);
 void lua_bridge_input_init(lua_State *L);

@@ -1656,9 +1656,10 @@ static int l_sprite_index(lua_State *L) {
   } else if (!strcmp(key, "scale_nn")) {
     lua_pushinteger(L, s->scale_nn);
   } else {
-    lua_getmetatable(L, 1);
+    // Methods only (upvalue 1, from lb_register_type), never the metatable:
+    // sprite:__gc() must not reach the finaliser.
     lua_pushvalue(L, 2);
-    lua_gettable(L, -2);
+    lua_rawget(L, lua_upvalueindex(1));
   }
   return 1;
 }
@@ -3037,7 +3038,6 @@ static const luaL_Reg l_tilemap_methods[] = {
     {"getTileSize", l_tilemap_getTileSize},
     {"getPixelSize", l_tilemap_getPixelSize},
     {"draw", l_tilemap_draw},
-    {"__gc", l_tilemap_gc},
     {NULL, NULL}};
 
 static const luaL_Reg l_tilemap_lib[] = {
@@ -3593,9 +3593,8 @@ static int l_animator_index(lua_State *L) {
   } else if (!strcmp(key, "reverses")) {
     lua_pushboolean(L, a->reverses);
   } else {
-    lua_getmetatable(L, 1);
-    lua_pushvalue(L, 2);
-    lua_gettable(L, -2);
+    lua_pushvalue(L, 2);  // methods only (upvalue 1), as l_sprite_index
+    lua_rawget(L, lua_upvalueindex(1));
   }
   return 1;
 }
@@ -4079,72 +4078,37 @@ void lua_bridge_graphics_init(lua_State *L) {
   s_has_global_stencil = false;
   memset(s_global_stencil, 0, sizeof(s_global_stencil));
 
-  // Install Graphics Image metatable
-  luaL_newmetatable(L, GRAPHICS_IMAGE_MT);
-  lua_pushvalue(L, -1);
-  lua_setfield(L, -2, "__index");
-  luaL_setfuncs(L, l_graphics_image_methods, 0);
-  lua_pushcfunction(L, l_graphics_image_gc);
-  lua_setfield(L, -2, "__gc");
-  lua_pop(L, 1);
-
-  // Install Graphics Sprite metatable
-  luaL_newmetatable(L, GRAPHICS_SPRITE_MT);
-  lua_pushcfunction(L, l_sprite_index);
-  lua_setfield(L, -2, "__index");
-  lua_pushcfunction(L, l_sprite_newindex);
-  lua_setfield(L, -2, "__newindex");
-  luaL_setfuncs(L, l_sprite_methods, 0);
-  lua_pushcfunction(L, l_sprite_gc);
-  lua_setfield(L, -2, "__gc");
-  lua_pop(L, 1);
-
-  // Install Graphics Spritesheet metatable
-  luaL_newmetatable(L, GRAPHICS_SPRITESHEET_MT);
-  lua_pushvalue(L, -1);
-  lua_setfield(L, -2, "__index");
-  luaL_setfuncs(L, l_spritesheet_methods, 0);
-  lua_pushcfunction(L, l_spritesheet_gc);
-  lua_setfield(L, -2, "__gc");
-  lua_pop(L, 1);
-
-  // Install Animation Loop metatable
-  luaL_newmetatable(L, GRAPHICS_ANIMATION_LOOP_MT);
-  lua_pushvalue(L, -1);
-  lua_setfield(L, -2, "__index");
-  luaL_setfuncs(L, l_animation_loop_methods, 0);
-  lua_pushcfunction(L, l_animation_loop_gc);
-  lua_setfield(L, -2, "__gc");
-  lua_pop(L, 1);
-
-  // Install Animator metatable
-  luaL_newmetatable(L, GRAPHICS_ANIMATOR_MT);
-  lua_pushcfunction(L, l_animator_index);
-  lua_setfield(L, -2, "__index");
-  lua_pushcfunction(L, l_animator_newindex);
-  lua_setfield(L, -2, "__newindex");
-  luaL_setfuncs(L, l_animator_methods, 0);
-  lua_pushcfunction(L, l_animator_gc);
-  lua_setfield(L, -2, "__gc");
-  lua_pop(L, 1);
-
-  // Install Animation Blinker metatable
-  luaL_newmetatable(L, GRAPHICS_ANIMATION_BLINKER_MT);
-  lua_pushvalue(L, -1);
-  lua_setfield(L, -2, "__index");
-  luaL_setfuncs(L, l_animation_blinker_methods, 0);
-  lua_pushcfunction(L, l_animation_blinker_gc);
-  lua_setfield(L, -2, "__gc");
-  lua_pop(L, 1);
-
-  // Install Graphics Font metatable
-  luaL_newmetatable(L, GRAPHICS_FONT_MT);
-  lua_pushvalue(L, -1);
-  lua_setfield(L, -2, "__index");
-  luaL_setfuncs(L, l_font_methods, 0);
-  lua_pushcfunction(L, l_font_gc);
-  lua_setfield(L, -2, "__gc");
-  lua_pop(L, 1);
+  // Metatables (lb_register_type): methods in a separate __index table,
+  // finalisers and the sprite/animator property accessors in the metatable.
+  static const luaL_Reg image_meta[] = {
+      {"__gc", l_graphics_image_gc}, {NULL, NULL}};
+  static const luaL_Reg sprite_meta[] = {
+      {"__index", l_sprite_index}, {"__newindex", l_sprite_newindex},
+      {"__gc", l_sprite_gc}, {NULL, NULL}};
+  static const luaL_Reg spritesheet_meta[] = {
+      {"__gc", l_spritesheet_gc}, {NULL, NULL}};
+  static const luaL_Reg loop_meta[] = {
+      {"__gc", l_animation_loop_gc}, {NULL, NULL}};
+  static const luaL_Reg animator_meta[] = {
+      {"__index", l_animator_index}, {"__newindex", l_animator_newindex},
+      {"__gc", l_animator_gc}, {NULL, NULL}};
+  static const luaL_Reg blinker_meta[] = {
+      {"__gc", l_animation_blinker_gc}, {NULL, NULL}};
+  static const luaL_Reg font_meta[] = {
+      {"__gc", l_font_gc}, {NULL, NULL}};
+  static const luaL_Reg tilemap_meta[] = {
+      {"__gc", l_tilemap_gc}, {NULL, NULL}};
+  lb_register_type(L, GRAPHICS_IMAGE_MT, l_graphics_image_methods, image_meta);
+  lb_register_type(L, GRAPHICS_SPRITE_MT, l_sprite_methods, sprite_meta);
+  lb_register_type(L, GRAPHICS_SPRITESHEET_MT, l_spritesheet_methods,
+                   spritesheet_meta);
+  lb_register_type(L, GRAPHICS_ANIMATION_LOOP_MT, l_animation_loop_methods,
+                   loop_meta);
+  lb_register_type(L, GRAPHICS_ANIMATOR_MT, l_animator_methods, animator_meta);
+  lb_register_type(L, GRAPHICS_ANIMATION_BLINKER_MT,
+                   l_animation_blinker_methods, blinker_meta);
+  lb_register_type(L, GRAPHICS_FONT_MT, l_font_methods, font_meta);
+  lb_register_type(L, GRAPHICS_TILEMAP_MT, l_tilemap_methods, tilemap_meta);
 
   // Build picocalc.graphics table
   lua_newtable(L);
@@ -4161,13 +4125,6 @@ void lua_bridge_graphics_init(lua_State *L) {
   lua_newtable(L);
   luaL_setfuncs(L, l_spritesheet_lib, 0);
   lua_setfield(L, -2, "spritesheet");
-
-  // Tilemap metatable + lib
-  luaL_newmetatable(L, GRAPHICS_TILEMAP_MT);
-  lua_pushvalue(L, -1);
-  lua_setfield(L, -2, "__index");
-  luaL_setfuncs(L, l_tilemap_methods, 0);
-  lua_pop(L, 1);
 
   lua_newtable(L);
   luaL_setfuncs(L, l_tilemap_lib, 0);

@@ -260,6 +260,10 @@ static const luaL_Reg video_methods[] = {
     {"getVolume", l_video_getVolume},
     {"setMuted", l_video_setMuted},
     {"isMuted", l_video_isMuted},
+    {NULL, NULL}
+};
+
+static const luaL_Reg video_meta[] = {
     {"__gc", l_video_gc},
     {NULL, NULL}
 };
@@ -270,11 +274,7 @@ static const luaL_Reg video_funcs[] = {
 };
 
 void lua_bridge_video_init(lua_State *L) {
-    luaL_newmetatable(L, VIDEO_USERDATA);
-    lua_pushvalue(L, -1);
-    lua_setfield(L, -2, "__index");
-    luaL_setfuncs(L, video_methods, 0);
-    lua_pop(L, 1);
+    lb_register_type(L, VIDEO_USERDATA, video_methods, video_meta);
 
     register_subtable(L, "video", video_funcs);
 }

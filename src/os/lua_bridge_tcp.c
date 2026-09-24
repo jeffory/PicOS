@@ -310,13 +310,8 @@ void tcp_lua_fire_pending(lua_State *L) {
 }
 
 void lua_bridge_tcp_init(lua_State *L) {
-    luaL_newmetatable(L, TCP_MT);
-    lua_pushvalue(L, -1);
-    lua_setfield(L, -2, "__index");
-    luaL_setfuncs(L, l_tcp_methods, 0);
-    lua_pushcfunction(L, l_tcp_gc);
-    lua_setfield(L, -2, "__gc");
-    lua_pop(L, 1);
+    static const luaL_Reg tcp_meta[] = {{"__gc", l_tcp_gc}, {NULL, NULL}};
+    lb_register_type(L, TCP_MT, l_tcp_methods, tcp_meta);
 
     lua_newtable(L);
     luaL_setfuncs(L, l_tcp_lib, 0);

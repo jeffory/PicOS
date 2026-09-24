@@ -908,7 +908,6 @@ static const luaL_Reg sound_sample_methods[] = {
     {"play", l_sound_sample_play},
     {"playAt", l_sound_sample_playAt},
     {"save", l_sound_sample_save},
-    {"__gc", l_sound_sample_gc},
     {NULL, NULL}
 };
 
@@ -929,7 +928,6 @@ static const luaL_Reg sound_player_methods[] = {
     {"getRate", l_sound_sampleplayer_getRate},
     {"setFinishCallback", l_sound_sampleplayer_setFinishCallback},
     {"setLoopCallback", l_sound_sampleplayer_setLoopCallback},
-    {"__gc", l_sound_sampleplayer_gc},
     {NULL, NULL}
 };
 
@@ -952,7 +950,6 @@ static const luaL_Reg sound_fileplayer_methods[] = {
     {"setStopOnUnderrun", l_sound_fileplayer_setStopOnUnderrun},
     {"setRate", l_sound_fileplayer_setRate},
     {"getRate", l_sound_fileplayer_getRate},
-    {"__gc", l_sound_fileplayer_gc},
     {NULL, NULL}
 };
 
@@ -969,7 +966,6 @@ static const luaL_Reg sound_mp3player_methods[] = {
     {"getVolume", l_sound_mp3player_getVolume},
     {"getSampleRate", l_sound_mp3player_getSampleRate},
     {"setLoop", l_sound_mp3player_setLoop},
-    {"__gc", l_sound_mp3player_gc},
     {NULL, NULL}
 };
 
@@ -984,30 +980,23 @@ static const luaL_Reg sound_funcs[] = {
     {NULL, NULL}
 };
 
+// Finalisers stay out of the method tables (lb_register_type).
+static const luaL_Reg sound_sample_meta[] = {
+    {"__gc", l_sound_sample_gc}, {NULL, NULL}};
+static const luaL_Reg sound_player_meta[] = {
+    {"__gc", l_sound_sampleplayer_gc}, {NULL, NULL}};
+static const luaL_Reg sound_fileplayer_meta[] = {
+    {"__gc", l_sound_fileplayer_gc}, {NULL, NULL}};
+static const luaL_Reg sound_mp3player_meta[] = {
+    {"__gc", l_sound_mp3player_gc}, {NULL, NULL}};
+
 void lua_bridge_sound_init(lua_State *L) {
-    luaL_newmetatable(L, SAMPLE_USERDATA);
-    lua_pushvalue(L, -1);
-    lua_setfield(L, -2, "__index");
-    luaL_setfuncs(L, sound_sample_methods, 0);
-    lua_pop(L, 1);
-
-    luaL_newmetatable(L, PLAYER_USERDATA);
-    lua_pushvalue(L, -1);
-    lua_setfield(L, -2, "__index");
-    luaL_setfuncs(L, sound_player_methods, 0);
-    lua_pop(L, 1);
-
-    luaL_newmetatable(L, FILEPLAYER_USERDATA);
-    lua_pushvalue(L, -1);
-    lua_setfield(L, -2, "__index");
-    luaL_setfuncs(L, sound_fileplayer_methods, 0);
-    lua_pop(L, 1);
-
-    luaL_newmetatable(L, MP3PLAYER_USERDATA);
-    lua_pushvalue(L, -1);
-    lua_setfield(L, -2, "__index");
-    luaL_setfuncs(L, sound_mp3player_methods, 0);
-    lua_pop(L, 1);
+    lb_register_type(L, SAMPLE_USERDATA, sound_sample_methods, sound_sample_meta);
+    lb_register_type(L, PLAYER_USERDATA, sound_player_methods, sound_player_meta);
+    lb_register_type(L, FILEPLAYER_USERDATA, sound_fileplayer_methods,
+                     sound_fileplayer_meta);
+    lb_register_type(L, MP3PLAYER_USERDATA, sound_mp3player_methods,
+                     sound_mp3player_meta);
 
     // Reset audio state from any previous app (stop timers, close files, clear players)
     sound_init();

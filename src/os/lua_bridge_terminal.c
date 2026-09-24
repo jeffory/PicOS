@@ -600,6 +600,10 @@ static const luaL_Reg terminal_methods[] = {
     {"getCell", l_terminal_getCell},
     {"setCellColors", l_terminal_setCellColors},
     {"setRowColors", l_terminal_setRowColors},
+    {NULL, NULL}
+};
+
+static const luaL_Reg terminal_meta[] = {
     {"__gc", l_terminal_gc},
     {NULL, NULL}
 };
@@ -610,11 +614,7 @@ static const luaL_Reg terminal_funcs[] = {
 };
 
 void lua_bridge_terminal_init(lua_State* L) {
-    luaL_newmetatable(L, TERMINAL_MT);
-    lua_pushvalue(L, -1);
-    lua_setfield(L, -2, "__index");
-    luaL_setfuncs(L, terminal_methods, 0);
-    lua_pop(L, 1);
+    lb_register_type(L, TERMINAL_MT, terminal_methods, terminal_meta);
 
     register_subtable(L, "terminal", terminal_funcs);
 }
