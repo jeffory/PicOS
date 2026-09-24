@@ -1,0 +1,7 @@
+{
+    "id": "com.test.native_api_probe",
+    "name": "Native API Probe",
+    "description": "E2E fixture: logs the PicoCalcAPI layout (source: tests/e2e/native/api_probe.c)",
+    "version": "1.0",
+    "author": "PicOS E2E"
+}

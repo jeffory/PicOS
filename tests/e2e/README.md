@@ -83,9 +83,32 @@ tests/e2e/
 ├── picos_simulator.py   JSON-RPC client and process wrapper
 ├── lib/picotest.lua     Lua test kit, staged to /system/lib/picotest.lua
 ├── apps/<name>/         fixture apps (app.json + main.lua), staged onto every SD card
+├── native/              source + Makefile of the native fixture (apps/native_api_probe/main.elf)
+├── elfgen.py            struct.pack ELF32 builder, valid or malformed, for the loader tests
 ├── fixtures/fonts/      golden PNGs
 └── skip_allowlist.txt   tests that may skip; any other skip fails the run
 ```
+
+## Native apps
+
+`test_native.py` launches the committed `apps/hello_c/main.elf` (smoke) and
+`apps/native_api_probe`, which logs the `PicoCalcAPI` layout it was compiled
+against next to what the simulator handed it. Expected values come from the
+sources: `g_api.version` from `src/main.c`, the layout from `src/os/os.h`
+(parsed by `tools/check_native_abi.py`). The probe ELF is committed, so this
+job needs no ARM toolchain; after changing `sdk/native/os.h`, rebuild it with
+`make -C tests/e2e/native` and commit it. CI's `native-sdk` job (build-sim.yml)
+compiles `sdk/native/main.c` and the probe and runs
+`tools/check_native_abi.py --cc arm-none-eabi-gcc`, which compares the three
+ABI copies (`src/os/os.h`, `sdk/native/os.h`, the trampolines' version write).
+
+`test_native_malformed.py` stages one `elfgen.build_elf(...)` image per
+malformation (`specs/test-audit-2026-09-24.md` §3.5 plus the other
+`elf_plan` refusals) as `/apps/badelf_<case>/main.elf` and asserts the launch
+ends `load_failed` with the exact `[UNICORN] ELF rejected: <reason>` on
+stderr, nothing ran, the SD card is unchanged and the simulator still answers.
+The reason goes to stderr only (not the log buffer or `/system/error.log`,
+which the firmware loader writes).
 
 ## Fixtures
 
