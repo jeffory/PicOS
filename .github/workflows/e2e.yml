@@ -5,10 +5,31 @@ on:
     branches: [master, develop]
   pull_request:
     branches: [master, develop]
+  schedule:
+    - cron: '17 3 * * *'   # nightly: the informational TSan leg
+  workflow_dispatch:
 
 jobs:
+  # release and ASan+UBSan builds of the simulator run the same suite. Both
+  # legs are meant to be required status checks on PRs (branch protection:
+  # "E2E (release)" and "E2E (asan-ubsan)"). Under ASan the asan_only tests run
+  # too, and any sanitizer report fails the test that triggered it.
   e2e:
+    name: E2E (${{ matrix.sim }})
     runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        sim: [release, asan-ubsan]
+        include:
+          - sim: release
+            target: simulator
+            build_dir: build_sim
+            timeout: 10
+          - sim: asan-ubsan
+            target: simulator-asan
+            build_dir: build_sim_asan
+            timeout: 20
 
     steps:
       - uses: actions/checkout@v4
@@ -28,14 +49,15 @@ jobs:
       - name: Cache build
         uses: actions/cache@v4
         with:
-          path: build_sim
-          # Same key as build-sim.yml; no restore-keys (stale builds).
-          key: ${{ runner.os }}-simulator-${{ hashFiles('simulator/**', 'src/**', 'CMakeLists.txt', 'cmake/**', 'Makefile', 'scripts/ci/install-sim-deps.sh') }}
+          path: ${{ matrix.build_dir }}
+          # The release key is the same as build-sim.yml's; no restore-keys
+          # (stale builds).
+          key: ${{ runner.os }}-simulator${{ matrix.sim != 'release' && format('-{0}', matrix.sim) || '' }}-${{ hashFiles('simulator/**', 'src/**', 'CMakeLists.txt', 'cmake/**', 'Makefile', 'scripts/ci/install-sim-deps.sh') }}
 
-      - name: Build simulator
+      - name: Build simulator (${{ matrix.sim }})
         run: |
           source .venv/bin/activate
-          make simulator
+          make ${{ matrix.target }}
 
       - name: Run E2E tests
         run: |
@@ -49,6 +71,10 @@ jobs:
           # last command, so a passing tee would mask a failing suite.
           set -o pipefail
           export SDL_VIDEODRIVER=dummy
+          # The harness asks the binary --build-info: asan_only tests run only
+          # against the ASan build. ASAN/UBSAN_OPTIONS come from
+          # tests/e2e/picos_simulator.py (every report is fatal).
+          export PICOS_SIM_BINARY=${{ matrix.build_dir }}/picos_simulator
           # Per-test timeout (60 s), strict xfail and the skip allow-list come
           # from pytest.ini and tests/e2e/conftest.py. Each failing test's
           # simulator stdout/stderr, log buffer, error.log and screenshot land
@@ -62,19 +88,72 @@ jobs:
             --junitxml=reports/junit.xml \
             --artifacts-dir=reports/failures \
             -n auto 2>&1 | tee reports/test-output.txt
-        timeout-minutes: 10
+        timeout-minutes: ${{ matrix.timeout }}
 
       - name: Upload test results
         uses: actions/upload-artifact@v4
         if: always()
         with:
-          name: e2e-results
+          name: e2e-results-${{ matrix.sim }}
+          path: reports/
+
+  # Nightly, informational: the simulator's own threads race (the RPC socket
+  # thread reads OS state the main thread owns, Core 1 audio globals are
+  # unsynchronised), so TSan reports on most tests. See tests/e2e/README.md.
+  e2e-tsan:
+    name: E2E (tsan, informational)
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Install system dependencies
+        run: scripts/ci/install-sim-deps.sh
+
+      - name: Setup Python
+        run: |
+          python3 -m venv .venv
+          source .venv/bin/activate
+          pip install --upgrade pip
+          pip install -r tests/e2e/requirements.txt
+
+      - name: Build simulator (tsan)
+        run: make simulator-tsan
+
+      - name: Run E2E tests under TSan
+        run: |
+          source .venv/bin/activate
+          mkdir -p reports/tsan
+          set -o pipefail
+          export SDL_VIDEODRIVER=dummy
+          export PICOS_SIM_BINARY=build_sim_tsan/picos_simulator
+          # One report file per simulator process, for the artifact.
+          export TSAN_OPTIONS="halt_on_error=0:second_deadlock_stack=1:suppressions=$PWD/tests/e2e/tsan.supp:log_path=$PWD/reports/tsan/tsan"
+          pytest tests/e2e/ -q --tb=line -n auto \
+            --artifacts-dir=reports/failures 2>&1 | tee reports/test-output.txt
+        timeout-minutes: 30
+
+      - name: TSan summary
+        if: always()
+        run: |
+          echo "## TSan (informational)" >> $GITHUB_STEP_SUMMARY
+          grep -ho "WARNING: ThreadSanitizer: [a-z-]*" reports/tsan/* 2>/dev/null \
+            | sort | uniq -c >> $GITHUB_STEP_SUMMARY || true
+
+      - name: Upload TSan results
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: e2e-results-tsan
           path: reports/
 
   summary:
     needs: e2e
     runs-on: ubuntu-latest
-    if: always()
+    if: always() && github.event_name != 'schedule'
 
     steps:
       - name: Test Summary
@@ -87,7 +166,7 @@ jobs:
           elif [ "${{ needs.e2e.result }}" == "failure" ]; then
             echo "❌ E2E tests failed" >> $GITHUB_STEP_SUMMARY
             echo "" >> $GITHUB_STEP_SUMMARY
-            echo "Download the 'e2e-results' artifact for details (reports/failures/ has per-test simulator diagnostics)." >> $GITHUB_STEP_SUMMARY
+            echo "Download the 'e2e-results-<sim>' artifact for details (reports/failures/ has per-test simulator diagnostics)." >> $GITHUB_STEP_SUMMARY
           else
             echo "⚠️ E2E tests were skipped or cancelled" >> $GITHUB_STEP_SUMMARY
           fi
