@@ -95,7 +95,7 @@ FS_EDGE = {
         local f = T.ok(fs.open(fs.appPath("dc.txt"), "w"), "open")
         fs.write(f, "x")
         fs.close(f)
-        pcall(fs.close, f)          -- must be a no-op or a clean Lua error
+        fs.close(f)                 -- a second close is a no-op, not an error
     """,
     "read_after_close": """
         local path = fs.appPath("rac.txt")
@@ -104,14 +104,12 @@ FS_EDGE = {
         fs.close(w)
         local f = T.ok(fs.open(path, "r"), "open r")
         fs.close(f)
-        local ok, got = pcall(fs.read, f, 10)
-        T.ok(not ok or got == nil, "read on a closed handle returned data")
+        T.raises(function() fs.read(f, 10) end, "closed file")
     """,
     "write_after_close": """
         local f = T.ok(fs.open(fs.appPath("wac.txt"), "w"), "open")
         fs.close(f)
-        local ok, n = pcall(fs.write, f, "x")
-        T.ok(not ok or not n or n <= 0, "write on a closed handle succeeded")
+        T.raises(function() fs.write(f, "x") end, "closed file")
     """,
     "negative_read_rejected": """
         local path = fs.appPath("neg.txt")
@@ -170,7 +168,6 @@ FS_EDGE = {
         local ok = pcall(fs.readFile, path)   -- needs ~2x size: out of memory
         collectgarbage("collect"); collectgarbage("collect")
         local lost = base - mem().psram_free
-        picocalc.sys.log(("DBG base=%d lost=%d size=%d ok=%s"):format(base, lost, size, tostring(ok)))
         T.ok(lost < 65536, ("readFile leaked %d of %d bytes (ok=%s)")
              :format(lost, size, tostring(ok)))
         fs.delete(path)
