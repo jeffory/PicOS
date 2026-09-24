@@ -1,5 +1,6 @@
 #include "audio.h"
 #include "sound.h"
+#include "audio_ring.h"
 #include "../hardware.h"
 #include "hardware/gpio.h"
 #include "hardware/pwm.h"
@@ -132,16 +133,10 @@ void audio_set_volume(uint8_t volume) {
 
 // AUDIO_OUT_RATE is defined in audio.h (shared with sound.c's mixer).
 
-#define AUDIO_RING_SIZE 4096 // must be power of 2
-#define AUDIO_RING_MASK (AUDIO_RING_SIZE - 1)
-
-static uint8_t s_ring_l[AUDIO_RING_SIZE];
-static uint8_t s_ring_r[AUDIO_RING_SIZE];
-static volatile uint32_t s_ring_write = 0;
-static volatile uint32_t s_ring_read = 0;
+// PCM stream ring (audio_ring.h): 4096 frames, uint8 per channel.
+static audio_ring_t s_ring;
 static bool s_streaming = false;
 static uint32_t s_stream_content_rate = AUDIO_OUT_RATE;  // rate of ring data
-static uint32_t s_ring_phase = 0;                        // rate-convert accumulator
 
 static int          s_stream_dma_chan = -1;
 static uint32_t     s_stream_dma_buf[2][STREAM_DMA_SAMPLES];
@@ -179,27 +174,11 @@ static void __time_critical_func(audio_fill_dma_buffer)(uint32_t *buf, int count
     sound_mixer_process(s_mix_l, s_mix_r, chunk);
 
     for (int i = 0; i < chunk; i++) {
-      uint32_t w = s_ring_write;
-      uint32_t r = s_ring_read;
       int32_t ml, mr;
-
-      if (r == w) {
+      if (!audio_ring_pop(&s_ring, s_stream_content_rate, AUDIO_OUT_RATE,
+                          &ml, &mr)) {
         // Stream underrun: base is silent (samples/tone may still sound)
         s_stream_underrun_count++;
-        ml = 0;
-        mr = 0;
-      } else {
-        uint32_t idx = r & AUDIO_RING_MASK;
-        // uint8 [0,255] -> centered int16
-        ml = ((int32_t)s_ring_l[idx] - 128) << 8;
-        mr = ((int32_t)s_ring_r[idx] - 128) << 8;
-        // Advance the source at the content's own rate (nearest-neighbor
-        // resample to AUDIO_OUT_RATE; e.g. 11025 Hz content emits each frame 4x).
-        s_ring_phase += s_stream_content_rate;
-        while (s_ring_phase >= AUDIO_OUT_RATE) {
-          s_ring_phase -= AUDIO_OUT_RATE;
-          if (s_ring_read != s_ring_write) s_ring_read++;
-        }
       }
 
       // + sound.c sample players
@@ -264,7 +243,7 @@ void audio_start_stream(uint32_t sample_rate) {
   s_stream_pwm_slice = pwm_gpio_to_slice_num(AUDIO_PIN_L);
 
   s_stream_content_rate = sample_rate;
-  s_ring_phase = 0;
+  s_ring.phase = 0;
 
   uint32_t sys_clk = clock_get_hz(clk_sys);
   uint32_t target = (uint32_t)AUDIO_OUT_RATE * (uint32_t)(STREAM_PWM_WRAP + 1);
@@ -298,8 +277,7 @@ void audio_start_stream(uint32_t sample_rate) {
   dma_channel_set_irq0_enabled(s_stream_dma_chan, true);
 
   // Reset ring buffer and pre-fill DMA buffers with silence
-  s_ring_read = 0;
-  s_ring_write = 0;
+  audio_ring_clear(&s_ring);
   s_streaming = true;
 
   audio_fill_dma_buffer(s_stream_dma_buf[0], STREAM_DMA_SAMPLES);
@@ -353,28 +331,13 @@ void audio_stream_poll(void) {
 void audio_stream_debug(uint32_t *isr_count, uint32_t *underruns, uint32_t *ring_used) {
   if (isr_count) *isr_count = s_stream_dma_isr_count;
   if (underruns) *underruns = s_stream_underrun_count;
-  if (ring_used) *ring_used = s_ring_write - s_ring_read;
+  if (ring_used) *ring_used = audio_ring_used(&s_ring);
 }
 
 uint32_t audio_ring_free(void) {
-  uint32_t used = s_ring_write - s_ring_read;
-  if (used > AUDIO_RING_SIZE) return 0; // shouldn't happen
-  return AUDIO_RING_SIZE - used;
+  return audio_ring_space(&s_ring);
 }
 
 void audio_push_samples(const int16_t *samples, int count) {
-  for (int i = 0; i < count; i++) {
-    uint32_t avail = s_ring_write - s_ring_read;
-    if (avail >= AUDIO_RING_SIZE)
-      break; // ring full, drop remaining samples
-
-    int16_t l = samples[i * 2 + 0];
-    int16_t r = samples[i * 2 + 1];
-
-    uint32_t idx = s_ring_write & AUDIO_RING_MASK;
-    // int16_t [-32768,32767] → uint8_t [0,255]
-    s_ring_l[idx] = (uint8_t)((l + 32768) >> 8);
-    s_ring_r[idx] = (uint8_t)((r + 32768) >> 8);
-    s_ring_write++;
-  }
+  audio_ring_push(&s_ring, samples, count);
 }
