@@ -1,6 +1,7 @@
 #include "screenshot.h"
 #include "../drivers/display.h"
 #include "../drivers/sdcard.h"
+#include "app_stack.h"
 
 #include "pico/stdlib.h"
 #include "pico/time.h"
@@ -49,7 +50,11 @@ static void put_u32le(uint8_t *buf, int off, uint32_t val) {
   buf[off + 3] = (uint8_t)((val >> 24) & 0xFF);
 }
 
-void screenshot_save(void) {
+// The body runs on an app stack (screenshot_save below): its frame (the
+// 960-byte row buffer plus FatFs writes) is too big for the launcher's 4 KB
+// main stack.
+static void screenshot_write(void *arg) {
+  (void)arg;
   // ── Find next available filename ─────────────────────────────────────────
   char path[32];
   int slot = -1;
@@ -147,4 +152,9 @@ void screenshot_save(void) {
   // Restore the clean front buffer to the screen and leave the dirty frame in
   // the back buffer
   display_flush();
+}
+
+void screenshot_save(void) {
+  if (!app_stack_run_os(screenshot_write, NULL))
+    printf("[SCREENSHOT] no memory for the stack, not saved\n");
 }

@@ -414,9 +414,11 @@ static void dev_send_file_b64(const char *path) {
     s_transfer_quiet = false;
 }
 
-bool dev_commands_process(void) {
-    if (!s_cmd_ready) return false;
-
+// Executes the line in s_cmd_buf. Runs on an app stack (see
+// dev_commands_process): the file commands below reach FatFs and miniz,
+// whose frames do not fit the 4 KB main stack.
+static void dev_command_run(void *arg) {
+    (void)arg;
     printf("[DEV] Command: %s\n", s_cmd_buf);
 
     if (strcmp(s_cmd_buf, "ping") == 0) {
@@ -427,14 +429,19 @@ bool dev_commands_process(void) {
         printf("[DEV] Stack: msp_peak=%lu msp_size=%lu",
                (unsigned long)app_stack_msp_high_water(),
                (unsigned long)PICO_STACK_SIZE);
+        // At the launcher this command itself runs on the OS command stack;
+        // report the app runtime's stack only while an app owns the PSP.
         uint8_t *base = g_app_stack_base;
         uint32_t size = g_app_stack_size;
-        if (base)
+        if (base && g_app_stack_owner != APP_STACK_OS)
             printf(" app=%s app_peak=%lu app_size=%lu",
                    g_app_stack_owner == APP_STACK_LUA ? "lua" : "native",
                    (unsigned long)app_stack_high_water(base, size),
                    (unsigned long)size);
-        printf("\n");
+        // Peak of the last launcher-side command on the OS command stack.
+        printf(" os_cmd_peak=%lu os_cmd_size=%lu\n",
+               (unsigned long)app_stack_os_last_peak(),
+               (unsigned long)APP_STACK_OS_SIZE);
     } else if (strcmp(s_cmd_buf, "ver") == 0) {
         printf("[DEV] PicOS build %s %s\n", __DATE__, __TIME__);
     } else if (strcmp(s_cmd_buf, "status") == 0) {
@@ -504,9 +511,7 @@ bool dev_commands_process(void) {
                 ch = key[0];
             } else {
                 printf("[DEV] Unknown key: %s\n", key);
-                s_cmd_buf[0] = '\0';
-                s_cmd_ready = false;
-                return true;
+                return;
             }
         }
 
@@ -529,18 +534,14 @@ bool dev_commands_process(void) {
         }
         if (size == 0 || strlen(args) == 0) {
             printf("[DEV] Usage: put <path> <size>\n");
-            s_cmd_buf[0] = '\0';
-            s_cmd_ready = false;
-            return true;
+            return;
         }
         strncpy(s_file_recv_path, args, sizeof(s_file_recv_path) - 1);
         s_file_recv_path[sizeof(s_file_recv_path) - 1] = '\0';
         s_file_recv_handle = sdcard_fopen(s_file_recv_path, "wb");
         if (!s_file_recv_handle) {
             printf("[DEV] Failed to open file for writing: %s\n", args);
-            s_cmd_buf[0] = '\0';
-            s_cmd_ready = false;
-            return true;
+            return;
         }
         s_file_recv_expected = size;
         s_file_recv_received = 0;
@@ -557,18 +558,14 @@ bool dev_commands_process(void) {
         }
         if (size == 0 || strlen(args) == 0) {
             printf("[DEV] Usage: putb64 <path> <raw_size>\n");
-            s_cmd_buf[0] = '\0';
-            s_cmd_ready = false;
-            return true;
+            return;
         }
         strncpy(s_file_recv_path, args, sizeof(s_file_recv_path) - 1);
         s_file_recv_path[sizeof(s_file_recv_path) - 1] = '\0';
         s_file_recv_handle = sdcard_fopen(s_file_recv_path, "wb");
         if (!s_file_recv_handle) {
             printf("[DEV] Failed to open file for writing: %s\n", args);
-            s_cmd_buf[0] = '\0';
-            s_cmd_ready = false;
-            return true;
+            return;
         }
         s_file_recv_expected = size;
         s_file_recv_received = 0;
@@ -612,22 +609,16 @@ bool dev_commands_process(void) {
         const char *path = s_cmd_buf + 4;
         if (strlen(path) == 0) {
             printf("[DEV] Usage: get <path>\n");
-            s_cmd_buf[0] = '\0';
-            s_cmd_ready = false;
-            return true;
+            return;
         }
         if (!tud_cdc_connected()) {
             printf("[DEV] Error: CDC not connected — use getb64\n");
-            s_cmd_buf[0] = '\0';
-            s_cmd_ready = false;
-            return true;
+            return;
         }
         sdfile_t f = sdcard_fopen(path, "rb");
         if (!f) {
             printf("[DEV] Failed to open file: %s\n", path);
-            s_cmd_buf[0] = '\0';
-            s_cmd_ready = false;
-            return true;
+            return;
         }
         int size = sdcard_fsize_handle(f);
         printf("FILE_DATA:\nSIZE:%d\n", size);
@@ -649,9 +640,7 @@ bool dev_commands_process(void) {
         const char *path = s_cmd_buf + 6;
         if (path[0] != '/') {
             printf("[DEV] Usage: mkdir /absolute/path\n");
-            s_cmd_buf[0] = '\0';
-            s_cmd_ready = false;
-            return true;
+            return;
         }
         // Recursive create ("mkdir -p"): make each component in turn.
         char tmp[CMD_BUF_SIZE];
@@ -721,7 +710,7 @@ bool dev_commands_process(void) {
         printf("[DEV] Available commands:\n");
         printf("[DEV]   ping           - Check device is responding\n");
         printf("[DEV]   ver            - Show firmware build date/time\n");
-        printf("[DEV]   stack          - Main-stack and app-stack peak use\n");
+        printf("[DEV]   stack          - Main, app and OS-command stack peak use\n");
         printf("[DEV]   exit           - Signal current app to exit\n");
         printf("[DEV]   usb            - Enable USB storage mode\n");
         printf("[DEV]   reboot         - Reboot device\n");
@@ -747,6 +736,20 @@ bool dev_commands_process(void) {
     } else {
         printf("[DEV] Unknown command: %s\n", s_cmd_buf);
     }
+}
+
+bool dev_commands_process(void) {
+    if (!s_cmd_ready) return false;
+
+    // At the launcher this pump runs on Core 0's 4 KB main stack (with ~3 KB
+    // already used at peak), and `unzip` alone needs ~5 KB — miniz's central-
+    // directory read has a 4 KB local buffer — so it overflowed into MSPLIM
+    // and rebooted the device. Every command therefore runs on an app stack:
+    // a short-lived 32 KB PSRAM stack at the launcher, or inline on the
+    // running app's stack when pumped from inside an app.
+    if (!app_stack_run_os(dev_command_run, NULL))
+        printf("[DEV] Error: no memory for the command stack, dropped: %s\n",
+               s_cmd_buf);
 
     s_cmd_buf[0] = '\0';
     s_cmd_ready = false;

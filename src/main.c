@@ -110,6 +110,7 @@ static uint32_t native_addr_to_elf_vaddr(uint32_t addr) {
 #define CRASH_F_HFSR_FORCED (1u << 11) // HFSR bit 30
 #define CRASH_F_HFSR_VECTBL (1u << 10) // HFSR bit 1
 #define CRASH_F_PSP_LUA     (1u << 9)  // ...and the PSP was the Lua VM's stack
+#define CRASH_F_PSP_OS      (1u << 8)  // ...or app_stack_run_os() (dev command)
 
 // Boot-loop detection (main): while booting, scratch[0] holds
 // BOOT_MAGIC | attempt; it is zeroed once the launcher is about to run.
@@ -188,6 +189,9 @@ static void __attribute__((used)) hardfault_c(uint32_t *frame, uint32_t exc_retu
                           | (((exc_return & 4u) &&
                               g_app_stack_owner == APP_STACK_LUA)
                                  ? CRASH_F_PSP_LUA : 0u)
+                          | (((exc_return & 4u) &&
+                              g_app_stack_owner == APP_STACK_OS)
+                                 ? CRASH_F_PSP_OS : 0u)
                           | ((hfsr & (1u << 30)) ? CRASH_F_HFSR_FORCED : 0u)
                           | ((hfsr & (1u << 1)) ? CRASH_F_HFSR_VECTBL : 0u)
                           | (sfsr & 0xFFu);
@@ -329,6 +333,7 @@ static void __attribute__((used)) hardfault_c(uint32_t *frame, uint32_t exc_retu
   snprintf(ln, sizeof(ln), "Stack: %s core %lu",
            !on_psp ? "MSP (OS)"
            : g_app_stack_owner == APP_STACK_LUA ? "PSP (Lua VM)"
+           : g_app_stack_owner == APP_STACK_OS  ? "PSP (OS command)"
                                                 : "PSP (native app)",
            (unsigned long)core);
   display_draw_text(4, 62, ln, 0x07E0, 0x0000); // green
@@ -1707,6 +1712,7 @@ static void crash_log_save(const char *app_name) {
   bool was_psp = (flags & CRASH_F_PSP) != 0;
   const char *stack_name = !was_psp                     ? "MSP (OS)"
                            : (flags & CRASH_F_PSP_LUA) ? "PSP (Lua VM)"
+                           : (flags & CRASH_F_PSP_OS)  ? "PSP (OS command)"
                                                        : "PSP (native app)";
   uint32_t crash_uptime_sec = s_crash_data[7];
   // A stack-limit violation taken while stacking the exception frame leaves

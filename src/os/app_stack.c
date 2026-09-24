@@ -2,6 +2,8 @@
 
 #include <stddef.h>
 
+#include "umm_malloc.h"
+
 #ifndef PICOS_SIMULATOR
 #include "hardware/sync.h"
 #endif
@@ -123,6 +125,15 @@ uint32_t app_stack_msp_high_water(void) {
   return used_above(lo, (const uint32_t *)&__StackTop);
 }
 
+bool app_stack_active(void) {
+  // CONTROL.SPSEL: Thread mode uses the PSP. Only the app runners and
+  // app_stack_run_os() set it, so this is the ground truth for "on an app
+  // stack", independent of the g_app_stack_* bookkeeping.
+  uint32_t control;
+  __asm volatile("mrs %0, control" : "=r"(control));
+  return (control & 2u) != 0;
+}
+
 #else  // PICOS_SIMULATOR: no PSP; run on the host stack.
 
 void app_stack_run(uint8_t *base, uint32_t size, app_stack_owner_t owner,
@@ -147,4 +158,23 @@ uint32_t app_stack_high_water(const uint8_t *base, uint32_t size) {
 void app_stack_paint_msp(void) {}
 uint32_t app_stack_msp_high_water(void) { return 0; }
 
+bool app_stack_active(void) { return g_app_stack_base != NULL; }
+
 #endif
+
+static uint32_t s_os_last_peak = 0;
+
+bool app_stack_run_os(void (*fn)(void *), void *arg) {
+  if (app_stack_active()) {
+    fn(arg);  // nested inside an app: its stack already has the room
+    return true;
+  }
+  uint8_t *stack = (uint8_t *)umm_malloc(APP_STACK_OS_SIZE);
+  if (!stack) return false;
+  app_stack_run(stack, APP_STACK_OS_SIZE, APP_STACK_OS, fn, arg);
+  s_os_last_peak = app_stack_high_water(stack, APP_STACK_OS_SIZE);
+  umm_free(stack);
+  return true;
+}
+
+uint32_t app_stack_os_last_peak(void) { return s_os_last_peak; }
