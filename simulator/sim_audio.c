@@ -702,11 +702,18 @@ static int skip_id3v2(struct mad_stream *stream) {
     return 0;
 }
 
-static bool mp3_refill_decode_buffer(void) {
+// Mirrors src/drivers/mp3_player.c: what a refill achieved. The decode
+// loop continues only on new data; retrying on a buffered partial frame
+// with nothing new to add spun this thread (and the firmware's Core 1)
+// forever at the end of a file that stops mid-frame.
+typedef enum { MP3_REFILL_GOT_DATA, MP3_REFILL_WAIT, MP3_REFILL_EOF } mp3_refill_t;
+
+static mp3_refill_t mp3_refill_decode_buffer(void) {
     if (s_mp3_buf_pos > 0 && s_mp3_bytes_in_buf > 0)
         memmove(s_mp3_decode_buf, s_mp3_decode_buf + s_mp3_buf_pos, s_mp3_bytes_in_buf);
     s_mp3_buf_pos = 0;
 
+    mp3_refill_t result = MP3_REFILL_WAIT;
     int space = MP3_DECODE_BUF_SIZE - s_mp3_bytes_in_buf - MAD_BUFFER_GUARD;
     if (space > 0) {
         if (s_fed_mode) {
@@ -716,19 +723,45 @@ static bool mp3_refill_decode_buffer(void) {
             if (to_read > 0) {
                 fed_ring_read(s_mp3_decode_buf + s_mp3_bytes_in_buf, to_read);
                 s_mp3_bytes_in_buf += (int)to_read;
+                result = MP3_REFILL_GOT_DATA;
             }
+        } else if (!s_mp3_file) {
+            result = MP3_REFILL_EOF;
         } else {
-            if (!s_mp3_file) goto pad;
             int to_read = (space > 4096) ? 4096 : space;
             int br = sdcard_fread(s_mp3_file, s_mp3_decode_buf + s_mp3_bytes_in_buf, to_read);
-            if (br > 0) s_mp3_bytes_in_buf += br;
+            if (br > 0) {
+                s_mp3_bytes_in_buf += br;
+                result = MP3_REFILL_GOT_DATA;
+            } else {
+                result = MP3_REFILL_EOF;
+            }
         }
     }
 
-pad:
     memset(s_mp3_decode_buf + s_mp3_bytes_in_buf, 0, MAD_BUFFER_GUARD);
-    return s_mp3_bytes_in_buf > 0;
+    return result;
 }
+
+// End of file, no whole frame left: loop back (at most once per update) or
+// finish. Returns true when decoding should go on.
+static bool mp3_end_of_stream(bool *rewound) {
+    if (s_mp3_player.loop && !*rewound) {
+        *rewound = true;
+        sdcard_fseek(s_mp3_file, 0);
+        s_mp3_bytes_in_buf = 0;
+        s_mp3_buf_pos = 0;
+        mad_stream_init(s_mad_stream);
+        mad_frame_init(s_mad_frame);
+        mad_synth_init(s_mad_synth);
+        return mp3_refill_decode_buffer() == MP3_REFILL_GOT_DATA;
+    }
+    if (!s_mp3_player.loop)
+        s_mp3_player.playing = false;
+    return false;
+}
+
+#define MP3_MAX_ERRORS_PER_UPDATE 32
 
 static void mp3_decode_fill_ring(void) {
     if (!s_mp3_player.playing || s_mp3_player.paused || !s_mad_stream)
@@ -741,6 +774,8 @@ static void mp3_decode_fill_ring(void) {
 
     int max_frames = 3;
     int frames_decoded = 0;
+    int errors_this_update = 0;
+    bool rewound = false;
     while (frames_decoded < max_frames && mp3_ring_free() >= 1152) {
         mad_stream_buffer(s_mad_stream,
                           s_mp3_decode_buf + s_mp3_buf_pos,
@@ -755,48 +790,23 @@ static void mp3_decode_fill_ring(void) {
                 }
             }
 
-            if (s_mad_stream->error == MAD_ERROR_BUFLEN) {
-                if (!mp3_refill_decode_buffer()) {
-                    if (s_fed_mode) {
-                        break;
-                    }
-                    if (s_mp3_player.loop) {
-                        sdcard_fseek(s_mp3_file, 0);
-                        s_mp3_bytes_in_buf = 0;
-                        s_mp3_buf_pos = 0;
-                        mp3_refill_decode_buffer();
-                        mad_stream_init(s_mad_stream);
-                        mad_frame_init(s_mad_frame);
-                        mad_synth_init(s_mad_synth);
-                        continue;
-                    }
-                    s_mp3_player.playing = false;
+            bool need_data = s_mad_stream->error == MAD_ERROR_BUFLEN ||
+                             (s_mad_stream->error == MAD_ERROR_LOSTSYNC &&
+                              s_mp3_bytes_in_buf < 256);
+            if (need_data) {
+                mp3_refill_t r = mp3_refill_decode_buffer();
+                if (r == MP3_REFILL_GOT_DATA)
+                    continue;
+                if (r == MP3_REFILL_WAIT)
                     break;
-                }
-                continue;
+                if (mp3_end_of_stream(&rewound))
+                    continue;
+                break;
             }
 
             if (MAD_RECOVERABLE(s_mad_stream->error)) {
-                if (s_mad_stream->error == MAD_ERROR_LOSTSYNC && s_mp3_bytes_in_buf < 256) {
-                    if (!mp3_refill_decode_buffer()) {
-                        if (s_fed_mode) {
-                            break;
-                        }
-                        if (s_mp3_player.loop) {
-                            sdcard_fseek(s_mp3_file, 0);
-                            s_mp3_bytes_in_buf = 0;
-                            s_mp3_buf_pos = 0;
-                            mp3_refill_decode_buffer();
-                            mad_stream_init(s_mad_stream);
-                            mad_frame_init(s_mad_frame);
-                            mad_synth_init(s_mad_synth);
-                            continue;
-                        }
-                        s_mp3_player.playing = false;
-                        break;
-                    }
-                    continue;
-                }
+                if (++errors_this_update >= MP3_MAX_ERRORS_PER_UPDATE)
+                    break;
                 continue;
             }
 
