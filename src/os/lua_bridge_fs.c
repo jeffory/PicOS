@@ -9,6 +9,8 @@
 #include "fs_path.h"
 #include "umm_malloc.h"
 
+#include <limits.h>
+
 // ── Filesystem sandbox ──────────────────────────────────────────────────────
 // Apps may touch only (unless "root-filesystem" is granted):
 //   /apps/<dir>/   — read-only (their own bundle)
@@ -29,6 +31,48 @@ bool fs_sandbox_check(lua_State *L, const char *path, bool write) {
   return fs_path_allowed(path, write, me->dir, me->data_dir, me->root_fs);
 }
 
+// ── File handles ────────────────────────────────────────────────────────────
+// fs.open returns a full userdata (FS_FILE_MT) that owns the sdcard_fopen
+// handle; it is never a raw pointer in Lua's hands:
+//   - every handle function checks the type with luaL_checkudata, so nil, a
+//     light userdata or another module's userdata is a Lua error, not a FIL;
+//   - close sets f to NULL, so a second close is a no-op and any other use
+//     of a closed handle is a Lua error ("attempt to use a closed file");
+//   - __gc and __close close a handle the app dropped or scoped with
+//     `local f <close> = ...`;
+//   - each open file is also on the running app's open-file list
+//     (app_files_*), which lua_run sweeps after lua_close, so no handle
+//     outlives its app (FatFS has only FF_FS_LOCK = 16 slots).
+// The metatable is hidden (__metatable = false) and methods come from a
+// separate table through __index, so h:read(n) works and h:__gc() does not
+// exist.  fs.read(h, n) and h:read(n) are the same function.
+
+#define FS_FILE_MT "picocalc.fs.file"
+
+typedef struct {
+  sdfile_t f;  // NULL once closed
+} lua_fs_file_t;
+
+// The open handle at idx, or a Lua error (wrong type, or closed).
+static lua_fs_file_t *check_file(lua_State *L, int idx) {
+  lua_fs_file_t *h = (lua_fs_file_t *)luaL_checkudata(L, idx, FS_FILE_MT);
+  if (!h->f)
+    luaL_error(L, "attempt to use a closed file");
+  return h;
+}
+
+// Close h once.  The fclose belongs to whoever untracks the handle: if the
+// app-exit sweep (app_files_close_all) already closed it, do nothing.
+static void fs_file_release(lua_fs_file_t *h) {
+  sdfile_t f = h->f;
+  if (!f)
+    return;
+  h->f = NULL;
+  if (app_files_untrack(f))
+    sdcard_fclose(f);
+}
+
+// fs.open(path [, mode]) -> handle | nil, err
 static int l_fs_open(lua_State *L) {
   const char *path = luaL_checkstring(L, 1);
   const char *mode = luaL_optstring(L, 2, "r");
@@ -36,49 +80,124 @@ static int l_fs_open(lua_State *L) {
                       strchr(mode, '+') != NULL);
   if (!fs_sandbox_check(L, path, needs_write)) {
     lua_pushnil(L);
-    return 1;
+    lua_pushliteral(L, "permission denied");
+    return 2;
   }
+  // The userdata first: if it raises (out of memory) nothing is open yet.
+  lua_fs_file_t *h = (lua_fs_file_t *)lua_newuserdatauv(L, sizeof(*h), 0);
+  h->f = NULL;
+  luaL_setmetatable(L, FS_FILE_MT);
   sdfile_t f = sdcard_fopen(path, mode);
   if (!f) {
     lua_pushnil(L);
-    return 1;
+    lua_pushliteral(L, "cannot open file");
+    return 2;
   }
-  lua_pushlightuserdata(L, f);
+  if (!app_files_track(f)) {
+    sdcard_fclose(f);
+    lua_pushnil(L);
+    lua_pushliteral(L, "too many open files");
+    return 2;
+  }
+  h->f = f;
   return 1;
 }
 
+// fs.read(h, len) / h:read(len) -> string, or nil at end of file / on error.
+// len must be >= 0; it is clamped to the bytes left in the file, so an
+// absurd length never becomes an allocation.  Reads straight into a Lua
+// buffer (no temporary umm_malloc to leak if pushing the string fails).
 static int l_fs_read(lua_State *L) {
-  sdfile_t f = lua_touserdata(L, 1);
-  int len = (int)luaL_checkinteger(L, 2);
-  char *buf = (char *)umm_malloc(len);
-  if (!buf) {
+  lua_fs_file_t *h = check_file(L, 1);
+  lua_Integer want = luaL_checkinteger(L, 2);
+  luaL_argcheck(L, want >= 0, 2, "negative length");
+  int size = sdcard_fsize_handle(h->f);
+  if (size >= 0) {
+    uint32_t pos = sdcard_ftell(h->f);
+    lua_Integer left = (uint32_t)size > pos ? (lua_Integer)((uint32_t)size - pos) : 0;
+    if (want > left)
+      want = left;
+  }
+  if (want == 0 || want > INT_MAX) {
     lua_pushnil(L);
     return 1;
   }
-  int n = sdcard_fread(f, buf, len);
+  luaL_Buffer b;
+  char *buf = luaL_buffinitsize(L, &b, (size_t)want);
+  int n = sdcard_fread(h->f, buf, (int)want);
   if (n <= 0) {
-    umm_free(buf);
     lua_pushnil(L);
     return 1;
   }
-  lua_pushlstring(L, buf, n);
-  umm_free(buf);
+  luaL_pushresultsize(&b, (size_t)n);
   return 1;
 }
 
+// fs.write(h, data) / h:write(data) -> bytes written (-1 on error)
 static int l_fs_write(lua_State *L) {
-  sdfile_t f = lua_touserdata(L, 1);
+  lua_fs_file_t *h = check_file(L, 1);
   size_t len;
   const char *data = luaL_checklstring(L, 2, &len);
-  int n = sdcard_fwrite(f, data, (int)len);
-  lua_pushinteger(L, n);
+  luaL_argcheck(L, len <= INT_MAX, 2, "data too large");
+  lua_pushinteger(L, sdcard_fwrite(h->f, data, (int)len));
   return 1;
 }
 
+// fs.close(h) / h:close() — idempotent; fs.close(nil) is a no-op.
 static int l_fs_close(lua_State *L) {
-  sdfile_t f = lua_touserdata(L, 1);
-  sdcard_fclose(f);
+  if (lua_isnoneornil(L, 1))
+    return 0;
+  fs_file_release((lua_fs_file_t *)luaL_checkudata(L, 1, FS_FILE_MT));
   return 0;
+}
+
+static int l_fs_seek(lua_State *L) {
+  lua_fs_file_t *h = check_file(L, 1);
+  lua_Integer offset = luaL_checkinteger(L, 2);
+  luaL_argcheck(L, offset >= 0, 2, "negative offset");
+  lua_pushboolean(L, sdcard_fseek(h->f, (uint32_t)offset));
+  return 1;
+}
+
+static int l_fs_tell(lua_State *L) {
+  lua_fs_file_t *h = check_file(L, 1);
+  lua_pushinteger(L, (lua_Integer)sdcard_ftell(h->f));
+  return 1;
+}
+
+// __gc and __close: close a handle the app dropped or scoped.
+static int l_fs_file_gc(lua_State *L) {
+  fs_file_release((lua_fs_file_t *)luaL_checkudata(L, 1, FS_FILE_MT));
+  return 0;
+}
+
+static int l_fs_file_tostring(lua_State *L) {
+  lua_fs_file_t *h = (lua_fs_file_t *)luaL_checkudata(L, 1, FS_FILE_MT);
+  if (h->f)
+    lua_pushfstring(L, "file (%p)", (void *)h);
+  else
+    lua_pushliteral(L, "file (closed)");
+  return 1;
+}
+
+static const luaL_Reg l_fs_file_methods[] = {
+    {"read", l_fs_read},   {"write", l_fs_write}, {"close", l_fs_close},
+    {"seek", l_fs_seek},   {"tell", l_fs_tell},   {NULL, NULL}};
+
+static const luaL_Reg l_fs_file_meta[] = {
+    {"__gc", l_fs_file_gc},
+    {"__close", l_fs_file_gc},
+    {"__tostring", l_fs_file_tostring},
+    {NULL, NULL}};
+
+static void fs_file_register_mt(lua_State *L) {
+  luaL_newmetatable(L, FS_FILE_MT);
+  luaL_setfuncs(L, l_fs_file_meta, 0);
+  luaL_newlib(L, l_fs_file_methods);
+  lua_setfield(L, -2, "__index");
+  lua_pushboolean(L, 0);
+  lua_setfield(L, -2, "__metatable");
+  lua_pop(L, 1);
 }
 
 static int l_fs_exists(lua_State *L) {
@@ -105,19 +224,6 @@ static int l_fs_readFile(lua_State *L) {
   }
   lua_pushlstring(L, buf, len);
   umm_free(buf);
-  return 1;
-}
-
-static int l_fs_seek(lua_State *L) {
-  sdfile_t f = lua_touserdata(L, 1);
-  uint32_t offset = (uint32_t)luaL_checkinteger(L, 2);
-  lua_pushboolean(L, sdcard_fseek(f, offset));
-  return 1;
-}
-
-static int l_fs_tell(lua_State *L) {
-  sdfile_t f = lua_touserdata(L, 1);
-  lua_pushinteger(L, (lua_Integer)sdcard_ftell(f));
   return 1;
 }
 
@@ -449,5 +555,6 @@ static const luaL_Reg l_fs_lib[] = {
 
 
 void lua_bridge_fs_init(lua_State *L) {
+  fs_file_register_mt(L);
   register_subtable(L, "fs", l_fs_lib);
 }

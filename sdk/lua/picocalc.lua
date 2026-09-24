@@ -515,35 +515,65 @@ function picocalc.sys.qmiPsramRead(ptr, offset, len) end
 ---@class picocalc.fs
 picocalc.fs = {}
 
+---An open file.  Full userdata owned by Lua: a dropped handle is closed by
+---the garbage collector, `local f <close> = picocalc.fs.open(...)` closes at
+---scope exit, and files still open when the app exits are closed by the OS.
+---Using a closed handle raises "attempt to use a closed file"; `close` is
+---idempotent.  Methods mirror the `picocalc.fs` functions (`h:read(n)` ==
+---`picocalc.fs.read(h, n)`).  At most 16 files can be open at once (FatFS).
 ---@class PicOSFile : userdata
 local PicOSFile = {}
+
+---Read up to `len` bytes (clamped to what is left in the file).
+---@param len integer Must be >= 0
+---@return string? data `nil` at end of file or on error
+function PicOSFile:read(len) end
+
+---Write data. Returns bytes written (-1 on error).
+---@param data string
+---@return integer bytes_written
+function PicOSFile:write(data) end
+
+---Close the file (no-op if already closed).
+function PicOSFile:close() end
+
+---Seek to an absolute byte offset.
+---@param offset integer Must be >= 0
+---@return boolean ok
+function PicOSFile:seek(offset) end
+
+---Current byte offset.
+---@return integer offset
+function PicOSFile:tell() end
 
 ---Open a file on the SD card.
 ---@param path string Absolute SD card path
 ---@param mode? string `"r"` (default), `"w"`, `"a"`, `"r+"`, etc.
 ---@return PicOSFile? handle
----@return string? error
+---@return string? error `"permission denied"`, `"cannot open file"` or `"too many open files"`
 function picocalc.fs.open(path, mode) end
 
----Read up to `len` bytes from an open file.
+---Read up to `len` bytes from an open file (clamped to what is left in it).
+---Raises on a closed handle or a negative `len`.
 ---@param file PicOSFile
 ---@param len integer
 ---@return string? data `nil` on EOF or error
 function picocalc.fs.read(file, len) end
 
----Write data to an open file. Returns bytes written.
+---Write data to an open file. Returns bytes written (-1 on error).
+---Raises on a closed handle.
 ---@param file PicOSFile
 ---@param data string
 ---@return integer bytes_written
 function picocalc.fs.write(file, data) end
 
----Close an open file handle.
----@param file PicOSFile
+---Close an open file handle. Idempotent; `nil` is ignored.
+---@param file PicOSFile?
 function picocalc.fs.close(file) end
 
 ---Seek to an absolute byte offset within an open file.
 ---@param file PicOSFile
----@param offset integer
+---@param offset integer Must be >= 0
 ---@return boolean ok
 function picocalc.fs.seek(file, offset) end
 

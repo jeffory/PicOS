@@ -3,9 +3,11 @@
 gc_test runs twice, once with the default collector and once with a very
 aggressive incremental collector (stress.flag). Each Lua case is one pytest
 id per mode. The fs handle-misuse cases run as separate inline apps because
-today they can take the simulator down, which must not cost the other cases.
+a regression would take the simulator down, which must not cost the other
+cases.
 
-Known review bugs are strict xfails; Tasks 9, 10 and 11 remove the markers.
+Known review bugs are strict xfails; Tasks 10 and 11 remove the markers
+(Task 9 removed the fs ones).
 """
 
 import pytest
@@ -22,8 +24,6 @@ PERFORM_BUG = ("review: Graphics Critical — performOnAllSprites passes 4-byte 
                "userdata (and today never calls the callback); Task 10")
 SAMPLE_BUG = ("review: Audio High — a sampleplayer keeps no reference to its "
               "sample; Task 11")
-FS_HANDLE_BUG = ("review: Audio/storage Critical — fs handles are lightuserdata "
-                 "with no liveness check (double fclose / use after close); Task 9")
 
 GC_KNOWN_BUGS = {
     "sprite_new_keeps_image": GRAPHICS_BUG,
@@ -203,42 +203,10 @@ def _fs_edge_app(body):
             "T.done()\n")
 
 
-# write_after_close is undefined behaviour on a freed FILE in the release
-# simulator: it crashes, "succeeds" or fails from run to run. Only the
-# sanitizer build (make simulator-asan) can check it deterministically. The
-# sim's file handle is a heap wrapper around the FILE* (hal_sdcard.c), so the
-# misuse is a use-after-free in instrumented code that ASan reports at the
-# bridge call (a bare FILE* is only touched inside glibc, which ASan can't
-# see: read_after_close used to pass under ASan).
-def _fs_asan(stack):
-    return f"{FS_HANDLE_BUG}; ASan: heap-use-after-free, {stack}"
-
-
-FS_EDGE_MARKS = {
-    # release: SIGSEGV (fclose through the freed handle)
-    "double_close": [known_bug(_fs_asan(
-        "hal_sdcard_close <- l_fs_close (lua_bridge_fs.c) on the freed handle"))],
-    # release: SIGSEGV
-    "read_after_close": [known_bug(_fs_asan(
-        "hal_sdcard_read <- l_fs_read (lua_bridge_fs.c) on the freed handle"))],
-    "write_after_close": [known_bug(_fs_asan(
-        "hal_sdcard_write <- l_fs_write (lua_bridge_fs.c) on the freed handle")),
-        pytest.mark.asan_only],
-    # today: pcall(fs.read, f, -1) returns nil (umm_malloc(-1) fails) and an
-    # absurd length returns nil instead of the data
-    "negative_read_rejected": [known_bug(FS_HANDLE_BUG)],
-    # today: the qmi buffer is used as a FIL (garbage read, then a free of
-    # the buffer's memory as a file)
-    "foreign_userdata_rejected": [known_bug(FS_HANDLE_BUG)],
-    # today: lightuserdata has no __gc, so the 17th open fails
-    "gc_closes_dropped": [known_bug(FS_HANDLE_BUG)],
-    # today: lightuserdata has no methods
-    "methods_and_close_var": [known_bug(FS_HANDLE_BUG)],
-}
-
-
-@pytest.mark.parametrize("name", [pytest.param(n, id=n, marks=FS_EDGE_MARKS[n])
-                                  for n in FS_EDGE])
+# Handles are full userdata (lua_bridge_fs.c): a closed or foreign handle is
+# a Lua error, never a FIL, so every case is deterministic in both the release
+# and the ASan simulator.
+@pytest.mark.parametrize("name", list(FS_EDGE))
 def test_fs_handle_misuse(simulator, name):
     stage_lua_app(simulator.sd_card_path, f"fsedge_{name}", _fs_edge_app(FS_EDGE[name]))
     run = run_lua_app(simulator, f"fsedge_{name}", timeout=15)
@@ -262,8 +230,6 @@ T.done()
 """
 
 
-# today: nothing closes the leaked handles, so the second run gets none
-@known_bug(FS_HANDLE_BUG)
 def test_fs_handles_leaked_at_exit(simulator):
     """An app that exits with 20 open files (16 of them real: FF_FS_LOCK)
     doesn't stop the next one from opening 16."""
