@@ -353,6 +353,12 @@ static bool tls_start(struct mg_connection *nc, const char *host,
            host);
   mg_tls_init(nc, &opts);
   if (!nc->is_tls_hs || !nc->tls) return false;
+  // Fail closed on the handshake's randomness too: Mongoose's mg_mbed_rng
+  // ignores mg_random's failure and hands mbedTLS the zeroed buffer.
+  // rng_mbedtls_random returns an mbedTLS error instead, so a DRBG that fails
+  // after the rng_ready() check aborts the handshake rather than using zeros.
+  mbedtls_ssl_conf_rng(&((struct mg_tls *)nc->tls)->conf, rng_mbedtls_random,
+                       NULL);
   if (!insecure) {
     struct mg_tls *tls = (struct mg_tls *)nc->tls;
     mbedtls_ssl_conf_ca_chain(&tls->conf, s_ca_chain, NULL);
