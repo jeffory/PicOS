@@ -675,9 +675,13 @@ static void fire_sound_cb(lua_State *L, sound_lua_cb_t *cb, const char *what) {
     cb->pending = 0;
     lua_rawgeti(L, LUA_REGISTRYINDEX, cb->ref);
     if (lua_pcall(L, 0, 0, 0) != LUA_OK) {
-        const char *err = lua_tostring(L, -1);
-        printf("[SOUND-LUA] %s callback error: %s\n", what,
-               err ? err : "(not a string)");
+        // sys.exit() in the callback is not an error: the exit request is
+        // sticky, and the service pass raises it again.
+        if (!lua_bridge_is_exit_sentinel(L, -1)) {
+            const char *err = lua_tostring(L, -1);
+            printf("[SOUND-LUA] %s callback error: %s\n", what,
+                   err ? err : "(not a string)");
+        }
         lua_pop(L, 1);
     }
 }

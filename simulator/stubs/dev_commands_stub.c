@@ -11,6 +11,7 @@
 #include <time.h>
 #include <errno.h>
 #include "../../src/os/screenshot.h"
+#include "../../src/os/lua_bridge.h"
 #include "../../src/os/app_stack.h"
 #include "../../src/dev_ops.h"
 
@@ -173,9 +174,7 @@ bool dev_commands_sim_run(const char *cmd, int timeout_ms, char *reply,
     }
     snprintf(s_dc_cmd, sizeof(s_dc_cmd), "%s", cmd);
     s_dc_state = DC_QUEUED;
-    // A running app's next hook call pumps it (lua_bridge.c service pass).
-    extern volatile bool g_lua_service_pending;
-    g_lua_service_pending = true;
+    lua_bridge_request_service();  // a running app's next hook pumps it
     int rc = 0;
     while (s_dc_state != DC_DONE && rc != ETIMEDOUT)
         rc = pthread_cond_timedwait(&s_dc_cond, &s_dc_mutex, &deadline);
