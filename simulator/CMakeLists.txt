@@ -352,6 +352,7 @@ set(PICOS_CORE_SOURCES
     ${PICOS_ROOT}/src/os/zip_name.c
     ${PICOS_ROOT}/src/os/lua_bridge_json.c
     ${PICOS_ROOT}/src/drivers/mod_player.c
+    ${PICOS_ROOT}/src/drivers/fileplayer.c
     ${PICOS_ROOT}/src/drivers/wav.c
     ${PICOS_ROOT}/third_party/miniz/miniz.c
     ${PICOS_ROOT}/third_party/miniz/miniz_tinfl.c

@@ -1222,14 +1222,6 @@ int display_draw_text_to_buffer(uint16_t *buf, int buf_w, int buf_h,
                      x, y, text, fg, bg, false);
 }
 
-// --- Fileplayer rate/callback stubs ---
-#include "../../src/drivers/fileplayer.h"
-void fileplayer_set_rate(fileplayer_t *player, float rate) { (void)player; (void)rate; }
-float fileplayer_get_rate(const fileplayer_t *player) { (void)player; return 1.0f; }
-void fileplayer_set_loop_callback(fileplayer_t *player, int (*cb)(void *), void *arg) {
-    (void)player; (void)cb; (void)arg;
-}
-
 // --- Sound player callbacks ---
 // Stored like firmware sound.c (the Lua bridge finds a player's callback
 // slots through them, to reuse and release them); the simulator mixer does

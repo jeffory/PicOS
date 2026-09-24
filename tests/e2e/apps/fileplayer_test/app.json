@@ -1,0 +1,8 @@
+{
+    "id": "com.test.fileplayer",
+    "name": "Fileplayer Test",
+    "description": "E2E fixture: WAV fileplayer flow control (plays for its duration) and per-player files",
+    "version": "1.0",
+    "author": "PicOS E2E",
+    "requirements": ["audio"]
+}
