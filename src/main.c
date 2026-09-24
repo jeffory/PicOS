@@ -336,8 +336,13 @@ static void __attribute__((used)) hardfault_c(uint32_t *frame, uint32_t exc_retu
 
   display_flush();
 
-  // Brief pause so the fault screen is visible before reboot.
-  for (volatile int i = 0; i < 2000000; i++) {}
+  // Hold the fault screen long enough to read (~3 s), then reboot. Bounded
+  // and well inside the 10 s watchdog (8 s during the boot QMI init), so the
+  // explicit reboot below normally wins; if the watchdog fires first the
+  // record in scratch[0-3] survives that reset too. busy_wait reads the
+  // timer directly and needs no interrupts. No key wait: the keyboard sits
+  // on I2C behind a driver the fault may have broken.
+  busy_wait_ms(3000);
 
   // Reboot explicitly — watchdog scratch already has the crash data (saved
   // at the top of this function).  On next boot, crash_log_save() writes it
