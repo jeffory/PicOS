@@ -87,6 +87,25 @@ static uint32_t native_addr_to_elf_vaddr(uint32_t addr) {
   return 0xFFFFFFFFu;
 }
 
+// ── Crash record in the watchdog scratch registers ────────────────────────────
+// hardfault_c leaves a record for the next boot, which crash_log_save() turns
+// into a /system/crashlog.txt entry. The SDK's watchdog_reboot(0, 0, 0) zeroes
+// scratch[4] (with a non-zero pc it also writes scratch[5-7] and the bootrom
+// reads them as a vectored-boot request), so everything that must survive
+// lives in scratch[0-3]:
+//   scratch[0] = CRASH_TAG (bits 31-16) | flags (bits 15-8) | SFSR (bits 7-0)
+//   scratch[1] = stacked PC
+//   scratch[2] = stacked LR
+//   scratch[3] = CFSR (all 32 bits)
+// scratch[5-7] hold supplementary data that watchdog_reboot(0, 0, 0) leaves
+// alone: [5] pre-fault SP, [6] fault address or diagnostic pack (see
+// hardfault_c), [7] app uptime in seconds.
+#define CRASH_TAG           0xFA170000u
+#define CRASH_TAG_MASK      0xFFFF0000u
+#define CRASH_F_PSP         (1u << 12) // fault frame on PSP (native app)
+#define CRASH_F_HFSR_FORCED (1u << 11) // HFSR bit 30
+#define CRASH_F_HFSR_VECTBL (1u << 10) // HFSR bit 1
+
 static void __attribute__((used)) hardfault_c(uint32_t *frame, uint32_t exc_return) {
   // ARM exception frame layout (8 words pushed by hardware on entry):
   //   frame[0]=R0, [1]=R1, [2]=R2, [3]=R3,
@@ -126,15 +145,17 @@ static void __attribute__((used)) hardfault_c(uint32_t *frame, uint32_t exc_retu
     instr16 = *(volatile uint16_t *)pc_probe;
   }
 
-  // Persist fault data in watchdog scratch registers so it survives a
-  // watchdog reset and can be dumped to SD on next boot.
-  #define CRASH_MAGIC 0xDEAD1234u
-  watchdog_hw->scratch[0] = CRASH_MAGIC;
+  // Persist fault data in watchdog scratch registers so it survives the
+  // reboot and can be dumped to SD on next boot (layout above hardfault_c).
+  watchdog_hw->scratch[0] = CRASH_TAG
+                          | ((exc_return & 4u) ? CRASH_F_PSP : 0u)
+                          | ((hfsr & (1u << 30)) ? CRASH_F_HFSR_FORCED : 0u)
+                          | ((hfsr & (1u << 1)) ? CRASH_F_HFSR_VECTBL : 0u)
+                          | (sfsr & 0xFFu);
   watchdog_hw->scratch[1] = pc;
   watchdog_hw->scratch[2] = lr;
-  watchdog_hw->scratch[3] = (uint32_t)(uintptr_t)frame + 32u; // pre-fault SP
-  watchdog_hw->scratch[4] = cfsr;
-  watchdog_hw->scratch[5] = hfsr;
+  watchdog_hw->scratch[3] = cfsr;
+  watchdog_hw->scratch[5] = (uint32_t)(uintptr_t)frame + 32u; // pre-fault SP
   // scratch[6] is context-dependent (crash_log_save decodes with the same
   // conditions): SFAR when SFSR.SFARVALID; BFAR when any CFSR/SFSR syndrome
   // exists; otherwise (no syndrome at all — BFAR is stale garbage then) a
@@ -148,12 +169,7 @@ static void __attribute__((used)) hardfault_c(uint32_t *frame, uint32_t exc_retu
                             | ((ipsr & 0x1FFu) << 16)
                             | ((stacked_xpsr & 0x7Fu) << 25);
   }
-  // Pack PSP bit (bit 31) + SFSR (bits 23-30) + uptime seconds (bits 0-22)
-  // into scratch[7].  EXC_RETURN only needs bit 2 (PSP vs MSP) for crash log
-  // decoding; SFSR is 8 bits; 23 bits of uptime covers 97 days.
-  watchdog_hw->scratch[7] = ((exc_return & 4u) ? (1u << 31) : 0u)
-                           | ((sfsr & 0xFFu) << 23)
-                           | (uptime_sec & 0x7FFFFFu);
+  watchdog_hw->scratch[7] = uptime_sec;
 
   // frame IS the MSP/PSP just after the hardware pushed the 8-word exception
   // frame.  Pre-fault SP = frame + 32 (8 words × 4 bytes).
@@ -1584,10 +1600,10 @@ static void core1_entry(void) {
 // ── Main ─────────────────────────────────────────────────────────────────────
 
 // ── Crash persistence across watchdog resets ─────────────────────────────────
-#define CRASH_MAGIC 0xDEAD1234u
 static uint32_t s_crash_data[8];
 static bool s_had_crash = false;
 
+#define CRASH_LINE_CAP 2048
 static void crash_log_save(const char *app_name) {
   if (!s_had_crash) return;
 
@@ -1601,21 +1617,31 @@ static void crash_log_save(const char *app_name) {
   sdfile_t f = sdcard_fopen("/system/crashlog.txt", "a");
   if (!f) return;
 
-  uint32_t cfsr = s_crash_data[4];
-  uint32_t hfsr = s_crash_data[5];
-  // scratch[7] packing: bit 31 = PSP flag, bits 23-30 = SFSR (low 8 bits),
-  // bits 0-22 = uptime in seconds
-  bool was_psp = (s_crash_data[7] & (1u << 31)) != 0;
-  uint32_t sfsr = (s_crash_data[7] >> 23) & 0xFFu;
-  uint32_t crash_uptime_sec = s_crash_data[7] & 0x7FFFFFu;
+  // Record layout: see the comment above hardfault_c.
+  uint32_t flags = s_crash_data[0];
+  uint32_t cfsr = s_crash_data[3];
+  uint32_t hfsr = ((flags & CRASH_F_HFSR_FORCED) ? (1u << 30) : 0u)
+                | ((flags & CRASH_F_HFSR_VECTBL) ? (1u << 1) : 0u);
+  uint32_t sfsr = flags & 0xFFu;
+  bool was_psp = (flags & CRASH_F_PSP) != 0;
+  uint32_t crash_uptime_sec = s_crash_data[7];
+  // A stack-limit violation taken while stacking the exception frame leaves
+  // the frame contents UNKNOWN (ARMv8-M), so the stacked PC/LR are not
+  // trustworthy then.
+  bool stkof = (cfsr & (1u << 20)) != 0;
+  const char *unreliable = stkof ? "  (unreliable: STKOF)" : "";
 
-  char line[512];
-  int n = snprintf(line, sizeof(line),
+  // From the PSRAM heap: main() runs on the 4 KB MSP. Sized so that every
+  // decoded line at once still fits (snprintf offsets never pass the end).
+  char *line = (char *)umm_malloc(CRASH_LINE_CAP);
+  if (!line) { sdcard_fclose(f); return; }
+  int n = snprintf(line, CRASH_LINE_CAP,
     "--- HARDFAULT ---\n"
     "  Uptime: %lum %lus\n"
     "  App: %s\n"
-    "  PC   = 0x%08lx\n"
-    "  LR   = 0x%08lx\n"
+    "%s"
+    "  PC   = 0x%08lx%s\n"
+    "  LR   = 0x%08lx%s\n"
     "  SP   = 0x%08lx\n"
     "  CFSR = 0x%08lx\n"
     "  HFSR = 0x%08lx\n"
@@ -1623,20 +1649,22 @@ static void crash_log_save(const char *app_name) {
     "  Stack: %s\n",
     (unsigned long)(crash_uptime_sec / 60u), (unsigned long)(crash_uptime_sec % 60u),
     (app_name && app_name[0]) ? app_name : "(none -- OS/launcher)",
-    (unsigned long)s_crash_data[1], (unsigned long)s_crash_data[2],
-    (unsigned long)s_crash_data[3], (unsigned long)cfsr,
+    stkof ? "  STACK OVERFLOW (MSPLIM/PSPLIM)\n" : "",
+    (unsigned long)s_crash_data[1], unreliable,
+    (unsigned long)s_crash_data[2], unreliable,
+    (unsigned long)s_crash_data[5], (unsigned long)cfsr,
     (unsigned long)hfsr, (unsigned long)sfsr,
     was_psp ? "PSP (native app)" : "MSP (OS)");
 
   // scratch[6] decode mirrors hardfault_c's packing conditions.
   if (sfsr & (1u << 6)) {
-    n += snprintf(line+n, sizeof(line)-n, "  SFAR = 0x%08lx\n",
+    n += snprintf(line+n, CRASH_LINE_CAP-n, "  SFAR = 0x%08lx\n",
                   (unsigned long)s_crash_data[6]);
   } else if (cfsr != 0 || sfsr != 0) {
-    n += snprintf(line+n, sizeof(line)-n, "  BFAR = 0x%08lx\n",
+    n += snprintf(line+n, CRASH_LINE_CAP-n, "  BFAR = 0x%08lx\n",
                   (unsigned long)s_crash_data[6]);
   } else {
-    n += snprintf(line+n, sizeof(line)-n,
+    n += snprintf(line+n, CRASH_LINE_CAP-n,
                   "  IPSR = %lu (3=HardFault)  stackedISR = %lu  [PC] = 0x%04lx\n",
                   (unsigned long)((s_crash_data[6] >> 16) & 0x1FFu),
                   (unsigned long)((s_crash_data[6] >> 25) & 0x7Fu),
@@ -1644,40 +1672,41 @@ static void crash_log_save(const char *app_name) {
   }
 
   // Decode CFSR/HFSR flags into human-readable text
-  if (cfsr & (1u<<17)) n += snprintf(line+n, sizeof(line)-n, "  INVSTATE: invalid CPU state\n");
-  if (cfsr & (1u<<16)) n += snprintf(line+n, sizeof(line)-n, "  UNDEFINSTR: undefined instruction\n");
-  if (cfsr & (1u<<18)) n += snprintf(line+n, sizeof(line)-n, "  INVPC: invalid EXC_RETURN/PC\n");
-  if (cfsr & (1u<<19)) n += snprintf(line+n, sizeof(line)-n, "  NOCP: coprocessor access\n");
-  if (cfsr & (1u<< 9)) n += snprintf(line+n, sizeof(line)-n, "  PRECISERR: precise data bus fault\n");
-  if (cfsr & (1u<< 8)) n += snprintf(line+n, sizeof(line)-n, "  IBUSERR: instruction bus fault\n");
-  if (cfsr & (1u<<10)) n += snprintf(line+n, sizeof(line)-n, "  IMPRECISERR: imprecise data bus fault\n");
-  if (cfsr & (1u<<12)) n += snprintf(line+n, sizeof(line)-n, "  STKERR: exception stack push fault\n");
-  if (cfsr & (1u<<11)) n += snprintf(line+n, sizeof(line)-n, "  UNSTKERR: exception stack pop fault\n");
-  if (cfsr & (1u<< 1)) n += snprintf(line+n, sizeof(line)-n, "  DACCVIOL: MPU data access violation\n");
-  if (cfsr & (1u<< 0)) n += snprintf(line+n, sizeof(line)-n, "  IACCVIOL: MPU instruction access violation\n");
-  if (cfsr & (1u<<25)) n += snprintf(line+n, sizeof(line)-n, "  DIVBYZERO\n");
-  if (cfsr & (1u<<24)) n += snprintf(line+n, sizeof(line)-n, "  UNALIGNED access\n");
-  if (cfsr & (1u<<20)) n += snprintf(line+n, sizeof(line)-n, "  STKOF: stack overflow (MSPLIM/PSPLIM limit hit)\n");
-  if (hfsr & (1u<<30)) n += snprintf(line+n, sizeof(line)-n, "  HFSR: FORCED escalation\n");
-  if (hfsr & (1u<< 1)) n += snprintf(line+n, sizeof(line)-n, "  HFSR: vector table fault\n");
-  if (sfsr & (1u<<0))  n += snprintf(line+n, sizeof(line)-n, "  SFSR INVEP: invalid NS->S entry\n");
-  if (sfsr & (1u<<1))  n += snprintf(line+n, sizeof(line)-n, "  SFSR INVIS: invalid integrity signature\n");
-  if (sfsr & (1u<<2))  n += snprintf(line+n, sizeof(line)-n, "  SFSR INVER: invalid exception return\n");
-  if (sfsr & (1u<<3))  n += snprintf(line+n, sizeof(line)-n, "  SFSR AUVIOL: attribution violation\n");
-  if (sfsr & (1u<<4))  n += snprintf(line+n, sizeof(line)-n, "  SFSR INVTRAN: invalid S<->NS transition\n");
-  if (sfsr & (1u<<5))  n += snprintf(line+n, sizeof(line)-n, "  SFSR LSPERR: lazy FP preservation error\n");
-  if (sfsr & (1u<<7))  n += snprintf(line+n, sizeof(line)-n, "  SFSR LSERR: lazy state error\n");
-  n += snprintf(line+n, sizeof(line)-n, "\n");
+  if (cfsr & (1u<<17)) n += snprintf(line+n, CRASH_LINE_CAP-n, "  INVSTATE: invalid CPU state\n");
+  if (cfsr & (1u<<16)) n += snprintf(line+n, CRASH_LINE_CAP-n, "  UNDEFINSTR: undefined instruction\n");
+  if (cfsr & (1u<<18)) n += snprintf(line+n, CRASH_LINE_CAP-n, "  INVPC: invalid EXC_RETURN/PC\n");
+  if (cfsr & (1u<<19)) n += snprintf(line+n, CRASH_LINE_CAP-n, "  NOCP: coprocessor access\n");
+  if (cfsr & (1u<< 9)) n += snprintf(line+n, CRASH_LINE_CAP-n, "  PRECISERR: precise data bus fault\n");
+  if (cfsr & (1u<< 8)) n += snprintf(line+n, CRASH_LINE_CAP-n, "  IBUSERR: instruction bus fault\n");
+  if (cfsr & (1u<<10)) n += snprintf(line+n, CRASH_LINE_CAP-n, "  IMPRECISERR: imprecise data bus fault\n");
+  if (cfsr & (1u<<12)) n += snprintf(line+n, CRASH_LINE_CAP-n, "  STKERR: exception stack push fault\n");
+  if (cfsr & (1u<<11)) n += snprintf(line+n, CRASH_LINE_CAP-n, "  UNSTKERR: exception stack pop fault\n");
+  if (cfsr & (1u<< 1)) n += snprintf(line+n, CRASH_LINE_CAP-n, "  DACCVIOL: MPU data access violation\n");
+  if (cfsr & (1u<< 0)) n += snprintf(line+n, CRASH_LINE_CAP-n, "  IACCVIOL: MPU instruction access violation\n");
+  if (cfsr & (1u<<25)) n += snprintf(line+n, CRASH_LINE_CAP-n, "  DIVBYZERO\n");
+  if (cfsr & (1u<<24)) n += snprintf(line+n, CRASH_LINE_CAP-n, "  UNALIGNED access\n");
+  if (cfsr & (1u<<20)) n += snprintf(line+n, CRASH_LINE_CAP-n, "  STKOF: stack overflow (MSPLIM/PSPLIM limit hit)\n");
+  if (hfsr & (1u<<30)) n += snprintf(line+n, CRASH_LINE_CAP-n, "  HFSR: FORCED escalation\n");
+  if (hfsr & (1u<< 1)) n += snprintf(line+n, CRASH_LINE_CAP-n, "  HFSR: vector table fault\n");
+  if (sfsr & (1u<<0))  n += snprintf(line+n, CRASH_LINE_CAP-n, "  SFSR INVEP: invalid NS->S entry\n");
+  if (sfsr & (1u<<1))  n += snprintf(line+n, CRASH_LINE_CAP-n, "  SFSR INVIS: invalid integrity signature\n");
+  if (sfsr & (1u<<2))  n += snprintf(line+n, CRASH_LINE_CAP-n, "  SFSR INVER: invalid exception return\n");
+  if (sfsr & (1u<<3))  n += snprintf(line+n, CRASH_LINE_CAP-n, "  SFSR AUVIOL: attribution violation\n");
+  if (sfsr & (1u<<4))  n += snprintf(line+n, CRASH_LINE_CAP-n, "  SFSR INVTRAN: invalid S<->NS transition\n");
+  if (sfsr & (1u<<5))  n += snprintf(line+n, CRASH_LINE_CAP-n, "  SFSR LSPERR: lazy FP preservation error\n");
+  if (sfsr & (1u<<7))  n += snprintf(line+n, CRASH_LINE_CAP-n, "  SFSR LSERR: lazy state error\n");
+  n += snprintf(line+n, CRASH_LINE_CAP-n, "\n");
 
   sdcard_fwrite(f, line, n);
   sdcard_fclose(f);
+  umm_free(line);
   printf("[CRASH] Saved crash log to /system/crashlog.txt\n");
 }
 
 int main(void) {
   // ── Boot-loop detection using watchdog scratch[0] ──────────────────────────
   // scratch[0] encoding:
-  //   CRASH_MAGIC (0xDEAD1234) = HardFault data present
+  //   CRASH_TAG   (0xFA17xxxx) = HardFault record present (see hardfault_c)
   //   BOOT_MAGIC  (0xB007xx00) = boot attempt counter (low byte = count)
   //   anything else            = fresh boot (power-on or clean reset)
   #define BOOT_MAGIC_MASK  0xFFFFFF00u
@@ -1689,7 +1718,7 @@ int main(void) {
   int boot_attempt = 0;
   bool skip_boot_watchdog = false;
 
-  if (scratch0 == CRASH_MAGIC) {
+  if ((scratch0 & CRASH_TAG_MASK) == CRASH_TAG) {
     // HardFault crash recovery — preserve fault data for later display
     memcpy(s_crash_data, (void *)watchdog_hw->scratch, sizeof(s_crash_data));
     s_had_crash = true;
