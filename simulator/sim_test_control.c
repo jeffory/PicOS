@@ -232,23 +232,46 @@ bool sim_test_mode(void) { return s_test_mode; }
 
 static pthread_mutex_t s_launch_mutex = PTHREAD_MUTEX_INITIALIZER;
 static char *s_launch_name = NULL;
+static uint32_t s_launch_id = 0;       // id of the queued request
+static uint32_t s_launch_next_id = 1;  // next id to hand out
 static bool s_rescan_requested = false;
+// Last app.exited params, kept for get_last_outcome (guarded by the mutex).
+static char *s_last_outcome = NULL;
 
-void sim_launch_request(const char *name, bool *replaced) {
+uint32_t sim_launch_request(const char *name, bool *replaced) {
   char *copy = strdup(name);
   pthread_mutex_lock(&s_launch_mutex);
   if (replaced) *replaced = s_launch_name != NULL;
   free(s_launch_name);
   s_launch_name = copy;
+  uint32_t id = s_launch_next_id++;
+  s_launch_id = id;
   pthread_mutex_unlock(&s_launch_mutex);
+  return id;
 }
 
-char *sim_launch_take(void) {
+char *sim_launch_take(uint32_t *launch_id) {
   pthread_mutex_lock(&s_launch_mutex);
   char *name = s_launch_name;
   s_launch_name = NULL;
+  if (launch_id) *launch_id = s_launch_id;
   pthread_mutex_unlock(&s_launch_mutex);
   return name;
+}
+
+static void last_outcome_store(const char *json) {
+  char *copy = json ? strdup(json) : NULL;
+  pthread_mutex_lock(&s_launch_mutex);
+  free(s_last_outcome);
+  s_last_outcome = copy;
+  pthread_mutex_unlock(&s_launch_mutex);
+}
+
+char *sim_last_outcome_json(void) {
+  pthread_mutex_lock(&s_launch_mutex);
+  char *copy = strdup(s_last_outcome ? s_last_outcome : "{\"launch_id\":0}");
+  pthread_mutex_unlock(&s_launch_mutex);
+  return copy;
 }
 
 void sim_rescan_request(void) {
@@ -324,8 +347,8 @@ static const char *result_name(sim_app_result_t r) {
   }
 }
 
-// app.exited params: {name,id,found,result,error,runtime_ms}.
-static char *outcome_json(const char *requested, bool found) {
+// app.exited params: {name,id,found,result,error,runtime_ms,launch_id}.
+static char *outcome_json(const char *requested, bool found, uint32_t launch_id) {
   sim_app_result_t r = s_outcome.result;
   if (!found) {
     r = SIM_APP_RESULT_LOAD_FAILED;
@@ -345,7 +368,7 @@ static char *outcome_json(const char *requested, bool found) {
                  found ? "true" : "false", result_name(r));
   if (s_outcome.error[0]) sim_sb_append_json_str(&sb, s_outcome.error);
   else sim_sb_append(&sb, "null", 4);
-  sim_sb_appendf(&sb, ",\"runtime_ms\":%u}", runtime);
+  sim_sb_appendf(&sb, ",\"runtime_ms\":%u,\"launch_id\":%u}", runtime, launch_id);
   return sim_sb_finish(&sb);
 }
 
@@ -358,7 +381,8 @@ bool sim_handler_check_launch(void) {
     dirty = true;
   }
 
-  char *name = sim_launch_take();
+  uint32_t launch_id = 0;
+  char *name = sim_launch_take(&launch_id);
   if (!name) return dirty;
 
   sim_strbuf_t sb = {0};
@@ -377,8 +401,11 @@ bool sim_handler_check_launch(void) {
     outcome_reset();
     found = launcher_launch_by_name(name);
   }
-  char *params = outcome_json(name, found);
+  char *params = outcome_json(name, found, launch_id);
   sim_log_os("[LAUNCHER] exited %s", name);
+  // Stored before the notification goes out, so a client that sees the
+  // notification (or times out waiting for it) always finds it here too.
+  last_outcome_store(params);
   sim_socket_notify("app.exited", params ? params : "{}");
   free(params);
   free(name);

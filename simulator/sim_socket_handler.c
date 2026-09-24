@@ -323,12 +323,26 @@ static char *h_launch_app(const char *params) {
     }
     const char *running = launcher_get_running_app_name();
     bool busy = running && running[0];
-    sim_launch_request(name, NULL);
-    char buf[96];
+    uint32_t launch_id = sim_launch_request(name, NULL);
+    char buf[128];
     snprintf(buf, sizeof(buf),
-             "{\"jsonrpc\":\"2.0\",\"result\":{\"queued\":true,\"busy\":%s}}",
-             busy ? "true" : "false");
+             "{\"jsonrpc\":\"2.0\",\"result\":{\"queued\":true,\"busy\":%s,"
+             "\"launch_id\":%u}}",
+             busy ? "true" : "false", launch_id);
     return strdup(buf);
+}
+
+// The app.exited params of the last finished launch ({"launch_id":0} if
+// none). Backfill for clients whose app.exited notification was dropped.
+static char *h_get_last_outcome(const char *params) {
+    (void)params;
+    char *outcome = sim_last_outcome_json();
+    if (!outcome) return NULL;
+    size_t n = strlen(outcome) + 32;
+    char *buf = malloc(n);
+    if (buf) snprintf(buf, n, "{\"jsonrpc\":\"2.0\",\"result\":%s}", outcome);
+    free(outcome);
+    return buf;
 }
 
 static char *h_rescan_apps(const char *params) {
@@ -1186,6 +1200,7 @@ static struct {
     { "display_diff",       h_display_diff },
     { "get_pixel",          h_get_pixel },
     { "rescan_apps",        h_rescan_apps },
+    { "get_last_outcome",   h_get_last_outcome },
     { "subscribe",          h_subscribe },
     { "get_input_state",    h_get_input_state },
     { NULL, NULL },

@@ -53,6 +53,7 @@ static int g_auto_launch_done = 0;   // Flag to track if auto-launch was attempt
 static int g_show_splash = 0;        // Show boot splash screen
 static int g_tcp_port = 7878;        // TCP port for RPC socket
 static char g_instance_id[64] = "";  // Instance ID for unique socket paths
+static char g_unix_socket[256] = ""; // --unix-socket PATH|none ("" = default)
 // Per-process by default. A single shared path meant that under parallel test
 // runs (pytest -n auto) one crashing instance was reported as a crash by every
 // other instance's get_crash_log, and the file outlived the run so a crash in
@@ -123,7 +124,8 @@ static void print_usage(const char* program) {
     printf("  --launch APP         Auto-launch app on startup\n");
     printf("  --port PORT          TCP port for RPC socket (default: 7878, 0=auto)\n");
     printf("  --instance-id ID     Unique instance ID (for parallel simulators)\n");
-    printf("  --crash-log PATH     Crash log file path (default: /tmp/picos_sim_crash.log)\n");
+    printf("  --unix-socket PATH   UNIX control socket path, or 'none' to disable\n");
+    printf("  --crash-log PATH     Crash log file path (default: /tmp/picos_sim_crash_<pid>.log)\n");
     printf("  --show-splash        Show boot splash screen with delays\n");
     printf("  --test-mode          Error screens return at once; idle dim off\n");
     printf("  --debug              Enable debug logging\n");
@@ -149,6 +151,9 @@ static void parse_args(int argc, char** argv) {
         } else if (strcmp(argv[i], "--instance-id") == 0 && i + 1 < argc) {
             strncpy(g_instance_id, argv[i + 1], sizeof(g_instance_id) - 1);
             g_instance_id[sizeof(g_instance_id) - 1] = '\0';
+            i++;
+        } else if (strcmp(argv[i], "--unix-socket") == 0 && i + 1 < argc) {
+            snprintf(g_unix_socket, sizeof(g_unix_socket), "%s", argv[i + 1]);
             i++;
         } else if (strcmp(argv[i], "--crash-log") == 0 && i + 1 < argc) {
             strncpy(g_crash_log_path, argv[i + 1], sizeof(g_crash_log_path) - 1);
@@ -527,7 +532,8 @@ int main(int argc, char** argv) {
     extern void dev_commands_init(void);
     dev_commands_init();
 
-    sim_socket_init(g_tcp_port, g_instance_id[0] ? g_instance_id : NULL);
+    sim_socket_init(g_tcp_port, g_instance_id[0] ? g_instance_id : NULL,
+                    g_unix_socket[0] ? g_unix_socket : NULL);
 
     launcher_run();
     printf("[Core0] Launcher exited, setting g_running=0\n");

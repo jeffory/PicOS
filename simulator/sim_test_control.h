@@ -34,9 +34,16 @@ char *sim_log_build_json(uint32_t since_seq, uint32_t tail);
 // ── Launch slot ─────────────────────────────────────────────────────────────
 // Socket thread: queue `name` for the main thread. A request that arrives
 // before the previous one was taken replaces it (returns true in *replaced).
-void sim_launch_request(const char *name, bool *replaced);
-// Main thread: take the queued name (malloc'd, caller frees) or NULL.
-char *sim_launch_take(void);
+// Returns the request's launch_id (monotonic from 1); the app.exited params
+// and get_last_outcome carry the launch_id of the launch they describe.
+uint32_t sim_launch_request(const char *name, bool *replaced);
+// Main thread: take the queued name (malloc'd, caller frees) or NULL, and
+// its launch_id.
+char *sim_launch_take(uint32_t *launch_id);
+// Socket thread: the last app.exited params (malloc'd, caller frees), or
+// {"launch_id":0} before any launch finished. Lets a client that lost the
+// notification (dropped while its buffer was full) still get the outcome.
+char *sim_last_outcome_json(void);
 // Socket thread: ask the main thread to rescan /apps.
 void sim_rescan_request(void);
 

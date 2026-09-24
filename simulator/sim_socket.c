@@ -259,23 +259,33 @@ static void process_requests(client_t *c) {
 
 static void *sim_socket_thread_func(void *arg);
 
-void sim_socket_init(int tcp_port, const char *instance_id) {
+void sim_socket_init(int tcp_port, const char *instance_id, const char *unix_path) {
     memset(s_clients, 0, sizeof(s_clients));
     for (int i = 0; i < MAX_CLIENTS; i++) s_clients[i].fd = -1;
     FD_ZERO(&s_read_fds);
     s_max_fd = -1;
 
-    // Build UNIX socket path based on instance ID
-    if (instance_id && instance_id[0]) {
+    // UNIX socket path: explicit override, "none", or derived from the
+    // instance ID (default ./picos_control in the cwd).
+    if (unix_path && strcmp(unix_path, "none") == 0) {
+        s_unix_sock_path[0] = '\0';
+    } else if (unix_path && unix_path[0]) {
+        snprintf(s_unix_sock_path, sizeof(s_unix_sock_path), "%s", unix_path);
+    } else if (instance_id && instance_id[0]) {
         snprintf(s_unix_sock_path, sizeof(s_unix_sock_path),
                  "./picos_control_%s", instance_id);
     } else {
-        strncpy(s_unix_sock_path, DEFAULT_UNIX_SOCK_PATH, sizeof(s_unix_sock_path) - 1);
+        snprintf(s_unix_sock_path, sizeof(s_unix_sock_path), "%s",
+                 DEFAULT_UNIX_SOCK_PATH);
     }
 
-    unlink(s_unix_sock_path);
-
-    s_unix_fd = socket(AF_UNIX, SOCK_STREAM, 0);
+    if (s_unix_sock_path[0]) {
+        unlink(s_unix_sock_path);
+        s_unix_fd = socket(AF_UNIX, SOCK_STREAM, 0);
+    } else {
+        s_unix_fd = -1;
+        printf("[Socket] UNIX domain server disabled\n");
+    }
     if (s_unix_fd >= 0) {
         set_nonblocking(s_unix_fd);
         struct sockaddr_un addr = {0};
@@ -298,7 +308,9 @@ void sim_socket_init(int tcp_port, const char *instance_id) {
         set_nonblocking(s_tcp_fd);
         struct sockaddr_in addr = {0};
         addr.sin_family = AF_INET;
-        addr.sin_addr.s_addr = htonl(INADDR_ANY);
+        // Loopback only: read_file/write_file must not be reachable from
+        // the LAN.
+        addr.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
         addr.sin_port = htons((uint16_t)bind_port);
         if (bind(s_tcp_fd, (struct sockaddr *)&addr, sizeof(addr)) == 0 &&
             listen(s_tcp_fd, 5) == 0) {
@@ -431,7 +443,7 @@ void sim_socket_close(void) {
     }
     if (s_unix_fd >= 0) { close(s_unix_fd); s_unix_fd = -1; }
     if (s_tcp_fd >= 0)  { close(s_tcp_fd);  s_tcp_fd = -1; }
-    unlink(s_unix_sock_path);
+    if (s_unix_sock_path[0]) unlink(s_unix_sock_path);
 }
 
 void sim_socket_notify(const char *method, const char *params_json) {

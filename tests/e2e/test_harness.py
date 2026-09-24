@@ -185,15 +185,19 @@ def test_rescan_apps_rescans_the_launcher(harness_sim):
 
 def test_launch_app_reports_queued_and_busy(harness_sim):
     sim = harness_sim
-    assert sim.launch_app("harness_input") == {"queued": True, "busy": False}
+    r1 = sim.launch_app("harness_input")
+    assert r1 == {"queued": True, "busy": False, "launch_id": r1["launch_id"]}
     sim.wait_for_log(r"^H:INPUT_READY$", timeout=5.0)
     # A second launch while the first app runs is queued behind it.
-    assert sim.call("launch_app", {"name": "harness_ok"}) == {"queued": True, "busy": True}
+    r2 = sim.call("launch_app", {"name": "harness_ok"})
+    assert r2 == {"queued": True, "busy": True, "launch_id": r1["launch_id"] + 1}
     sim.keypress("q")
     first = sim.wait_for_notification("app.exited", timeout=5.0)["params"]
     assert first["name"] == "harness_input" and first["result"] == "returned"
+    assert first["launch_id"] == r1["launch_id"]
     second = sim.wait_for_notification("app.exited", timeout=5.0)["params"]
     assert second["name"] == "harness_ok" and second["result"] == "returned"
+    assert second["launch_id"] == r2["launch_id"]
 
 
 # ── Frame and input sync ────────────────────────────────────────────────────

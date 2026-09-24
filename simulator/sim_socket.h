@@ -5,7 +5,10 @@
 // Initialize the RPC socket server.
 // tcp_port: port to bind (0 = auto-assign, use sim_socket_get_port() after init)
 // instance_id: if non-NULL, UNIX socket is ./picos_control_<id> instead of ./picos_control
-void sim_socket_init(int tcp_port, const char *instance_id);
+// unix_path: if non-NULL, overrides the UNIX socket path; "none" disables the
+//            UNIX socket (parallel test instances then never touch the cwd).
+// The TCP listener binds 127.0.0.1 only: the RPCs read and write files.
+void sim_socket_init(int tcp_port, const char *instance_id, const char *unix_path);
 void sim_socket_poll(void);
 void sim_socket_shutdown(void);
 void sim_socket_close(void);
