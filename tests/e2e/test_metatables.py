@@ -157,6 +157,22 @@ DESTROYED = {
         s:setImage(G.image.new(8, 8))
         s, holder = nil, nil
     """,
+    "spritesheet": """
+        arm(function() return G.spritesheet.newGrid(G.image.new(8, 8), 1, 1, 8, 8) end,
+            function(ss) ss:drawFrame(0, 0, 0) end)
+    """,
+    "tilemap": """
+        arm(function() return G.tilemap.new(G.image.new(8, 8), 8, 8) end,
+            function(tm) tm:draw(0, 0) end)
+    """,
+    "font": """
+        arm(function() return G.font.new('6x8') end,
+            function(f) return f:getHeight() end)
+    """,
+    "animator": """
+        arm(function() return G.animation.animator.new(100, 0, 1) end,
+            function(a) return a:currentValue() end)
+    """,
     "fileplayer": """
         arm(function() return pc.sound.fileplayer() end,
             function(fp) fp:load(APP_DIR .. '/s.wav') end)

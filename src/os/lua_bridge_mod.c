@@ -30,7 +30,7 @@ static int l_mod_create(lua_State *L) {
         if (*live && (const void *)live == s_mod_owner)
             return 1;  // the one live handle
     }
-    lua_pop(L, 1);  // the stale cache entry (nil)
+    lua_pop(L, 1);  // cache[1]: nil, or a handle that no longer owns the player
 
     // The userdata first: if it raises (out of memory) nothing is reset.
     mod_player_t **ud = lua_newuserdatauv(L, sizeof(mod_player_t *), 0);
