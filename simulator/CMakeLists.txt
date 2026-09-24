@@ -85,6 +85,11 @@ target_compile_definitions(lua_sim PUBLIC ${PICOS_LUA_DEFINITIONS})
 target_sources(lua_sim PRIVATE ${PICOS_LUA_SOURCES})  # picos_lua_sprintf (float formatting)
 target_compile_definitions(lua_sim PRIVATE PICOS_SIMULATOR=1)
 target_compile_options(lua_sim PRIVATE -O2 -Wall)
+# The string hash seed comes from sim_test_control.c (sim_lua_seed.h): fixed
+# under --test-mode so pairs() order over string keys repeats run to run
+# (simulator only; the firmware keeps stock luai_makeseed).
+set_source_files_properties(${LUA_DIR}/lstate.c PROPERTIES
+    COMPILE_OPTIONS "-include;${CMAKE_CURRENT_SOURCE_DIR}/sim_lua_seed.h")
 
 # ── libmad (MP3 decoder) ──────────────────────────────────────────────────
 set(LIBMAD_DIR ${PICOS_ROOT}/third_party/libmad)

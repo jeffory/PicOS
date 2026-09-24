@@ -37,6 +37,7 @@
 #include "drivers/keyboard.h"
 #include "appconfig.h"
 #include "config.h"
+#include "clock.h"
 #include "idle_dim.h"
 #include "system_menu.h"
 #include "sim_test_control.h"
@@ -519,6 +520,12 @@ int main(int argc, char** argv) {
     }
     
     hal_timing_init();
+
+    // --test-mode pins the wall clock to a fixed date (getClock, the header
+    // clock); it then runs with the sim clock. The SIM_FIRMWARE_NET build's
+    // SNTP stand-in may still re-sync it once the network is up.
+    if (sim_test_mode())
+        clock_sntp_set(SIM_TEST_EPOCH);
 
     // Wire global API struct (required by Lua bridge modules)
     sim_wire_g_api();

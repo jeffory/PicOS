@@ -39,6 +39,11 @@ void sim_log_err(const char *fmt, ...) __attribute__((format(printf, 1, 2)));
 void sim_log_os(const char *fmt, ...) __attribute__((format(printf, 1, 2)));
 // --test-mode: error screens return at once and idle dimming is off.
 bool sim_test_mode(void);
+// --test-mode determinism: math.random's seed (lua_bridge.c), the string
+// hash seed (luai_makeseed, simulator/sim_lua_seed.h) and the date the clock
+// is pinned to at boot (2026-01-01T00:00:00Z, simulator/main.c).
+#define SIM_TEST_RANDOM_SEED 0x5049434F
+#define SIM_TEST_EPOCH 1767225600u
 
 #else
 

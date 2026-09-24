@@ -353,6 +353,14 @@ void lua_bridge_register(lua_State *L) {
   lua_pop(L, 1);
   printf("[LUA] registering math...\n");
   luaL_requiref(L, "math", luaopen_math, 1);
+#ifdef PICOS_SIMULATOR
+  // Simulator --test-mode: a fixed seed, so math.random repeats run to run.
+  if (sim_test_mode()) {
+    lua_getfield(L, -1, "randomseed");
+    lua_pushinteger(L, SIM_TEST_RANDOM_SEED);
+    lua_call(L, 1, 0);
+  }
+#endif
   lua_pop(L, 1);
   printf("[LUA] registering coroutine...\n");
   luaL_requiref(L, LUA_COLIBNAME, luaopen_coroutine, 1);

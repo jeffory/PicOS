@@ -4,6 +4,7 @@
 #define _GNU_SOURCE
 
 #include "sim_test_control.h"
+#include "sim_lua_seed.h"
 #include "sim_socket.h"
 #include "sim_socket_handler.h"
 #include "hal/hal_timing.h"
@@ -14,6 +15,8 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <time.h>
+#include <stdint.h>
 
 // ── Growable string buffer ──────────────────────────────────────────────────
 
@@ -227,6 +230,16 @@ static volatile bool s_test_mode = false;
 
 void sim_set_test_mode(bool on) { s_test_mode = on; }
 bool sim_test_mode(void) { return s_test_mode; }
+
+// lstate.c's luai_makeseed (the string hash seed, which fixes pairs() order
+// over string keys). Stock Lua mixes in time(NULL) and addresses, so the
+// order changes run to run; --test-mode pins it.
+unsigned int sim_lua_makeseed(void *L) {
+  if (s_test_mode)
+    return (unsigned int)SIM_TEST_RANDOM_SEED;
+  uintptr_t h = (uintptr_t)time(NULL) ^ (uintptr_t)L ^ (uintptr_t)&h;
+  return (unsigned int)((uint64_t)h ^ ((uint64_t)h >> 32));
+}
 
 // ── Launch slot ─────────────────────────────────────────────────────────────
 

@@ -17,6 +17,8 @@ import time
 
 import pytest
 
+from helpers import stage_lua_app
+
 
 
 @pytest.fixture
@@ -422,3 +424,57 @@ def test_stalled_client_is_disconnected_without_stalling_sys_log(harness_sim):
     t_ms = [e["t_ms"] for e in ticks]
     assert max(b - a for a, b in zip(t_ms, t_ms[1:])) < 500, "sys.log stalled"
     sim.wait_for_exit(timeout=15.0)
+
+
+# ── Test-mode determinism ───────────────────────────────────────────────────
+
+# 2026-01-01T00:00:00Z: the date --test-mode pins the clock to at boot.
+TEST_EPOCH = 1767225600
+
+
+DETERMINISM_APP = """
+local sys = picocalc.sys
+local r = {}
+for i = 1, 8 do r[#r + 1] = tostring(math.random(1, 1000000)) end
+sys.log("DET:RANDOM " .. table.concat(r, ","))
+local t = {}
+for i = 1, 40 do t["key" .. i] = i end
+local order = {}
+for k in pairs(t) do order[#order + 1] = k end
+sys.log("DET:PAIRS " .. table.concat(order, ","))
+local c = sys.getClock()
+sys.log(string.format("DET:CLOCK %s %d %d %d %d", tostring(c.synced),
+        c.epoch, c.hour, c.min, c.sec))
+"""
+
+
+def _determinism_run(sim_factory, sd):
+    sim = sim_factory(sd)
+    sim.launch_app("det_app")
+    assert sim.wait_for_exit(timeout=10.0)["result"] == "returned"
+    got = {}
+    for e in sim.get_log_lines(0):
+        if e["text"].startswith("DET:"):
+            key, _, rest = e["text"].partition(" ")
+            got[key] = rest
+    sim.stop()
+    return got
+
+
+def test_math_random_and_table_order_repeat_across_runs(sim_factory, test_sd_card):
+    stage_lua_app(test_sd_card, "det_app", DETERMINISM_APP)
+    a = _determinism_run(sim_factory, test_sd_card)
+    b = _determinism_run(sim_factory, test_sd_card)
+    assert a["DET:RANDOM"] == b["DET:RANDOM"], (a, b)
+    assert a["DET:PAIRS"] == b["DET:PAIRS"], (a, b)
+
+
+def test_get_clock_is_pinned_to_a_fixed_date(sim_factory, test_sd_card):
+    stage_lua_app(test_sd_card, "det_app", DETERMINISM_APP)
+    got = _determinism_run(sim_factory, test_sd_card)
+    synced, epoch, hour, minute, _sec = got["DET:CLOCK"].split()
+    assert synced == "true", got
+    # Pinned at boot, then running with the sim clock: same date, and a
+    # fresh sim is still inside the first minutes of it.
+    assert TEST_EPOCH <= int(epoch) < TEST_EPOCH + 600, got
+    assert (int(hour), int(minute) < 10) == (0, True), got
