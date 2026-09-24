@@ -278,6 +278,111 @@ static void test_keycode_button_map(void) {
                KBD_MOD_BUTTONS);
 }
 
+// ── Background polls (sys.sleep) then the app's poll ─────────────────────────
+// kbd_poll_begin as keyboard.c runs it; raw is getRawKey's value.
+static uint8_t raw;
+
+static void poll_start(bool bg) {
+  kbd_poll_begin(&btn, bg, &raw);
+  in.ev_pushed = 0;
+  in.char_pushed = 0;
+}
+
+static void apply(uint8_t state, uint8_t key) {
+  uint8_t r = kbd_fifo_apply(&in, &btn, state, key);
+  if (r)
+    raw = r;
+}
+
+// A key tapped (pressed and released) during the sleep: the app's next poll
+// sees the press edge and the raw key, the one after the release edge.
+static void test_bg_tap_reaches_next_foreground_poll(void) {
+  reset();
+  raw = 0;
+  poll_start(false);                       // the app's poll before the sleep
+  poll_start(true);                        // sys.sleep's background polls
+  apply(KBD_FIFO_PRESSED, KEY_ENTER);
+  poll_start(true);
+  apply(KBD_FIFO_RELEASED, KEY_ENTER);
+  poll_start(true);
+  poll_start(false);                       // input.update() after the sleep
+  CHECK_EQ_U32(pressed(), BTN_ENTER);
+  CHECK_EQ_U32(released(), 0);
+  CHECK_EQ_INT(raw, KEY_ENTER);
+  poll_start(false);
+  CHECK_EQ_U32(pressed(), 0);
+  CHECK_EQ_U32(released(), BTN_ENTER);
+  CHECK_EQ_INT(raw, 0);
+}
+
+// A key tapped inside a single background poll behaves the same.
+static void test_bg_tap_inside_one_background_poll(void) {
+  reset();
+  raw = 0;
+  poll_start(false);
+  poll_start(true);
+  apply(KBD_FIFO_PRESSED, KEY_UP);
+  apply(KBD_FIFO_RELEASED, KEY_UP);
+  poll_start(true);
+  poll_start(false);
+  CHECK_EQ_U32(pressed(), BTN_UP);
+  poll_start(false);
+  CHECK_EQ_U32(released(), BTN_UP);
+}
+
+// A key pressed during the sleep and still held: a press edge, then held.
+static void test_bg_press_still_held(void) {
+  reset();
+  raw = 0;
+  poll_start(false);
+  poll_start(true);
+  apply(KBD_FIFO_PRESSED, KEY_ENTER);
+  poll_start(true);
+  poll_start(false);
+  CHECK_EQ_U32(pressed(), BTN_ENTER);
+  CHECK_EQ_INT(raw, KEY_ENTER);
+  poll_start(false);
+  CHECK_EQ_U32(pressed(), 0);
+  CHECK_EQ_U32(btn.curr, BTN_ENTER);
+  poll_start(false);
+  apply(KBD_FIFO_RELEASED, KEY_ENTER);
+  CHECK_EQ_U32(released(), BTN_ENTER);
+}
+
+// A key held before the sleep and released during it: a release edge only.
+static void test_bg_release_of_key_held_before(void) {
+  reset();
+  raw = 0;
+  poll_start(false);
+  apply(KBD_FIFO_PRESSED, KEY_LEFT);
+  poll_start(false);                       // held, edge consumed
+  CHECK_EQ_U32(pressed(), 0);
+  poll_start(true);
+  apply(KBD_FIFO_RELEASED, KEY_LEFT);
+  poll_start(true);
+  poll_start(false);
+  CHECK_EQ_U32(pressed(), 0);
+  CHECK_EQ_U32(released(), BTN_LEFT);
+  CHECK_EQ_INT(raw, 0);
+}
+
+// A tap in the app's last poll before the sleep is released by the first
+// background poll: after the sleep it reads as released, not as held.
+static void test_tap_before_sleep_released(void) {
+  reset();
+  raw = 0;
+  poll_start(false);
+  apply(KBD_FIFO_PRESSED, KEY_DOWN);
+  apply(KBD_FIFO_RELEASED, KEY_DOWN);
+  CHECK_EQ_U32(pressed(), BTN_DOWN);
+  poll_start(true);
+  poll_start(true);
+  poll_start(false);
+  CHECK_EQ_U32(btn.curr, 0);
+  CHECK_EQ_U32(released(), BTN_DOWN);
+  CHECK_EQ_U32(pressed(), 0);
+}
+
 int main(void) {
   test_two_chars_in_one_poll();
   test_letter_key_down_and_up();
@@ -294,5 +399,10 @@ int main(void) {
   test_drop_newest_keeps_ups();
   test_injected_button_events();
   test_keycode_button_map();
+  test_bg_tap_reaches_next_foreground_poll();
+  test_bg_tap_inside_one_background_poll();
+  test_bg_press_still_held();
+  test_bg_release_of_key_held_before();
+  test_tap_before_sleep_released();
   return check_report("test_kbd_event_queue");
 }

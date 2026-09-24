@@ -67,6 +67,7 @@ typedef struct {
   uint32_t prev;     // held at the previous poll
   uint32_t tapped;   // got a fresh PRESSED during this poll
   uint32_t deferred; // pressed and released inside this poll: released next
+  bool in_bg;        // background polls ran since the last foreground poll
 } kbd_buttons_t;
 
 // ── Keycode helpers ──────────────────────────────────────────────────────────
@@ -286,6 +287,37 @@ static inline void kbd_buttons_begin_poll(kbd_buttons_t *b) {
   b->curr &= ~b->deferred;
   b->deferred = 0;
   b->tapped = 0;
+}
+
+// Start of a foreground (kbd_poll, the app's input.update) or background
+// (kbd_poll_background, sys.sleep) poll. *raw_key is getRawKey's value.
+//
+// A run of background polls must leave the app's next foreground poll the
+// same edges it would have got had the FIFO items waited for it:
+//  - the first background poll after a foreground one starts a poll as
+//    usual (prev = the curr the app last saw, the previous poll's taps are
+//    released, the raw key clears);
+//  - later background polls start nothing: taps, deferred releases and the
+//    raw key accumulate, and prev stays the app's last curr;
+//  - the first foreground poll after them keeps all of that, so a key held
+//    or tapped during the background polls reads as a press edge (a tap is
+//    held for exactly this poll and released at the next one), a key
+//    released meanwhile as a release edge, and the raw key of the last key
+//    typed meanwhile is still there.
+// Returns true when this is the first background poll of a run (the caller
+// uses it for nothing else than bookkeeping it owns).
+static inline bool kbd_poll_begin(kbd_buttons_t *b, bool bg, uint8_t *raw_key) {
+  if (bg) {
+    if (b->in_bg)
+      return false;
+    b->in_bg = true;
+  } else if (b->in_bg) {
+    b->in_bg = false;
+    return false;  // keep what the background polls gathered
+  }
+  kbd_buttons_begin_poll(b);
+  *raw_key = 0;
+  return bg;
 }
 
 // ── STM32 FIFO decoder ───────────────────────────────────────────────────────

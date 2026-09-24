@@ -248,11 +248,12 @@ bool kbd_init(void) {
 
 // bg: a background poll (kbd_poll_background) that reads the STM32 FIFO into
 // the event queue, the char backlog and the button masks WITHOUT starting a
-// new app-facing poll: prev, the pending tap/defer state, the char the app
-// has not read yet and the raw key stay as they are, and injected one-shots
-// are neither retired nor published. So edges that arrive during a sleep
-// accumulate and the app's next kbd_poll() still delivers them; only the
-// OS-level Sym and Brk flags are set right away.
+// new app-facing poll (kbd_poll_begin in kbd_event_queue.h): taps, deferred
+// releases and the raw key accumulate against the curr the app last saw,
+// the char the app has not read yet stays, and injected one-shots are
+// neither retired nor published. The app's next kbd_poll() then delivers
+// the press/release edges, chars and raw key of what arrived meanwhile;
+// only the OS-level Sym and Brk flags are set right away.
 static void kbd_poll_impl(bool bg);
 
 void kbd_poll(void) { kbd_poll_impl(false); }
@@ -260,11 +261,10 @@ void kbd_poll(void) { kbd_poll_impl(false); }
 void kbd_poll_background(void) { kbd_poll_impl(true); }
 
 static void kbd_poll_impl(bool bg) {
-  if (!bg) {
-    kbd_buttons_begin_poll(&s_btn);
+  kbd_poll_begin(&s_btn, bg, &s_last_raw_key);
+  if (!bg)
     s_last_char = 0;
-    s_last_raw_key = 0;
-  }
+  bool new_key = false;  // a press/repeat or char decoded in THIS poll
   s_in.ev_pushed = 0;
   s_in.char_pushed = 0;
   kbd_keyset_t down_before = s_in.down;
@@ -357,8 +357,10 @@ static void kbd_poll_impl(bool bg) {
 #endif
 
     uint8_t raw = kbd_fifo_apply(&s_in, &s_btn, state, keycode);
-    if (raw)
+    if (raw) {
       s_last_raw_key = raw;
+      new_key = true;
+    }
     // Brk (screenshot) on its press only: checked per item, so a key that
     // follows it in the same poll cannot hide it.
     if (state == KBD_FIFO_PRESSED && keycode == KEY_BRK)
@@ -394,7 +396,12 @@ done_polling:;
   // Idle screen dimming: any fresh input counts as activity. If the activity
   // woke a dimmed screen, swallow the waking event so it doesn't reach the
   // running app.
-  if ((s_btn.curr & ~s_btn.prev) || s_in.char_pushed || s_last_raw_key) {
+  // In a background poll prev does not advance and the raw key is kept, so
+  // only what this poll decoded counts (once per key, not every pass).
+  bool activity = bg ? (new_key || s_in.char_pushed)
+                     : ((s_btn.curr & ~s_btn.prev) || s_in.char_pushed ||
+                        s_last_raw_key);
+  if (activity) {
     if (idle_dim_note_activity()) {
       s_btn.curr &= s_btn.prev; // drop fresh press edges
       s_btn.deferred = 0;
@@ -504,9 +511,11 @@ bool kbd_consume_screenshot_press(void) {
 }
 
 void kbd_discard_pending(void) {
-  // Everything the STM32 queued while nobody polled (sys.sleep does not
-  // poll), plus pending/active one-shot injections: none of it was typed
-  // at whatever is about to be shown.  Bounded: the FIFO holds 31 events.
+  // Everything the STM32 queued while nobody polled, what background polls
+  // (sys.sleep) already decoded into the queue, backlog and button masks
+  // (kbd_clear_state below drops it), plus pending/active one-shot
+  // injections: none of it was typed at whatever is about to be shown.
+  // Bounded: the FIFO holds 31 events.
   for (int i = 0; i < 40; i++) {
     uint8_t event[2] = {0, 0};
     if (!i2c_read_reg(KBD_REG_FIF, event, 2, KBD_REG_DELAY_MS))
