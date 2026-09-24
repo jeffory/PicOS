@@ -182,7 +182,7 @@ A debug hook fires every 256 opcodes (`lua_sethook` with `LUA_MASKCOUNT`). The h
 - `audio.c` — tone generation (square wave) and PCM streaming via DMA
 - `sound.c` — sound sample loading and playback (WAV-like)
   - 8 sample slots + 8 player slots, mixed by `sound_mixer_process()` inside audio.c's DMA refill ISR on Core 1. Anything that frees a sample or changes which sample a player reads takes the mixer lock (`s_mix_cs`, a striped critical section); `sound_sample_destroy()` stops and detaches every player still using the sample first. A player never owns its sample.
-  - Lua: a `sampleplayer` keeps its sample alive as a user value (`sampleplayer(path)` and `sample:play()` anchor a sample of their own; `getSample()` returns that object). Collected players and samples give their slots back; freed handles hold NULL and are rejected.
+  - Lua: a `sampleplayer` keeps its sample alive as a user value (`sampleplayer(path)` and `sample:play()` anchor a sample of their own; `getSample()` returns that object). Collected players and samples give their slots back (and a player its callback slots); freed handles hold NULL and are rejected.
 - `fileplayer.c` — streaming file playback from SD card
 - `mp3_player.c` — MP3 decoding via libmad; PCM ring buffer (32KB) in PIO PSRAM; DMA ISR reads from 1KB SRAM staging buffer, refilled by Core 1
 - `mp3_player_update()`, `fileplayer_update()` and `mod_player_update()` called on Core 1 every 1 ms tick

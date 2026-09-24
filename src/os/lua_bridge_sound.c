@@ -472,9 +472,12 @@ static int l_sound_sampleplayer_getRate(lua_State *L) {
     return 1;
 }
 
+static void release_player_cbs(lua_State *L, sound_player_t *player);
+
 static int l_sound_sampleplayer_gc(lua_State *L) {
     sound_player_t **ud = luaL_checkudata(L, 1, PLAYER_USERDATA);
     if (*ud) {
+        release_player_cbs(L, *ud);
         g_api.soundplayer->playerFree(*ud);
         *ud = NULL;
     }
@@ -724,6 +727,23 @@ static int l_sound_sampleplayer_setLoopCallback(lua_State *L) {
     if (!cb) return luaL_error(L, "too many sampleplayer loop callbacks");
     sound_player_set_loop_callback(player, trampoline_set_pending, cb);
     return 0;
+}
+
+// A collected sampleplayer gives its callback slots back (they used to stay
+// taken, so the ninth player ever given a callback failed).
+static void release_cb(lua_State *L, sound_lua_cb_t *arr, int count, void *arg) {
+    for (int i = 0; i < count; i++) {
+        if (arg == &arr[i] && arr[i].ref != 0) {
+            luaL_unref(L, LUA_REGISTRYINDEX, arr[i].ref);
+            arr[i].ref = 0;
+            arr[i].pending = 0;
+        }
+    }
+}
+
+static void release_player_cbs(lua_State *L, sound_player_t *player) {
+    release_cb(L, s_sp_finish_cbs, MAX_SAMPLEPLAYER_CBS, player->finish_callback_arg);
+    release_cb(L, s_sp_loop_cbs, MAX_SAMPLEPLAYER_CBS, player->loop_callback_arg);
 }
 
 static int l_sound_fileplayer_didUnderrun(lua_State *L) {
