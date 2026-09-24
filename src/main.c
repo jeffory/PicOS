@@ -38,15 +38,17 @@ extern uint32_t __StackOneBottom; // Core 1 MSP lower bound (SCRATCH_X)
 // each core before its code runs: Core 0 from runtime_init() with
 // &__StackBottom, Core 1 from core1_wrapper() with __StackOneBottom. We supply
 // the implementation (PICO_RUNTIME_NO_INIT_PER_CORE_INSTALL_STACK_GUARD=1) to
-// keep a margin above the bottom: an overflow faults with CFSR.STKOF while
-// STACK_LIMIT_MARGIN bytes are still free, and isr_hardfault drops the limit
-// so the handler can use them. 320 = FP exception frame (104) + hardfault_c's
-// own frame (184) + the launcher getters it calls first (32), so the crash
-// record in watchdog scratch is always written; the printf/display path that
-// follows may run below the bottom (into Core 1's stack top / the heap end),
-// which is tolerable because the handler reboots.
+// add a tiny margin: 32 bytes = one 8-word basic exception frame, and a
+// multiple of 8 (the MSPLIM granule). A limit hit taken during exception-entry
+// stacking clamps SP at the limit, so that frame still lands inside the real
+// stack rather than in whatever lies below it. The margin is deliberately not
+// sized for the handler: isr_hardfault clears MSPLIM before hardfault_c
+// pushes anything, and the handler (frame + printf/display path) may run
+// below the bottom (Core 1's stack top / the heap end), which is tolerable
+// because it reboots. Keeping the margin small preserves almost the full
+// 4 KB of usable stack on both cores.
 // Runs before runtime init completes: no printf, no asserts.
-#define STACK_LIMIT_MARGIN 320u
+#define STACK_LIMIT_MARGIN 32u
 void runtime_init_per_core_install_stack_guard(void *stack_bottom) {
   uint32_t limit = ((uint32_t)(uintptr_t)stack_bottom + STACK_LIMIT_MARGIN + 7u) & ~7u;
   __asm volatile ("msr msplim, %0" : : "r"(limit));
