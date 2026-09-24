@@ -393,12 +393,8 @@ static int l_sys_pio_psram_size(lua_State *L) {
 // buffer refuses access, and the block is released when the handle is
 // collected (or the app's Lua state closes).  No raw pointers reach Lua.
 
-#define QMI_BUF_MT "picocalc.sys.qmibuf"
-
-typedef struct {
-  uint8_t *p;
-  size_t size;
-} qmi_buf_t;
+// qmi_buf_t and QMI_BUF_MT live in lua_bridge_internal.h: graphics
+// image.loadFromBuffer also reads these buffers.
 
 static void qmi_buf_release(qmi_buf_t *b) {
   if (b->p) {

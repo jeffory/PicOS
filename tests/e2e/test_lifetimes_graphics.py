@@ -23,8 +23,6 @@ CASES = lua_case_names(APP)
 # collected_blinker_leaves_updateAll is not listed: it passes in the release
 # simulator (the stale write lands in freed memory unseen) and only the ASan
 # simulator reports it (heap-use-after-free in l_animation_blinker_updateAll).
-RAW_PTR = ("review (Task 7): graphics casts any userdata to its own struct "
-           "(loadFromBuffer, sprite.new, animation loop frames); Task 10 item 0")
 ANCHOR = ("review: Graphics Critical — sprite/spritesheet/tilemap/animation "
           "keep raw pointers with no GC anchor; Task 10 item 1")
 LIST = ("review: Graphics Critical — the display list holds raw sprite "
@@ -36,9 +34,6 @@ WALLS = ("review: Graphics High — addWallSprites pushes up to 256 userdata "
 OVERSIZE = ("review: Graphics Medium — sprite width/height are used as the "
             "source stride; Task 10 item 5")
 KNOWN_BUGS = {
-    "loadFromBuffer_qmibuf": RAW_PTR,
-    "sprite_new_rejects_foreign_userdata": RAW_PTR,
-    "loop_skips_foreign_frames": RAW_PTR,
     "getImage_returns_the_image": ANCHOR,
     "sprite_copy_keeps_image": ANCHOR,
     "spriteWithText_keeps_image": ANCHOR,

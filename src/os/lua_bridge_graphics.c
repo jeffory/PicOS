@@ -273,17 +273,27 @@ static const luaL_Reg l_graphics_image_methods[] = {
     {"getMetadata", l_graphics_image_getMetadata},
     {NULL, NULL}};
 
+// loadFromBuffer(string) or loadFromBuffer(qmibuf, [len]): the only
+// buffers accepted are a Lua string and a sys.qmiPsramAlloc handle, whose
+// length is checked against the handle's size. Any other userdata was once
+// read as raw bytes (an 8-byte handle read `len` bytes past its end).
 static int l_graphics_image_loadFromBuffer(lua_State *L) {
   size_t len;
   const uint8_t *data;
 
-  if (lua_isstring(L, 1)) {
-    data = (const uint8_t *)luaL_checklstring(L, 1, &len);
-  } else if (lua_isuserdata(L, 1)) {
-    data = (const uint8_t *)lua_touserdata(L, 1);
-    len = (size_t)luaL_checkinteger(L, 2);
+  if (lua_type(L, 1) == LUA_TSTRING) {
+    data = (const uint8_t *)lua_tolstring(L, 1, &len);
   } else {
-    return luaL_error(L, "expected string or userdata containing file buffer");
+    qmi_buf_t *b = (qmi_buf_t *)luaL_testudata(L, 1, QMI_BUF_MT);
+    if (!b)
+      return luaL_typeerror(L, 1, "string or qmibuf");
+    if (!b->p)
+      return luaL_error(L, "loadFromBuffer: qmibuf freed");
+    lua_Integer n = luaL_optinteger(L, 2, (lua_Integer)b->size);
+    luaL_argcheck(L, n >= 0 && (uint64_t)n <= (uint64_t)b->size, 2,
+                  "length exceeds the buffer");
+    data = b->p;
+    len = (size_t)n;
   }
 
   if (!data || len < 16) {
@@ -1039,6 +1049,9 @@ static int l_sprite_gc(lua_State *L) {
 }
 
 static int l_sprite_new(lua_State *L) {
+  // Resolve the argument BEFORE pushing the sprite: with no argument, index 1
+  // would otherwise be the new userdata itself.
+  lua_image_t *img = lua_isnoneornil(L, 1) ? NULL : check_image(L, 1);
   lua_sprite_t *s = (lua_sprite_t *)lua_newuserdata(L, sizeof(lua_sprite_t));
   s->x = 0;
   s->y = 0;
@@ -1088,12 +1101,10 @@ static int l_sprite_new(lua_State *L) {
   s->has_stencil_pattern = false;
   s->tilemap = NULL;
 
-  if (lua_isuserdata(L, 1)) {
-    s->image = (lua_image_t *)lua_touserdata(L, 1);
-    if (s->image) {
-      s->width = s->image->w;
-      s->height = s->image->h;
-    }
+  if (img) {
+    s->image = img;
+    s->width = img->w;
+    s->height = img->h;
   }
 
   luaL_setmetatable(L, GRAPHICS_SPRITE_MT);
@@ -3189,11 +3200,8 @@ static int l_animation_loop_new(lua_State *L) {
     }
     for (int i = 0; i < loop->frame_count; i++) {
       lua_rawgeti(L, -1, i + 1);
-      if (lua_isuserdata(L, -1)) {
-        loop->frames[i] = (lua_image_t *)lua_touserdata(L, -1);
-      } else {
-        loop->frames[i] = NULL;
-      }
+      // Anything but an image is an empty frame (never cast).
+      loop->frames[i] = (lua_image_t *)luaL_testudata(L, -1, GRAPHICS_IMAGE_MT);
       lua_pop(L, 1);
     }
     lua_pop(L, 1);
@@ -3279,11 +3287,7 @@ static int l_animation_loop_setImageTable(lua_State *L) {
   }
   for (int i = 0; i < loop->frame_count; i++) {
     lua_rawgeti(L, 2, i + 1);
-    if (lua_isuserdata(L, -1)) {
-      loop->frames[i] = (lua_image_t *)lua_touserdata(L, -1);
-    } else {
-      loop->frames[i] = NULL;
-    }
+    loop->frames[i] = (lua_image_t *)luaL_testudata(L, -1, GRAPHICS_IMAGE_MT);
     lua_pop(L, 1);
   }
   loop->valid = (loop->frame_count > 0);

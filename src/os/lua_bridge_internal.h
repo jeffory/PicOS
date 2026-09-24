@@ -42,6 +42,15 @@ typedef struct {
 
 #define GRAPHICS_IMAGE_MT "picocalc.graphics.image"
 
+// sys.qmiPsramAlloc buffer handle (lua_bridge_sys.c): a full userdata that
+// owns a umm_malloc block. p is NULL once freed. Check it with
+// luaL_checkudata/luaL_testudata(L, idx, QMI_BUF_MT), never lua_touserdata.
+#define QMI_BUF_MT "picocalc.sys.qmibuf"
+typedef struct {
+    uint8_t *p;
+    size_t size;
+} qmi_buf_t;
+
 uint16_t l_checkcolor(lua_State *L, int idx);
 // Integer "quantity" arguments (coordinates, sizes, durations, volumes...):
 // accept any finite number and round floats to nearest (ties toward +inf);
