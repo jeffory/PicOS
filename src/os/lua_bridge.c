@@ -1,4 +1,5 @@
 #include "lua_bridge_internal.h"
+#include "app_identity.h"
 #include "lua_psram_alloc.h"
 #include "crashlog.h"
 #include "sim_hooks.h"
@@ -356,10 +357,9 @@ void lua_bridge_show_error(lua_State *L, const char *context) {
   }
 
   // Log to /system/error.log on SD card
-  lua_getglobal(L, "APP_NAME");
-  const char *app = lua_isstring(L, -1) ? lua_tostring(L, -1) : "unknown";
-  crashlog_write_lua_error(app, context, buf);
-  lua_pop(L, 1);
+  // Attributed from app_identity: the APP_NAME global is the app's to change.
+  const app_identity_t *me = app_identity_current();
+  crashlog_write_lua_error(me ? me->name : "unknown", context, buf);
   sim_app_report_error(context, buf);
 
   display_clear(COLOR_BLACK);

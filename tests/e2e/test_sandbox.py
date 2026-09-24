@@ -18,18 +18,12 @@ from helpers import case_params, lua_case_names, write_wav
 SANDBOX_CASES = lua_case_names("sandbox_test")
 ROOT_CASES = lua_case_names("sandbox_root_test")
 
-GLOBALS_BUG = ("review: Lua Critical — the sandbox trusts writable globals "
-               "(APP_REQUIREMENTS/APP_ID/APP_DIR); Task 5 moves identity into C")
 SOUND_BUG = ("review/audit §3.1 — sound sample load/save and sampleplayer "
              "loads skip fs_sandbox_check")
 APPCONFIG_BUG = ("review: Core Low / Lua Critical — appconfig builds its path "
                  "from the writable APP_ID global; Task 5")
 
 KNOWN_BUGS = {
-    "globals_root_flag_field": GLOBALS_BUG,
-    "globals_requirements_table": GLOBALS_BUG,
-    "globals_app_id": GLOBALS_BUG,
-    "globals_app_dir": GLOBALS_BUG,
     "sample_save_outside_sandbox": SOUND_BUG,
     "sample_load_other_app": SOUND_BUG,
     "sampleplayer_load_other_app": SOUND_BUG,

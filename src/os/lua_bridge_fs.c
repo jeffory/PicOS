@@ -5,77 +5,28 @@
 
 #include "../drivers/sdcard.h"
 #include "file_browser.h"
+#include "app_identity.h"
+#include "fs_path.h"
 #include "umm_malloc.h"
 
-// ── Filesystem sandbox
-// ──────────────────────────────────────────────────────── Apps are allowed to
-// access only two trees (unless "root-filesystem" requirement is granted):
-//   /apps/<dirname>/  — read-only (their own app bundle)
-//   /data/<dirname>/  — read + write (their own data directory)
-//
-// <dirname> is derived from the APP_DIR global set by launcher.c, e.g.
-//   APP_DIR = "/apps/editor"  → dirname = "editor"
-//
+// ── Filesystem sandbox ──────────────────────────────────────────────────────
+// Apps may touch only (unless "root-filesystem" is granted):
+//   /apps/<dir>/   — read-only (their own bundle)
+//   /data/<id>/    — read + write (their own data directory)
+//   /system/lib/   — read-only (shared libraries)
 // Relative paths and any path containing ".." are always rejected.
 //
-// Apps with the "root-filesystem" requirement can access the entire SD card.
+// The identity and grants come from app_identity (set in C by the runner),
+// never from the APP_DIR / APP_ID / APP_REQUIREMENTS globals, which the app
+// can overwrite.  The rules themselves are fs_path_allowed() (fs_path.c,
+// host-tested).
 
 bool fs_sandbox_check(lua_State *L, const char *path, bool write) {
-  if (!path || path[0] != '/')
-    return false; // require absolute paths
-  if (strstr(path, ".."))
-    return false; // reject traversal
-
-  // Allow read-only access to /system/lib/ for all apps (shared libraries)
-  if (!write && strncmp(path, "/system/lib/", 12) == 0)
-    return true;
-
-  // Check for root-filesystem requirement
-  lua_getglobal(L, "APP_REQUIREMENTS");
-  if (lua_istable(L, -1)) {
-    lua_getfield(L, -1, "root_filesystem");
-    bool has_root_fs = lua_toboolean(L, -1);
-    lua_pop(L, 2); // pop root_filesystem and APP_REQUIREMENTS
-    if (has_root_fs) {
-      return true; // full filesystem access granted
-    }
-  } else {
-    lua_pop(L, 1); // pop APP_REQUIREMENTS if not a table
-  }
-
-  lua_getglobal(L, "APP_DIR");
-  const char *app_dir = lua_tostring(L, -1);
-  lua_pop(L, 1);
-  if (!app_dir)
-    return false;
-
-  // Extract the directory name component from "/apps/<dirname>"
-  const char *dirname = strrchr(app_dir, '/');
-  if (!dirname || dirname[1] == '\0')
-    return false;
-  dirname++; // skip the '/'
-
-  // /data/<APP_ID> prefix — uses the app's declared identity, not its folder name
-  lua_getglobal(L, "APP_ID");
-  const char *app_id = lua_tostring(L, -1);
-  lua_pop(L, 1);
-  if (!app_id)
-    return false;
-  char data_prefix[128];
-  int dp_len = snprintf(data_prefix, sizeof(data_prefix), "/data/%s", app_id);
-  bool in_data = (strncmp(path, data_prefix, dp_len) == 0 &&
-                  (path[dp_len] == '\0' || path[dp_len] == '/'));
-
-  if (write)
-    return in_data;
-
-  // For reads also allow /apps/<dirname> itself and any path beneath it
-  char app_prefix[128];
-  int ap_len = snprintf(app_prefix, sizeof(app_prefix), "/apps/%s", dirname);
-  bool in_app = (strncmp(path, app_prefix, ap_len) == 0 &&
-                 (path[ap_len] == '\0' || path[ap_len] == '/'));
-
-  return in_data || in_app;
+  (void)L;
+  const app_identity_t *me = app_identity_current();
+  if (!me)
+    return fs_path_allowed(path, write, NULL, NULL, false);
+  return fs_path_allowed(path, write, me->dir, me->data_dir, me->root_fs);
 }
 
 static int l_fs_open(lua_State *L) {
@@ -241,52 +192,35 @@ static int l_fs_mkdir(lua_State *L) {
 static int l_fs_appPath(lua_State *L) {
   const char *name = luaL_checkstring(L, 1);
 
-  lua_getglobal(L, "APP_ID");
-  const char *app_id = lua_tostring(L, -1);
-  lua_pop(L, 1);
-  if (!app_id) {
+  const app_identity_t *me = app_identity_current();
+  if (!me) {
     lua_pushnil(L);
     return 1;
   }
 
-  // Auto-create /data/<APP_ID>/ on first call
-  char data_dir[128];
-  snprintf(data_dir, sizeof(data_dir), "/data/%s", app_id);
-  sdcard_mkdir(data_dir);
+  // Auto-create /data/<id>/ on first call
+  sdcard_mkdir(me->data_dir);
 
   char full_path[192];
-  snprintf(full_path, sizeof(full_path), "/data/%s/%s", app_id, name);
+  snprintf(full_path, sizeof(full_path), "%s/%s", me->data_dir, name);
   lua_pushstring(L, full_path);
   return 1;
 }
 
 // Open a file-browser panel overlay.
-// Optional arg: start directory (defaults to the app's /data/<dirname>/ dir).
+// Optional arg: start directory (defaults to the app's /data/<id>/ dir).
 // Returns the selected file path as a string, or nil if cancelled.
 static int l_fs_browse(lua_State *L) {
-  const char *start_path;
-  static char default_path[128];
-
-  // Always determine the app's data root for use as the browser root boundary.
-  lua_getglobal(L, "APP_ID");
-  const char *app_id = lua_tostring(L, -1);
-  lua_pop(L, 1);
-
-  const char *root_path;
-  static char root_buf[128];
-  if (app_id) {
-    snprintf(root_buf, sizeof(root_buf), "/data/%s", app_id);
-    sdcard_mkdir(root_buf);
-    root_path = root_buf;
-  } else {
-    root_path = "/data";
+  // The app's data root is the browser's root boundary.
+  const app_identity_t *me = app_identity_current();
+  const char *root_path = "/data";
+  if (me) {
+    sdcard_mkdir(me->data_dir);
+    root_path = me->data_dir;
   }
 
-  if (lua_isnoneornil(L, 1)) {
-    start_path = root_path;
-  } else {
-    start_path = luaL_checkstring(L, 1);
-  }
+  const char *start_path =
+      lua_isnoneornil(L, 1) ? root_path : luaL_checkstring(L, 1);
 
   char selected[192];
   if (file_browser_show(start_path, root_path, selected, sizeof(selected))) {

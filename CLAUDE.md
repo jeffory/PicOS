@@ -100,6 +100,7 @@ main()
 5. Dispatches via `AppRunner` vtable (`src/os/app_runner.h`):
    - **Lua apps** (`src/os/lua_runner.c`): allocates a 64 KB VM stack, reads `main.lua`, then runs the whole VM lifetime on that stack (PSP): fresh `lua_State`, `lua_bridge_register()`, `lua_pcall()`, error screen, `lua_close()`
    - **Native apps** (`src/os/native_loader.c`): ELF32 PIE loader, relocates to PSRAM (code in SRAM if fits), runs on PSP (Process Stack Pointer). All header/segment/dynamic/relocation validation is in `src/os/elf_plan.c` (pure; shared with the simulator's `unicorn_runner.c`, host-tested in `tests/unit/test_elf_plan.c`, fuzzed by `tests/fuzz/fuzz_elf_plan.c`). Only `R_ARM_RELATIVE` is applied; `R_ARM_ABS32/GLOB_DAT/JUMP_SLOT` (undefined weak symbols in newlib's unwinder) are bounds-checked and left as-is; any other relocation type rejects the app
+   - Both runners first install the app's identity (`src/os/app_identity.c`: id, `/apps/<dir>`, `/data/<id>`, requirement flags and the full requirement list, held in PSRAM) and clear it after teardown; for Lua this happens before `lua_bridge_register()`. Every enforcement check reads it through `app_identity_current()` / `app_identity_has_requirement(name)`, never the `APP_*` Lua globals
    - Both use `app_stack_run()` (`src/os/app_stack.c`): paints the stack, arms `PSPLIM` above a 32-byte guard (overflow = STKOF HardFault, crash record names `PSP (Lua VM)` / `PSP (native app)`), switches Thread mode to the PSP, calls the runtime, switches back. Only one runner is active, so there is one PSP user at a time; IRQs always use the MSP. The launcher itself stays on the MSP; its dev commands and screenshot save use `app_stack_run_os()` (32 KB PSRAM, owner `PSP (OS command)`), which runs inline instead when an app stack is already active, so `app_stack_run` never nests
 
 ### Lua Bridge (split across `src/os/lua_bridge_*.c`)
@@ -260,7 +261,7 @@ Apps are directories at `/apps/<name>/` on a FAT32 SD card containing:
 - `main.lua` — Lua app (loop until `return` to exit to launcher)
 - `main.elf` — native C/TinyGo app (ELF32 PIE; native takes priority if both present)
 
-Pre-set globals (Lua): `APP_DIR` (e.g. `"/apps/hello"`), `APP_NAME`, `APP_ID`, `APP_REQUIREMENTS`.
+Pre-set globals (Lua): `APP_DIR` (e.g. `"/apps/hello"`), `APP_NAME`, `APP_ID`, `APP_REQUIREMENTS`. They are convenience copies: the sandbox and the per-app stores read the C-side identity (`app_identity`), so an app that rewrites them gains nothing.
 
 Native apps receive `PicoCalcAPI *api` as their entry point argument. Use `api->sys->poll()` each frame and check `api->sys->shouldExit()` to handle the system menu exit.
 
@@ -287,7 +288,7 @@ if APP_REQUIREMENTS.root_filesystem then
 end
 ```
 
-When `"root-filesystem"` is granted, the app bypasses the default sandbox (`/apps/<name>` read + `/data/<app_id>` write) and can access the entire SD card.
+Without `"root-filesystem"`, the sandbox (`fs_sandbox_check` → `fs_path_allowed` in `src/os/fs_path.c`, host-tested) allows reads of the app's own `/apps/<dir>` and of `/system/lib/`, and read + write of `/data/<app_id>`; relative paths and any `..` are refused. It guards `picocalc.fs.*` and the image, font and zip loaders. When `"root-filesystem"` is granted, the app bypasses the sandbox and can access the entire SD card.
 
 When `"http"` is granted, WiFi will remain connected after initial time sync (for power saving) so the app can make HTTP requests.
 
