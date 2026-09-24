@@ -12,12 +12,10 @@ Known review bugs are strict xfails; Tasks 10 and 11 remove the markers
 
 import pytest
 
-from helpers import case_params, known_bug, lua_case_names, run_lua_app, stage_lua_app
+from helpers import case_params, lua_case_names, run_lua_app, stage_lua_app
 
 GC_CASES = lua_case_names("gc_test")
 
-GRAPHICS_BUG = ("review: Graphics Critical — sprite/spritesheet/tilemap/animation "
-                "keep raw image pointers with no GC anchor; Task 10")
 SPRITE_LIST_BUG = ("review: Graphics Critical — the display list holds raw sprite "
                    "pointers, so an added sprite can be collected; Task 10")
 PERFORM_BUG = ("review: Graphics Critical — performOnAllSprites passes 4-byte proxy "
@@ -26,11 +24,6 @@ SAMPLE_BUG = ("review: Audio High — a sampleplayer keeps no reference to its "
               "sample; Task 11")
 
 GC_KNOWN_BUGS = {
-    "sprite_new_keeps_image": GRAPHICS_BUG,
-    "sprite_setImage_keeps_image": GRAPHICS_BUG,
-    "spritesheet_keeps_image": GRAPHICS_BUG,
-    "tilemap_keeps_tileset": GRAPHICS_BUG,
-    "animation_loop_keeps_frames": GRAPHICS_BUG,
     "added_sprite_survives_gc": SPRITE_LIST_BUG,
     "performOnAllSprites_visits_real_sprites": PERFORM_BUG,
     "sampleplayer_setSample_keeps_sample": SAMPLE_BUG,
@@ -78,11 +71,6 @@ def _gc_asan(bug, site):
 
 
 GC_ASAN_KNOWN_BUGS = {
-    "sprite_new_keeps_image": _gc_asan(GRAPHICS_BUG, "l_sprite_draw"),
-    "sprite_setImage_keeps_image": _gc_asan(GRAPHICS_BUG, "l_sprite_draw"),
-    "spritesheet_keeps_image": _gc_asan(GRAPHICS_BUG, "l_spritesheet_drawFrame"),
-    "tilemap_keeps_tileset": _gc_asan(GRAPHICS_BUG, "tilemap_draw <- l_tilemap_draw"),
-    "animation_loop_keeps_frames": _gc_asan(GRAPHICS_BUG, "l_animation_loop_draw"),
     "added_sprite_survives_gc": _gc_asan(SPRITE_LIST_BUG, "l_sprite_update"),
     "sampleplayer_setSample_keeps_sample": _gc_asan(
         SAMPLE_BUG, "sound_player_play (sim_audio.c) <- l_sound_sampleplayer_play"),
@@ -99,10 +87,17 @@ def _use_first(case):
     return setup
 
 
+# Every lifetime case runs here; the ones whose fix has landed must pass.
+GC_ASAN_CASES = [
+    "sprite_new_keeps_image", "sprite_setImage_keeps_image",
+    "spritesheet_keeps_image", "tilemap_keeps_tileset",
+    "animation_loop_keeps_frames", "added_sprite_survives_gc",
+    "sampleplayer_setSample_keeps_sample", "sampleplayer_new_keeps_sample",
+]
+
+
 @pytest.mark.asan_only
-@pytest.mark.parametrize("case", [
-    pytest.param(c, id=c, marks=[known_bug(r)])
-    for c, r in GC_ASAN_KNOWN_BUGS.items()])
+@pytest.mark.parametrize("case", case_params(GC_ASAN_CASES, GC_ASAN_KNOWN_BUGS))
 def test_gc_use_after_collect(lua_suite, case):
     run = lua_suite("gc_test", setup=_use_first(case))
     run.check_case(case)

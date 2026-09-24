@@ -14,6 +14,21 @@ static lua_image_t *check_image(lua_State *L, int idx) {
   return (lua_image_t *)luaL_checkudata(L, idx, GRAPHICS_IMAGE_MT);
 }
 
+// ── Lifetime anchors ─────────────────────────────────────────────────────────
+// An object that keeps a C pointer to another Lua object (a sprite's image, a
+// tilemap's tileset, an animation loop's frames) also keeps that object in one
+// of its user values, so the collector cannot free the target while the
+// pointer is live. Every such pointer is assigned together with its anchor.
+// valueidx 0 clears the slot. Slot numbers are listed with each type.
+static void anchor_set(lua_State *L, int idx, int slot, int valueidx) {
+  idx = lua_absindex(L, idx);
+  if (valueidx)
+    lua_pushvalue(L, valueidx);
+  else
+    lua_pushnil(L);
+  lua_setiuservalue(L, idx, slot);
+}
+
 static int l_graphics_image_gc(lua_State *L) {
   lua_image_t *img = check_image(L, 1);
   if (img->data) {
@@ -761,6 +776,7 @@ static int l_graphics_draw3DWireframe(lua_State *L) {
 #define GRAPHICS_TILEMAP_MT "picocalc.graphics.tilemap"
 #define TILEMAP_MAX_WIDTH 128
 #define TILEMAP_MAX_HEIGHT 128
+#define TILEMAP_UV_TILESET 1  // user value: the image behind ->tileset
 
 typedef struct {
   lua_image_t *tileset;  // tileset image (spritesheet atlas)
@@ -897,6 +913,13 @@ static void emit_to_buffer(int x, int y, const char *line, void *user) {
 #define GRAPHICS_SPRITE_MT "picocalc.graphics.sprite"
 #define MAX_SPRITES 256
 
+// Sprite user values: the Lua objects behind the image, stencil and tilemap
+// pointers (anchor_set). Create sprites with new_sprite_ud().
+#define SPRITE_UV_IMAGE   1
+#define SPRITE_UV_STENCIL 2
+#define SPRITE_UV_TILEMAP 3
+#define SPRITE_NUV        3
+
 typedef struct {
   int x, y;
   int width, height;
@@ -940,6 +963,14 @@ static bool s_has_global_stencil = false;
 
 static lua_sprite_t *check_sprite(lua_State *L, int idx) {
   return (lua_sprite_t *)luaL_checkudata(L, idx, GRAPHICS_SPRITE_MT);
+}
+
+// Push a new, zeroed sprite userdata with its anchor slots (no metatable yet).
+static lua_sprite_t *new_sprite_ud(lua_State *L) {
+  lua_sprite_t *s = (lua_sprite_t *)lua_newuserdatauv(L, sizeof(lua_sprite_t),
+                                                       SPRITE_NUV);
+  memset(s, 0, sizeof(*s));
+  return s;
 }
 
 static int l_sprite_new(lua_State *L);
@@ -1052,7 +1083,7 @@ static int l_sprite_new(lua_State *L) {
   // Resolve the argument BEFORE pushing the sprite: with no argument, index 1
   // would otherwise be the new userdata itself.
   lua_image_t *img = lua_isnoneornil(L, 1) ? NULL : check_image(L, 1);
-  lua_sprite_t *s = (lua_sprite_t *)lua_newuserdata(L, sizeof(lua_sprite_t));
+  lua_sprite_t *s = new_sprite_ud(L);
   s->x = 0;
   s->y = 0;
   s->width = 0;
@@ -1105,6 +1136,7 @@ static int l_sprite_new(lua_State *L) {
     s->image = img;
     s->width = img->w;
     s->height = img->h;
+    anchor_set(L, -1, SPRITE_UV_IMAGE, 1);
   }
 
   luaL_setmetatable(L, GRAPHICS_SPRITE_MT);
@@ -1181,9 +1213,11 @@ static int l_sprite_setImage(lua_State *L) {
     s->image = NULL;
     s->width = 0;
     s->height = 0;
+    anchor_set(L, 1, SPRITE_UV_IMAGE, 0);
     return 0;
   }
-  s->image = (lua_image_t *)luaL_checkudata(L, 2, GRAPHICS_IMAGE_MT);
+  s->image = check_image(L, 2);
+  anchor_set(L, 1, SPRITE_UV_IMAGE, 2);
   s->width = s->image->w;
   s->height = s->image->h;
   if (lua_isboolean(L, 3))
@@ -1199,7 +1233,7 @@ static int l_sprite_getImage(lua_State *L) {
   lua_sprite_t *s = check_sprite(L, 1);
   if (!s->image)
     return 0;
-  lua_pushlightuserdata(L, s->image);
+  lua_getiuservalue(L, 1, SPRITE_UV_IMAGE);  // the image object itself
   return 1;
 }
 
@@ -1339,8 +1373,13 @@ static int l_sprite_setTransparentColor(lua_State *L) {
 
 static int l_sprite_copy(lua_State *L) {
   lua_sprite_t *src = check_sprite(L, 1);
-  lua_sprite_t *dst = (lua_sprite_t *)lua_newuserdata(L, sizeof(lua_sprite_t));
+  lua_sprite_t *dst = new_sprite_ud(L);
   memcpy(dst, src, sizeof(lua_sprite_t));
+  // The copy shares the image/stencil/tilemap, so it anchors them too.
+  for (int slot = 1; slot <= SPRITE_NUV; slot++) {
+    lua_getiuservalue(L, 1, slot);
+    lua_setiuservalue(L, -2, slot);
+  }
   // Deep-copy extracted frame data so each sprite owns its buffer
   if (src->frame_data && src->frame_w > 0 && src->frame_h > 0) {
     int sz = src->frame_w * src->frame_h * sizeof(uint16_t);
@@ -1587,11 +1626,10 @@ static int l_sprite_index(lua_State *L) {
   } else if (!strcmp(key, "tag")) {
     lua_pushinteger(L, s->tag);
   } else if (!strcmp(key, "image")) {
-    if (s->image) {
-      lua_pushlightuserdata(L, s->image);
-    } else {
+    if (s->image)
+      lua_getiuservalue(L, 1, SPRITE_UV_IMAGE);
+    else
       lua_pushnil(L);
-    }
   } else if (!strcmp(key, "scale_nn")) {
     lua_pushinteger(L, s->scale_nn);
   } else {
@@ -2477,7 +2515,8 @@ static int l_sprite_querySpriteInfoAlongLine(lua_State *L) {
 
 static int l_sprite_setStencilImage(lua_State *L) {
   lua_sprite_t *s = check_sprite(L, 1);
-  s->stencil = (lua_image_t *)luaL_checkudata(L, 2, GRAPHICS_IMAGE_MT);
+  s->stencil = check_image(L, 2);
+  anchor_set(L, 1, SPRITE_UV_STENCIL, 2);
   // arg 3 (tile) is ignored — reserved for future use
   return 0;
 }
@@ -2485,6 +2524,7 @@ static int l_sprite_setStencilImage(lua_State *L) {
 static int l_sprite_clearStencil(lua_State *L) {
   lua_sprite_t *s = check_sprite(L, 1);
   s->stencil = NULL;
+  anchor_set(L, 1, SPRITE_UV_STENCIL, 0);
   s->has_stencil_pattern = false;
   return 0;
 }
@@ -2686,8 +2726,7 @@ static int l_sprite_addEmptyCollisionSprite(lua_State *L) {
   if (s_sprite_count >= MAX_SPRITES)
     return luaL_error(L, "max sprites reached");
 
-  lua_sprite_t *s = (lua_sprite_t *)lua_newuserdata(L, sizeof(lua_sprite_t));
-  memset(s, 0, sizeof(lua_sprite_t));
+  lua_sprite_t *s = new_sprite_ud(L);
   s->x = x;
   s->y = y;
   s->width = w;
@@ -2737,6 +2776,7 @@ static const luaL_Reg l_sprite_lib[] = {
 
 #define GRAPHICS_SPRITESHEET_MT "picocalc.graphics.spritesheet"
 #define MAX_FRAMES 64
+#define SPRITESHEET_UV_IMAGE 1  // user value: the image behind ->image
 
 typedef struct {
   lua_image_t *image;
@@ -2763,9 +2803,10 @@ static int l_spritesheet_new(lua_State *L) {
     img = (lua_image_t *)luaL_checkudata(L, 1, GRAPHICS_IMAGE_MT);
   }
   
-  lua_spritesheet_t *ss = (lua_spritesheet_t *)lua_newuserdata(L, sizeof(lua_spritesheet_t));
+  lua_spritesheet_t *ss = (lua_spritesheet_t *)lua_newuserdatauv(L, sizeof(lua_spritesheet_t), 1);
   ss->image = img;
   ss->frame_count = 0;
+  if (img) anchor_set(L, -1, SPRITESHEET_UV_IMAGE, 1);
   
   luaL_setmetatable(L, GRAPHICS_SPRITESHEET_MT);
   return 1;
@@ -2778,9 +2819,10 @@ static int l_spritesheet_newGrid(lua_State *L) {
   int frame_w = lb_checkint(L, 4);
   int frame_h = lb_checkint(L, 5);
   
-  lua_spritesheet_t *ss = (lua_spritesheet_t *)lua_newuserdata(L, sizeof(lua_spritesheet_t));
+  lua_spritesheet_t *ss = (lua_spritesheet_t *)lua_newuserdatauv(L, sizeof(lua_spritesheet_t), 1);
   ss->image = img;
   ss->frame_count = 0;
+  anchor_set(L, -1, SPRITESHEET_UV_IMAGE, 1);
   
   int x = 0, y = 0;
   for (int r = 0; r < rows && ss->frame_count < MAX_FRAMES; r++) {
@@ -2843,7 +2885,7 @@ static int l_spritesheet_getFrame(lua_State *L) {
 static int l_spritesheet_getImage(lua_State *L) {
   lua_spritesheet_t *ss = check_spritesheet(L, 1);
   if (!ss->image) return 0;
-  lua_pushlightuserdata(L, ss->image);
+  lua_getiuservalue(L, 1, SPRITESHEET_UV_IMAGE);
   return 1;
 }
 
@@ -2889,8 +2931,9 @@ static int l_tilemap_new(lua_State *L) {
 
   if (tw <= 0 || th <= 0) return luaL_error(L, "tile size must be positive");
 
-  lua_tilemap_t *tm = (lua_tilemap_t *)lua_newuserdata(L, sizeof(lua_tilemap_t));
+  lua_tilemap_t *tm = (lua_tilemap_t *)lua_newuserdatauv(L, sizeof(lua_tilemap_t), 1);
   tm->tileset = img;
+  anchor_set(L, -1, TILEMAP_UV_TILESET, 1);
   tm->tile_w = tw;
   tm->tile_h = th;
   tm->tiles_per_row = img->w / tw;
@@ -3009,10 +3052,12 @@ static int l_sprite_setTilemap(lua_State *L) {
   lua_sprite_t *s = check_sprite(L, 1);
   if (lua_isnil(L, 2)) {
     s->tilemap = NULL;
+    anchor_set(L, 1, SPRITE_UV_TILEMAP, 0);
     return 0;
   }
   lua_tilemap_t *tm = check_tilemap(L, 2);
   s->tilemap = tm;
+  anchor_set(L, 1, SPRITE_UV_TILEMAP, 2);
   s->width = tm->map_w * tm->tile_w;
   s->height = tm->map_h * tm->tile_h;
   return 0;
@@ -3046,8 +3091,7 @@ static int l_sprite_addWallSprites(lua_State *L) {
 
       if (is_wall && s_sprite_count < MAX_SPRITES) {
         // Create an invisible collision sprite at this tile position
-        lua_sprite_t *ws = (lua_sprite_t *)lua_newuserdata(L, sizeof(lua_sprite_t));
-        memset(ws, 0, sizeof(lua_sprite_t));
+        lua_sprite_t *ws = new_sprite_ud(L);
         ws->x = col * tm->tile_w + x_off;
         ws->y = row * tm->tile_h + y_off;
         ws->width = tm->tile_w;
@@ -3100,10 +3144,12 @@ static int l_sprite_spriteWithText(lua_State *L) {
   img->transparent_color = 0;
   luaL_setmetatable(L, GRAPHICS_IMAGE_MT);
 
+  int img_idx = lua_gettop(L);
+
   // Create sprite with this image
-  lua_sprite_t *s = (lua_sprite_t *)lua_newuserdata(L, sizeof(lua_sprite_t));
-  memset(s, 0, sizeof(lua_sprite_t));
+  lua_sprite_t *s = new_sprite_ud(L);
   s->image = img;
+  anchor_set(L, -1, SPRITE_UV_IMAGE, img_idx);
   s->width = max_w;
   s->height = max_h;
   s->scale = 1.0f;
@@ -3113,7 +3159,7 @@ static int l_sprite_spriteWithText(lua_State *L) {
   s->opaque = true;
   s->redraws_on_image_change = true;
   luaL_setmetatable(L, GRAPHICS_SPRITE_MT);
-  return 1;  // return the sprite (image is on stack but sprite is on top)
+  return 1;  // the sprite (it anchors the image below it)
 }
 
 // Forward declarations for text rendering functions (defined in font section)
@@ -3163,6 +3209,32 @@ static lua_animation_loop_t *check_animation_loop(lua_State *L, int idx) {
   return (lua_animation_loop_t *)luaL_checkudata(L, idx, GRAPHICS_ANIMATION_LOOP_MT);
 }
 
+// User value 1 of a loop: a private table {[i] = image} holding the images
+// behind frames[i-1] (a copy, so the caller may reuse or clear its table).
+#define LOOP_UV_FRAMES 1
+
+// Take loop frames from the table at tbl_idx (anything but an image is an
+// empty frame, never cast) and anchor them in the loop at loop_idx.
+static void loop_set_frames(lua_State *L, lua_animation_loop_t *loop,
+                            int loop_idx, int tbl_idx) {
+  loop_idx = lua_absindex(L, loop_idx);
+  tbl_idx = lua_absindex(L, tbl_idx);
+  int n = (int)lua_rawlen(L, tbl_idx);
+  if (n > MAX_ANIMATION_LOOP_FRAMES) n = MAX_ANIMATION_LOOP_FRAMES;
+  lua_createtable(L, n, 0);
+  for (int i = 0; i < n; i++) {
+    lua_rawgeti(L, tbl_idx, i + 1);
+    loop->frames[i] = (lua_image_t *)luaL_testudata(L, -1, GRAPHICS_IMAGE_MT);
+    if (loop->frames[i])
+      lua_rawseti(L, -2, i + 1);
+    else
+      lua_pop(L, 1);
+  }
+  lua_setiuservalue(L, loop_idx, LOOP_UV_FRAMES);
+  loop->frame_count = n;
+  loop->valid = (n > 0);
+}
+
 static int l_animation_loop_gc(lua_State *L) {
   lua_animation_loop_t *loop = check_animation_loop(L, 1);
   loop->frame_count = 0;
@@ -3178,7 +3250,7 @@ static int l_animation_loop_new(lua_State *L) {
   // was created with zero frames and simply never drew.
   int top = lua_gettop(L);
 
-  lua_animation_loop_t *loop = (lua_animation_loop_t *)lua_newuserdata(L, sizeof(lua_animation_loop_t));
+  lua_animation_loop_t *loop = (lua_animation_loop_t *)lua_newuserdatauv(L, sizeof(lua_animation_loop_t), 1);
   loop->frame_count = 0;
   loop->current_frame = 0;
   loop->interval_ms = 100;
@@ -3192,21 +3264,8 @@ static int l_animation_loop_new(lua_State *L) {
     }
   }
 
-  if (top >= 2 && lua_istable(L, 2)) {
-    lua_pushvalue(L, 2);
-    loop->frame_count = (int)lua_rawlen(L, -1);
-    if (loop->frame_count > MAX_ANIMATION_LOOP_FRAMES) {
-      loop->frame_count = MAX_ANIMATION_LOOP_FRAMES;
-    }
-    for (int i = 0; i < loop->frame_count; i++) {
-      lua_rawgeti(L, -1, i + 1);
-      // Anything but an image is an empty frame (never cast).
-      loop->frames[i] = (lua_image_t *)luaL_testudata(L, -1, GRAPHICS_IMAGE_MT);
-      lua_pop(L, 1);
-    }
-    lua_pop(L, 1);
-    loop->valid = (loop->frame_count > 0);
-  }
+  if (top >= 2 && lua_istable(L, 2))
+    loop_set_frames(L, loop, -1, 2);
 
   if (top >= 3) {
     loop->looping = lua_toboolean(L, 3);
@@ -3256,7 +3315,8 @@ static int l_animation_loop_image(lua_State *L) {
   lua_animation_loop_t *loop = check_animation_loop(L, 1);
   if (!loop->valid || !loop->frames[loop->current_frame])
     return 0;
-  lua_pushlightuserdata(L, loop->frames[loop->current_frame]);
+  lua_getiuservalue(L, 1, LOOP_UV_FRAMES);
+  lua_rawgeti(L, -1, loop->current_frame + 1);  // the image object itself
   return 1;
 }
 
@@ -3278,19 +3338,12 @@ static int l_animation_loop_setImageTable(lua_State *L) {
   loop->current_frame = 0;
   loop->valid = false;
 
-  if (!lua_istable(L, 2))
+  if (!lua_istable(L, 2)) {
+    anchor_set(L, 1, LOOP_UV_FRAMES, 0);
     return 0;
+  }
 
-  loop->frame_count = (int)lua_rawlen(L, 2);
-  if (loop->frame_count > MAX_ANIMATION_LOOP_FRAMES) {
-    loop->frame_count = MAX_ANIMATION_LOOP_FRAMES;
-  }
-  for (int i = 0; i < loop->frame_count; i++) {
-    lua_rawgeti(L, 2, i + 1);
-    loop->frames[i] = (lua_image_t *)luaL_testudata(L, -1, GRAPHICS_IMAGE_MT);
-    lua_pop(L, 1);
-  }
-  loop->valid = (loop->frame_count > 0);
+  loop_set_frames(L, loop, 1, 2);
   loop->last_update_ms = to_ms_since_boot(get_absolute_time());
   return 0;
 }
