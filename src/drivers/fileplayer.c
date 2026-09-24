@@ -1,32 +1,38 @@
 #include "fileplayer.h"
 #include "audio.h"
 #include "sdcard.h"
-#include "pico/stdlib.h"
+#include "pico/mutex.h"
 #include "umm_malloc.h"
 #include "wav.h"
 
+#include <stdatomic.h>
 #include <string.h>
 #include <stdio.h>
 #include <stdlib.h>
 
 #define WAV_BUFFER_SIZE FILEPLAYER_BUFFER_SIZE
+// Most bytes one update reads (~23 ms of 44.1 kHz stereo).
+#define FILEPLAYER_READ_MAX 4096u
+// Below this a read is not worth an SD transaction (unless it finishes the
+// data chunk): wait for the ring to drain further.
+#define FILEPLAYER_READ_MIN 512u
+
+/* Locking. Core 1 streams the active player in fileplayer_update(); Core 0
+ * loads, plays, seeks, stops and frees players. s_lock guards everything
+ * update reads: the players' files and data-chunk fields, their state and
+ * position, and s_active_player. Core 0 takes it blocking (held for field
+ * updates only: files are opened and closed outside it); Core 1 only ever
+ * try-locks it and skips the tick when Core 0 holds it, so Core 1 never
+ * waits on Core 0. Core 1's SD reads are try-reads too (sdcard_try_fread_at),
+ * so Core 1 cannot deadlock with a Core 0 that holds the SD card and then
+ * calls in here. Finish/loop callbacks run after the lock is released. */
+static mutex_t s_lock;
+static atomic_bool s_initialized;
 
 static fileplayer_t s_players[FILEPLAYER_MAX_INSTANCES];
 static fileplayer_t *s_active_player = NULL;
-static uint32_t s_sample_rate = 44100;
-static uint8_t s_volume_l = 100;
-static uint8_t s_volume_r = 100;
-static bool s_initialized = false;
-static sdfile_t s_current_file = NULL;
 static uint8_t *s_wav_buffer = NULL;
 static volatile bool s_underflow = false;
-
-// Where the current WAV's sample data lives (set by fileplayer_load):
-// playback seeks to s_data_offset, reads whole frames of s_block_align bytes
-// and stops after s_data_size bytes (trailing chunks are not audio).
-static uint32_t s_data_offset = 44;
-static uint32_t s_data_size = 0;
-static uint16_t s_block_align = 4;
 
 // Parse the header window at the start of f (RIFF chunk walk in wav.c).
 // The window buffer comes from PSRAM, not the 4 KB main stack.
@@ -82,21 +88,46 @@ static fileplayer_type_t detect_file_type(sdfile_t f) {
     return FILEPLAYER_TYPE_UNKNOWN;
 }
 
+static bool any_playing_locked(void) {
+    for (int i = 0; i < FILEPLAYER_MAX_INSTANCES; i++)
+        if (s_players[i].in_use && s_players[i].state == FILEPLAYER_STATE_PLAYING)
+            return true;
+    return false;
+}
+
+// Stops player; returns true when it had the stream and nothing else plays
+// (the caller stops the stream once the lock is released).
+static bool stop_locked(fileplayer_t *player) {
+    bool had_stream = player->state == FILEPLAYER_STATE_PLAYING ||
+                      s_active_player == player;
+    player->state = FILEPLAYER_STATE_STOPPED;
+    player->position = 0;
+    if (s_active_player == player)
+        s_active_player = NULL;
+    return had_stream && !any_playing_locked();
+}
+
 void fileplayer_reset(void) {
-    if (!s_initialized) return;
-    if (s_active_player && s_active_player->state == FILEPLAYER_STATE_PLAYING)
-        audio_stop_stream();
-    if (s_current_file) {
-        sdcard_fclose(s_current_file);
-        s_current_file = NULL;
-    }
+    if (!atomic_load(&s_initialized)) return;
+    sdfile_t files[FILEPLAYER_MAX_INSTANCES];
+    mutex_enter_blocking(&s_lock);
+    bool stream = s_active_player &&
+                  s_active_player->state == FILEPLAYER_STATE_PLAYING;
+    for (int i = 0; i < FILEPLAYER_MAX_INSTANCES; i++)
+        files[i] = s_players[i].file;
     memset(s_players, 0, sizeof(s_players));
     s_active_player = NULL;
     s_underflow = false;
+    mutex_exit(&s_lock);
+    if (stream)
+        audio_stop_stream();
+    for (int i = 0; i < FILEPLAYER_MAX_INSTANCES; i++)
+        if (files[i])
+            sdcard_fclose(files[i]);
 }
 
 void fileplayer_init(void) {
-    if (s_initialized) return;
+    if (atomic_load(&s_initialized)) return;
 
     printf("[FILEPLAYER] Allocating WAV buffer (%d bytes)...\n", WAV_BUFFER_SIZE);
     s_wav_buffer = umm_malloc(WAV_BUFFER_SIZE);
@@ -104,149 +135,164 @@ void fileplayer_init(void) {
     if (!s_wav_buffer) return;
 
     memset(s_players, 0, sizeof(s_players));
-
-    s_initialized = true;
+    mutex_init(&s_lock);
+    // Published last: Core 1's update checks it before touching the lock.
+    atomic_store(&s_initialized, true);
 }
 
 fileplayer_t *fileplayer_create(void) {
+    fileplayer_init();  // native apps reach here without the Lua bridge
+    if (!atomic_load(&s_initialized)) return NULL;
+    fileplayer_t *found = NULL;
+    mutex_enter_blocking(&s_lock);
     for (int i = 0; i < FILEPLAYER_MAX_INSTANCES; i++) {
-        if (s_players[i].state == FILEPLAYER_STATE_IDLE) {
-            memset(&s_players[i], 0, sizeof(fileplayer_t));
-            s_players[i].volume = 100;
-            s_players[i].channels = 2;
-            s_players[i].rate = 1.0f;
-            return &s_players[i];
+        if (!s_players[i].in_use) {
+            found = &s_players[i];
+            memset(found, 0, sizeof(*found));
+            found->in_use = true;
+            found->volume = 100;
+            found->volume_r = 100;
+            found->channels = 2;
+            found->rate = 1.0f;
+            found->block_align = 4;
+            found->sample_rate = 44100;
+            break;
         }
     }
-    return NULL;
+    mutex_exit(&s_lock);
+    return found;
 }
 
 void fileplayer_destroy(fileplayer_t *player) {
-    if (player) {
-        fileplayer_stop(player);
-        memset(player, 0, sizeof(fileplayer_t));
-    }
+    if (!player || !atomic_load(&s_initialized)) return;
+    mutex_enter_blocking(&s_lock);
+    bool stop_stream = stop_locked(player);
+    sdfile_t file = player->file;
+    memset(player, 0, sizeof(fileplayer_t));  // in_use = false: slot free
+    mutex_exit(&s_lock);
+    if (stop_stream)
+        audio_stop_stream();
+    if (file)
+        sdcard_fclose(file);
 }
 
 bool fileplayer_load(fileplayer_t *player, const char *path) {
-    if (!player || !path) return false;
+    if (!player || !path || !atomic_load(&s_initialized)) return false;
 
-    if (s_current_file) {
-        sdcard_fclose(s_current_file);
-        s_current_file = NULL;
-    }
-
-    strncpy(player->path, path, sizeof(player->path) - 1);
-
-    s_current_file = sdcard_fopen(path, "rb");
-    if (!s_current_file) {
+    // Open and parse outside the lock (SD work can take milliseconds; Core
+    // 1 keeps streaming another player meanwhile).
+    sdfile_t f = sdcard_fopen(path, "rb");
+    if (!f) {
         printf("fileplayer: failed to open %s\n", path);
         return false;
     }
 
-    fileplayer_type_t type = detect_file_type(s_current_file);
-    player->type = type;
-
-    if (type == FILEPLAYER_TYPE_MP3) {
-        sdcard_fclose(s_current_file);
-        s_current_file = NULL;
-        printf("fileplayer: MP3 file detected, use sound.mp3player() instead\n");
-        return false;
-    }
-
-    if (type != FILEPLAYER_TYPE_WAV) {
-        sdcard_fclose(s_current_file);
-        s_current_file = NULL;
-        printf("fileplayer: unknown file format\n");
-        return false;
-    }
-
+    fileplayer_type_t type = detect_file_type(f);
     wav_info_t info;
-    if (!parse_wav_header(s_current_file, sdcard_fsize_handle(s_current_file),
-                          &info)) {
-        sdcard_fclose(s_current_file);
-        s_current_file = NULL;
+    bool ok = false;
+    if (type == FILEPLAYER_TYPE_MP3)
+        printf("fileplayer: MP3 file detected, use sound.mp3player() instead\n");
+    else if (type != FILEPLAYER_TYPE_WAV)
+        printf("fileplayer: unknown file format\n");
+    else if (!parse_wav_header(f, sdcard_fsize_handle(f), &info))
         printf("fileplayer: failed to parse WAV\n");
+    else
+        ok = true;
+
+    // Swap the new file in (or none, on failure: a failed load leaves the
+    // player empty, as before) and stop this player.
+    mutex_enter_blocking(&s_lock);
+    bool stop_stream = stop_locked(player);
+    sdfile_t old = player->file;
+    player->file = ok ? f : NULL;
+    player->type = type;
+    strncpy(player->path, path, sizeof(player->path) - 1);
+    player->path[sizeof(player->path) - 1] = '\0';
+    if (ok) {
+        player->sample_rate = info.sample_rate;
+        player->data_offset = info.data_offset;
+        player->data_size = info.data_size;
+        player->block_align = info.block_align;
+        player->channels = (uint8_t)info.channels;
+        player->length = info.data_size / info.block_align;
+    } else {
+        player->data_size = 0;
+        player->length = 0;
+    }
+    player->position = 0;
+    mutex_exit(&s_lock);
+
+    if (stop_stream)
+        audio_stop_stream();
+    if (old)
+        sdcard_fclose(old);
+    if (!ok) {
+        sdcard_fclose(f);
         return false;
     }
-    uint32_t sample_rate = info.sample_rate;
-    uint16_t wav_channels = info.channels, bits = info.bits_per_sample;
-
-    s_sample_rate = sample_rate;
-    s_data_offset = info.data_offset;
-    s_data_size = info.data_size;
-    s_block_align = info.block_align;
-    player->channels = wav_channels;
-    player->length = info.data_size / info.block_align;
-    player->position = 0;
 
     printf("fileplayer: loaded %s (%lu Hz, %u bit, %u ch, %lu samples)\n",
-           path, sample_rate, bits, wav_channels, player->length);
-
+           path, (unsigned long)info.sample_rate, info.bits_per_sample,
+           info.channels, (unsigned long)player->length);
     return true;
 }
 
 bool fileplayer_play(fileplayer_t *player, uint8_t repeat_count) {
     (void)repeat_count;
-    if (!player || !s_current_file) return false;
+    if (!player || !atomic_load(&s_initialized)) return false;
 
+    mutex_enter_blocking(&s_lock);
+    if (!player->file) {
+        mutex_exit(&s_lock);
+        return false;
+    }
+    // One stream: starting this player stops whichever other one was on it.
+    if (s_active_player && s_active_player != player)
+        s_active_player->state = FILEPLAYER_STATE_STOPPED;
     player->state = FILEPLAYER_STATE_PLAYING;
+    player->position = 0;  // update() reads at data_offset + position
     s_active_player = player;
-
-    // Use the PCM streaming API — its ISR runs on Core 1 via s_core1_alarm_pool,
-    // eliminating the 44.1kHz timer ISR that used to preempt Core 0.
-    audio_start_stream(s_sample_rate);
-
-    sdcard_fseek(s_current_file, s_data_offset);
-    player->position = 0;
-
+    uint32_t rate = player->sample_rate;
+    // Start the stream (clears the ring) before Core 1 can push into it.
+    audio_start_stream(rate);
+    mutex_exit(&s_lock);
     return true;
 }
 
 void fileplayer_stop(fileplayer_t *player) {
-    if (!player) return;
-
-    player->state = FILEPLAYER_STATE_STOPPED;
-    player->position = 0;
-
-    if (s_active_player == player) {
-        s_active_player = NULL;
-    }
-
-    bool any_playing = false;
-    for (int i = 0; i < FILEPLAYER_MAX_INSTANCES; i++) {
-        if (s_players[i].state == FILEPLAYER_STATE_PLAYING) {
-            any_playing = true;
-            break;
-        }
-    }
-
-    if (!any_playing)
+    if (!player || !atomic_load(&s_initialized)) return;
+    // The file stays loaded: play() starts it again from the beginning.
+    mutex_enter_blocking(&s_lock);
+    bool stop_stream = stop_locked(player);
+    mutex_exit(&s_lock);
+    if (stop_stream)
         audio_stop_stream();
-
-    if (s_current_file) {
-        sdcard_fclose(s_current_file);
-        s_current_file = NULL;
-    }
 }
 
 void fileplayer_pause(fileplayer_t *player) {
-    if (!player || player->state != FILEPLAYER_STATE_PLAYING) return;
-    player->state = FILEPLAYER_STATE_PAUSED;
+    if (!player || !atomic_load(&s_initialized)) return;
+    mutex_enter_blocking(&s_lock);
+    if (player->state == FILEPLAYER_STATE_PLAYING)
+        player->state = FILEPLAYER_STATE_PAUSED;
+    mutex_exit(&s_lock);
 }
 
 void fileplayer_resume(fileplayer_t *player) {
-    if (!player || player->state != FILEPLAYER_STATE_PAUSED) return;
-    player->state = FILEPLAYER_STATE_PLAYING;
+    if (!player || !atomic_load(&s_initialized)) return;
+    mutex_enter_blocking(&s_lock);
+    if (player->state == FILEPLAYER_STATE_PAUSED && s_active_player == player)
+        player->state = FILEPLAYER_STATE_PLAYING;
+    mutex_exit(&s_lock);
 }
 
 bool fileplayer_is_playing(const fileplayer_t *player) {
     return player && player->state == FILEPLAYER_STATE_PLAYING;
 }
 
+// Frames of the data chunk consumed so far.
 uint32_t fileplayer_get_position(const fileplayer_t *player) {
-    if (!player) return 0;
-    return player->position / 4;
+    if (!player || player->block_align == 0) return 0;
+    return player->position / player->block_align;
 }
 
 uint32_t fileplayer_get_length(const fileplayer_t *player) {
@@ -261,14 +307,13 @@ void fileplayer_set_volume(fileplayer_t *player, uint8_t left, uint8_t right) {
     if (left > 100) left = 100;
     if (right > 100) right = 100;
     player->volume = left;
-    s_volume_l = left;
-    s_volume_r = right > 0 ? right : left;
+    player->volume_r = right > 0 ? right : left;
 }
 
 void fileplayer_get_volume(const fileplayer_t *player, uint8_t *left, uint8_t *right) {
     if (!player) return;
-    *left = player->volume;
-    *right = s_volume_r;
+    if (left) *left = player->volume;
+    if (right) *right = player->volume_r;
 }
 
 void fileplayer_set_loop_range(fileplayer_t *player, uint32_t start, uint32_t end) {
@@ -279,30 +324,37 @@ void fileplayer_set_loop_range(fileplayer_t *player, uint32_t start, uint32_t en
 }
 
 void fileplayer_set_finish_callback(fileplayer_t *player, int (*cb)(void *), void *arg) {
-    if (!player) return;
+    if (!player || !atomic_load(&s_initialized)) return;
+    mutex_enter_blocking(&s_lock);
     player->finish_callback = cb;
     player->finish_callback_arg = arg;
+    mutex_exit(&s_lock);
 }
 
 void fileplayer_set_loop_callback(fileplayer_t *player, int (*cb)(void *), void *arg) {
-    if (!player) return;
+    if (!player || !atomic_load(&s_initialized)) return;
+    mutex_enter_blocking(&s_lock);
     player->loop_callback = cb;
     player->loop_callback_arg = arg;
+    mutex_exit(&s_lock);
 }
 
 void fileplayer_set_offset(fileplayer_t *player, uint32_t seconds) {
-    if (!player || !s_current_file) return;
-    // Whole frames from the start of the data chunk.
-    uint64_t offset = (uint64_t)seconds * s_sample_rate * s_block_align;
-    if (offset > s_data_size)
-        offset = s_data_size;
-    sdcard_fseek(s_current_file, s_data_offset + (uint32_t)offset);
-    player->position = (uint32_t)offset;
+    if (!player || !atomic_load(&s_initialized)) return;
+    mutex_enter_blocking(&s_lock);
+    if (player->file) {
+        // Whole frames from the start of the data chunk.
+        uint64_t offset = (uint64_t)seconds * player->sample_rate * player->block_align;
+        if (offset > player->data_size)
+            offset = player->data_size;
+        player->position = (uint32_t)offset;
+    }
+    mutex_exit(&s_lock);
 }
 
 uint32_t fileplayer_get_offset(const fileplayer_t *player) {
-    if (!player) return 0;
-    return player->position / s_block_align / s_sample_rate;
+    if (!player || player->block_align == 0 || player->sample_rate == 0) return 0;
+    return player->position / player->block_align / player->sample_rate;
 }
 
 void fileplayer_set_stop_on_underrun(fileplayer_t *player, bool flag) {
@@ -321,122 +373,116 @@ float fileplayer_get_rate(const fileplayer_t *player) {
     return player ? player->rate : 1.0f;
 }
 
-// Called from Core 1 every 5ms. Reads WAV data from SD, converts to
-// stereo int16_t, and pushes into the PCM stream ring buffer.
-void fileplayer_update(void) {
-    if (!s_initialized) return;
-    if (!s_current_file || !s_active_player ||
-        s_active_player->state != FILEPLAYER_STATE_PLAYING)
-        return;
+/* Flow control. The stream ring holds frames at the content rate (audio.c's
+ * refill ISR resamples them to AUDIO_OUT_RATE); a player at speed `rate`
+ * turns `rate` input frames into one ring frame (nearest neighbour), so
+ * with F ring frames free it may read floor(F * rate) input frames, i.e.
+ * floor(F * rate) * block_align bytes. Reading more (as the old code did,
+ * 4 KB every tick at SD speed) only made audio_push_samples drop what did
+ * not fit while position raced to EOF: a long WAV "finished" in seconds. */
+static uint32_t bytes_that_fit(const fileplayer_t *p) {
+    float rate = p->rate < 0.1f ? 0.1f : p->rate;
+    uint32_t in_frames = (uint32_t)((float)audio_ring_free() * rate);
+    uint32_t remaining = p->position < p->data_size ? p->data_size - p->position : 0;
+    uint32_t n = FILEPLAYER_READ_MAX;
+    if (n / p->block_align > in_frames) n = in_frames * p->block_align;
+    if (n > remaining) n = remaining;
+    return n - n % p->block_align;  // whole frames: an odd step swaps L/R
+}
+
+// Convert br bytes of 16-bit PCM in s_wav_buffer to stereo and push them.
+static void push_pcm(const fileplayer_t *p, uint32_t br) {
+    const int16_t *pcm = (const int16_t *)s_wav_buffer;
+    uint32_t in_frames = br / p->block_align;
+    float rate = p->rate < 0.1f ? 0.1f : p->rate;
+    uint32_t out_frames = (uint32_t)((float)in_frames / rate);
+    if (out_frames == 0) out_frames = 1;
+    bool mono = p->channels == 1;
+    int32_t vol_l = p->volume, vol_r = p->volume_r;
+    int16_t stereo_buf[512];  // 256 stereo frames at a time
+    uint32_t pos = 0;
+    while (pos < out_frames) {
+        uint32_t chunk = out_frames - pos;
+        if (chunk > 256) chunk = 256;
+        for (uint32_t i = 0; i < chunk; i++) {
+            uint32_t src = (uint32_t)((float)(pos + i) * rate);
+            if (src >= in_frames) src = in_frames - 1;
+            int32_t l = mono ? pcm[src] : pcm[src * 2];
+            int32_t r = mono ? pcm[src] : pcm[src * 2 + 1];
+            // 0-100 volumes never grow a sample: no clipping needed.
+            stereo_buf[i * 2] = (int16_t)((l * vol_l) / 100);
+            stereo_buf[i * 2 + 1] = (int16_t)((r * (mono ? vol_l : vol_r)) / 100);
+        }
+        audio_push_samples(stereo_buf, (int)chunk);
+        pos += chunk;
+    }
+}
+
+typedef struct {
+    int (*fn)(void *);
+    void *arg;
+} fp_callback_t;
+
+// One streaming step for the active player p (s_lock held).
+static fp_callback_t update_locked(fileplayer_t *p) {
+    fp_callback_t cb = {NULL, NULL};
 
     // Stop on underrun if configured
-    if (s_underflow && s_active_player->stop_on_underrun) {
-        fileplayer_stop(s_active_player);
-        return;
+    if (s_underflow && p->stop_on_underrun) {
+        if (stop_locked(p))
+            audio_stop_stream();
+        return cb;
     }
 
-    /* Pace production to the DMA drain rate. The stream ring is small
-     * (AUDIO_RING_SIZE stereo frames); reading at SD speed (~18x realtime)
-     * just makes audio_push_samples drop almost everything while position
-     * races to EOF — the track "finishes" inaudibly in a fraction of a
-     * second. Only read what the ring can actually accept. */
-    float space_rate = s_active_player->rate;
-    if (space_rate < 0.1f) space_rate = 0.1f;
-    // Bytes of sample data left in the data chunk (trailing chunks such as
-    // LIST are not audio).
-    uint32_t pos = s_active_player->position;
-    uint32_t remaining = pos < s_data_size ? s_data_size - pos : 0;
-    size_t to_read = 4096;
-    size_t max_by_space = (size_t)(audio_ring_free() * 2 * space_rate);
-    if (to_read > max_by_space) to_read = max_by_space;
-    if (to_read > remaining) to_read = remaining;
-    // Whole frames only: a 2-byte step on stereo data swaps L/R from then on.
-    to_read -= to_read % s_block_align;
-    if (remaining >= s_block_align && (to_read == 0 ||
-                                       (to_read < 512 && to_read < remaining)))
-        return;  // ring nearly full — wait for the DMA to drain
+    uint32_t remaining = p->position < p->data_size ? p->data_size - p->position : 0;
+    uint32_t to_read = bytes_that_fit(p);
+    if (remaining >= p->block_align &&
+        (to_read == 0 || (to_read < FILEPLAYER_READ_MIN && to_read < remaining)))
+        return cb;  // ring (nearly) full: wait for the DMA to drain it
 
-    // Read a chunk of WAV data (to_read == 0 at the end of the data chunk
-    // takes the end-of-file path below). Non-blocking: skip this tick if
-    // Core 0 owns the SD card.
+    // Read at our own offset (to_read == 0 at the end of the data chunk
+    // takes the end-of-data path below). Skip the tick if Core 0 owns the
+    // SD card.
     int n = to_read > 0
-                ? sdcard_try_fread(s_current_file, s_wav_buffer, (int)to_read) : 0;
+                ? sdcard_try_fread_at(p->file, p->data_offset + p->position,
+                                      s_wav_buffer, (int)to_read)
+                : 0;
     if (n == SDCARD_BUSY)
-        return;
-    bool res_ok = n >= 0;
+        return cb;
     uint32_t br = n > 0 ? (uint32_t)n : 0;
-    br -= br % s_block_align;  // a short read at EOF: whole frames only
+    br -= br % p->block_align;  // a short read at EOF: whole frames only
 
-    if (res_ok && br > 0) {
-        // WAV data is 16-bit signed PCM. Convert to stereo int16_t pairs
-        // and push into the PCM stream ring buffer.
-        // Rate resampling: nearest-neighbor. For rate=2.0 we produce half
-        // the output frames (pitch up); for rate=0.5 we produce double.
-        int16_t *pcm = (int16_t *)s_wav_buffer;
-        uint32_t num_samples = br / 2;  // 16-bit samples
-        float rate = s_active_player->rate;
-        if (rate < 0.1f) rate = 0.1f;
-
-        if (s_active_player->channels == 1) {
-            uint32_t in_frames = num_samples;
-            uint32_t out_frames = (uint32_t)(in_frames / rate);
-            if (out_frames == 0) out_frames = 1;
-            int16_t stereo_buf[512];  // 256 stereo frames at a time
-            uint32_t pos = 0;
-            while (pos < out_frames) {
-                uint32_t chunk = out_frames - pos;
-                if (chunk > 256) chunk = 256;
-                for (uint32_t i = 0; i < chunk; i++) {
-                    uint32_t src = (uint32_t)((pos + i) * rate);
-                    if (src >= in_frames) src = in_frames - 1;
-                    int32_t s = ((int32_t)pcm[src] * s_volume_l) / 100;
-                    if (s > 32767) s = 32767;
-                    if (s < -32768) s = -32768;
-                    stereo_buf[i * 2] = (int16_t)s;
-                    stereo_buf[i * 2 + 1] = (int16_t)s;
-                }
-                audio_push_samples(stereo_buf, chunk);
-                pos += chunk;
-            }
-            s_active_player->position += br;
-        } else {
-            uint32_t in_frames = num_samples / 2;
-            uint32_t out_frames = (uint32_t)(in_frames / rate);
-            if (out_frames == 0) out_frames = 1;
-            int16_t stereo_buf[512];  // 256 stereo frames at a time
-            uint32_t pos = 0;
-            while (pos < out_frames) {
-                uint32_t chunk = out_frames - pos;
-                if (chunk > 256) chunk = 256;
-                for (uint32_t i = 0; i < chunk; i++) {
-                    uint32_t src = (uint32_t)((pos + i) * rate);
-                    if (src >= in_frames) src = in_frames - 1;
-                    int32_t l = ((int32_t)pcm[src * 2] * s_volume_l) / 100;
-                    int32_t r = ((int32_t)pcm[src * 2 + 1] * s_volume_r) / 100;
-                    if (l > 32767) l = 32767;
-                    if (l < -32768) l = -32768;
-                    if (r > 32767) r = 32767;
-                    if (r < -32768) r = -32768;
-                    stereo_buf[i * 2] = (int16_t)l;
-                    stereo_buf[i * 2 + 1] = (int16_t)r;
-                }
-                audio_push_samples(stereo_buf, chunk);
-                pos += chunk;
-            }
-            s_active_player->position += br;
-        }
+    if (br > 0) {
+        push_pcm(p, br);
+        p->position += br;
+    } else if (p->loop) {
+        p->position = 0;
+        cb.fn = p->loop_callback;
+        cb.arg = p->loop_callback_arg;
     } else {
-        if (s_active_player->loop) {
-            sdcard_fseek(s_current_file, s_data_offset);
-            s_active_player->position = 0;
-            if (s_active_player->loop_callback)
-                s_active_player->loop_callback(s_active_player->loop_callback_arg);
-        } else {
-            s_active_player->state = FILEPLAYER_STATE_STOPPED;
-            if (s_active_player->finish_callback)
-                s_active_player->finish_callback(s_active_player->finish_callback_arg);
-        }
+        // End of data (or a read error): finished. The stream keeps
+        // playing out what the ring still holds.
+        p->state = FILEPLAYER_STATE_STOPPED;
+        s_active_player = NULL;
+        cb.fn = p->finish_callback;
+        cb.arg = p->finish_callback_arg;
     }
+    return cb;
+}
+
+// Called from Core 1 every tick: tops the stream ring up from the active
+// player's file.
+void fileplayer_update(void) {
+    if (!atomic_load(&s_initialized)) return;
+    if (!mutex_try_enter(&s_lock, NULL))
+        return;  // Core 0 is changing a player: next tick
+    fp_callback_t cb = {NULL, NULL};
+    fileplayer_t *p = s_active_player;
+    if (p && p->file && p->state == FILEPLAYER_STATE_PLAYING)
+        cb = update_locked(p);
+    mutex_exit(&s_lock);
+    if (cb.fn)
+        cb.fn(cb.arg);
 }
 
 bool fileplayer_did_underrun(void) {

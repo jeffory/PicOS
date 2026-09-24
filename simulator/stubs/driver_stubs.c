@@ -696,9 +696,10 @@ sdfile_t sdcard_fopen(const char* path, const char* mode) { return hal_sdcard_op
 void sdcard_fclose(sdfile_t f) { hal_sdcard_close(f); }
 int sdcard_fread(sdfile_t f, void* buf, int len) { return (int)hal_sdcard_read(f, buf, (size_t)len); }
 // No cross-core SD mutex in the simulator: the try-read never finds it busy.
-int sdcard_try_fread(sdfile_t f, void* buf, int len) {
+int sdcard_try_fread_at(sdfile_t f, uint32_t offset, void* buf, int len) {
     if (!f) return -1;
-    return sdcard_fread(f, buf, len);
+    if (hal_sdcard_seek(f, (long)offset) != 0) return -1;
+    return len > 0 ? sdcard_fread(f, buf, len) : 0;
 }
 bool sdcard_fseek(sdfile_t f, uint32_t offset) {
     if (!f) return false;

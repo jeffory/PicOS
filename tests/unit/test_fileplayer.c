@@ -1,0 +1,232 @@
+// Host unit tests for src/drivers/fileplayer.c (the firmware WAV streamer;
+// since Task 14 the simulator runs this same file).
+//
+// Review rows (Audio/storage): Critical 1 "The WAV fileplayer f_reads 4 KB
+// on every tick and pushes it into a 4096-frame ring that silently drops
+// overflow" and High "Cross-core use-after-free: Core 0 closes and frees
+// s_current_file ... One s_current_file is shared by all fileplayer
+// instances".
+//
+// audio.c is replaced by a model of the stream ring: audio_push_samples()
+// counts what fits and what would have been dropped, drain() plays frames
+// out. The ring race test runs fileplayer_update() on a second thread (Core
+// 1) against load/play/stop on this one (Core 0); built with ASan, a use of
+// a closed file is a heap-use-after-free.
+#include "check.h"
+#include "fileplayer.h"
+#include "audio.h"
+#include "sdcard.h"
+#include "fakes/sdcard_fake.h"
+
+#include <pthread.h>
+#include <stdatomic.h>
+#include <stdlib.h>
+#include <string.h>
+
+// ── Stream ring model (audio.c) ─────────────────────────────────────────────
+#define RING_FRAMES 4096u
+static uint32_t s_ring_used;
+static uint64_t s_pushed;     // frames accepted into the ring
+static uint64_t s_dropped;    // frames offered with no room (audio lost)
+static int s_starts, s_stops;
+static uint32_t s_rate;
+static int16_t s_last_l;      // value of the most recent frame pushed
+
+void audio_start_stream(uint32_t sample_rate) { s_starts++; s_rate = sample_rate; s_ring_used = 0; }
+void audio_stop_stream(void) { s_stops++; }
+uint32_t audio_ring_free(void) { return RING_FRAMES - s_ring_used; }
+void audio_push_samples(const int16_t *samples, int count) {
+  for (int i = 0; i < count; i++) {
+    if (s_ring_used >= RING_FRAMES) { s_dropped++; continue; }
+    s_ring_used++;
+    s_pushed++;
+    s_last_l = samples[i * 2];
+  }
+}
+static void drain(uint32_t frames) {
+  s_ring_used = frames > s_ring_used ? 0 : s_ring_used - frames;
+}
+
+static void ring_reset(void) {
+  s_ring_used = 0; s_pushed = s_dropped = 0; s_starts = s_stops = 0;
+}
+
+// ── WAV fixtures ────────────────────────────────────────────────────────────
+static void le16(uint8_t *p, uint16_t v) { p[0] = v; p[1] = v >> 8; }
+static void le32(uint8_t *p, uint32_t v) { le16(p, v); le16(p + 2, v >> 16); }
+
+// A 16-bit PCM WAV of `frames` frames whose every sample is `value`.
+static void put_wav(const char *path, uint32_t frames, uint16_t channels,
+                    uint32_t rate, int16_t value) {
+  uint32_t data = frames * channels * 2;
+  uint8_t *buf = calloc(1, 44 + data);
+  memcpy(buf, "RIFF", 4); le32(buf + 4, 36 + data); memcpy(buf + 8, "WAVE", 4);
+  memcpy(buf + 12, "fmt ", 4); le32(buf + 16, 16); le16(buf + 20, 1);
+  le16(buf + 22, channels); le32(buf + 24, rate); le32(buf + 28, rate * channels * 2);
+  le16(buf + 32, channels * 2); le16(buf + 34, 16);
+  memcpy(buf + 36, "data", 4); le32(buf + 40, data);
+  for (uint32_t i = 0; i < frames * channels; i++) le16(buf + 44 + i * 2, (uint16_t)value);
+  sdfake_put(path, (const char *)buf, 44 + data);
+  free(buf);
+}
+
+static void setup(void) {
+  sdfake_reset();
+  ring_reset();
+  fileplayer_init();
+  fileplayer_reset();
+}
+
+// Tick Core 1 until the player stops, draining `per_tick` frames each tick
+// (the DMA's pace between polls). Returns the number of ticks.
+static int run(fileplayer_t *p, uint32_t per_tick, int max_ticks) {
+  int t = 0;
+  while (fileplayer_is_playing(p) && t < max_ticks) {
+    fileplayer_update();
+    drain(per_tick);
+    t++;
+  }
+  return t;
+}
+
+// Critical 1: the producer never offers the ring more than it can hold, so
+// nothing is dropped and every frame of the file is played.
+static void test_flow_control_plays_every_frame(void) {
+  setup();
+  put_wav("/a.wav", 22050, 2, 22050, 1000);   // 1 s stereo
+  fileplayer_t *p = fileplayer_create();
+  CHECK(fileplayer_load(p, "/a.wav"));
+  CHECK(fileplayer_play(p, 1));
+  // 44 frames per tick is ~2 ms of 22050 Hz content: far slower than SD.
+  int ticks = run(p, 44, 100000);
+  CHECK(!fileplayer_is_playing(p));
+  CHECK_EQ_INT(s_dropped, 0);
+  CHECK_EQ_INT(s_pushed, 22050);
+  // It took (at least) as many ticks as the audio needs to drain.
+  CHECK(ticks >= (22050 - (int)RING_FRAMES) / 44);
+  fileplayer_destroy(p);
+}
+
+static void test_mono_and_rate_flow_control(void) {
+  setup();
+  put_wav("/m.wav", 11025, 1, 11025, -500);
+  fileplayer_t *p = fileplayer_create();
+  CHECK(fileplayer_load(p, "/m.wav"));
+  fileplayer_set_rate(p, 0.5f);               // each input frame -> 2 out
+  CHECK(fileplayer_play(p, 1));
+  run(p, 100, 100000);
+  CHECK_EQ_INT(s_dropped, 0);
+  CHECK_EQ_INT(s_pushed, 22050);
+  fileplayer_destroy(p);
+}
+
+// A full ring: no SD read at all (the card stays free for Core 0).
+static void test_full_ring_reads_nothing(void) {
+  setup();
+  put_wav("/a.wav", 22050, 2, 22050, 1);
+  fileplayer_t *p = fileplayer_create();
+  CHECK(fileplayer_load(p, "/a.wav"));
+  CHECK(fileplayer_play(p, 1));
+  s_ring_used = RING_FRAMES;
+  int before = sdfake_try_reads();
+  for (int i = 0; i < 10; i++) fileplayer_update();
+  CHECK_EQ_INT(sdfake_try_reads(), before);
+  CHECK_EQ_INT(fileplayer_get_offset(p), 0);
+  CHECK(fileplayer_is_playing(p));
+  fileplayer_destroy(p);
+}
+
+// SD busy (Core 0 holds the card): the tick is skipped, nothing is lost.
+static void test_sd_busy_skips_the_tick(void) {
+  setup();
+  put_wav("/a.wav", 4410, 2, 22050, 7);
+  fileplayer_t *p = fileplayer_create();
+  CHECK(fileplayer_load(p, "/a.wav"));
+  CHECK(fileplayer_play(p, 1));
+  sdfake_set_busy(true);
+  for (int i = 0; i < 20; i++) fileplayer_update();
+  CHECK_EQ_INT(s_pushed, 0);
+  CHECK(fileplayer_is_playing(p));
+  sdfake_set_busy(false);
+  run(p, 256, 100000);
+  CHECK_EQ_INT(s_pushed, 4410);
+  CHECK_EQ_INT(s_dropped, 0);
+  fileplayer_destroy(p);
+}
+
+// High row: each fileplayer has its own file. Loading b must not close a's
+// file or give a b's data and length.
+static void test_players_keep_their_own_files(void) {
+  setup();
+  put_wav("/long.wav", 22050, 2, 22050, 1111);
+  put_wav("/short.wav", 2205, 2, 22050, 2222);
+  fileplayer_t *a = fileplayer_create(), *b = fileplayer_create();
+  CHECK(a && b && a != b);
+  CHECK(fileplayer_load(a, "/long.wav"));
+  CHECK(fileplayer_load(b, "/short.wav"));
+  CHECK_EQ_INT(fileplayer_get_length(a), 22050);
+  CHECK_EQ_INT(fileplayer_get_length(b), 2205);
+  CHECK(fileplayer_play(a, 1));
+  run(a, 256, 100000);
+  CHECK_EQ_INT(s_pushed, 22050);
+  CHECK_EQ_INT(s_last_l, 1111);
+  ring_reset();
+  CHECK(fileplayer_play(b, 1));
+  run(b, 256, 100000);
+  CHECK_EQ_INT(s_pushed, 2205);
+  CHECK_EQ_INT(s_last_l, 2222);
+  // Stopping one player leaves the other's file loaded: a can play again.
+  fileplayer_stop(b);
+  ring_reset();
+  CHECK(fileplayer_play(a, 1));
+  run(a, 256, 100000);
+  CHECK_EQ_INT(s_pushed, 22050);
+  fileplayer_destroy(a);
+  fileplayer_destroy(b);
+  CHECK_EQ_INT(sdfake_try_reads() > 0, 1);
+}
+
+// High row: Core 0 load/play/stop against Core 1's update. Before the
+// player lock, stop() closed (freed) the file while update() read it.
+static atomic_bool s_run_core1;
+static void *core1(void *arg) {
+  (void)arg;
+  while (atomic_load(&s_run_core1)) {
+    fileplayer_update();
+    drain(512);
+  }
+  return NULL;
+}
+
+static void test_cross_core_stop_is_safe(void) {
+  setup();
+  put_wav("/a.wav", 44100, 2, 44100, 5);
+  put_wav("/b.wav", 4410, 1, 22050, 6);
+  fileplayer_t *p = fileplayer_create(), *q = fileplayer_create();
+  atomic_store(&s_run_core1, true);
+  pthread_t t;
+  pthread_create(&t, NULL, core1, NULL);
+  for (int i = 0; i < 3000; i++) {
+    fileplayer_load(p, (i & 1) ? "/a.wav" : "/b.wav");
+    fileplayer_play(p, 1);
+    if (i % 3 == 0) fileplayer_load(q, "/b.wav");
+    fileplayer_stop(p);
+  }
+  atomic_store(&s_run_core1, false);
+  pthread_join(t, NULL);
+  fileplayer_destroy(p);
+  fileplayer_destroy(q);
+  CHECK(1);
+}
+
+int main(void) {
+  test_flow_control_plays_every_frame();
+  test_mono_and_rate_flow_control();
+  test_full_ring_reads_nothing();
+  test_sd_busy_skips_the_tick();
+  test_players_keep_their_own_files();
+  test_cross_core_stop_is_safe();
+  fileplayer_reset();
+  sdfake_reset();
+  return check_report("test_fileplayer");
+}

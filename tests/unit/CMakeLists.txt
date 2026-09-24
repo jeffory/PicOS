@@ -98,6 +98,12 @@ picos_unit_test(test_sound SOURCES ${SRC}/drivers/sound.c ${SRC}/drivers/wav.c
                 ${SD_FAKE} INCLUDES ${SD_INCLUDES})
 # The pico/critical_section.h stub leaves a parameter unused.
 target_compile_options(test_sound PRIVATE -Wno-unused-parameter)
+# The firmware WAV streamer (fileplayer.c, which the simulator also runs):
+# flow control against a model of the stream ring, per-player files, and
+# Core 0 stop vs Core 1 update on two threads.
+picos_unit_test(test_fileplayer SOURCES ${SRC}/drivers/fileplayer.c
+                ${SRC}/drivers/wav.c ${SD_FAKE} INCLUDES ${SD_INCLUDES})
+target_link_libraries(test_fileplayer PRIVATE pthread)
 
 # OTA image authentication (ECDSA P-256 + strict .sha256), against the same
 # mbedTLS the firmware links (host build, cmake/picos_host_mbedtls.cmake) and

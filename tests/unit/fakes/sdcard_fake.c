@@ -133,13 +133,15 @@ int sdcard_fread(sdfile_t fh, void *buf, int len) {
 void sdfake_set_busy(bool busy) { s_busy = busy; }
 int sdfake_try_reads(void) { return s_try_reads; }
 
-int sdcard_try_fread(sdfile_t fh, void *buf, int len) {
+int sdcard_try_fread_at(sdfile_t fh, uint32_t offset, void *buf, int len) {
     s_try_reads++;
     if (!fh)
         return -1;
     if (s_busy)
         return SDCARD_BUSY;
-    return sdcard_fread(fh, buf, len);
+    if (!sdcard_fseek(fh, offset))
+        return -1;
+    return len > 0 ? sdcard_fread(fh, buf, len) : 0;
 }
 
 int sdcard_fwrite(sdfile_t fh, const void *buf, int len) {

@@ -12,7 +12,7 @@ const char *sdfake_get(const char *path, size_t *len);
 bool        sdfake_dir_exists(const char *path);
 // Make the next sdcard_fwrite calls write at most `limit` bytes (-1 = off).
 void        sdfake_limit_writes(int limit);
-// While set, sdcard_try_fread reports SDCARD_BUSY (the other core holds
+// While set, sdcard_try_fread_at reports SDCARD_BUSY (the other core holds
 // the SD card) and counts the attempt.
 void        sdfake_set_busy(bool busy);
-int         sdfake_try_reads(void);   // sdcard_try_fread calls since reset
+int         sdfake_try_reads(void);   // sdcard_try_fread_at calls since reset

@@ -49,6 +49,8 @@ static struct mad_stream *s_mad_stream = NULL;
 static struct mad_frame  *s_mad_frame  = NULL;
 static struct mad_synth  *s_mad_synth  = NULL;
 static sdfile_t    s_file = NULL;
+static uint32_t    s_file_pos = 0;  // next byte of s_file to decode (Core 1
+                                    // reads at it: no blocking fseek there)
 static uint8_t     s_decode_buffer[MP3_DECODE_BUFFER_SIZE] __attribute__((aligned(4)));
 static int         s_bytes_in_buffer = 0;
 static int         s_buffer_pos = 0;
@@ -360,10 +362,12 @@ static bool refill_decode_buffer(void) {
             // SD mode: non-blocking read
             if (!s_file) goto pad;
             int to_read = (space > 4096) ? 4096 : space;
-            int br = sdcard_try_fread(s_file, s_decode_buffer + s_bytes_in_buffer, to_read);
-            if (br > 0)
+            int br = sdcard_try_fread_at(s_file, s_file_pos,
+                                         s_decode_buffer + s_bytes_in_buffer, to_read);
+            if (br > 0) {
                 s_bytes_in_buffer += br;
-            else
+                s_file_pos += (uint32_t)br;
+            } else
                 s_diag_sd_fail++;
         }
     }
@@ -414,7 +418,7 @@ static void decode_fill_ring(void) {
                         break;
                     }
                     if (s_player.loop) {
-                        sdcard_fseek(s_file, 0);
+                        s_file_pos = 0;
                         s_bytes_in_buffer = 0;
                         s_buffer_pos = 0;
                         refill_decode_buffer();
@@ -438,7 +442,7 @@ static void decode_fill_ring(void) {
                             break;
                         }
                         if (s_player.loop) {
-                            sdcard_fseek(s_file, 0);
+                            s_file_pos = 0;
                             s_bytes_in_buffer = 0;
                             s_buffer_pos = 0;
                             refill_decode_buffer();
@@ -674,6 +678,7 @@ bool mp3_player_load(mp3_player_t *player, const char *path) {
     }
     s_bytes_in_buffer = rd;
     s_buffer_pos = 0;
+    s_file_pos = (uint32_t)rd;
 
     s_ring_rd = s_ring_wr = 0;
 
