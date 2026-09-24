@@ -1,0 +1,241 @@
+"""The harness's own safety nets (audit R2, R3, R7, C7, §5.0 goldens).
+
+- a simulator that dies during a test fails that test, with the crash log
+- a sanitizer report on stderr is detected
+- a failing test gets the simulator's diagnostics attached
+- a skip that is not on skip_allowlist.txt fails the run
+- a failing @pytest.mark.flaky test is quarantined, not retried
+- a missing golden image fails unless --update-baselines
+- wait_for_exit recovers an app.exited notification the client never got
+- the Lua test kit reports PASS/FAIL/SKIP, survives identity tampering and
+  writes test_results.json
+
+The first four run an inner pytest session (pytester) that loads this suite's
+conftest.py, so they test the real hooks.
+"""
+
+import site
+import textwrap
+from pathlib import Path
+
+import numpy as np
+import pytest
+
+from helpers import E2E_DIR, compare_golden, run_lua_app, stage_lua_app
+
+pytest_plugins = ["pytester"]
+
+# Inner-session conftest: load the suite's conftest.py under another module
+# name and re-export its fixtures and hooks.
+INNER_CONFTEST = textwrap.dedent(f"""
+    import importlib.util, sys
+    sys.path.insert(0, {str(E2E_DIR)!r})
+    _spec = importlib.util.spec_from_file_location(
+        "picos_e2e_conftest", {str(E2E_DIR / "conftest.py")!r})
+    _mod = importlib.util.module_from_spec(_spec)
+    _spec.loader.exec_module(_mod)
+    globals().update({{k: v for k, v in vars(_mod).items()
+                      if not k.startswith("__")}})
+""")
+
+
+def _inner(pytester, simulator_binary, test_src, *args):
+    # pytester points HOME at a tmp dir, which hides a --user pytest install
+    # from the subprocess; keep the real user site-packages visible.
+    pytester._monkeypatch.setenv("PYTHONUSERBASE", site.getuserbase())
+    pytester.makeconftest(INNER_CONFTEST)
+    pytester.makepyfile(test_inner=textwrap.dedent(test_src))
+    return pytester.runpytest_subprocess(
+        "-p", "no:cacheprovider", "-p", "no:xdist",
+        f"--simulator-path={simulator_binary}", *args, timeout=120)
+
+
+def test_sim_crash_fails_the_test(pytester, simulator_binary):
+    """A simulator killed by SIGSEGV mid-test fails the test and the report
+    carries the crash handler's backtrace (read from disk)."""
+    result = _inner(pytester, simulator_binary, """
+        import os, signal, time
+        def test_dies(simulator):
+            os.kill(simulator.process.pid, signal.SIGSEGV)
+            deadline = time.time() + 5
+            while simulator.process.poll() is None and time.time() < deadline:
+                time.sleep(0.05)
+    """)
+    result.assert_outcomes(failed=1)
+    out = result.stdout.str()
+    assert "Simulator health check failed" in out, out
+    assert "Signal: SIGSEGV" in out, out           # crash log from disk
+    assert "sim stderr (tail)" in out, out         # diagnostics attached
+
+
+def test_failure_attaches_diagnostics(pytester, simulator_binary, tmp_path):
+    """A failing test gets the log buffer, stdout/stderr tails and a
+    screenshot; --artifacts-dir writes them to disk."""
+    art = tmp_path / "artifacts"
+    result = _inner(pytester, simulator_binary, """
+        def test_fails(simulator):
+            simulator.launch_app("harness_ok")
+            simulator.wait_for_exit(timeout=10)
+            assert False, "deliberate"
+    """, f"--artifacts-dir={art}")
+    result.assert_outcomes(failed=1)
+    out = result.stdout.str()
+    assert "sim log buffer" in out and "H:LINE 3" in out, out
+    shots = list(art.rglob("screenshot.png"))
+    assert shots and shots[0].read_bytes()[:4] == b"\x89PNG", list(art.rglob("*"))
+    assert list(art.rglob("log_buffer.txt")), list(art.rglob("*"))
+
+
+def test_unlisted_skip_fails_the_run(pytester, simulator_binary):
+    result = _inner(pytester, simulator_binary, """
+        import pytest
+        def test_skips():
+            pytest.skip("nobody allow-listed this")
+    """)
+    assert result.ret == pytest.ExitCode.TESTS_FAILED, result.stdout.str()
+    result.stdout.fnmatch_lines(["*skips not on tests/e2e/skip_allowlist.txt*",
+                                 "*test_skips*nobody allow-listed this*"])
+
+
+def test_hardware_marked_skip_is_allowed(pytester, simulator_binary):
+    result = _inner(pytester, simulator_binary, """
+        import pytest
+        @pytest.mark.hardware
+        def test_needs_device():
+            pytest.skip("no device")
+    """)
+    assert result.ret == pytest.ExitCode.OK, result.stdout.str()
+
+
+def test_flaky_failure_is_quarantined_not_retried(pytester, simulator_binary):
+    """A failing @pytest.mark.flaky test does not fail the run; it is listed
+    in its own summary section and runs exactly once."""
+    result = _inner(pytester, simulator_binary, """
+        import pytest
+        RUNS = []
+        @pytest.mark.flaky(reason="known flake")
+        def test_flake():
+            RUNS.append(1)
+            assert len(RUNS) > 1, "fails on first run"
+    """, "-rx")
+    assert result.ret == pytest.ExitCode.OK, result.stdout.str()
+    result.assert_outcomes(xfailed=1)
+    result.stdout.fnmatch_lines(["*quarantined flaky tests that failed*",
+                                 "*test_flake (call): quarantined flake: known flake*"])
+
+
+def test_sanitizer_report_is_detected(simulator):
+    """health_problems() flags a sanitizer line on the simulator's stderr."""
+    assert simulator.health_problems() == []
+    simulator._stderr_tail.append(
+        "==4242==ERROR: AddressSanitizer: heap-use-after-free on address 0x1")
+    problems = simulator.health_problems()
+    simulator._stderr_tail.pop()  # don't fail this test's own health check
+    assert any("AddressSanitizer" in p for p in problems), problems
+
+
+def test_missing_golden_fails(tmp_path):
+    img = np.zeros((4, 4, 3), dtype=np.uint8)
+    missing = tmp_path / "nope.png"
+    with pytest.raises(pytest.fail.Exception, match="golden image missing"):
+        compare_golden(img, missing, update=False)
+    assert not missing.exists(), "a missing golden must not be written"
+    compare_golden(img, missing, update=True)       # --update-baselines
+    compare_golden(img, missing, update=False)      # now it matches
+    img[0, 0] = 255
+    with pytest.raises(AssertionError, match="differs in 1 pixels"):
+        compare_golden(img, missing, update=False)
+
+
+def test_wait_for_exit_recovers_a_lost_notification(simulator):
+    """app.exited can be dropped whole while the client's buffer is full;
+    wait_for_exit then gets the outcome from get_last_outcome."""
+    assert simulator.get_last_outcome() == {"launch_id": 0}
+    launch = simulator.launch_app("harness_ok")
+    assert launch["launch_id"] >= 1, launch
+    simulator.wait_for_log(r"^\[LAUNCHER\] exited harness_ok$", timeout=10, src="os")
+    # Simulate the drop: remove the notification the client received.
+    with simulator._notif_cond:
+        simulator._notifications[:] = [
+            n for n in simulator._notifications if n.get("method") != "app.exited"]
+    outcome = simulator.wait_for_exit(timeout=3)
+    assert outcome["name"] == "harness_ok", outcome
+    assert outcome["result"] == "returned", outcome
+    assert outcome["launch_id"] == launch["launch_id"], outcome
+    assert simulator.get_last_outcome() == outcome
+
+
+def test_unix_socket_disabled_and_tcp_on_loopback(simulator):
+    """--unix-socket none leaves no picos_control in the cwd; TCP listens on
+    127.0.0.1 only."""
+    out = simulator.get_output()["stdout"]
+    assert "UNIX domain server disabled" in out, out[-2000:]
+    assert "UNIX domain server listening" not in out
+    assert not list(Path.cwd().glob("picos_control*"))
+    listening = Path("/proc/net/tcp").read_text().splitlines()[1:]
+    port_hex = f"{simulator.tcp_port:04X}"
+    ours = [l.split() for l in listening if l.split()[1].endswith(":" + port_hex)
+            and l.split()[3] == "0A"]  # 0A = LISTEN
+    assert ours, f"port {simulator.tcp_port} not listening"
+    assert all(cols[1].startswith("0100007F:") for cols in ours), ours
+
+
+# ── Lua test kit ────────────────────────────────────────────────────────────
+
+KIT_APP = """
+local T = picocalc.sys.loadlib("picotest")
+T.case("passes", function() T.eq(1 + 1, 2) end)
+T.case("fails_eq", function() T.eq(1, 2, "one vs two") end)
+T.case("errors", function() local x = nil; return x.field end)
+T.case("skips", function() T.skip("not here") end)
+T.case("raises_ok", function() T.raises(function() error("boom") end, "boom") end)
+T.case("raises_none", function() T.raises(function() end) end)
+T.case("tamper", function()
+    APP_ID = "com.other"
+    APP_REQUIREMENTS.root_filesystem = true
+    APP_REQUIREMENTS = { root_filesystem = true }
+end)
+T.case("identity_restored", function()
+    T.eq(APP_ID, "com.test.kit_selftest")
+    T.eq(APP_REQUIREMENTS.root_filesystem, false)
+end)
+T.done()
+"""
+
+
+def test_picotest_kit_reports_every_outcome(simulator):
+    stage_lua_app(simulator.sd_card_path, "kit_selftest", KIT_APP)
+    run = run_lua_app(simulator, "kit_selftest", timeout=15)
+    run.assert_clean_exit()
+    status = {n: c["status"] for n, c in run.cases.items()}
+    assert status == {
+        "passes": "PASS", "fails_eq": "FAIL", "errors": "FAIL", "skips": "SKIP",
+        "raises_ok": "PASS", "raises_none": "FAIL", "tamper": "PASS",
+        "identity_restored": "PASS",
+    }, run.describe()
+    assert "one vs two: expected 2, got 1" in run.cases["fails_eq"]["detail"]
+    assert ":4: one vs two" in run.cases["fails_eq"]["detail"]  # check position
+    assert run.cases["skips"]["detail"] == "not here"
+    res = run.results
+    assert res and res["done"] is True, res
+    assert (res["pass"], res["fail"], res["skip"]) == (4, 3, 1), res
+    texts = [e["text"] for e in run.log]
+    assert any(t.startswith("[T] CASE fails_eq FAIL ") and
+               t.endswith(":4: one vs two: expected 2, got 1") for t in texts), texts
+    assert "[T] DONE pass=4 fail=3 skip=1" in texts
+
+
+def test_picotest_results_survive_a_crash_mid_suite(simulator):
+    """Results are rewritten after every case, so cases that finished before
+    the app died are still reported (here: a Lua error outside any case)."""
+    stage_lua_app(simulator.sd_card_path, "kit_partial", """
+local T = picocalc.sys.loadlib("picotest")
+T.case("first", function() end)
+error("app dies between cases")
+""")
+    run = run_lua_app(simulator, "kit_partial", timeout=15)
+    assert run.outcome["result"] == "error", run.describe()
+    assert run.cases == {"first": {"status": "PASS", "detail": ""}}, run.describe()
+    assert not run.done
+    with pytest.raises(AssertionError):
+        run.assert_clean_exit()

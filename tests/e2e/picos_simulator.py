@@ -42,6 +42,8 @@ class PicosSimulator:
         tcp_port: int = 0,
         timeout: float = 10.0,
         test_mode: bool = False,
+        crash_log_path: Optional[str] = None,
+        unix_socket: Optional[str] = "none",
     ):
         self.binary_path = binary_path or str(self.DEFAULT_BINARY)
         self.sd_card_path = sd_card_path or str(self.DEFAULT_SD_CARD)
@@ -52,7 +54,17 @@ class PicosSimulator:
         # --test-mode: Lua error screens and launch refusals return at once
         # (their text goes to the log's "err" source) and idle dim is off.
         self.test_mode = test_mode
+        # --crash-log: where the sim's SIGSEGV/SIGABRT handler writes its
+        # backtrace. Read from disk after a crash (a dead sim can't answer
+        # get_crash_log). None = the sim's per-PID default under /tmp.
+        self.crash_log_path = crash_log_path
+        # --unix-socket: "none" (default) keeps parallel instances from
+        # binding ./picos_control in the cwd; None = the sim's default.
+        self.unix_socket = unix_socket
         self.process: Optional[subprocess.Popen] = None
+        # Exit status once the process has been reaped (stop() or crash).
+        self.returncode: Optional[int] = None
+        self._launch_id = 0
         self._sock: Optional[socket.socket] = None
         self._lock = threading.Lock()
         self._reader_thread: Optional[threading.Thread] = None
@@ -103,6 +115,10 @@ class PicosSimulator:
         ]
         if self.test_mode:
             cmd.append("--test-mode")
+        if self.crash_log_path:
+            cmd += ["--crash-log", str(self.crash_log_path)]
+        if self.unix_socket:
+            cmd += ["--unix-socket", str(self.unix_socket)]
 
         env = os.environ.copy()
         if self.headless:
@@ -139,12 +155,77 @@ class PicosSimulator:
 
         if self.process:
             try:
-                self.process.terminate()
-                self.process.wait(timeout=3)
-            except subprocess.TimeoutExpired:
-                self.process.kill()
+                # The shutdown RPC normally ends the process by itself; only
+                # signal it if it is still running after a grace period.
                 self.process.wait(timeout=2)
+            except subprocess.TimeoutExpired:
+                try:
+                    self.process.terminate()
+                    self.process.wait(timeout=3)
+                except subprocess.TimeoutExpired:
+                    self.process.kill()
+                    self.process.wait(timeout=2)
+            self.returncode = self.process.returncode
+            self._join_drains()
             self.process = None
+
+    # ── Health ────────────────────────────────────────────────────────────────
+
+    # Sanitizer reports (a sanitizer build prints them to stderr).
+    SANITIZER_RE = re.compile(
+        r"AddressSanitizer|UndefinedBehaviorSanitizer|ThreadSanitizer|runtime error:")
+    # Exit statuses that mean the sim died rather than shut down: a fatal
+    # signal (negative), or the crash handler's _exit(128 + signal).
+    _FATAL = (signal.SIGSEGV, signal.SIGABRT, signal.SIGBUS, signal.SIGFPE,
+              signal.SIGILL)
+    CRASH_SIGNALS = {-s for s in _FATAL} | {128 + s for s in _FATAL}
+
+    def is_alive(self) -> bool:
+        return self.process is not None and self.process.poll() is None
+
+    def exit_code(self) -> Optional[int]:
+        """The process's exit status if it has exited, else None."""
+        if self.process is not None:
+            return self.process.poll()
+        return self.returncode
+
+    def read_crash_log(self) -> str:
+        """The crash handler's backtrace, read from disk ('' if none)."""
+        if not self.crash_log_path:
+            return ""
+        try:
+            return Path(self.crash_log_path).read_text(errors="replace")
+        except OSError:
+            return ""
+
+    def sanitizer_lines(self) -> list[str]:
+        """stderr lines that look like a sanitizer report."""
+        return [l for l in list(self._stderr_tail) if self.SANITIZER_RE.search(l)]
+
+    def health_problems(self) -> list[str]:
+        """Reasons this sim is unhealthy: the process exited without stop()
+        being called (or stop() reaped a crash status), it wrote a crash log,
+        or a sanitizer reported on stderr. [] = healthy."""
+        problems = []
+        if self.process is not None:
+            code = self.process.poll()
+            if code is not None:
+                problems.append(
+                    f"simulator process exited unexpectedly with status {code}")
+                self._join_drains()
+        elif self.returncode in self.CRASH_SIGNALS:
+            problems.append(f"simulator died with status {self.returncode}")
+        crash = self.read_crash_log()
+        if crash.strip():
+            problems.append("crash log:\n" + crash.strip())
+        san = self.sanitizer_lines()
+        if san:
+            problems.append("sanitizer report on stderr:\n" + "\n".join(san[:40]))
+        return problems
+
+    def _join_drains(self, timeout: float = 1.0):
+        for t in self._drain_threads:
+            t.join(timeout=timeout)
 
     def _start_pipe_drains(self):
         """Continuously drain the child's stdout/stderr.
@@ -206,6 +287,7 @@ class PicosSimulator:
             if not line:
                 time.sleep(0.05)
                 continue
+            self._stdout_tail.append(line.rstrip("\n"))
 
             m = port_re.search(line)
             if m:
@@ -407,7 +489,14 @@ class PicosSimulator:
         """
         with self._notif_cond:
             self._launch_rx = self._rx_counter
-        return self.call("launch_app", {"name": name})
+        result = self.call("launch_app", {"name": name})
+        self._launch_id = result.get("launch_id", 0)
+        return result
+
+    def get_last_outcome(self) -> dict:
+        """app.exited params of the last finished launch ({"launch_id": 0}
+        before any)."""
+        return self.call("get_last_outcome")
 
     def rescan_apps(self) -> dict:
         """Ask the launcher to rescan /apps (e.g. after changing an app.json)."""
@@ -421,12 +510,35 @@ class PicosSimulator:
         """Wait for the app from the last launch_app() to finish.
 
         Returns the app.exited params:
-        {name, id, found, result, error, runtime_ms} where result is
-        "returned" | "error" | "exit_sentinel" | "load_failed".
+        {name, id, found, result, error, runtime_ms, launch_id} where result
+        is "returned" | "error" | "exit_sentinel" | "load_failed".
+
+        The server drops a notification whole when this client's buffer is
+        full (e.g. mid-way through a large response), so while waiting this
+        also polls get_last_outcome, which keeps the last app.exited params.
         """
-        notif = self.wait_for_notification(
-            "app.exited", timeout=timeout or 30.0, after_rx=self._launch_rx)
-        return notif.get("params", {})
+        deadline = time.time() + (timeout or 30.0)
+        want = self._launch_id
+        while True:
+            remaining = deadline - time.time()
+            try:
+                notif = self.wait_for_notification(
+                    "app.exited", timeout=max(0.01, min(remaining, 0.5)),
+                    after_rx=self._launch_rx)
+                params = notif.get("params", {})
+                # Ignore an exit that belongs to an earlier launch.
+                if params.get("launch_id", want) >= want:
+                    return params
+                continue
+            except TimeoutError:
+                pass
+            last = self.get_last_outcome()
+            if want and last.get("launch_id", 0) >= want:
+                return last
+            if time.time() >= deadline:
+                raise TimeoutError(
+                    f"app.exited for launch {want} not received within timeout "
+                    f"(last outcome: {last})")
 
     # Named buttons recognized by inject_button
     _BUTTONS = {

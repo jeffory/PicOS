@@ -43,7 +43,7 @@ USB serial at 115200 baud. App log calls appear as `[APP] message`. Lua errors d
 
 To stage a multi-file app on hardware or the simulator, prefer the `push_app` MCP tool (`tools/picos_mcp.py`): it ships the whole directory as one ZIP and extracts it on-device via the `unzip <zip> <dest>` dev command (`rm <path>` cleans up), far faster than per-file transfers for asset-heavy apps.
 
-There is no automated test suite or linter.
+Tests: the simulator E2E suite (`SDL_VIDEODRIVER=dummy pytest tests/e2e -n auto`; see `tests/e2e/README.md`, config in the repo-level `pytest.ini`), `make test-unit` and `make test-lua`. There is no linter. Lua fixture apps report through the test kit `tests/e2e/lib/picotest.lua` (staged as `/system/lib/picotest.lua`).
 
 ## Architecture
 
@@ -347,7 +347,7 @@ Status constants: `picocalc.network.kStatusNotConnected` (0), `kStatusConnected`
 - The launcher caches the app list at boot, but the `launch_app` RPC rescans `/apps` once when a name is not found, so newly staged apps launch without a restart; `rescan_apps` forces a rescan (e.g. after editing an existing app's `app.json`).
 - Boot mirrors `src/main.c`: `config_load()`, idle-dim init, network, Core 1, `system_menu_init()`, launcher. Idle dim stays inert (the keyboard stub never polls it).
 - SD paths resolve `..` lexically and anything that would leave the SD root is refused (`[SIM] SD escape: <path>` on the `err` log source).
-- Test control channel (`simulator/sim_socket_handler.c`, `sim_test_control.c`): `get_log_buffer {since_seq, tail}` returns `{lines:[{seq,t_ms,src,text}], next_seq, dropped, more}` with `src` = `lua`/`native`/`os`/`err`; `subscribe {"logs":true}` pushes `log {seq,src,text}` notifications; `app.exited` carries `{name, id, found, result: returned|error|exit_sentinel|load_failed, error, runtime_ms}`; `launch_app` returns `{queued, busy}`; `display_stats.present_count`; `inject_*` return `input_seq` and `get_input_state` reports `consumed_seq`. `--test-mode` makes Lua error screens and launch refusals return at once (the text is on the `err` source). Python client: `tests/e2e/picos_simulator.py`.
+- Test control channel (`simulator/sim_socket_handler.c`, `sim_test_control.c`): `get_log_buffer {since_seq, tail}` returns `{lines:[{seq,t_ms,src,text}], next_seq, dropped, more}` with `src` = `lua`/`native`/`os`/`err`; `subscribe {"logs":true}` pushes `log {seq,src,text}` notifications; `app.exited` carries `{name, id, found, result: returned|error|exit_sentinel|load_failed, error, runtime_ms, launch_id}`; `launch_app` returns `{queued, busy, launch_id}` and `get_last_outcome` returns the last `app.exited` params (backfill when a notification was dropped); `display_stats.present_count`; `inject_*` return `input_seq` and `get_input_state` reports `consumed_seq`. `--test-mode` makes Lua error screens and launch refusals return at once (the text is on the `err` source). The TCP listener binds 127.0.0.1 only; `--unix-socket PATH|none` overrides or disables the `./picos_control` UNIX socket (the E2E harness passes `none`). Python client: `tests/e2e/picos_simulator.py`.
 - `picocalc.video` is stubbed (no decoder): `player()` returns nil-backed handles; every video trampoline is a no-op.
 - Everything else (zip including read-in-place archive handles, modplayer, display clip rect, drawPlane, tilemap, sprites) mirrors firmware, including `g_api.version = 7`.
 

@@ -17,11 +17,10 @@ import time
 
 import pytest
 
-from picos_simulator import PicosSimulator
 
 
 @pytest.fixture
-def harness_sim(request, simulator_binary, test_sd_card):
+def harness_sim(sim_factory, test_sd_card):
     """Fresh --test-mode simulator on the per-test SD card.
 
     Writes /system/config.json before boot so boot-time config_load() is
@@ -29,15 +28,7 @@ def harness_sim(request, simulator_binary, test_sd_card):
     """
     (test_sd_card / "system" / "config.json").write_text(
         json.dumps({"harness_key": "42"}))
-    sim = PicosSimulator(
-        binary_path=str(simulator_binary),
-        sd_card_path=str(test_sd_card),
-        headless=True,
-        test_mode=True,
-    )
-    sim.start()
-    yield sim
-    sim.stop()
+    return sim_factory(test_sd_card)
 
 
 def _run(sim, name, timeout=15.0):
