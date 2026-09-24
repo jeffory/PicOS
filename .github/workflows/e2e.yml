@@ -104,6 +104,69 @@ jobs:
           name: e2e-results-${{ matrix.sim }}
           path: reports/
 
+  # The firmware network stack in the simulator (make simulator-net:
+  # src/drivers/wifi.c/http.c/tcp.c on Mongoose/POSIX, simulator/net/) against
+  # local servers: tests/e2e/test_network_firmware.py. The review's Core 0/
+  # Core 1 close races are strict xfails there, so a fix shows up as XPASS
+  # (a failure) until its marker goes. Optional: not a required check. About
+  # 5 minutes (a ~1 min build locally at -j4 plus deps; the suite is ~15 s).
+  e2e-firmware-net:
+    name: E2E firmware-net (${{ matrix.sim }})
+    runs-on: ubuntu-latest
+    if: github.event_name != 'schedule'
+    strategy:
+      fail-fast: false
+      matrix:
+        sim: [release, asan-ubsan]
+        include:
+          - sim: release
+            target: simulator-net
+            build_dir: build_sim_net
+            expect_sanitize: ''
+          - sim: asan-ubsan
+            target: simulator-net-asan
+            build_dir: build_sim_net_asan
+            expect_sanitize: address,undefined
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Install system dependencies
+        run: scripts/ci/install-sim-deps.sh
+
+      - name: Setup Python
+        run: |
+          python3 -m venv .venv
+          source .venv/bin/activate
+          pip install --upgrade pip
+          pip install -r tests/e2e/requirements.txt
+
+      - name: Build simulator (firmware-net, ${{ matrix.sim }})
+        run: make ${{ matrix.target }}
+
+      - name: Run firmware network tests
+        run: |
+          source .venv/bin/activate
+          mkdir -p reports
+          set -o pipefail
+          export SDL_VIDEODRIVER=dummy
+          export PICOS_SIM_BINARY=${{ matrix.build_dir }}/picos_simulator
+          export PICOS_SIM_EXPECT_SANITIZE="${{ matrix.expect_sanitize }}"
+          export PICOS_SIM_EXPECT_FIRMWARE_NET=1
+          export ASAN_SYMBOLIZER_PATH="$(command -v llvm-symbolizer || true)"
+          pytest tests/e2e/test_network_firmware.py tests/e2e/test_network.py \
+            -v --tb=short --artifacts-dir=reports/failures \
+            -n auto 2>&1 | tee reports/test-output.txt
+        timeout-minutes: 10
+
+      - name: Upload test results
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: e2e-results-firmware-net-${{ matrix.sim }}
+          path: reports/
+
   # Nightly, informational: the simulator's own threads race (the RPC socket
   # thread reads OS state the main thread owns, Core 1 audio globals are
   # unsynchronised), so TSan reports on most tests. See tests/e2e/README.md.

@@ -76,27 +76,45 @@ def default_binary() -> Path:
 _build_info_cache: dict = {}
 
 
-def binary_sanitizers(binary) -> Optional[str]:
-    """The -fsanitize= list a simulator binary was built with ('' for a
-    release build), from `picos_simulator --build-info`; None when the probe
-    failed (missing binary, crash, timeout, no sanitize= line), so callers
-    can tell "not sanitized" from "don't know"."""
+def binary_build_info(binary) -> Optional[dict]:
+    """`picos_simulator --build-info` as a dict of its key=value lines
+    (sanitize=..., firmware_net=0|1); None when the probe failed (missing
+    binary, crash, timeout, no sanitize= line), so callers can tell "no"
+    from "don't know"."""
     key = str(binary)
     if key not in _build_info_cache:
-        san = None
+        info = {}
         try:
             out = subprocess.run([key, "--build-info"], capture_output=True,
                                  text=True, timeout=30,
                                  env=sanitizer_env(os.environ.copy())).stdout
             for line in out.splitlines():
-                if line.startswith("sanitize="):
-                    san = line[len("sanitize="):].strip()
+                k, sep, v = line.partition("=")
+                if sep:
+                    info[k.strip()] = v.strip()
         except (OSError, subprocess.SubprocessError):
             pass
-        if san is None:
+        if "sanitize" not in info:
             return None  # not cached: the binary may be built later
-        _build_info_cache[key] = san
+        _build_info_cache[key] = info
     return _build_info_cache[key]
+
+
+def binary_sanitizers(binary) -> Optional[str]:
+    """The -fsanitize= list a simulator binary was built with ('' for a
+    release build), from `picos_simulator --build-info`; None when the probe
+    failed (missing binary, crash, timeout, no sanitize= line), so callers
+    can tell "not sanitized" from "don't know"."""
+    info = binary_build_info(binary)
+    return None if info is None else info["sanitize"]
+
+
+def binary_firmware_net(binary) -> Optional[bool]:
+    """True if the simulator runs the firmware network stack
+    (SIM_FIRMWARE_NET=ON, make simulator-net); None when the probe failed.
+    Binaries from before the option report no firmware_net line: False."""
+    info = binary_build_info(binary)
+    return None if info is None else info.get("firmware_net") == "1"
 
 
 class PicosSimulator:

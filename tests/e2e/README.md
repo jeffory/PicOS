@@ -48,6 +48,28 @@ writes, all unlocked (`specs/test-audit-2026-09-24.md` §2.6). So the TSan leg i
 nightly and informational; `tests/e2e/tsan.supp` suppresses third-party
 (libdbus) reports only.
 
+### Firmware network stack (`firmware_net`)
+
+```bash
+make simulator-net       # build_sim_net/ (also simulator-net-asan, simulator-net-tsan)
+PICOS_SIM_BINARY=build_sim_net/picos_simulator SDL_VIDEODRIVER=dummy \
+    pytest tests/e2e/test_network_firmware.py -n auto
+```
+
+`make simulator-net` runs the firmware's own `src/drivers/wifi.c`, `http.c` and
+`tcp.c` on Mongoose/POSIX (TLS off) instead of the sim's libcurl layer, with
+Core 0 and Core 1 as two host threads (`simulator/net/`). The `firmware_net`
+tests (`test_network_firmware.py`) run only against it (`--build-info` says
+`firmware_net=1`) and skip, allow-listed, elsewhere;
+`PICOS_SIM_EXPECT_FIRMWARE_NET=1` makes the run refuse to start without it.
+Each case runs in its own simulator against local servers
+(`net_servers.py`: HTTP on 127.0.0.1 with `/ok`, `/big`, `/chunked`, `/close`,
+`/drip`, `/hang`, `/reset`, `/echo`; a TCP echo/flood server; a black-hole
+port). The app `net_fw/main.lua` is staged per test and runs the one case
+named in `/data/com.test.net_fw/servers.json`, so a case that crashes the
+simulator fails alone. The code review's Core 0/Core 1 close races are
+strict xfails there. The whole E2E suite also passes against this build.
+
 Paths are absolute, so any working directory inside the repo works. The config
 is the repo-level `pytest.ini`: 60 s per-test timeout (`pytest-timeout`), strict
 xfail, and markers `slow`, `hardware`, `native`, `asan_only`, `flaky`, `sd`.
@@ -169,7 +191,8 @@ A missing golden fails the test. Create or refresh goldens with
 
 - The simulator runs its own display, audio, keyboard and network code, not
   `src/drivers/*` (see `specs/test-audit-2026-09-24.md` §2.7), so goldens and
-  pixel values prove simulator output.
+  pixel values prove simulator output. The exception is `make simulator-net`,
+  which runs the firmware's `wifi.c`/`http.c`/`tcp.c` (without TLS).
 - `get_heap_info` in the simulator counts the live `umm_*`/Lua bytes (a
   counting allocator over malloc: 8 MB minus live). The largest free block is
   approximated by the free total and fragmentation is always 0, so

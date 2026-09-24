@@ -23,7 +23,8 @@ import pytest
 
 from helpers import (DEFAULT_SD_SOURCE, E2E_DIR, build_sd_card, new_simulator,
                      run_lua_app, stop_and_check)
-from picos_simulator import PicosSimulator, binary_sanitizers
+from picos_simulator import (PicosSimulator, binary_firmware_net,
+                             binary_sanitizers)
 
 SKIP_ALLOWLIST = E2E_DIR / "skip_allowlist.txt"
 
@@ -81,7 +82,18 @@ def pytest_configure(config):
     """PICOS_SIM_EXPECT_SANITIZE (set by the sanitizer CI legs, e.g.
     "address"): refuse to run unless the binary's --build-info confirms it,
     so a failed probe can't turn an ASan leg into a release run whose
-    asan_only tests all skip."""
+    asan_only tests all skip. PICOS_SIM_EXPECT_FIRMWARE_NET=1 does the same
+    for the firmware_net tests (make simulator-net)."""
+    if os.environ.get("PICOS_SIM_EXPECT_FIRMWARE_NET") == "1":
+        # The firmware-net CI legs: a failed probe or a default build must
+        # not quietly skip every firmware_net test.
+        net_ok, net_on = sim_firmware_net(config)
+        if not (net_ok and net_on):
+            raise pytest.UsageError(
+                "PICOS_SIM_EXPECT_FIRMWARE_NET=1 but "
+                f"`{config.getoption('--simulator-path')} --build-info` "
+                + ("failed" if not net_ok else "reports firmware_net=0")
+                + " (build it with make simulator-net)")
     expect = set(re.split(r"[;,]", os.environ.get("PICOS_SIM_EXPECT_SANITIZE", ""))) - {""}
     if not expect:
         return
@@ -99,9 +111,27 @@ def pytest_configure(config):
             f"{','.join(sorted(kinds)) or '(none)'}; missing {','.join(sorted(missing))}")
 
 
+def sim_firmware_net(config):
+    """(probe_ok, on): does the simulator under test run the firmware
+    network stack (SIM_FIRMWARE_NET, make simulator-net)?"""
+    on = binary_firmware_net(Path(config.getoption("--simulator-path")))
+    return on is not None, bool(on)
+
+
 def pytest_collection_modifyitems(config, items):
     """asan_only tests need an ASan build of the simulator
-    (PICOS_SIM_BINARY=build_sim_asan/picos_simulator); otherwise they skip."""
+    (PICOS_SIM_BINARY=build_sim_asan/picos_simulator); otherwise they skip.
+    firmware_net tests need a SIM_FIRMWARE_NET build
+    (PICOS_SIM_BINARY=build_sim_net/picos_simulator); otherwise they skip."""
+    if any("firmware_net" in item.keywords for item in items):
+        if not sim_firmware_net(config)[1]:
+            skip_net = pytest.mark.skip(
+                reason="firmware_net: needs the simulator built with the "
+                       "firmware network stack (make simulator-net; "
+                       "PICOS_SIM_BINARY=build_sim_net/picos_simulator)")
+            for item in items:
+                if "firmware_net" in item.keywords:
+                    item.add_marker(skip_net)
     if not any("asan_only" in item.keywords for item in items):
         return
     if sim_is_sanitized(config):
@@ -409,8 +439,13 @@ def pytest_runtest_logreport(report):
         _quarantined.append(report)
 
 
-def _skip_allowed(report, patterns, probe_ok: bool = True) -> bool:
+def _skip_allowed(report, patterns, probe_ok: bool = True,
+                  net_probe_ok: bool = True) -> bool:
     if "hardware" in report.keywords:
+        return True
+    # Likewise a firmware_net skip on a simulator without the firmware
+    # network stack, as long as --build-info answered.
+    if "firmware_net" in report.keywords and net_probe_ok:
         return True
     # An asan_only skip is fine on a release build, but not when the
     # --build-info probe failed: then nobody knows the tests didn't need to run.
@@ -428,7 +463,9 @@ def pytest_sessionfinish(session, exitstatus):
         return  # xdist worker: the controller sees every report
     patterns = _allowlist()
     probe_ok = sim_sanitizers(session.config)[0]
-    bad = [r for r in _skipped if not _skip_allowed(r, patterns, probe_ok)]
+    net_probe_ok = sim_firmware_net(session.config)[0]
+    bad = [r for r in _skipped
+           if not _skip_allowed(r, patterns, probe_ok, net_probe_ok)]
     if bad:
         session.config._picos_bad_skips = bad
         if session.exitstatus == 0:
