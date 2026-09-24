@@ -28,6 +28,7 @@
 //     locked to CS0 during flash operations, making PSRAM on CS1 inaccessible)
 
 #include "ota_update.h"
+#include "app_stack.h"
 #include "crashlog.h"
 
 #include <stdio.h>
@@ -175,6 +176,31 @@ static void __no_inline_not_in_flash_func(ota_write_and_reboot)(
     while (1) { /* wait for reset */ }
 }
 
+// ── Boot-time image check (runs on the OS stack) ────────────────────────────
+
+typedef struct {
+    const uint8_t *data;
+    uint32_t len;
+    const char *err;
+    bool ok;
+} ota_image_check_t;
+
+static void ota_check_image_buf(void *arg) {
+    ota_image_check_t *chk = (ota_image_check_t *)arg;
+    uint8_t digest[32];
+    mbedtls_sha256_context sha;
+    mbedtls_sha256_init(&sha);
+    mbedtls_sha256_starts(&sha, 0);
+    for (uint32_t off = 0; off < chk->len; off += 64u * 1024u) {
+        uint32_t n = chk->len - off < 64u * 1024u ? chk->len - off : 64u * 1024u;
+        mbedtls_sha256_update(&sha, chk->data + off, n);
+        watchdog_update();
+    }
+    mbedtls_sha256_finish(&sha, digest);
+    mbedtls_sha256_free(&sha);
+    chk->ok = ota_check_digest(digest, OTA_HASH_PATH, OTA_SIG_PATH, &chk->err);
+}
+
 // ── Staged-file bookkeeping ─────────────────────────────────────────────────
 
 // Rename the staged image and its .sha256/.sig to <name><suffix>, replacing
@@ -273,20 +299,16 @@ bool ota_apply_update(void) {
 
     // Authenticate the exact bytes that will be written: checksum pre-check,
     // then the ECDSA signature against the key embedded in this firmware.
+    // On the 32 KB OS stack (PSRAM): PEM + ECDSA are too deep for the 4 KB
+    // MSP.  Only the check runs there — the flash writer below must stay on
+    // the MSP (SRAM), since PSRAM is unreachable while flash is written.
     ota_show_status("Verifying firmware...", "Checking signature", COLOR_WHITE);
     {
-        uint8_t digest[32];
-        mbedtls_sha256_context sha;
-        mbedtls_sha256_init(&sha);
-        mbedtls_sha256_starts(&sha, 0);
-        for (uint32_t off = 0; off < total; off += 64u * 1024u) {
-            uint32_t n = total - off < 64u * 1024u ? total - off : 64u * 1024u;
-            mbedtls_sha256_update(&sha, fw_buf + off, n);
-            watchdog_update();
-        }
-        mbedtls_sha256_finish(&sha, digest);
-        mbedtls_sha256_free(&sha);
-        if (!ota_check_digest(digest, OTA_HASH_PATH, OTA_SIG_PATH, &reason)) {
+        ota_image_check_t chk = {fw_buf, total, NULL, false};
+        if (!app_stack_run_os(ota_check_image_buf, &chk))
+            chk.err = "Not enough memory to verify";
+        if (!chk.ok) {
+            reason = chk.err;
             printf("[OTA] Refusing image: %s\n", reason);
             umm_free(fw_buf);
             goto fail;

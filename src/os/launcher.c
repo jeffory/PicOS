@@ -7,6 +7,7 @@
 #include "lua_runner.h"
 #include "native_loader.h"
 #include "ota_update.h"
+#include "app_stack.h"
 #include "zip_archive.h"
 #include "../drivers/audio.h"
 #include "../drivers/display.h"
@@ -120,6 +121,16 @@ static int compare_app_name(const void *a, const void *b) {
 // Ids are folded, so two apps whose ids differ only in case (or were
 // copied) share /data/<id> and the per-app config store.  Say so at scan
 // time; the launcher does not guess which one is the impostor.
+// dev `reboot-ota`, run on the OS stack (see the launcher loop).
+typedef struct {
+  const char *err;
+} launcher_ota_ctx_t;
+
+static void launcher_reboot_ota(void *arg) {
+  launcher_ota_ctx_t *ctx = (launcher_ota_ctx_t *)arg;
+  ota_trigger_update(OTA_BIN_PATH, &ctx->err);  // returns only on failure
+}
+
 static void warn_shared_ids(void) {
   for (int i = 0; i < s_app_count; i++) {
     for (int j = i + 1; j < s_app_count; j++) {
@@ -948,11 +959,15 @@ void launcher_run(void) {
     }
     if (dev_commands_wants_reboot_ota()) {
       // The host staged /system/update.bin + .sha256 + .sig (ota_flash.py):
-      // set the one-shot OTA token and reboot. Does not return on success.
+      // validate (hash + ECDSA verify), set the one-shot OTA token and
+      // reboot. Does not return on success. Runs on the 32 KB OS stack:
+      // the signature check is too deep for the launcher's 4 KB MSP.
       dev_commands_clear_reboot_ota();
-      const char *err = NULL;
-      if (!ota_trigger_update(OTA_BIN_PATH, &err))
-        printf("[DEV] reboot-ota failed: %s\n", err ? err : "unknown error");
+      launcher_ota_ctx_t ctx = {0};
+      if (!app_stack_run_os(launcher_reboot_ota, &ctx))
+        ctx.err = "out of memory for the OS stack";
+      printf("[DEV] reboot-ota failed: %s\n",
+             ctx.err ? ctx.err : "unknown error");
     }
     if (dev_commands_wants_reboot_flash()) {
       printf("[DEV] Rebooting to BOOTSEL mode...\n");

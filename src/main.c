@@ -483,6 +483,7 @@ void __attribute__((naked)) isr_hardfault(void) {
 #include "drivers/keyboard.h"
 #include "drivers/sdcard.h"
 #include "drivers/wifi.h"
+#include "drivers/rng.h"
 #include "fonts/font_registry.h"
 #include "hardware.h"
 #include "os/appconfig.h"
@@ -1560,11 +1561,22 @@ static inline void core1_relay_watchdog(void) {
     watchdog_update();
 }
 
+// app_stack_run_os() adapter for the boot-time Core 0 RNG seed.
+static void rng_boot_seed(void *arg) {
+  (void)arg;
+  (void)rng_init_this_core();
+}
+
 static void core1_entry(void) {
   volatile uint32_t *scb_ccr = (volatile uint32_t *)(0xE000ED14);
   *scb_ccr &= ~(1u << 3);
   __asm volatile ("dsb sy" ::: "memory");
   __asm volatile ("isb sy" ::: "memory");
+
+  // Seed Core 1's CSPRNG (Mongoose TLS) here, at the bottom of its 4 KB
+  // stack: the seed path is ~2 KB deep and must never run inside
+  // mg_mgr_poll (see rng.h).  On failure TLS is refused, not weakened.
+  (void)rng_init_this_core();
 
   audio_core1_init();
 
@@ -2177,6 +2189,13 @@ int main(void) {
     kbd_set_backlight(brightness);
     idle_dim_init(brightness, dim_timeout_s);
   }
+
+  // Seed Core 0's CSPRNG before anything draws from it (wifi_init's
+  // mg_tcpip_init already calls mg_random).  Seeding needs ~2 KB of stack:
+  // run it on the OS stack, not the 4 KB MSP (see rng.h).
+  if (!app_stack_run_os(rng_boot_seed, NULL))
+    printf("[RNG] core 0: no OS stack for seeding\n");
+  watchdog_update();
 
   // Initialise WiFi hardware (auto-connects if credentials are in config)
   ui_draw_splash("Initialising WiFi...", NULL);

@@ -6,6 +6,7 @@
 #include "../os/system_menu.h"
 #include "../os/toast.h"
 #include "ca_bundle.h"
+#include "rng.h"
 #include "display.h"
 #include "http.h"
 
@@ -252,6 +253,12 @@ static bool tls_clock_ready(void) {
 // connection opted out (opts.ca empty => MBEDTLS_SSL_VERIFY_NONE).
 static bool tls_start(struct mg_connection *nc, const char *host,
                       bool insecure) {
+  // mbedTLS draws every nonce and ephemeral key from mg_random: never run a
+  // handshake without this core's TRNG-seeded DRBG (rng.c).
+  if (!rng_ready()) {
+    printf("[TLS] %s: refused, no seeded RNG on Core 1\n", host);
+    return false;
+  }
   struct mg_tls_opts opts = {0};
   opts.name = mg_str(host);
   if (!insecure) {
@@ -618,6 +625,10 @@ void wifi_poll(void) {
   // since Core 1's core1_entry() drives the stack on its 1 ms tick.
   if (get_core_num() != 1)
     return;
+
+  // Top up the pre-generated random pool while the stack is shallow: TLS
+  // draws from it deep inside mg_mgr_poll (rng.h).
+  rng_refill();
 
   // Always drain requests — connect requests must be processed even when
   // disconnected/failed, otherwise queued WIFI_CONNECT never executes.

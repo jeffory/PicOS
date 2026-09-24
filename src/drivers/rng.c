@@ -14,6 +14,7 @@
 
 #include "umm_malloc.h"
 
+#include <limits.h>
 #include <stdio.h>
 #include <string.h>
 
@@ -77,10 +78,14 @@ static bool trng_block(uint32_t words[6]) {
 }
 
 bool rng_trng_read(uint8_t *out, size_t len) {
-  static bool s_unreset;  // one byte of .bss; both cores may set it
-  if (!s_unreset) {
-    unreset_block_wait(RESETS_RESET_TRNG_BITS);  // no-op if already out
-    s_unreset = true;
+  // The SDK's runtime init takes the TRNG out of reset (pico_rand uses it
+  // from boot).  If it is somehow still held, release it with a bounded
+  // wait rather than unreset_block_wait's unbounded one.
+  if (resets_hw->reset & RESETS_RESET_TRNG_BITS) {
+    unreset_block(RESETS_RESET_TRNG_BITS);
+    uint32_t t0 = time_us_32();
+    while (!(resets_hw->reset_done & RESETS_RESET_TRNG_BITS))
+      if (time_us_32() - t0 > 1000u) return false;
   }
   while (len > 0) {
     uint32_t words[6];
@@ -112,19 +117,36 @@ static int trng_entropy_source(void *data, unsigned char *out, size_t len,
 
 // ── Per-core DRBG ────────────────────────────────────────────────────────────
 
+// Pre-generated DRBG output.  Core 1 draws its randomness from deep inside
+// mbedTLS (ECDHE key generation and blinding in mg_mgr_poll), where even a
+// plain CTR_DRBG request (~300 bytes of stack) eats into the 4 KB stack;
+// wifi_poll refills the pool at the top of the loop (rng_refill) so those
+// draws are a memcpy.  One-shot: bytes are zeroed as they are handed out.
+#define RNG_POOL_BYTES 512
+
 typedef struct {
   mbedtls_entropy_context entropy;
   mbedtls_ctr_drbg_context drbg;
+  uint16_t pool_avail;             // unread bytes at the END of pool[]
+  uint8_t pool[RNG_POOL_BYTES];
 } rng_state_t;
 
 static rng_state_t *s_state[2];  // indexed by core; umm-allocated
 
-static rng_state_t *rng_state_for_core(void) {
-  unsigned core = get_core_num();
-  if (s_state[core]) return s_state[core];
+bool rng_ready(void) {
+  return s_state[get_core_num()] != NULL;
+}
 
+bool rng_init_this_core(void) {
+  unsigned core = get_core_num();
+  if (s_state[core]) return true;
+
+  uint32_t t0 = time_us_32();
   rng_state_t *st = (rng_state_t *)umm_calloc(1, sizeof(rng_state_t));
-  if (!st) return NULL;
+  if (!st) {
+    printf("[RNG] core %u: out of memory\n", core);
+    return false;
+  }
   mbedtls_entropy_init(&st->entropy);
   mbedtls_ctr_drbg_init(&st->drbg);
   int rc = mbedtls_entropy_add_source(&st->entropy, trng_entropy_source, NULL,
@@ -139,20 +161,23 @@ static rng_state_t *rng_state_for_core(void) {
                                custom, sizeof(custom));
   }
   if (rc != 0) {
-    printf("[RNG] core %u DRBG seed failed: -0x%04x\n", core, (unsigned)-rc);
+    printf("[RNG] core %u: TRNG/DRBG seed FAILED (-0x%04x) — no CSPRNG, "
+           "TLS disabled on this core\n", core, (unsigned)-rc);
     mbedtls_ctr_drbg_free(&st->drbg);
     mbedtls_entropy_free(&st->entropy);
     umm_free(st);
-    return NULL;
+    return false;
   }
+  // Never reseed from inside a (deep) request: see rng.h.
+  mbedtls_ctr_drbg_set_reseed_interval(&st->drbg, INT32_MAX);
   s_state[core] = st;
-  return st;
+  rng_refill();
+  printf("[RNG] core %u: CTR_DRBG seeded from the TRNG in %lu us\n", core,
+         (unsigned long)(time_us_32() - t0));
+  return true;
 }
 
-int rng_mbedtls_random(void *p_rng, unsigned char *out, size_t len) {
-  (void)p_rng;
-  rng_state_t *st = rng_state_for_core();
-  if (!st) return MBEDTLS_ERR_CTR_DRBG_ENTROPY_SOURCE_FAILED;
+static int drbg_fill(rng_state_t *st, unsigned char *out, size_t len) {
   while (len > 0) {
     size_t n = len < MBEDTLS_CTR_DRBG_MAX_REQUEST ? len
                                                   : MBEDTLS_CTR_DRBG_MAX_REQUEST;
@@ -164,6 +189,29 @@ int rng_mbedtls_random(void *p_rng, unsigned char *out, size_t len) {
   return 0;
 }
 
+int rng_mbedtls_random(void *p_rng, unsigned char *out, size_t len) {
+  (void)p_rng;
+  rng_state_t *st = s_state[get_core_num()];
+  if (!st) return MBEDTLS_ERR_CTR_DRBG_ENTROPY_SOURCE_FAILED;
+  if (len <= st->pool_avail) {
+    uint8_t *src = st->pool + (RNG_POOL_BYTES - st->pool_avail);
+    memcpy(out, src, len);
+    mbedtls_platform_zeroize(src, len);
+    st->pool_avail = (uint16_t)(st->pool_avail - len);
+    return 0;
+  }
+  return drbg_fill(st, out, len);
+}
+
+void rng_refill(void) {
+  rng_state_t *st = s_state[get_core_num()];
+  if (!st || st->pool_avail == RNG_POOL_BYTES) return;
+  if (drbg_fill(st, st->pool, RNG_POOL_BYTES) == 0)
+    st->pool_avail = RNG_POOL_BYTES;
+  else
+    st->pool_avail = 0;
+}
+
 bool rng_bytes(void *buf, size_t len) {
   if (rng_mbedtls_random(NULL, (unsigned char *)buf, len) == 0) return true;
   mbedtls_platform_zeroize(buf, len);
@@ -172,12 +220,16 @@ bool rng_bytes(void *buf, size_t len) {
 
 // ── Mongoose (MG_ENABLE_CUSTOM_RANDOM) ──────────────────────────────────────
 // Mongoose's mbedTLS glue passes mg_random to mbedtls_ssl_conf_rng and
-// ignores its return value, so a failure here would hand TLS predictable
-// bytes.  A TRNG that fails its health tests is a hardware fault: stop.
-#include "pico/platform/panic.h"
+// ignores its return value.  Without a seeded DRBG, the bytes come from
+// get_rand_32 (fine for DNS ids and ephemeral ports) and false is returned;
+// TLS never gets there because wifi.c refuses to start TLS unless
+// rng_ready().  (Halting instead would turn a TRNG fault into a boot loop:
+// mg_tcpip_init calls this during wifi_init.)
+#include "pico/rand.h"
 
 bool mg_random(void *buf, size_t len) {
   if (rng_bytes(buf, len)) return true;
-  panic("RNG: TRNG/DRBG failure (refusing to run TLS without entropy)");
+  uint8_t *p = (uint8_t *)buf;
+  for (size_t i = 0; i < len; i++) p[i] = (uint8_t)get_rand_32();
   return false;
 }
