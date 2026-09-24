@@ -2839,8 +2839,12 @@ picocalc.modplayer = {}
 ---@class PicOSModPlayer : userdata
 local PicOSModPlayer = {}
 
----Create a MOD player instance (freed by GC).
----@return PicOSModPlayer
+---Return the MOD player handle. There is one player: while a handle is
+---alive, `create()` returns that same handle (untouched); once every
+---reference is dropped it is collected and the next `create()` makes a
+---fresh one.
+---@return PicOSModPlayer? player
+---@return string? error
 function picocalc.modplayer.create() end
 
 ---Load a .mod file.
