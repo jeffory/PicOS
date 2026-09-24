@@ -21,7 +21,8 @@ static FATFS s_fs;
 static bool  s_mounted = false;
 
 // Protects all FatFS operations from concurrent access across cores.
-// Recursive so that sdcard_list_dir callbacks can call other sdcard_* functions.
+// Recursive, so a nested sdcard_* call from a holder cannot deadlock. Callbacks
+// (list_dir entries, copy progress) run with it released.
 recursive_mutex_t g_sdcard_mutex;
 
 // ── Filesystem corruption logging ────────────────────────────────────────────
@@ -378,6 +379,23 @@ bool sdcard_mkdir(const char *path) {
     return (res == FR_OK || res == FR_EXIST);
 }
 
+// Directory entries are read into a packed PSRAM snapshot under the SD lock,
+// then the lock is released (and the directory closed) before any callback
+// runs. Callbacks used to run with the recursive mutex held: a slow one (a
+// Lua listDir building tables, a recursive delete) kept Core 1's audio
+// try-locks failing for the whole walk, and one that raised a Lua error
+// longjmp'd out with the mutex held and the DIR open for good.
+typedef struct {
+    uint32_t size;
+    uint16_t fdate, ftime;
+    uint16_t name_len;
+    uint8_t  is_dir;
+    uint8_t  pad;
+    // name bytes + '\0' follow, then padding to a 4-byte boundary
+} list_rec_t;
+
+#define LIST_REC_ALIGN(n) (((n) + 3u) & ~3u)
+
 int sdcard_list_dir(const char *path,
                     void (*callback)(const sdcard_entry_t *entry, void *user),
                     void *user) {
@@ -385,9 +403,12 @@ int sdcard_list_dir(const char *path,
 
     DIR *dir = (DIR *)umm_malloc(sizeof(DIR));
     FILINFO *fi = (FILINFO *)umm_malloc(sizeof(FILINFO));
-    if (!dir || !fi) {
+    size_t cap = 2048, used = 0;
+    uint8_t *snap = (uint8_t *)umm_malloc(cap);
+    if (!dir || !fi || !snap) {
         if (dir) umm_free(dir);
         if (fi) umm_free(fi);
+        if (snap) umm_free(snap);
         return -1;
     }
 
@@ -397,37 +418,68 @@ int sdcard_list_dir(const char *path,
         recursive_mutex_exit(&g_sdcard_mutex);
         umm_free(dir);
         umm_free(fi);
+        umm_free(snap);
         if (is_fs_corruption(open_res))
             sdcard_log_corruption(open_res, "sdcard_list_dir(opendir)", path);
         return -1;
     }
 
     int count = 0;
+    bool oom = false;
     FRESULT rd_res;
     while ((rd_res = f_readdir(dir, fi)) == FR_OK && fi->fname[0]) {
-        sdcard_entry_t e;
-        strncpy(e.name, fi->fname, sizeof(e.name) - 1);
-        e.name[sizeof(e.name) - 1] = '\0';
-        e.is_dir = (fi->fattrib & AM_DIR) != 0;
-        e.size   = fi->fsize;
-        e.fdate  = fi->fdate;
-        e.ftime  = fi->ftime;
-        if (callback) callback(&e, user);
+        size_t name_len = strnlen(fi->fname, sizeof(((sdcard_entry_t *)0)->name) - 1);
+        size_t rec = LIST_REC_ALIGN(sizeof(list_rec_t) + name_len + 1);
+        if (used + rec > cap) {
+            size_t ncap = cap * 2;
+            while (used + rec > ncap) ncap *= 2;
+            uint8_t *n = (uint8_t *)umm_realloc(snap, ncap);
+            if (!n) { oom = true; break; }
+            snap = n;
+            cap = ncap;
+        }
+        list_rec_t *r = (list_rec_t *)(snap + used);
+        r->size = fi->fsize;
+        r->fdate = fi->fdate;
+        r->ftime = fi->ftime;
+        r->name_len = (uint16_t)name_len;
+        r->is_dir = (fi->fattrib & AM_DIR) != 0;
+        r->pad = 0;
+        memcpy((char *)(r + 1), fi->fname, name_len);
+        ((char *)(r + 1))[name_len] = '\0';
+        used += rec;
         count++;
-    }
-    if (rd_res != FR_OK && is_fs_corruption(rd_res)) {
-        f_closedir(dir);
-        recursive_mutex_exit(&g_sdcard_mutex);
-        umm_free(dir);
-        umm_free(fi);
-        sdcard_log_corruption(rd_res, "sdcard_list_dir(readdir)", path);
-        return count; // return partial count
     }
     f_closedir(dir);
     recursive_mutex_exit(&g_sdcard_mutex);
     umm_free(dir);
     umm_free(fi);
-    return count;
+
+    if (oom) {
+        umm_free(snap);
+        printf("[SD] list_dir %s: out of memory for the listing\n", path);
+        return -1;
+    }
+    if (rd_res != FR_OK && is_fs_corruption(rd_res))
+        sdcard_log_corruption(rd_res, "sdcard_list_dir(readdir)", path);
+
+    // Callbacks run unlocked; they may call other sdcard_* functions (which
+    // take the lock themselves), including on this directory.
+    if (callback) {
+        sdcard_entry_t e;
+        for (size_t off = 0; off < used;) {
+            const list_rec_t *r = (const list_rec_t *)(snap + off);
+            memcpy(e.name, (const char *)(r + 1), (size_t)r->name_len + 1);
+            e.is_dir = r->is_dir;
+            e.size   = r->size;
+            e.fdate  = r->fdate;
+            e.ftime  = r->ftime;
+            callback(&e, user);
+            off += LIST_REC_ALIGN(sizeof(list_rec_t) + r->name_len + 1);
+        }
+    }
+    umm_free(snap);
+    return count; // partial count after a readdir error, as before
 }
 
 bool sdcard_delete(const char *path) {
@@ -481,82 +533,68 @@ bool sdcard_rename(const char *src, const char *dst) {
 
 #define COPY_CHUNK 4096
 
+// The SD lock is held per FatFS step (open, each chunk's read+write, close),
+// never across the progress callback: a Lua progress callback used to run
+// with the recursive mutex held, so Core 1's audio try-locks failed for the
+// whole copy, and a callback that slept (or showed a dialog) stalled it
+// further. Between chunks other code may use the card; FatFS's file lock
+// (FF_FS_LOCK) keeps anyone from opening dst for writing meanwhile.
 bool sdcard_copy(const char *src, const char *dst,
                  void (*progress_cb)(uint32_t done, uint32_t total, void *user),
                  void *user) {
     if (!s_mounted) return false;
 
     FILINFO *fi = (FILINFO *)umm_malloc(sizeof(FILINFO));
-    if (!fi) return false;
-
-    recursive_mutex_enter_blocking(&g_sdcard_mutex);
-
-    uint32_t total = (f_stat(src, fi) == FR_OK) ? fi->fsize : 0;
-    umm_free(fi);
-
     FIL *fsrc = (FIL *)umm_malloc(sizeof(FIL));
     FIL *fdst = (FIL *)umm_malloc(sizeof(FIL));
-    if (!fsrc || !fdst) {
-        if (fsrc) umm_free(fsrc);
-        if (fdst) umm_free(fdst);
-        recursive_mutex_exit(&g_sdcard_mutex);
-        return false;
-    }
-
-    if (f_open(fsrc, src, FA_READ | FA_OPEN_EXISTING) != FR_OK) {
-        umm_free(fsrc);
-        umm_free(fdst);
-        recursive_mutex_exit(&g_sdcard_mutex);
-        return false;
-    }
-    if (f_open(fdst, dst, FA_WRITE | FA_CREATE_ALWAYS) != FR_OK) {
-        f_close(fsrc);
-        umm_free(fsrc);
-        umm_free(fdst);
-        recursive_mutex_exit(&g_sdcard_mutex);
-        return false;
-    }
-
     uint8_t *buf = (uint8_t *)umm_malloc(COPY_CHUNK);
-    if (!buf) {
-        f_close(fsrc);
-        f_close(fdst);
-        umm_free(fsrc);
-        umm_free(fdst);
+    bool ok = fi && fsrc && fdst && buf;
+    bool src_open = false, dst_open = false;
+    uint32_t total = 0;
+
+    if (ok) {
+        recursive_mutex_enter_blocking(&g_sdcard_mutex);
+        total = (f_stat(src, fi) == FR_OK) ? fi->fsize : 0;
+        src_open = f_open(fsrc, src, FA_READ | FA_OPEN_EXISTING) == FR_OK;
+        if (src_open)
+            dst_open = f_open(fdst, dst, FA_WRITE | FA_CREATE_ALWAYS) == FR_OK;
         recursive_mutex_exit(&g_sdcard_mutex);
-        return false;
+        ok = src_open && dst_open;
     }
 
     uint32_t done = 0;
-    bool ok = true;
-    while (true) {
-        UINT br;
-        if (f_read(fsrc, buf, COPY_CHUNK, &br) != FR_OK) {
+    while (ok) {
+        UINT br = 0, bw = 0;
+        recursive_mutex_enter_blocking(&g_sdcard_mutex);
+        if (f_read(fsrc, buf, COPY_CHUNK, &br) != FR_OK)
             ok = false;
-            break;
-        }
-        if (br == 0) break; // EOF
-        UINT bw;
-        if (f_write(fdst, buf, br, &bw) != FR_OK || bw != br) {
+        else if (br > 0 && (f_write(fdst, buf, br, &bw) != FR_OK || bw != br))
             ok = false;
-            break;
-        }
+        recursive_mutex_exit(&g_sdcard_mutex);
+        if (!ok || br == 0)
+            break; // error or EOF
         done += br;
         if (progress_cb)
             progress_cb(done, total, user);
     }
 
-    umm_free(buf);
-    f_close(fsrc);
-    if (ok)
-        f_sync(fdst);  // Flush destination data + directory entry before close
-    f_close(fdst);
-    umm_free(fsrc);
-    umm_free(fdst);
-    if (!ok)
-        f_unlink(dst); // remove partial destination on error
-
-    recursive_mutex_exit(&g_sdcard_mutex);
+    if (src_open || dst_open) {
+        recursive_mutex_enter_blocking(&g_sdcard_mutex);
+        if (src_open)
+            f_close(fsrc);
+        if (dst_open) {
+            if (ok)
+                f_sync(fdst);  // Flush destination data + directory entry before close
+            f_close(fdst);
+            if (!ok)
+                f_unlink(dst); // remove partial destination on error
+        }
+        recursive_mutex_exit(&g_sdcard_mutex);
+    }
+    if (fi) umm_free(fi);
+    if (fsrc) umm_free(fsrc);
+    if (fdst) umm_free(fdst);
+    if (buf) umm_free(buf);
     return ok;
 }
 
