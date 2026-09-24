@@ -24,6 +24,11 @@ static int l_mod_create(lua_State *L) {
 static int l_mod_load(lua_State *L) {
     mod_player_t *p = check_modplayer(L, 1);
     const char *path = luaL_checkstring(L, 2);
+    if (!fs_sandbox_check(L, path, false)) {
+        lua_pushboolean(L, false);
+        lua_pushstring(L, "access denied");
+        return 2;
+    }
     lua_pushboolean(L, mod_player_load(p, path));
     return 1;
 }

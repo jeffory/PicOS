@@ -403,3 +403,27 @@ def write_wav(path: Path, seconds: float = 0.05, rate: int = 22050):
         w.setsampwidth(2)
         w.setframerate(rate)
         w.writeframes(b"\x00\x00" * int(seconds * rate))
+
+
+def write_mp3(path: Path, frames: int = 8):
+    """A decodable MP3 of silence: MPEG-1 Layer III, 128 kbps, 44.1 kHz,
+    joint stereo, no padding (417-byte frames; all-zero side info and main
+    data decode to silence)."""
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    frame = b"\xff\xfb\x90\x64" + b"\x00" * (417 - 4)
+    path.write_bytes(frame * frames)
+
+
+def write_mod(path: Path):
+    """A minimal valid ProTracker MOD ("M.K.", 4 channels): one silent
+    pattern, no sample data."""
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    header = b"picos test".ljust(20, b"\x00")
+    # 31 sample headers: name, length (words), finetune, volume, loop
+    # start, loop length (1 word = no loop).
+    sample = b"\x00" * 22 + b"\x00\x00" + b"\x00" + b"\x40" + b"\x00\x00" + b"\x00\x01"
+    header += sample * 31
+    header += bytes([1, 127]) + bytes(128) + b"M.K."
+    path.write_bytes(header + bytes(64 * 4 * 4))

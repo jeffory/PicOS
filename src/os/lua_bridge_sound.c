@@ -69,6 +69,11 @@ static int l_sound_sample_new(lua_State *L) {
 
     const char *path = luaL_optstring(L, 1, NULL);
     if (path) {
+        if (!fs_sandbox_check(L, path, false)) {
+            lua_pushnil(L);
+            lua_pushstring(L, "access denied");
+            return 2;
+        }
         sound_sample_t *sample = (sound_sample_t *)g_api.soundplayer->sampleLoad(path);
         if (!sample) {
             lua_pushnil(L);
@@ -99,6 +104,11 @@ static int l_sound_sample_load(lua_State *L) {
     sound_sample_t *sample = check_sample(L, 1);
     const char *path = luaL_checkstring(L, 2);
 
+    if (!fs_sandbox_check(L, path, false)) {
+        lua_pushnil(L);
+        lua_pushstring(L, "access denied");
+        return 2;
+    }
     if (sound_sample_load(sample, path)) {
         lua_pushboolean(L, true);
         return 1;
@@ -207,6 +217,11 @@ static int l_sound_sample_save(lua_State *L) {
         lua_pushstring(L, "sample has no data");
         return 2;
     }
+    if (!fs_sandbox_check(L, path, true)) {
+        lua_pushboolean(L, false);
+        lua_pushstring(L, "access denied");
+        return 2;
+    }
 
     sdfile_t f = sdcard_fopen(path, "w");
     if (!f) {
@@ -272,6 +287,11 @@ static int l_sound_sampleplayer_new(lua_State *L) {
     if (lua_isuserdata(L, 1)) {
         sample = check_sample(L, 1);
     } else if (lua_isstring(L, 1)) {
+        if (!fs_sandbox_check(L, lua_tostring(L, 1), false)) {
+            lua_pushnil(L);
+            lua_pushstring(L, "access denied");
+            return 2;
+        }
         sample = (sound_sample_t *)g_api.soundplayer->sampleLoad(lua_tostring(L, 1));
         if (!sample) {
             lua_pushnil(L);
@@ -449,6 +469,11 @@ static int l_sound_fileplayer_new(lua_State *L) {
 static int l_sound_fileplayer_load(lua_State *L) {
     fileplayer_t *player = check_fileplayer(L, 1);
     const char *path = luaL_checkstring(L, 2);
+    if (!fs_sandbox_check(L, path, false)) {
+        lua_pushboolean(L, false);
+        lua_pushstring(L, "access denied");
+        return 2;
+    }
     g_api.soundplayer->filePlayerLoad(player, path);
     lua_pushboolean(L, true);
     return 1;
@@ -718,6 +743,11 @@ static int l_sound_mp3player_new(lua_State *L) {
 static int l_sound_mp3player_load(lua_State *L) {
     mp3_player_t *player = check_mp3player(L, 1);
     const char *path = luaL_checkstring(L, 2);
+    if (!fs_sandbox_check(L, path, false)) {
+        lua_pushboolean(L, false);
+        lua_pushstring(L, "access denied");
+        return 2;
+    }
     g_api.soundplayer->mp3PlayerLoad(player, path);
     lua_pushboolean(L, true);
     return 1;

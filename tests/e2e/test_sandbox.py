@@ -5,27 +5,21 @@ proves the same operations succeed with the grant. Each Lua case is one pytest
 id; the host then checks that nothing was written outside the app's own data
 directory.
 
-Cases that fail today because of a known review bug are strict xfails (the
-fix turns them into XPASS, which fails the run until the marker goes).
+Identity and grants are held in C (app_identity), so the cases that rewrite
+the APP_* globals prove the globals are irrelevant to enforcement. Any future
+known-bug case is a strict xfail listed in KNOWN_BUGS.
 """
 
 import json
 
 import pytest
 
-from helpers import case_params, lua_case_names, write_wav
+from helpers import case_params, lua_case_names, write_mod, write_mp3, write_wav
 
 SANDBOX_CASES = lua_case_names("sandbox_test")
 ROOT_CASES = lua_case_names("sandbox_root_test")
 
-SOUND_BUG = ("review/audit §3.1 — sound sample load/save and sampleplayer "
-             "loads skip fs_sandbox_check")
-
-KNOWN_BUGS = {
-    "sample_save_outside_sandbox": SOUND_BUG,
-    "sample_load_other_app": SOUND_BUG,
-    "sampleplayer_load_other_app": SOUND_BUG,
-}
+KNOWN_BUGS = {}
 
 SYSTEM_CONFIG = {"sentinel": "keep"}
 OTHER_CONFIG = {"secret": "other-app"}
@@ -37,6 +31,12 @@ def _stage(sd):
     other.mkdir(parents=True, exist_ok=True)
     (other / "config.json").write_text(json.dumps(OTHER_CONFIG))
     write_wav(other / "secret.wav")
+    write_mp3(other / "secret.mp3")
+    write_mod(other / "secret.mod")
+    own = sd / "apps" / "sandbox_test"
+    write_wav(own / "own.wav")
+    write_mp3(own / "own.mp3")
+    write_mod(own / "own.mod")
 
 
 @pytest.fixture(scope="module")

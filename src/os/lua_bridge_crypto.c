@@ -163,6 +163,11 @@ static int l_crypto_sha1(lua_State *L) {
 static int l_crypto_sha256File(lua_State *L) {
     const char *path = luaL_checkstring(L, 1);
     uint8_t hash[32];
+    if (!fs_sandbox_check(L, path, false)) {
+        lua_pushnil(L);
+        lua_pushstring(L, "access denied");
+        return 2;
+    }
     if (!crypto_sha256_file(path, hash)) {
         lua_pushnil(L);
         lua_pushstring(L, "cannot read file");

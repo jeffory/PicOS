@@ -24,6 +24,11 @@ static int l_video_new(lua_State *L) {
 static int l_video_load(lua_State *L) {
     video_player_t *player = check_video(L, 1);
     const char *path = luaL_checkstring(L, 2);
+    if (!fs_sandbox_check(L, path, false)) {
+        lua_pushboolean(L, false);
+        lua_pushstring(L, "access denied");
+        return 2;
+    }
     if (video_player_load(player, path)) {
         lua_pushboolean(L, true);
         return 1;

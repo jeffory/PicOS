@@ -5,13 +5,14 @@
 --   /system/config.json               {"sentinel":"keep"}
 --   /data/com.other/config.json       another app's config
 --   /data/com.other/secret.wav        another app's (valid) WAV
+--   /data/com.other/secret.mp3, .mod  another app's MP3 / MOD
+--   /apps/sandbox_test/own.{wav,mp3,mod}  the same formats in its own bundle
 -- and checks on the host afterwards that nothing was written outside
 -- /data/com.test.sandbox (test_sandbox.py).
 --
--- Cases marked in test_sandbox.py as strict xfails are known review bugs
--- (the sandbox reads writable Lua globals; sound loads/saves skip the check;
--- appconfig trusts APP_ID). The kit restores the identity globals after
--- every case.
+-- Identity and grants live in C (app_identity): rewriting the APP_* globals
+-- must change nothing. The kit restores the identity globals after every
+-- case.
 
 local pc = picocalc
 local fs = pc.fs
@@ -125,11 +126,47 @@ end)
 T.case("sample_load_other_app", function()
     T.eq(pc.sound.sample("/data/com.other/secret.wav"), nil,
          "sound.sample loaded another app's file")
+    local s = T.ok(pc.sound.sample(0.01), "cannot create a blank sample")
+    T.ok(not s:load("/data/com.other/secret.wav"),
+         "sample:load loaded another app's file")
 end)
 
 T.case("sampleplayer_load_other_app", function()
     T.eq(pc.sound.sampleplayer("/data/com.other/secret.wav"), nil,
          "sound.sampleplayer loaded another app's file")
+end)
+
+T.case("fileplayer_load_other_app", function()
+    local fp = T.ok(pc.sound.fileplayer(), "cannot create a fileplayer")
+    local ok = fp:load("/data/com.other/secret.wav")
+    T.eq(fp:getLength(), 0, "fileplayer opened another app's file")
+    T.ok(not ok, "fileplayer:load reported success for another app's file")
+end)
+
+T.case("mp3player_load_other_app", function()
+    local mp = T.ok(pc.sound.mp3player(), "cannot create an mp3player")
+    local ok = mp:load("/data/com.other/secret.mp3")
+    T.eq(mp:getSampleRate(), 0, "mp3player decoded another app's file")
+    T.ok(not ok, "mp3player:load reported success for another app's file")
+end)
+
+T.case("modplayer_load_other_app", function()
+    local m = T.ok(pc.modplayer.create(), "cannot create a modplayer")
+    T.ok(not m:load("/data/com.other/secret.mod"),
+         "modplayer:load loaded another app's file")
+end)
+
+-- Controls: the same loaders still read the app's own bundle.
+T.case("sound_loads_own_app_dir", function()
+    T.ok(pc.sound.sample(APP_DIR .. "/own.wav"), "sound.sample own.wav")
+    T.ok(pc.sound.sampleplayer(APP_DIR .. "/own.wav"), "sampleplayer own.wav")
+    local fp = pc.sound.fileplayer()
+    T.ok(fp:load(APP_DIR .. "/own.wav"), "fileplayer:load own.wav")
+    T.ok(fp:getLength() > 0, "fileplayer own.wav has no length")
+    local mp = pc.sound.mp3player()
+    T.ok(mp:load(APP_DIR .. "/own.mp3"), "mp3player:load own.mp3")
+    T.eq(mp:getSampleRate(), 44100, "mp3player own.mp3 sample rate")
+    T.ok(pc.modplayer.create():load(APP_DIR .. "/own.mod"), "modplayer own.mod")
 end)
 
 -- ── appconfig: the store path must not come from APP_ID ────────────────────

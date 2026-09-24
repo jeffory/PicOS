@@ -288,7 +288,7 @@ if APP_REQUIREMENTS.root_filesystem then
 end
 ```
 
-Without `"root-filesystem"`, the sandbox (`fs_sandbox_check` → `fs_path_allowed` in `src/os/fs_path.c`, host-tested) allows reads of the app's own `/apps/<dir>` and of `/system/lib/`, and read + write of `/data/<app_id>`; relative paths and any `..` are refused. It guards `picocalc.fs.*` and the image, font and zip loaders. When `"root-filesystem"` is granted, the app bypasses the sandbox and can access the entire SD card.
+Without `"root-filesystem"`, the sandbox (`fs_sandbox_check` → `fs_path_allowed` in `src/os/fs_path.c`, host-tested) allows reads of the app's own `/apps/<dir>` and of `/system/lib/`, and read + write of `/data/<app_id>`; relative paths and any `..` are refused. It guards `picocalc.fs.*` and the image, font and zip loaders, the sound loaders (`sound.sample`/`sampleplayer` paths, `sample:load`, `sample:save`, `fileplayer:load`, `mp3player:load`), `modplayer:load`, `video:load` and `crypto.sha256File`. When `"root-filesystem"` is granted, the app bypasses the sandbox and can access the entire SD card.
 
 `picocalc.config` always reads and writes the running app's own `/data/<app_id>/config.json`: the store is bound to the identity's id on each call and unbound at every app start and exit, so one app never sees another's keys.
 
