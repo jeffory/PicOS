@@ -47,6 +47,24 @@ static struct mg_mgr s_mgr;
 static struct mg_tcpip_if s_ifp;
 static struct mg_tcpip_driver_pico_w_data s_driver_data;
 
+// Core 1 ticks every 1 ms because its audio pollers need that cadence (see
+// core1_entry). Polling the CYW43 that often buys nothing while associated
+// with no sockets open, so idle polls are spaced to this interval — still
+// frequent enough for DHCP renewal, ARP replies and link-state changes.
+#define WIFI_IDLE_POLL_MS 5
+static uint32_t s_last_idle_poll_ms = 0;
+
+// True when any Mongoose connection other than the DNS resolver's own UDP
+// socket (which stays open after the first lookup) exists: an HTTP/TCP
+// socket, an SNTP query or the connectivity check.
+static bool mgr_has_user_conns(void) {
+  for (struct mg_connection *c = s_mgr.conns; c != NULL; c = c->next) {
+    if (c != s_mgr.dns4.c && c != s_mgr.dns6.c)
+      return true;
+  }
+  return false;
+}
+
 // ── Core 0 → Core 1 request queue
 // ────────────────────────────────────────
 
@@ -527,7 +545,7 @@ void wifi_poll(void) {
 
   // Only Core 1 owns the Mongoose manager. All other callers are legacy
   // call sites from before Core 1 took ownership; they are now safe no-ops
-  // since Core 1's core1_entry() drives the stack every 5 ms.
+  // since Core 1's core1_entry() drives the stack on its 1 ms tick.
   if (get_core_num() != 1)
     return;
 
@@ -540,6 +558,15 @@ void wifi_poll(void) {
   if (st != WIFI_STATUS_CONNECTED && st != WIFI_STATUS_CONNECTING &&
       st != WIFI_STATUS_ONLINE) {
     return;
+  }
+
+  // Associated but idle (no sockets, not mid-connect): poll at
+  // WIFI_IDLE_POLL_MS instead of every tick.
+  if (st != WIFI_STATUS_CONNECTING && !mgr_has_user_conns()) {
+    uint32_t now_ms = to_ms_since_boot(get_absolute_time());
+    if (now_ms - s_last_idle_poll_ms < WIFI_IDLE_POLL_MS)
+      return;
+    s_last_idle_poll_ms = now_ms;
   }
 
   mg_mgr_poll(&s_mgr, 0);

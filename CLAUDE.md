@@ -67,7 +67,7 @@ main()
 
 ### Dual-Core Model
 - **Core 0**: Runs the launcher, Lua VM, and native apps. Owns the display, keyboard, and SD card.
-- **Core 1**: Runs the network stack (Mongoose/CYW43) and audio decode (MP3, fileplayer). Polls every 5ms. Core 0 communicates via IPC ring buffer (`wifi_req_push()`). **Core 0 must never call `mg_*` functions directly.**
+- **Core 1**: Runs the network stack (Mongoose/CYW43) and audio decode (MP3, fileplayer). Ticks every 1 ms (alarm on the Core 1 audio pool; audio pollers need that cadence), with the CYW43/Mongoose poll spaced to 5 ms while associated with no sockets open. Core 0 communicates via IPC ring buffer (`wifi_req_push()`). **Core 0 must never call `mg_*` functions directly.**
 
 ### Central API (`src/os/os.h`)
 `PicoCalcAPI g_api` is a function pointer table wired in `main.c`. Sub-tables (all available to both Lua and native C apps unless noted):
@@ -168,7 +168,7 @@ A debug hook fires every 256 opcodes (`lua_sethook` with `LUA_MASKCOUNT`). The h
 - `sound.c` — sound sample loading and playback (WAV-like)
 - `fileplayer.c` — streaming file playback from SD card
 - `mp3_player.c` — MP3 decoding via libmad; PCM ring buffer (32KB) in PIO PSRAM; DMA ISR reads from 1KB SRAM staging buffer, refilled by Core 1
-- `mp3_player_update()` and `fileplayer_update()` called on Core 1 every 5ms
+- `mp3_player_update()`, `fileplayer_update()` and `mod_player_update()` called on Core 1 every 1 ms tick
 
 ### Video Player (`src/drivers/video_player.cpp`)
 - MJPEG video playback with JPEGDEC decoding (JPEGDEC state lives in static SRAM)

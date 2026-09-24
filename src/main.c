@@ -1331,7 +1331,8 @@ static const picocalc_zip_t s_zip_impl = {
 };
 
 // ── Core 1 entry — background WiFi polling ──────��─────────────────────────────
-// Core 1 drives the Mongoose / CYW43 network stack every 5 ms.
+// Core 1 runs the audio pollers and the Mongoose / CYW43 network stack on a
+// 1 ms tick (wifi_poll spaces its idle polls to 5 ms on its own).
 // wifi_poll() acquires display_spi_lock() internally, so the SPI1 bus
 // (shared between the LCD and the WiFi chip) is safe to access from here.
 // Lua apps benefit automatically; native apps benefit via http_fire_c_pending().
@@ -1357,7 +1358,7 @@ static bool core1_timer_callback(repeating_timer_t *rt) {
 
 // Doorbell ISR: Core 0 rings WIFI_IPC_DOORBELL after pushing to the IPC
 // queue.  This wakes Core 1 from __wfi() immediately (<1us latency)
-// instead of waiting for the 5ms polling timer.
+// instead of waiting for the next 1 ms tick.
 static void core1_doorbell_isr(void) {
   multicore_doorbell_clear_current_core(WIFI_IPC_DOORBELL);
   s_core1_tick_pending = true;
@@ -1376,6 +1377,12 @@ static void core1_entry(void) {
   irq_set_exclusive_handler(doorbell_irq, core1_doorbell_isr);
   irq_set_enabled(doorbell_irq, true);
 
+  // 1 ms, not 5: several audio pollers refill a fixed amount per call.
+  // mod_player_update renders 128 frames @22050 Hz (5.8 ms of audio) per
+  // tick, so a 5 ms tick leaves only 16% headroom, and under WiFi load the
+  // real tick rate has been measured at ~260/s even at 1 ms nominal. MP3
+  // staging (8 KB, ~46 ms) likewise relies on frequent refills between
+  // decode bursts. Negative period = fixed rate from the previous start.
   alarm_pool_t *pool = audio_get_core1_alarm_pool();
   alarm_pool_add_repeating_timer_ms(pool, -1, core1_timer_callback, NULL, &s_core1_timer);
 
