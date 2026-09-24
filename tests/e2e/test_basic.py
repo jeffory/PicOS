@@ -17,10 +17,11 @@ import time
 import pytest
 
 from helpers import build_sd_card
+from picos_simulator import sanitizer_env
 
 
 def _spawn(binary, sd, *extra):
-    env = os.environ.copy()
+    env = sanitizer_env(os.environ.copy())
     env["SDL_VIDEODRIVER"] = "dummy"
     env["SDL_AUDIODRIVER"] = "dummy"
     cmd = [str(binary), "--sd-card", str(sd), "--port", "0",

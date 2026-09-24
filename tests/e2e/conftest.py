@@ -23,7 +23,7 @@ import pytest
 
 from helpers import (DEFAULT_SD_SOURCE, E2E_DIR, build_sd_card, new_simulator,
                      run_lua_app, stop_and_check)
-from picos_simulator import PicosSimulator
+from picos_simulator import PicosSimulator, binary_sanitizers
 
 SKIP_ALLOWLIST = E2E_DIR / "skip_allowlist.txt"
 
@@ -44,7 +44,8 @@ def pytest_addoption(parser):
     parser.addoption(
         "--simulator-path", action="store",
         default=str(PicosSimulator.DEFAULT_BINARY),
-        help="Path to the picos_simulator binary",
+        help="Path to the picos_simulator binary (default: $PICOS_SIM_BINARY, "
+             "else build_sim/picos_simulator)",
     )
     parser.addoption(
         "--sd-card-path", action="store", default=str(DEFAULT_SD_SOURCE),
@@ -57,13 +58,26 @@ def pytest_addoption(parser):
     )
 
 
-def pytest_collection_modifyitems(config, items):
-    """asan_only tests need a sanitizer build of the simulator
-    (PICOS_SIM_SANITIZE set, see Task 22); otherwise they skip."""
+def sim_is_sanitized(config) -> bool:
+    """True when the simulator under test is an ASan build: its
+    `--build-info` says so (make simulator-asan), or PICOS_SIM_SANITIZE is
+    set by hand."""
     if os.environ.get("PICOS_SIM_SANITIZE"):
+        return "address" in os.environ["PICOS_SIM_SANITIZE"]
+    binary = Path(config.getoption("--simulator-path"))
+    return binary.exists() and "address" in binary_sanitizers(binary)
+
+
+def pytest_collection_modifyitems(config, items):
+    """asan_only tests need an ASan build of the simulator
+    (PICOS_SIM_BINARY=build_sim_asan/picos_simulator); otherwise they skip."""
+    if not any("asan_only" in item.keywords for item in items):
         return
-    skip = pytest.mark.skip(reason="asan_only: needs a sanitizer build "
-                                   "(set PICOS_SIM_SANITIZE)")
+    if sim_is_sanitized(config):
+        return
+    skip = pytest.mark.skip(reason="asan_only: needs an ASan build of the "
+                                   "simulator (make simulator-asan; "
+                                   "PICOS_SIM_BINARY=build_sim_asan/picos_simulator)")
     for item in items:
         if "asan_only" in item.keywords:
             item.add_marker(skip)
@@ -76,7 +90,9 @@ def pytest_collection_modifyitems(config, items):
 def simulator_binary(request) -> Path:
     """The simulator binary, built on demand."""
     binary_path = Path(request.config.getoption("--simulator-path")).resolve()
-    if not binary_path.exists():
+    # Only the default release binary is built on demand; a missing
+    # PICOS_SIM_BINARY / --simulator-path must not silently fall back to it.
+    if not binary_path.exists() and binary_path == PicosSimulator.PROJECT_ROOT / "build_sim" / "picos_simulator":
         try:
             PicosSimulator.build()
         except subprocess.CalledProcessError as e:

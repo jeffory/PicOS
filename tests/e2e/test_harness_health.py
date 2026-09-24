@@ -1,7 +1,7 @@
 """The harness's own safety nets (audit R2, R3, R7, C7, §5.0 goldens).
 
 - a simulator that dies during a test fails that test, with the crash log
-- a sanitizer report on stderr is detected
+- a sanitizer report on stderr is detected (for real under an ASan build)
 - a failing test gets the simulator's diagnostics attached
 - a skip that is not on skip_allowlist.txt fails the run
 - a failing @pytest.mark.flaky test is quarantined, not retried
@@ -14,6 +14,7 @@ The first four run an inner pytest session (pytester) that loads this suite's
 conftest.py, so they test the real hooks.
 """
 
+import re
 import site
 import textwrap
 from pathlib import Path
@@ -37,6 +38,16 @@ INNER_CONFTEST = textwrap.dedent(f"""
     globals().update({{k: v for k, v in vars(_mod).items()
                       if not k.startswith("__")}})
 """)
+
+
+# Evidence of a SIGSEGV: the release sim's crash handler writes
+# "Signal: SIGSEGV" to the crash log; a sanitizer build leaves the signal to
+# ASan, which prints "AddressSanitizer: SEGV" on stderr instead.
+SEGV_EVIDENCE = re.compile(r"Signal: SIGSEGV|AddressSanitizer: SEGV")
+
+
+def _segv_count(out: str) -> int:
+    return len(SEGV_EVIDENCE.findall(out))
 
 
 def _inner(pytester, simulator_binary, test_src, *args):
@@ -64,7 +75,7 @@ def test_sim_crash_fails_the_test(pytester, simulator_binary):
     result.assert_outcomes(failed=1)
     out = result.stdout.str()
     assert "Simulator health check failed" in out, out
-    assert "Signal: SIGSEGV" in out, out           # crash log from disk
+    assert _segv_count(out), out           # crash log from disk (or ASan)
     assert "sim stderr (tail)" in out, out         # diagnostics attached
 
 
@@ -139,7 +150,7 @@ def test_flaky_health_failure_is_not_quarantined(pytester, simulator_binary):
     assert result.ret == pytest.ExitCode.TESTS_FAILED, result.stdout.str()
     result.assert_outcomes(failed=1)
     out = result.stdout.str()
-    assert "Signal: SIGSEGV" in out, out
+    assert _segv_count(out), out
     assert "quarantined flaky tests that failed" not in out, out
 
 
@@ -173,7 +184,7 @@ def test_crash_mid_lua_suite_fails_every_case_with_evidence(pytester, simulator_
     # Each failure is the crash report, not an escaped socket error.
     assert "E       RuntimeError" not in out, out
     assert out.count("E       AssertionError: app crasher: outcome") == 3, out
-    assert out.count("Signal: SIGSEGV") >= 3, out         # crash log per case
+    assert _segv_count(out) >= 3, out         # crash log (or ASan) per case
     assert out.count("stderr tail:") >= 3, out            # stderr per case
     assert out.count("simulator_died") >= 3, out
 
@@ -193,7 +204,7 @@ def test_sim_factory_sims_are_health_checked(pytester, simulator_binary):
     """)
     result.assert_outcomes(failed=1)
     out = result.stdout.str()
-    assert "Simulator health check failed" in out and "Signal: SIGSEGV" in out, out
+    assert "Simulator health check failed" in out and _segv_count(out), out
 
 
 def test_sanitizer_report_is_detected(simulator):
@@ -204,6 +215,47 @@ def test_sanitizer_report_is_detected(simulator):
     problems = simulator.health_problems()
     simulator._stderr_tail.pop()  # don't fail this test's own health check
     assert any("AddressSanitizer" in p for p in problems), problems
+
+
+def test_sanitizer_report_survives_later_output(simulator):
+    """The stderr drain keeps a sanitizer report even after more output than
+    the 2000-line tail holds has followed it (a TSan run keeps printing;
+    C-Dogs floods the tails), and it stays bounded."""
+    note = simulator._note_stderr_line
+    note("==4242==ERROR: AddressSanitizer: heap-use-after-free on address 0x1")
+    note("    #0 0x1 in l_fs_write lua_bridge_fs.c:123")
+    for i in range(5000):
+        note(f"noise {i}")
+    try:
+        assert "#0 0x1 in l_fs_write" in simulator.sanitizer_report()
+        assert len(simulator._sanitizer_report) == simulator.SANITIZER_REPORT_MAX
+        assert any("AddressSanitizer" in p for p in simulator.health_problems())
+    finally:
+        simulator._sanitizer_report.clear()  # don't fail this test's own check
+
+
+@pytest.mark.asan_only
+def test_real_sanitizer_report_fails_the_test(pytester, simulator_binary):
+    """End to end, through the real stderr drain: an ASan build's
+    sanitizer_selftest RPC reads past a heap block, ASan prints its report
+    and aborts, and the health hook fails the test with the report and its
+    stack."""
+    result = _inner(pytester, simulator_binary, """
+        import time
+        def test_overflow(simulator):
+            try:
+                simulator.call("sanitizer_selftest", timeout=5)
+            except Exception:
+                pass  # the sim is dead
+            deadline = time.time() + 10
+            while simulator.process.poll() is None and time.time() < deadline:
+                time.sleep(0.05)
+    """)
+    result.assert_outcomes(failed=1)
+    out = result.stdout.str()
+    assert "Simulator health check failed" in out, out
+    assert "AddressSanitizer: heap-buffer-overflow" in out, out
+    assert "h_sanitizer_selftest" in out, out  # the stack came through
 
 
 def test_missing_golden_fails(tmp_path):

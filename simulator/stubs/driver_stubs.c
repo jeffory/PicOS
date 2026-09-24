@@ -701,7 +701,7 @@ uint32_t sdcard_ftell(sdfile_t f) {
 int sdcard_fsize_handle(sdfile_t f) {
     if (!f) return -1;
     /* hal_sdcard_seek only supports SEEK_SET, so use fseek/ftell directly */
-    FILE *fp = (FILE *)f;
+    FILE *fp = hal_sdcard_stream(f);
     long pos = ftell(fp);
     if (fseek(fp, 0, SEEK_END) != 0) return -1;
     long size = ftell(fp);

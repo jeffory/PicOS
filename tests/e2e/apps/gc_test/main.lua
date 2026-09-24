@@ -12,6 +12,12 @@
 --
 -- If /apps/gc_test/stress.flag exists the collector runs in a very
 -- aggressive incremental mode for the whole run (the harness runs both).
+--
+-- use_first.flag (sanitizer runs only): skip the survival check until after
+-- the parent has been used, so a collected child is a real use-after-free
+-- that ASan reports at the bridge call. only.flag names the one case to run
+-- (a use-after-free aborts the sanitizer build, so each case gets its own
+-- run). See test_lifetimes.py::test_gc_use_after_collect.
 
 local pc = picocalc
 local gfx = pc.graphics
@@ -20,6 +26,14 @@ local fs = pc.fs
 local T = pc.sys.loadlib("picotest")
 
 local STRESS = fs.exists(APP_DIR .. "/stress.flag")
+local USE_FIRST = fs.exists(APP_DIR .. "/use_first.flag")
+local ONLY = fs.exists(APP_DIR .. "/only.flag") and fs.readFile(APP_DIR .. "/only.flag")
+if ONLY then
+    local case = T.case
+    T.case = function(name, fn)
+        if name == ONLY then return case(name, fn) end
+    end
+end
 if STRESS then
     collectgarbage("incremental", 0, 1000)
 end
@@ -46,7 +60,16 @@ end
 
 local function alive(weak, what)
     churn()
+    if USE_FIRST then return end  -- settle() checks, after the parent is used
     T.ok(weak[1] ~= nil, what .. " was collected while still referenced from C")
+end
+
+-- End of an anchor case: in use_first mode, the survival check alive()
+-- skipped (reached only if using the parent did not trip the sanitizer).
+local function settle(weak, what)
+    if USE_FIRST then
+        T.ok(weak[1] ~= nil, what .. " was collected while still referenced from C")
+    end
 end
 
 -- Run body; always run cleanup (so a failed case can't leave dangling
@@ -66,6 +89,8 @@ T.case("sprite_new_keeps_image", function()
     local w, h = s:getSize()
     T.eq(w, 16, "width")
     T.eq(h, 16, "height")
+    s:draw()  -- reads the image's pixels (getSize is cached on the sprite)
+    settle(weak, "the image passed to sprite.new")
 end)
 
 T.case("sprite_setImage_keeps_image", function()
@@ -78,6 +103,8 @@ T.case("sprite_setImage_keeps_image", function()
     alive(weak, "the image passed to sprite:setImage")
     local w = s:getSize()
     T.eq(w, 16, "width")
+    s:draw()
+    settle(weak, "the image passed to sprite:setImage")
 end)
 
 local KEEP_IMG = gfx.image.new(8, 8)
@@ -95,31 +122,41 @@ T.case("added_sprite_survives_gc", function()
         T.eq(gfx.sprite.spriteCount(), 1, "sprite count")
         gfx.sprite.update()
         pc.display.flush()
+        settle(weak, "a sprite in the display list")
     end, function() gfx.sprite.removeAll() end)
 end)
 
 T.case("spritesheet_keeps_image", function()
-    local _, weak = weakly(function()
+    local sheet, weak = weakly(function()
         local img = gfx.image.new(32, 32)
         return gfx.spritesheet.new(img), img
     end)
     alive(weak, "the image passed to spritesheet.new")
+    sheet:addFrame(0, 0, 16, 16)
+    sheet:drawFrame(0, 0, 0)  -- frames are 0-based
+    settle(weak, "the image passed to spritesheet.new")
 end)
 
 T.case("tilemap_keeps_tileset", function()
-    local _, weak = weakly(function()
+    local map, weak = weakly(function()
         local img = gfx.image.new(32, 32)
         return gfx.tilemap.new(img, 8, 8), img
     end)
     alive(weak, "the tileset passed to tilemap.new")
+    map:setSize(2, 2)
+    map:setTileAtPosition(0, 0, 1)  -- 0-based cell, 1-based tile
+    map:draw(0, 0)
+    settle(weak, "the tileset passed to tilemap.new")
 end)
 
 T.case("animation_loop_keeps_frames", function()
-    local _, weak = weakly(function()
+    local loop, weak = weakly(function()
         local img = gfx.image.new(8, 8)
         return gfx.animation.loop.new(100, { img }), img
     end)
     alive(weak, "a frame passed to animation.loop.new")
+    loop:draw(0, 0)
+    settle(weak, "a frame passed to animation.loop.new")
 end)
 
 T.case("sampleplayer_setSample_keeps_sample", function()
@@ -133,6 +170,7 @@ T.case("sampleplayer_setSample_keeps_sample", function()
     p:play()
     pc.sys.sleep(20)
     p:stop()
+    settle(weak, "the sample passed to sampleplayer:setSample")
 end)
 
 T.case("sampleplayer_new_keeps_sample", function()
@@ -144,6 +182,7 @@ T.case("sampleplayer_new_keeps_sample", function()
     p:play()
     pc.sys.sleep(20)
     p:stop()
+    settle(weak, "the sample passed to sound.sampleplayer")
 end)
 
 T.case("performOnAllSprites_visits_real_sprites", function()

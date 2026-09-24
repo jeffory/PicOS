@@ -88,6 +88,18 @@ static void force_exit_handler(int sig) {
     _exit(1);
 }
 
+// ASan/TSan install their own fatal-signal handlers (PICOS_SIM_SANITIZE).
+#if defined(__SANITIZE_ADDRESS__) || defined(__SANITIZE_THREAD__)
+#define SIM_HAS_SANITIZER 1
+#elif defined(__has_feature)
+#if __has_feature(address_sanitizer) || __has_feature(thread_sanitizer)
+#define SIM_HAS_SANITIZER 1
+#endif
+#endif
+#ifndef SIM_HAS_SANITIZER
+#define SIM_HAS_SANITIZER 0
+#endif
+
 // Crash handler — writes backtrace to crash log file using only async-signal-safe calls
 static void crash_handler(int sig) {
     // Write crash info to log file
@@ -129,6 +141,7 @@ static void print_usage(const char* program) {
     printf("  --show-splash        Show boot splash screen with delays\n");
     printf("  --test-mode          Error screens return at once; idle dim off\n");
     printf("  --debug              Enable debug logging\n");
+    printf("  --build-info         Print build facts (sanitizers) and exit\n");
     printf("  --help               Show this help\n");
 }
 
@@ -137,6 +150,10 @@ static void parse_args(int argc, char** argv) {
     for (int i = 1; i < argc; i++) {
         if (strcmp(argv[i], "--help") == 0 || strcmp(argv[i], "-h") == 0) {
             print_usage(argv[0]);
+            exit(0);
+        } else if (strcmp(argv[i], "--build-info") == 0) {
+            // Read by the E2E harness (conftest) to enable asan_only tests.
+            printf("sanitize=%s\n", PICOS_SIM_SANITIZE_STR);
             exit(0);
         } else if (strcmp(argv[i], "--sd-card") == 0 && i + 1 < argc) {
             strncpy(g_sd_card_path, argv[i + 1], sizeof(g_sd_card_path) - 1);
@@ -418,11 +435,17 @@ int main(int argc, char** argv) {
     signal(SIGINT, signal_handler);
     signal(SIGTERM, signal_handler);
 
-    // Crash handlers — write backtrace to crash log on fatal signals
+    // Crash handlers — write backtrace to crash log on fatal signals. A
+    // sanitizer build leaves them to the sanitizer runtime, whose own handler
+    // prints the symbolised report the E2E harness scans stderr for.
+#if !SIM_HAS_SANITIZER
     signal(SIGSEGV, crash_handler);
     signal(SIGABRT, crash_handler);
     signal(SIGBUS, crash_handler);
     signal(SIGFPE, crash_handler);
+#else
+    (void)crash_handler;
+#endif
     
     // Initialize SDL
     if (SDL_Init(SDL_INIT_VIDEO | SDL_INIT_AUDIO | SDL_INIT_EVENTS) < 0) {

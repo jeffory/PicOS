@@ -920,6 +920,33 @@ static char *h_shutdown(const char *params) {
     return strdup("{\"jsonrpc\":\"2.0\",\"result\":{\"ok\":true}}");
 }
 
+// ── Sanitizer self-test ──────────────────────────────────────────────────────
+// ASan builds only, and only with --test-mode: reads one byte past a heap
+// block so the E2E suite can prove, end to end, that a sanitizer report on
+// stderr fails the test (test_harness_health.py). A release build refuses.
+
+#if defined(__SANITIZE_ADDRESS__)
+#define SIM_ASAN_BUILD 1
+#elif defined(__has_feature)
+#if __has_feature(address_sanitizer)
+#define SIM_ASAN_BUILD 1
+#endif
+#endif
+
+static char *h_sanitizer_selftest(const char *params) {
+    (void)params;
+#ifdef SIM_ASAN_BUILD
+    if (sim_test_mode()) {
+        volatile char *p = malloc(16);
+        volatile char c = p[16];  // heap-buffer-overflow: ASan aborts here
+        (void)c;
+        free((void *)p);
+    }
+#endif
+    return strdup("{\"jsonrpc\":\"2.0\",\"error\":{\"code\":-32601,"
+                  "\"message\":\"needs an ASan build and --test-mode\"}}");
+}
+
 // ── Clear log buffer ─────────────────────────────────────────────────────────
 
 static char *h_clear_log_buffer(const char *params) {
@@ -1203,6 +1230,7 @@ static struct {
     { "get_last_outcome",   h_get_last_outcome },
     { "subscribe",          h_subscribe },
     { "get_input_state",    h_get_input_state },
+    { "sanitizer_selftest", h_sanitizer_selftest },
     { NULL, NULL },
 };
 

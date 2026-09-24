@@ -1,7 +1,7 @@
 # PicOS Makefile
 # Automated setup, build, and deployment for ClockworkPi PicoCalc
 
-.PHONY: help setup build clean flash flash-ota rebuild check-env test-lua test-unit simulator simulator-run simulator-clean
+.PHONY: help setup build clean flash flash-ota rebuild check-env test-lua test-unit simulator simulator-asan simulator-tsan simulator-run simulator-clean
 
 # ── Configuration ─────────────────────────────────────────────────────────────
 
@@ -34,6 +34,8 @@ help:
 	@echo ""
 	@echo "Simulator Targets (PC):"
 	@echo "  make simulator      - Build PC simulator for testing/debugging"
+	@echo "  make simulator-asan - Simulator with ASan+UBSan (build_sim_asan/)"
+	@echo "  make simulator-tsan - Simulator with TSan (build_sim_tsan/)"
 	@echo "  make simulator-run  - Build and run the simulator"
 	@echo "  make simulator-clean - Clean simulator build files"
 	@echo ""
@@ -281,6 +283,37 @@ simulator-debug: simulator-check download-lua
 	@echo "  Binary: $(SIM_BINARY)"
 	@echo ""
 
+# Sanitizer builds of the simulator (own build dirs, so the release build stays
+# untouched). Run the E2E suite against one with
+#   PICOS_SIM_BINARY=build_sim_asan/picos_simulator pytest tests/e2e -n auto
+# Unicorn is not instrumented; its source is reused from build_sim if present.
+# Clang by default: its compiler-rt ships the ASan/UBSan/TSan runtimes, while
+# GCC's (libasan/libubsan/libtsan) are separate packages that are often absent.
+SIM_SAN_CC ?= clang
+SIM_SAN_CXX ?= clang++
+SIM_UNICORN_SRC := $(CURDIR)/$(SIM_BUILD_DIR)/_deps/unicorn-src
+define sim_sanitize_build
+	@echo "Building PicOS PC Simulator ($(2))..."
+	@mkdir -p $(1)
+	@cd $(1) && \
+		cmake ../simulator -DCMAKE_BUILD_TYPE=RelWithDebInfo \
+			-DCMAKE_C_COMPILER=$(SIM_SAN_CC) -DCMAKE_CXX_COMPILER=$(SIM_SAN_CXX) \
+			-DPICOS_SIM_SANITIZE="$(2)" \
+			$$( [ -d $(SIM_UNICORN_SRC) ] && echo -DFETCHCONTENT_SOURCE_DIR_UNICORN=$(SIM_UNICORN_SRC) ) && \
+		$(MAKE) -j$$(nproc 2>/dev/null || echo 4)
+	@test -x $(1)/picos_simulator || { \
+		echo "ERROR: build finished but $(1)/picos_simulator is missing"; \
+		exit 1; \
+	}
+	@echo "✓ $(1)/picos_simulator ($(2))"
+endef
+
+simulator-asan: simulator-check download-lua
+	$(call sim_sanitize_build,build_sim_asan,address;undefined)
+
+simulator-tsan: simulator-check download-lua
+	$(call sim_sanitize_build,build_sim_tsan,thread)
+
 simulator-run: simulator
 	@echo "Running PicOS Simulator..."
 	@echo ""
@@ -288,7 +321,7 @@ simulator-run: simulator
 
 simulator-clean:
 	@echo "Cleaning simulator build..."
-	@rm -rf $(SIM_BUILD_DIR)
+	@rm -rf $(SIM_BUILD_DIR) build_sim_asan build_sim_tsan
 	@echo "✓ Simulator clean complete"
 
 # ── Host unit tests ──────────────────────────────────────────────────────────

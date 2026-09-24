@@ -381,6 +381,33 @@ set_source_files_properties(
 # PNGdec's bundled zlib both defining crc32 — is resolved by renaming
 # PNGdec's copy on its sources (the set_source_files_properties on the PNGdec sources).
 
+# ── Sanitizer builds (make simulator-asan / simulator-tsan) ─────────────────
+# PICOS_SIM_SANITIZE is a list of -fsanitize= kinds, e.g. "address;undefined"
+# or "thread". It instruments the simulator and everything it compiles from
+# the PicOS tree (OS, bridge, Lua, decoders, HAL, network) but NOT Unicorn,
+# which is third-party JIT code and only slows the run down. Since the sim maps
+# umm_* and the Lua heap onto malloc, ASan sees every bridge allocation.
+set(PICOS_SIM_SANITIZE "" CACHE STRING
+    "Sanitizers for the simulator: '' (off), 'address;undefined' or 'thread'")
+set(_picos_san "")
+if(PICOS_SIM_SANITIZE)
+    string(REPLACE ";" "," _picos_san "${PICOS_SIM_SANITIZE}")
+    set(_picos_san_flags -fsanitize=${_picos_san} -fno-omit-frame-pointer -g)
+    if("undefined" IN_LIST PICOS_SIM_SANITIZE)
+        # Every UB report is fatal, so the harness sees it as a dead sim.
+        list(APPEND _picos_san_flags -fno-sanitize-recover=undefined)
+    endif()
+    foreach(_t picos_simulator sim_hal sim_network lua_sim libmad_sim image_decoders_sim)
+        target_compile_options(${_t} PRIVATE ${_picos_san_flags})
+    endforeach()
+    target_link_options(picos_simulator PRIVATE -fsanitize=${_picos_san})
+    message(STATUS "  - Sanitizers: ${_picos_san}")
+endif()
+# Reported by `picos_simulator --build-info` so the E2E harness can tell a
+# sanitizer build from a release one (asan_only tests).
+target_compile_definitions(picos_simulator PRIVATE
+    PICOS_SIM_SANITIZE_STR="${_picos_san}")
+
 # ── Install / Run ───────────────────────────────────────────────────────────
 set_target_properties(picos_simulator PROPERTIES
     RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}

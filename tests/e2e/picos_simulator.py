@@ -26,12 +26,71 @@ from pathlib import Path
 from typing import Any, Optional, List
 
 
+PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent
+
+# Sanitizer runtime options for sanitizer builds of the simulator (make
+# simulator-asan / simulator-tsan); ignored by a release build. Every report
+# is fatal (abort → the health hook sees a dead sim plus the report on
+# stderr). Leak checking stays off until there is a suppressions file.
+# allocator_may_return_null keeps the firmware's OOM contract (umm_malloc
+# returns NULL) instead of ASan aborting on a huge request. TSan keeps going
+# after a report: its leg is informational (see tests/e2e/README.md).
+SANITIZER_ENV = {
+    "ASAN_OPTIONS": "abort_on_error=1:halt_on_error=1:detect_leaks=0:"
+                    "allocator_may_return_null=1",
+    "UBSAN_OPTIONS": "print_stacktrace=1:halt_on_error=1",
+    "TSAN_OPTIONS": "halt_on_error=0:second_deadlock_stack=1:suppressions="
+                    + str(PROJECT_ROOT / "tests" / "e2e" / "tsan.supp"),
+}
+
+
+def sanitizer_env(env: dict) -> dict:
+    """`env` plus SANITIZER_ENV (values already in `env` win)."""
+    for key, value in SANITIZER_ENV.items():
+        env.setdefault(key, value)
+    return env
+
+
+def default_binary() -> Path:
+    """$PICOS_SIM_BINARY (relative to the cwd, else the repo root) or
+    build_sim/picos_simulator."""
+    override = os.environ.get("PICOS_SIM_BINARY")
+    if not override:
+        return PROJECT_ROOT / "build_sim" / "picos_simulator"
+    path = Path(override).expanduser()
+    if not path.is_absolute() and not path.exists():
+        path = PROJECT_ROOT / path
+    return path.resolve()
+
+
+_build_info_cache: dict = {}
+
+
+def binary_sanitizers(binary) -> str:
+    """The -fsanitize= list a simulator binary was built with ('' for a
+    release build), from `picos_simulator --build-info`."""
+    key = str(binary)
+    if key not in _build_info_cache:
+        san = ""
+        try:
+            out = subprocess.run([key, "--build-info"], capture_output=True,
+                                 text=True, timeout=30,
+                                 env=sanitizer_env(os.environ.copy())).stdout
+            for line in out.splitlines():
+                if line.startswith("sanitize="):
+                    san = line[len("sanitize="):].strip()
+        except (OSError, subprocess.SubprocessError):
+            pass
+        _build_info_cache[key] = san
+    return _build_info_cache[key]
+
+
 class PicosSimulator:
     """Controls PicOS Simulator process for E2E testing via JSON-RPC 2.0."""
 
     # Project root (two levels up from tests/e2e/)
-    PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent
-    DEFAULT_BINARY = PROJECT_ROOT / "build_sim" / "picos_simulator"
+    PROJECT_ROOT = PROJECT_ROOT
+    DEFAULT_BINARY = default_binary()
     DEFAULT_SD_CARD = PROJECT_ROOT / "simulator" / "assets" / "sd_card"
 
     def __init__(
@@ -93,6 +152,12 @@ class PicosSimulator:
         # diagnostics without growing without bound.
         self._stdout_tail: deque = deque(maxlen=2000)
         self._stderr_tail: deque = deque(maxlen=2000)
+        # A sanitizer report, captured from its first line by the stderr
+        # drain and kept apart from the tail, so later output (C-Dogs fills
+        # the tail in under a second; TSan keeps running) can't evict it.
+        # Bounded: the drain keeps reading past the cap, it just stops
+        # storing, so report volume can never back up the pipe.
+        self._sanitizer_report: list[str] = []
         self._drain_threads: list[threading.Thread] = []
 
     # ── Context Manager ──────────────────────────────────────────────────────
@@ -120,7 +185,7 @@ class PicosSimulator:
         if self.unix_socket:
             cmd += ["--unix-socket", str(self.unix_socket)]
 
-        env = os.environ.copy()
+        env = sanitizer_env(os.environ.copy())
         if self.headless:
             env["SDL_VIDEODRIVER"] = "dummy"
             env["SDL_AUDIODRIVER"] = "dummy"
@@ -132,12 +197,17 @@ class PicosSimulator:
             env=env,
         )
 
+        # stderr is drained from the first byte: a sanitizer build can write
+        # to it before the port line appears (TSan races at startup), and an
+        # undrained pipe deadlocks the sim (see _start_pipe_drains).
+        self._start_pipe_drains(stdout=False)
+
         # Parse the actual TCP port from simulator stdout
         self.tcp_port = self._parse_port()
 
-        # From here on nothing else reads these pipes, so they must be drained
-        # continuously — see _start_pipe_drains for why.
-        self._start_pipe_drains()
+        # From here on nothing else reads stdout, so it must be drained
+        # continuously too.
+        self._start_pipe_drains(stderr=False)
 
         # Connect and start reader
         self._connect()
@@ -198,9 +268,25 @@ class PicosSimulator:
         except OSError:
             return ""
 
+    # Lines of sanitizer report kept (a whole ASan report with its stacks
+    # is well under this; TSan may print many).
+    SANITIZER_REPORT_MAX = 600
+
     def sanitizer_lines(self) -> list[str]:
         """stderr lines that look like a sanitizer report."""
-        return [l for l in list(self._stderr_tail) if self.SANITIZER_RE.search(l)]
+        seen = [l for l in self._sanitizer_report if self.SANITIZER_RE.search(l)]
+        return seen or [l for l in list(self._stderr_tail)
+                        if self.SANITIZER_RE.search(l)]
+
+    def sanitizer_report(self) -> str:
+        """The captured sanitizer report (first line onwards, with stacks)."""
+        return "\n".join(self._sanitizer_report)
+
+    def _note_stderr_line(self, line: str):
+        """Stderr drain hook: start or extend the sticky sanitizer report."""
+        if self._sanitizer_report or self.SANITIZER_RE.search(line):
+            if len(self._sanitizer_report) < self.SANITIZER_REPORT_MAX:
+                self._sanitizer_report.append(line)
 
     def health_problems(self) -> list[str]:
         """Reasons this sim is unhealthy: the process exited without stop()
@@ -220,15 +306,16 @@ class PicosSimulator:
             problems.append("crash log:\n" + crash.strip())
         san = self.sanitizer_lines()
         if san:
-            problems.append("sanitizer report on stderr:\n" + "\n".join(san[:40]))
+            report = self._sanitizer_report or san
+            problems.append("sanitizer report on stderr:\n" + "\n".join(report[:120]))
         return problems
 
     def _join_drains(self, timeout: float = 1.0):
         for t in self._drain_threads:
             t.join(timeout=timeout)
 
-    def _start_pipe_drains(self):
-        """Continuously drain the child's stdout/stderr.
+    def _start_pipe_drains(self, stdout: bool = True, stderr: bool = True):
+        """Continuously drain the child's stdout and/or stderr.
 
         The simulator is spawned with stdout=PIPE and stderr=PIPE, but after
         _parse_port() nothing reads them again. Once the kernel pipe buffer
@@ -241,10 +328,13 @@ class PicosSimulator:
         This showed up as 'App hung on cycle 5/10' in the stress tests: it took
         about five app launches' worth of output to fill the pipe.
         """
-        def drain(stream, tail):
+        def drain(stream, tail, note=None):
             try:
                 for raw in iter(stream.readline, b""):
-                    tail.append(raw.decode("utf-8", errors="replace").rstrip("\n"))
+                    line = raw.decode("utf-8", errors="replace").rstrip("\n")
+                    tail.append(line)
+                    if note is not None:
+                        note(line)
             except (ValueError, OSError):
                 pass  # stream closed during shutdown
             finally:
@@ -253,11 +343,14 @@ class PicosSimulator:
                 except Exception:
                     pass
 
-        for stream, tail in ((self.process.stdout, self._stdout_tail),
-                             (self.process.stderr, self._stderr_tail)):
-            if stream is None:
+        for wanted, stream, tail, note in (
+                (stdout, self.process.stdout, self._stdout_tail, None),
+                (stderr, self.process.stderr, self._stderr_tail,
+                 self._note_stderr_line)):
+            if not wanted or stream is None:
                 continue
-            t = threading.Thread(target=drain, args=(stream, tail), daemon=True)
+            t = threading.Thread(target=drain, args=(stream, tail, note),
+                                 daemon=True)
             t.start()
             self._drain_threads.append(t)
 
@@ -276,7 +369,8 @@ class PicosSimulator:
         while time.time() < deadline:
             if self.process.poll() is not None:
                 stdout = self.process.stdout.read().decode() if self.process.stdout else ""
-                stderr = self.process.stderr.read().decode() if self.process.stderr else ""
+                self._join_drains()
+                stderr = "\n".join(self._stderr_tail)
                 raise RuntimeError(
                     f"Simulator exited early (code {self.process.returncode})\n"
                     f"stdout: {stdout}\nstderr: {stderr}"

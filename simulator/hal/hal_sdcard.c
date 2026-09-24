@@ -104,33 +104,46 @@ void* hal_sdcard_open(const char* path, const char* mode) {
     if (stat(full_path, &st) == 0 && S_ISDIR(st.st_mode)) {
         return NULL;
     }
-    return fopen(full_path, mode);
+    FILE *fp = fopen(full_path, mode);
+    if (!fp) return NULL;
+    hal_sdfile_t *h = malloc(sizeof(*h));
+    if (!h) {
+        fclose(fp);
+        return NULL;
+    }
+    h->fp = fp;
+    return h;
+}
+
+FILE *hal_sdcard_stream(void* handle) {
+    return handle ? ((hal_sdfile_t *)handle)->fp : NULL;
 }
 
 void hal_sdcard_close(void* handle) {
     if (handle) {
-        fclose((FILE*)handle);
+        fclose(hal_sdcard_stream(handle));
+        free(handle);
     }
 }
 
 size_t hal_sdcard_read(void* handle, void* buf, size_t len) {
     if (!handle) return 0;
-    return fread(buf, 1, len, (FILE*)handle);
+    return fread(buf, 1, len, hal_sdcard_stream(handle));
 }
 
 size_t hal_sdcard_write(void* handle, const void* buf, size_t len) {
     if (!handle) return 0;
-    return fwrite(buf, 1, len, (FILE*)handle);
+    return fwrite(buf, 1, len, hal_sdcard_stream(handle));
 }
 
 int hal_sdcard_seek(void* handle, long offset) {
     if (!handle) return -1;
-    return fseek((FILE*)handle, offset, SEEK_SET);
+    return fseek(hal_sdcard_stream(handle), offset, SEEK_SET);
 }
 
 long hal_sdcard_tell(void* handle) {
     if (!handle) return -1;
-    return ftell((FILE*)handle);
+    return ftell(hal_sdcard_stream(handle));
 }
 
 int hal_sdcard_exists(const char* path) {

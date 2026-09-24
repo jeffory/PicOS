@@ -105,6 +105,13 @@ static int sim_traceback_msgh(lua_State *L) {
 #endif
 
 // Runs on the Lua VM stack (PSP).
+// lua_bridge_register returns void; calling it through a lua_CFunction
+// (int-returning) pointer is undefined behaviour (UBSan -fsanitize=function).
+static int lua_bridge_register_cfn(lua_State *L) {
+  lua_bridge_register(L);
+  return 0;
+}
+
 static void lua_vm_body(void *arg) {
   lua_vm_ctx_t *ctx = (lua_vm_ctx_t *)arg;
   const app_entry_t *app = ctx->app;
@@ -122,7 +129,7 @@ static void lua_vm_body(void *arg) {
 
   // Wrap registration in a pcall to catch errors before we enter the main loop.
   // This prevents abort() if a module fails to register (e.g. OOM).
-  lua_pushcfunction(L, (lua_CFunction)lua_bridge_register);
+  lua_pushcfunction(L, lua_bridge_register_cfn);
   if (lua_pcall(L, 0, 0, 0) != LUA_OK) {
     lua_bridge_show_error(L, "Init error:");
     sim_app_outcome_set(SIM_APP_RESULT_LOAD_FAILED, NULL);

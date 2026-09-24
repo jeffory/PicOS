@@ -64,6 +64,50 @@ def test_gc_suite_survives(gc_runs, mode):
     assert f"GC:MODE {mode}" in [e["text"] for e in run.log], run.describe()
 
 
+# ── gc_test under ASan: use the parent after the child is collected ─────────
+
+# The lifetime cases above stop at the survival check so the release sim stays
+# deterministic. Under ASan each case also runs alone in use_first mode: the
+# parent is used after the collection, and a missing anchor is a
+# heap-use-after-free that ASan reports (and aborts on) at the bridge call.
+# Reasons name the ASan report each case produced (task-22-report.md has the
+# stacks). performOnAllSprites is not a lifetime case (its callback never
+# runs), so it is not repeated here.
+def _gc_asan(bug, site):
+    return f"{bug}; ASan: heap-use-after-free in {site} on the collected child"
+
+
+GC_ASAN_KNOWN_BUGS = {
+    "sprite_new_keeps_image": _gc_asan(GRAPHICS_BUG, "l_sprite_draw"),
+    "sprite_setImage_keeps_image": _gc_asan(GRAPHICS_BUG, "l_sprite_draw"),
+    "spritesheet_keeps_image": _gc_asan(GRAPHICS_BUG, "l_spritesheet_drawFrame"),
+    "tilemap_keeps_tileset": _gc_asan(GRAPHICS_BUG, "tilemap_draw <- l_tilemap_draw"),
+    "animation_loop_keeps_frames": _gc_asan(GRAPHICS_BUG, "l_animation_loop_draw"),
+    "added_sprite_survives_gc": _gc_asan(SPRITE_LIST_BUG, "l_sprite_update"),
+    "sampleplayer_setSample_keeps_sample": _gc_asan(
+        SAMPLE_BUG, "sound_player_play (sim_audio.c) <- l_sound_sampleplayer_play"),
+    "sampleplayer_new_keeps_sample": _gc_asan(
+        SAMPLE_BUG, "sound_player_play (sim_audio.c) <- l_sound_sampleplayer_play"),
+}
+
+
+def _use_first(case):
+    def setup(sd):
+        app = sd / "apps" / "gc_test"
+        (app / "use_first.flag").write_text("1")
+        (app / "only.flag").write_text(case)
+    return setup
+
+
+@pytest.mark.asan_only
+@pytest.mark.parametrize("case", [
+    pytest.param(c, id=c, marks=[known_bug(r)])
+    for c, r in GC_ASAN_KNOWN_BUGS.items()])
+def test_gc_use_after_collect(lua_suite, case):
+    run = lua_suite("gc_test", setup=_use_first(case))
+    run.check_case(case)
+
+
 # ── fs handle misuse: one inline app per case ───────────────────────────────
 
 FS_EDGE = {
@@ -109,11 +153,25 @@ def _fs_edge_app(body):
 
 # write_after_close is undefined behaviour on a freed FILE in the release
 # simulator: it crashes, "succeeds" or fails from run to run. Only the
-# sanitizer build (Task 22) can check it deterministically.
+# sanitizer build (make simulator-asan) can check it deterministically. The
+# sim's file handle is a heap wrapper around the FILE* (hal_sdcard.c), so the
+# misuse is a use-after-free in instrumented code that ASan reports at the
+# bridge call (a bare FILE* is only touched inside glibc, which ASan can't
+# see: read_after_close used to pass under ASan).
+def _fs_asan(stack):
+    return f"{FS_HANDLE_BUG}; ASan: heap-use-after-free, {stack}"
+
+
 FS_EDGE_MARKS = {
-    "double_close": [known_bug(FS_HANDLE_BUG)],          # glibc aborts: double free
-    "read_after_close": [known_bug(FS_HANDLE_BUG)],      # SIGSEGV
-    "write_after_close": [known_bug(FS_HANDLE_BUG), pytest.mark.asan_only],
+    # release: SIGSEGV (fclose through the freed handle)
+    "double_close": [known_bug(_fs_asan(
+        "hal_sdcard_close <- l_fs_close (lua_bridge_fs.c) on the freed handle"))],
+    # release: SIGSEGV
+    "read_after_close": [known_bug(_fs_asan(
+        "hal_sdcard_read <- l_fs_read (lua_bridge_fs.c) on the freed handle"))],
+    "write_after_close": [known_bug(_fs_asan(
+        "hal_sdcard_write <- l_fs_write (lua_bridge_fs.c) on the freed handle")),
+        pytest.mark.asan_only],
 }
 
 

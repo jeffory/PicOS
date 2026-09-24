@@ -4,6 +4,7 @@
 #define HAL_SDCARD_H
 
 #include <stdbool.h>
+#include <stdio.h>
 #include <stddef.h>
 
 // Initialize SD card subsystem with base path
@@ -18,7 +19,15 @@ bool hal_sdcard_resolve(const char* path, char* out, size_t out_size);
 void hal_sdcard_shutdown(void);
 
 // File operations (similar to FatFS API)
+// A handle is a heap wrapper around the host FILE*, not the FILE* itself, so
+// a use after close touches freed memory in instrumented simulator code and an
+// ASan build reports it (glibc's own FILE accesses are invisible to ASan).
+typedef struct {
+    FILE *fp;
+} hal_sdfile_t;
+
 void* hal_sdcard_open(const char* path, const char* mode);
+FILE *hal_sdcard_stream(void* handle);
 void hal_sdcard_close(void* handle);
 size_t hal_sdcard_read(void* handle, void* buf, size_t len);
 size_t hal_sdcard_write(void* handle, const void* buf, size_t len);

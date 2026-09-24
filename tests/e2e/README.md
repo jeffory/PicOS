@@ -17,6 +17,33 @@ pytest tests/e2e --html=reports/e2e.html --self-contained-html \
                  --artifacts-dir reports/failures        # CI-style reports
 ```
 
+### Sanitizer builds
+
+```bash
+make simulator-asan      # ASan + UBSan, build_sim_asan/ (clang; SIM_SAN_CC to override)
+PICOS_SIM_BINARY=build_sim_asan/picos_simulator SDL_VIDEODRIVER=dummy pytest tests/e2e -n auto
+make simulator-tsan      # TSan, build_sim_tsan/ (informational, see below)
+```
+
+`PICOS_SIM_BINARY` (or `--simulator-path`) picks the binary. The harness asks it
+`--build-info` and runs the `asan_only` tests only against an ASan build; they
+skip (allow-listed) otherwise. Every simulator gets `ASAN_OPTIONS`,
+`UBSAN_OPTIONS` and `TSAN_OPTIONS` from `picos_simulator.SANITIZER_ENV` (any
+already set in the environment win): ASan and UBSan reports are fatal, leak
+checking is off, and `allocator_may_return_null=1` keeps umm's return-NULL OOM
+contract. The sanitizer build leaves SIGSEGV/SIGABRT to the sanitizer, so the
+evidence is the report on stderr rather than the sim's crash log. stderr is
+drained from the moment the process starts, and the report is captured apart
+from the 2000-line tail (capped at 600 lines), so neither report volume nor
+later output can hide it or back up the pipe.
+
+TSan reports on nearly every test, from the sim's own threads: the RPC socket
+thread reads the framebuffer, launcher and keyboard state that the main thread
+owns, and the Core 1 thread reads audio and lifecycle globals the main thread
+writes, all unlocked (`specs/test-audit-2026-09-24.md` §2.6). So the TSan leg is
+nightly and informational; `tests/e2e/tsan.supp` suppresses third-party
+(libdbus) reports only.
+
 Paths are absolute, so any working directory inside the repo works. The config
 is the repo-level `pytest.ini`: 60 s per-test timeout (`pytest-timeout`), strict
 xfail, and markers `slow`, `hardware`, `native`, `asan_only`, `flaky`, `sd`.
