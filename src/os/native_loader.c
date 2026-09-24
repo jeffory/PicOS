@@ -285,6 +285,9 @@ static bool native_run(const app_entry_t *app) {
   return unicorn_run_app(elf_path, app->path, app->id, app->name);
 }
 #else
+// Declared in main.c — feeds the watchdog and stamps Core 0's heartbeat.
+extern void core0_heartbeat(void);
+
 static bool native_run(const app_entry_t *app) {
   printf("[NATIVE] Loading '%s'\n", app->name);
   s_loading_app_name = app->name;
@@ -478,7 +481,9 @@ static bool native_run(const app_entry_t *app) {
     const Elf32_Phdr *ph = &phdr_table[i];
     if (ph->p_type != PT_LOAD || ph->p_filesz == 0)
       continue;
-    watchdog_update(); // kick per segment — large ELFs (e.g. DOOM) take seconds to read
+    // Heartbeat per segment: a large segment (e.g. DOOM) takes seconds to
+    // read, and Core 1 (paused) relays the watchdog only while it is fresh.
+    core0_heartbeat();
     if (ph->p_offset + ph->p_filesz > (uint32_t)file_len) {
       show_error("ELF: segment data out of bounds", NULL);
       goto out;

@@ -540,7 +540,11 @@ void launcher_apply_clock(uint32_t khz) {
   printf("[LAUNCHER] Changing clock: %lu -> %lu MHz\n", 
          (unsigned long)(current_khz / 1000), (unsigned long)(khz / 1000));
 
-  // 1. Pause Core 1 background tasks (WiFi/Audio) to avoid bus corruption
+  // 1. Pause Core 1 background tasks (WiFi/Audio) to avoid bus corruption.
+  // Paused Core 1 relays the watchdog only while Core 0's heartbeat is
+  // fresh, so kick it here: the whole change takes milliseconds, well
+  // inside the 10 s timeout, and a hang in it still resets.
+  watchdog_update();
   g_core1_pause = true;
   for (int i = 0; i < 200 && !g_core1_paused; i++)
     sleep_ms(1);

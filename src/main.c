@@ -572,6 +572,15 @@ static volatile bool s_native_exit = false;
 // rebooted by the 10s watchdog; a genuinely hung Core 0 still trips it
 // once the heartbeat goes stale.
 volatile uint32_t g_core0_heartbeat_ms = 0;
+#define CORE0_HEARTBEAT_STALE_MS 60000u
+
+// Feed the watchdog from Core 0 and stamp the heartbeat. Long Core 0 work
+// that runs with Core 1 paused (ELF segment reads, USB MSC setup) calls this
+// so Core 1 keeps relaying the watchdog for it.
+void core0_heartbeat(void) {
+  watchdog_update();
+  g_core0_heartbeat_ms = to_ms_since_boot(get_absolute_time());
+}
 
 // Pending app launch from serial command
 static const char* s_pending_launch = NULL;
@@ -580,8 +589,7 @@ static const char* s_pending_launch = NULL;
 // check the Sym (Menu) key to show the system menu overlay.
 static void sys_poll(void) {
   kbd_poll();
-  watchdog_update();
-  g_core0_heartbeat_ms = to_ms_since_boot(get_absolute_time());
+  core0_heartbeat();
   http_fire_c_pending();
   if (kbd_consume_menu_press()) {
     if (system_menu_show_for_native())
@@ -1462,6 +1470,17 @@ static void core1_doorbell_isr(void) {
   s_core1_tick_pending = true;
 }
 
+// Relay the watchdog for Core 0 while its heartbeat is fresh — long
+// CPU-bound stretches in apps (no poll for >10s) must not reboot the
+// device, but a Core 0 hung for over a minute still should. Applied while
+// Core 1 is paused too: Core 0 pauses it around ELF loads and clock
+// changes, and a hang there must still reset.
+static inline void core1_relay_watchdog(void) {
+  uint32_t now_ms = to_ms_since_boot(get_absolute_time());
+  if (now_ms - g_core0_heartbeat_ms < CORE0_HEARTBEAT_STALE_MS)
+    watchdog_update();
+}
+
 static void core1_entry(void) {
   volatile uint32_t *scb_ccr = (volatile uint32_t *)(0xE000ED14);
   *scb_ccr &= ~(1u << 3);
@@ -1489,7 +1508,7 @@ static void core1_entry(void) {
       atomic_store(&g_core1_paused, true);
       __dmb(); // ensure paused flag visible to Core 0 before we spin
       while (atomic_load(&g_core1_pause)) {
-        watchdog_update(); // keep watchdog alive while paused
+        core1_relay_watchdog();
         sleep_ms(1);
       }
       atomic_store(&g_core1_paused, false);
@@ -1500,14 +1519,7 @@ static void core1_entry(void) {
     if (s_core1_tick_pending) {
       s_core1_tick_pending = false;
 
-      // Relay the watchdog for Core 0 while its heartbeat is fresh — long
-      // CPU-bound stretches in apps (no poll for >10s) must not reboot the
-      // device, but a Core 0 hung for over a minute still should.
-      {
-        uint32_t now_ms = to_ms_since_boot(get_absolute_time());
-        if (now_ms - g_core0_heartbeat_ms < 60000u)
-          watchdog_update();
-      }
+      core1_relay_watchdog();
 
       wifi_poll();
       http_fire_c_pending();
