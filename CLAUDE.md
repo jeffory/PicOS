@@ -43,7 +43,7 @@ USB serial at 115200 baud. App log calls appear as `[APP] message`. Lua errors d
 
 To stage a multi-file app on hardware or the simulator, prefer the `push_app` MCP tool (`tools/picos_mcp.py`): it ships the whole directory as one ZIP and extracts it on-device via the `unzip <zip> <dest>` dev command (`rm <path>` cleans up), far faster than per-file transfers for asset-heavy apps.
 
-Tests: the simulator E2E suite (`SDL_VIDEODRIVER=dummy pytest tests/e2e -n auto`; see `tests/e2e/README.md`, config in the repo-level `pytest.ini`), `make test-unit` and `make test-lua`. There is no linter. Lua fixture apps report through the test kit `tests/e2e/lib/picotest.lua` (staged as `/system/lib/picotest.lua`).
+Tests: the simulator E2E suite (`SDL_VIDEODRIVER=dummy pytest tests/e2e -n auto`; see `tests/e2e/README.md`, config in the repo-level `pytest.ini`), `make test-unit` (host C unit tests: `tests/unit/CMakeLists.txt` → `build_unit/`, ctest, ASan+UBSan; covers the pure modules `elf_plan`, `fs_path`, `app_manifest`, `config`/`appconfig` over an in-memory SD fake, `wav`, `audio_ring`, `zip_name`, `text_wrap`, `lua_numfmt` vs glibc, fonts), `python3 -m pytest tests/unit` and `make test-lua`. `make fuzz` runs the libFuzzer targets in `tests/fuzz/` (clang; `FUZZ_TARGETS=`, `FUZZ_SECONDS=`); CI runs them nightly (`.github/workflows/fuzz.yml`) and the unit job on every push (`unit.yml`). There is no linter. Lua fixture apps report through the test kit `tests/e2e/lib/picotest.lua` (staged as `/system/lib/picotest.lua`).
 
 ## Architecture
 

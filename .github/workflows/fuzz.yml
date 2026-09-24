@@ -1,0 +1,50 @@
+name: Fuzz (nightly)
+
+# libFuzzer targets for the parsers that take untrusted files (tests/fuzz):
+# the native-app ELF loader's validation, app.json, and WAV headers. Each
+# runs 120 s. The working corpus is carried between nights in the actions
+# cache (and uploaded as an artifact); seeds live in tests/fuzz/corpus.
+# A crash fails the job and uploads the reproducer (build_fuzz/crash-*):
+#   build_fuzz/fuzz/fuzz_<target> <crash file>
+on:
+  schedule:
+    - cron: '41 2 * * *'
+  workflow_dispatch:
+
+jobs:
+  fuzz:
+    name: Fuzz (${{ matrix.target }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        target: [elf_plan, app_manifest, wav]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install clang
+        run: |
+          sudo apt-get update -q
+          sudo apt-get install -y cmake clang llvm
+
+      - name: Restore corpus
+        uses: actions/cache@v4
+        with:
+          path: build_fuzz/corpus/${{ matrix.target }}
+          # A new key every run (caches are immutable); restore the newest.
+          key: fuzz-corpus-${{ matrix.target }}-${{ github.run_id }}
+          restore-keys: fuzz-corpus-${{ matrix.target }}-
+
+      - name: Fuzz 120 s
+        run: make fuzz FUZZ_TARGETS=${{ matrix.target }} FUZZ_SECONDS=120
+
+      - name: Upload corpus and crashes
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: fuzz-${{ matrix.target }}
+          path: |
+            build_fuzz/corpus/${{ matrix.target }}
+            build_fuzz/crash-*
+          if-no-files-found: ignore

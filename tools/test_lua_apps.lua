@@ -156,17 +156,28 @@ local function check_lua_file(filepath)
     return true, nil
 end
 
--- Recursively find all .lua files in a directory
+-- Recursively find all .lua files in a directory. Inside a git checkout,
+-- only files git would track (committed or untracked-but-not-ignored): the
+-- gitignored vendor trees (e.g. apps/tic-80's bundled Lua test suite, which
+-- is deliberately invalid Lua) are not PicOS apps.
 local function find_lua_files(dir)
     local files = {}
-    local handle = io.popen("find " .. dir .. " -name '*.lua' 2>/dev/null")
+    local handle = io.popen("git ls-files --cached --others --exclude-standard -- '"
+        .. dir .. "/*.lua' 2>/dev/null")
+    if handle then
+        for file in handle:lines() do
+            table.insert(files, file)
+        end
+        handle:close()
+    end
+    if #files > 0 then return files end
+
+    handle = io.popen("find " .. dir .. " -name '*.lua' 2>/dev/null")
     if not handle then return files end
-    
     for file in handle:lines() do
         table.insert(files, file)
     end
     handle:close()
-    
     return files
 end
 
