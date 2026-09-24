@@ -10,25 +10,8 @@
 #include <stdio.h>
 #include <string.h>
 
-// XIP cache coherency — see pio_psram.c for detailed explanation.
-static inline bool is_cached_psram(const void *ptr) {
-    return ((uintptr_t)ptr >> 24) == 0x11;
-}
-#define XIP_UNCACHED_OFFSET 0x04000000
-
-static inline const uint8_t *flush_and_uncache(const void *ptr) {
-    __asm volatile ("dsb sy");
-    xip_cache_clean_all();
-    __asm volatile ("dsb sy" ::: "memory");
-    return (const uint8_t *)((uintptr_t)ptr + XIP_UNCACHED_OFFSET);
-}
-
-static inline uint8_t *flush_and_uncache_dst(void *ptr) {
-    __asm volatile ("dsb sy");
-    xip_cache_clean_all();
-    __asm volatile ("dsb sy" ::: "memory");
-    return (uint8_t *)((uintptr_t)ptr + XIP_UNCACHED_OFFSET);
-}
+// XIP cache coherency and the per-segment transfer lock: pio_psram_xip.h.
+#include "pio_psram_xip.h"
 
 // Include the generated PIO header
 #include "pio_psram_bulk.pio.h"
@@ -38,7 +21,7 @@ static PIO s_pio = NULL;
 static int s_sm = -1;
 static uint s_prog_offs = 0;
 static bool s_available = false;
-static mutex_t s_mutex;
+static pio_psram_lock_t s_lock;
 
 // DMA channels
 static int s_write_dma_chan = -1;
@@ -161,8 +144,8 @@ bool pio_psram_bulk_init(void) {
     channel_config_set_write_increment(&s_read_dma_cfg, true);
     channel_config_set_dreq(&s_read_dma_cfg, pio_get_dreq(s_pio, s_sm, false));
 
-    // Initialize mutex for multi-core safety
-    mutex_init(&s_mutex);
+    // Initialize the transfer lock for multi-core safety
+    pio_psram_lock_init(&s_lock);
 
     // Self-test: write 4 bytes then read them back
     // Uses polpo-compatible protocol (proven timing)
@@ -240,18 +223,10 @@ bool pio_psram_bulk_available(void) {
     return s_available;
 }
 
-void pio_psram_bulk_write(uint32_t addr, const uint8_t *src, uint32_t len) {
-    if (!s_available || len == 0) return;
-    if (is_cached_psram(src))
-        src = flush_and_uncache(src);
-
-    mutex_enter_blocking(&s_mutex);
-
-    // Per-transaction writes: each chunk is a complete SPI transaction
-    // with its own cmd+addr, matching the self-test protocol.
-    // [write_bits=(4+chunk)*8, read_bits=0, cmd, addr, data...] [0=end]
-    uint32_t remaining = len;
-    const uint8_t *p = src;
+// One write segment (s_lock held). Per-transaction writes: each chunk is a
+// complete SPI transaction with its own cmd+addr, matching the self-test
+// protocol: [write_bits=(4+chunk)*8, read_bits=0, cmd, addr, data...] [0=end]
+static void bulk_write_locked(uint32_t addr, const uint8_t *p, uint32_t remaining) {
     while (remaining > 0) {
         uint32_t chunk = (remaining > PIO_PSRAM_BULK_CHUNK_WRITE)
                          ? PIO_PSRAM_BULK_CHUNK_WRITE : remaining;
@@ -279,24 +254,29 @@ void pio_psram_bulk_write(uint32_t addr, const uint8_t *src, uint32_t len) {
     }
 
     sleep_us(1);
-
-    s_stats.write_calls++;
-    s_stats.write_bytes += len;
-
-    mutex_exit(&s_mutex);
 }
 
-void pio_psram_bulk_read(uint32_t addr, uint8_t *dst, uint32_t len) {
+void pio_psram_bulk_write(uint32_t addr, const uint8_t *src, uint32_t len) {
     if (!s_available || len == 0) return;
-    if (is_cached_psram(dst))
-        dst = flush_and_uncache_dst(dst);
+    src = pio_psram_xip_src(src, len);
 
-    mutex_enter_blocking(&s_mutex);
+    pio_psram_lock(&s_lock);
+    s_stats.write_calls++;
+    s_stats.write_bytes += len;
+    for (;;) {
+        uint32_t n = len < PIO_PSRAM_LOCK_SEGMENT ? len : PIO_PSRAM_LOCK_SEGMENT;
+        bulk_write_locked(addr, src, n);
+        addr += n; src += n; len -= n;
+        if (len == 0) break;
+        pio_psram_lock_yield(&s_lock);
+    }
+    pio_psram_unlock(&s_lock);
+}
 
-    // Non-streaming reads: each chunk is a separate polpo-compatible transaction.
-    // This uses the proven fudge read timing (no chunk boundary issues).
-    uint32_t remaining = len;
-    uint8_t *p = dst;
+// One read segment (s_lock held) into DMA-safe memory. Non-streaming reads:
+// each chunk is a separate polpo-compatible transaction. This uses the
+// proven fudge read timing (no chunk boundary issues).
+static void bulk_read_locked(uint32_t addr, uint8_t *p, uint32_t remaining) {
     while (remaining > 0) {
         uint32_t chunk = (remaining > PIO_PSRAM_BULK_CHUNK_READ)
                          ? PIO_PSRAM_BULK_CHUNK_READ : remaining;
@@ -325,11 +305,25 @@ void pio_psram_bulk_read(uint32_t addr, uint8_t *dst, uint32_t len) {
         p += chunk;
         remaining -= chunk;
     }
+}
 
+static void bulk_read_segmented(uint32_t addr, uint8_t *dst, uint32_t len) {
+    pio_psram_lock(&s_lock);
     s_stats.read_calls++;
     s_stats.read_bytes += len;
+    for (;;) {
+        uint32_t n = len < PIO_PSRAM_LOCK_SEGMENT ? len : PIO_PSRAM_LOCK_SEGMENT;
+        bulk_read_locked(addr, dst, n);
+        addr += n; dst += n; len -= n;
+        if (len == 0) break;
+        pio_psram_lock_yield(&s_lock);
+    }
+    pio_psram_unlock(&s_lock);
+}
 
-    mutex_exit(&s_mutex);
+void pio_psram_bulk_read(uint32_t addr, uint8_t *dst, uint32_t len) {
+    if (!s_available || len == 0) return;
+    pio_psram_xip_read(addr, dst, len, bulk_read_segmented);
 }
 
 void pio_psram_bulk_get_stats(pio_psram_bulk_stats_t *stats) {
@@ -347,10 +341,10 @@ void pio_psram_bulk_set_sysclk(uint32_t sys_khz) {
     // fractional jitter.
     uint32_t div = (sys_khz + 2 * 25000 - 1) / (2 * 25000);
     if (div < 1) div = 1;
-    mutex_enter_blocking(&s_mutex);
+    pio_psram_lock(&s_lock);
     pio_sm_set_clkdiv_int_frac(s_pio, s_sm, (uint16_t)div, 0);
     pio_sm_clkdiv_restart(s_pio, s_sm);
-    mutex_exit(&s_mutex);
+    pio_psram_unlock(&s_lock);
     printf("[PIO_PSRAM_BULK] Retimed: %lu kHz SPI at %lu kHz sysclk\n",
            (unsigned long)(sys_khz / (2 * div)), (unsigned long)sys_khz);
 }

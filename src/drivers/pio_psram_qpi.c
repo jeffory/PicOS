@@ -13,27 +13,8 @@
 
 #include "pio_psram_qpi.pio.h"
 
-// XIP cache coherency — same scheme as pio_psram_bulk.c: buffers in QMI PSRAM
-// may be addressed through the cached 0x11 alias; DMA must see flushed data
-// through the uncached 0x15 alias.
-static inline bool is_cached_psram(const void *ptr) {
-    return ((uintptr_t)ptr >> 24) == 0x11;
-}
-#define XIP_UNCACHED_OFFSET 0x04000000
-
-static inline const uint8_t *flush_and_uncache(const void *ptr) {
-    __asm volatile ("dsb sy");
-    xip_cache_clean_all();
-    __asm volatile ("dsb sy" ::: "memory");
-    return (const uint8_t *)((uintptr_t)ptr + XIP_UNCACHED_OFFSET);
-}
-
-static inline uint8_t *flush_and_uncache_dst(void *ptr) {
-    __asm volatile ("dsb sy");
-    xip_cache_clean_all();
-    __asm volatile ("dsb sy" ::: "memory");
-    return (uint8_t *)((uintptr_t)ptr + XIP_UNCACHED_OFFSET);
-}
+// XIP cache coherency and the per-segment transfer lock: pio_psram_xip.h.
+#include "pio_psram_xip.h"
 
 // PSRAM commands (ESP-PSRAM64H / APS6404L / LY68L6400 family)
 #define PSRAM_CMD_RESET_EN   0x66
@@ -53,7 +34,7 @@ static PIO s_pio = NULL;
 static int s_sm = -1;
 static uint s_prog_offs = 0;
 static bool s_available = false;
-static mutex_t s_mutex;
+static pio_psram_lock_t s_lock;
 
 static uint32_t s_target_khz = 0;   // tier target (50000 or 25000)
 static uint32_t s_spi_khz = 0;      // actual SPI clock after divider
@@ -181,7 +162,7 @@ static void qpi_diag_read_id(void) {
     s_diag_readid_count = n;
 }
 
-// Core transfer implementations. Callers hold s_mutex.
+// Core transfer implementations. Callers hold s_lock.
 static void qpi_write_locked(uint32_t addr, const uint8_t *src, uint32_t len) {
     uint32_t remaining = len;
     const uint8_t *p = src;
@@ -365,7 +346,7 @@ bool pio_psram_qpi_init(void) {
     channel_config_set_write_increment(&s_read_dma_cfg, true);
     channel_config_set_dreq(&s_read_dma_cfg, pio_get_dreq(s_pio, s_sm, false));
 
-    mutex_init(&s_mutex);
+    pio_psram_lock_init(&s_lock);
 
     uint32_t sys_khz = clock_get_hz(clk_sys) / 1000;
     static const uint32_t tiers[] = { 50000, 25000 };
@@ -408,29 +389,43 @@ bool pio_psram_qpi_available(void) {
 
 void pio_psram_qpi_write(uint32_t addr, const uint8_t *src, uint32_t len) {
     if (!s_available || len == 0) return;
-    if (is_cached_psram(src))
-        src = flush_and_uncache(src);
-    mutex_enter_blocking(&s_mutex);
-    qpi_write_locked(addr, src, len);
-    mutex_exit(&s_mutex);
+    src = pio_psram_xip_src(src, len);
+    pio_psram_lock(&s_lock);
+    for (;;) {
+        uint32_t n = len < PIO_PSRAM_LOCK_SEGMENT ? len : PIO_PSRAM_LOCK_SEGMENT;
+        qpi_write_locked(addr, src, n);
+        addr += n; src += n; len -= n;
+        if (len == 0) break;
+        pio_psram_lock_yield(&s_lock);
+    }
+    pio_psram_unlock(&s_lock);
+}
+
+// Raw read into DMA-safe memory, one lock segment at a time.
+static void qpi_read_segmented(uint32_t addr, uint8_t *dst, uint32_t len) {
+    pio_psram_lock(&s_lock);
+    for (;;) {
+        uint32_t n = len < PIO_PSRAM_LOCK_SEGMENT ? len : PIO_PSRAM_LOCK_SEGMENT;
+        qpi_read_locked(addr, dst, n);
+        addr += n; dst += n; len -= n;
+        if (len == 0) break;
+        pio_psram_lock_yield(&s_lock);
+    }
+    pio_psram_unlock(&s_lock);
 }
 
 void pio_psram_qpi_read(uint32_t addr, uint8_t *dst, uint32_t len) {
     if (!s_available || len == 0) return;
-    if (is_cached_psram(dst))
-        dst = flush_and_uncache_dst(dst);
-    mutex_enter_blocking(&s_mutex);
-    qpi_read_locked(addr, dst, len);
-    mutex_exit(&s_mutex);
+    pio_psram_xip_read(addr, dst, len, qpi_read_segmented);
 }
 
 void pio_psram_qpi_set_sysclk(uint32_t sys_khz) {
     if (!s_available) return;
-    mutex_enter_blocking(&s_mutex);
+    pio_psram_lock(&s_lock);
     qpi_apply_timing(sys_khz);
     printf("[PIO_PSRAM_QPI] Retimed: %lu kHz SPI at %lu kHz sysclk\n",
            (unsigned long)s_spi_khz, (unsigned long)sys_khz);
-    mutex_exit(&s_mutex);
+    pio_psram_unlock(&s_lock);
 }
 
 uint32_t pio_psram_qpi_spi_khz(void) {
