@@ -173,13 +173,18 @@ static int l_display_drawPlane(lua_State *L) {
 bool s_screenshot_pending = false;
 
 static int l_display_flush(lua_State *L) {
-  (void)L;
   toast_draw();
   display_flush();
   if (s_screenshot_pending) {
     s_screenshot_pending = false;
     screenshot_save();
   }
+  // Once a frame, whatever the count hook's count: a draw loop that never
+  // polls input runs a few instructions per frame, so after a compute phase
+  // (count at its maximum) the next hook call could be seconds away and the
+  // watchdog would fire. The gated pass (see lua_bridge.h) feeds it and
+  // serves exit, the menu, callbacks and dev commands.
+  lua_bridge_service_poll(L);
   return 0;
 }
 
@@ -197,6 +202,7 @@ static int l_display_flushRows(lua_State *L) {
     s_screenshot_pending = false;
     screenshot_save();
   }
+  lua_bridge_service_poll(L);  // as l_display_flush
   return 0;
 }
 
@@ -212,6 +218,7 @@ static int l_display_flushRegion(lua_State *L) {
     s_screenshot_pending = false;
     screenshot_save();
   }
+  lua_bridge_service_poll(L);  // as l_display_flush
   return 0;
 }
 

@@ -81,6 +81,66 @@ def test_dev_commands_reach_non_polling_draw_loop(simulator):
     assert time.time() - t < 1.0, "exit_app took over a second"
 
 
+def test_exit_after_compute_burst_then_non_polling_draw_loop(simulator):
+    """Review finding: a compute phase drives the hook count to its maximum
+    (4096), and a following draw loop runs a few instructions per frame, so
+    the next hook call was seconds away (past the device's 10 s watchdog).
+    display.flush runs the gated service pass every frame."""
+    code = """
+local pc = picocalc
+local d = pc.display
+local acc = 0
+for i = 1, 3000000 do acc = acc + i % 7 end   -- count climbs to the max
+pc.sys.log("LOW_READY")
+while true do
+    d.clear(d.BLACK)
+    d.flush()
+end
+"""
+    stage_lua_app(simulator.sd_card_path, "hook_burst_draw", code)
+    seq = simulator.get_log_buffer(tail=1).get("next_seq", 0)
+    simulator.launch_app("hook_burst_draw")
+    simulator.wait_for_log(r"^LOW_READY$", timeout=10, since_seq=seq)
+    time.sleep(0.3)
+    t = time.time()
+    simulator.exit_app()
+    outcome = simulator.wait_for_exit(timeout=15)
+    elapsed = time.time() - t
+    assert outcome.get("result") == "exit_sentinel", outcome
+    assert elapsed < 1.0, f"exit_app took {elapsed:.1f} s after a compute burst"
+
+
+def test_coroutine_adapting_does_not_pin_main_thread_count(simulator):
+    """Review finding: hook counts are per thread. A coroutine that adapted
+    its own count down (a slow phase) must not stop the main thread's count
+    from coming down when main enters a slow phase of its own. The slow
+    phases are table.sort calls (C, a few instructions each, ~1-2 ms here)
+    that never serve the system, so only the count hook runs dev commands."""
+    code = """
+local pc = picocalc
+local t = {}
+for i = 1, 5000 do t[i] = (i * 7919) % 5003 end   -- count climbs to the max
+local function slow_for(ms)
+    local t0 = pc.sys.getTimeMs()
+    while pc.sys.getTimeMs() - t0 < ms do table.sort(t) end
+end
+-- The coroutine inherits the maximum and adapts down to the minimum.
+local co = coroutine.create(function() slow_for(1500) end)
+coroutine.resume(co)
+pc.sys.log("LOW_READY")
+while true do table.sort(t) end               -- main: slow phase
+"""
+    stage_lua_app(simulator.sd_card_path, "hook_coroutine", code)
+    seq = simulator.get_log_buffer(tail=1).get("next_seq", 0)
+    simulator.launch_app("hook_coroutine")
+    simulator.wait_for_log(r"^LOW_READY$", timeout=15, since_seq=seq)
+    time.sleep(3.0)   # past main's first (long) hook gap of the slow phase
+    ms = _ping_ms(simulator, n=8)
+    assert ms < 250, f"dev command round trip {ms:.0f} ms: main thread count stuck"
+    simulator.exit_app()
+    assert simulator.wait_for_exit(timeout=15).get("result") == "exit_sentinel"
+
+
 def test_injected_keys_reach_draw_loop(simulator):
     _start(simulator, "hook_key_loop", DRAW_LOOP % POLL_INPUT)
     for ch in "abcde":
