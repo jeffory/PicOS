@@ -2,7 +2,6 @@
 #include "audio.h"
 #include "../hardware.h"
 #include "sdcard.h"
-#include "ff.h"       // direct FatFS calls for non-blocking SD reads
 #include "pico/platform.h"
 #include "hardware/gpio.h"
 #include "hardware/pwm.h"
@@ -360,16 +359,10 @@ static bool refill_decode_buffer(void) {
         } else {
             // SD mode: non-blocking read
             if (!s_file) goto pad;
-            if (!recursive_mutex_try_enter(&g_sdcard_mutex, NULL)) {
-                s_diag_sd_fail++;
-                goto pad;
-            }
             int to_read = (space > 4096) ? 4096 : space;
-            UINT br = 0;
-            FRESULT res = f_read((FIL *)s_file, s_decode_buffer + s_bytes_in_buffer, to_read, &br);
-            recursive_mutex_exit(&g_sdcard_mutex);
-            if (res == FR_OK && br > 0)
-                s_bytes_in_buffer += (int)br;
+            int br = sdcard_try_fread(s_file, s_decode_buffer + s_bytes_in_buffer, to_read);
+            if (br > 0)
+                s_bytes_in_buffer += br;
             else
                 s_diag_sd_fail++;
         }

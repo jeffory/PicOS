@@ -1,10 +1,7 @@
 #include "fileplayer.h"
 #include "audio.h"
-#include "../hardware.h"
 #include "sdcard.h"
-#include "ff.h"       // direct FatFS calls for non-blocking SD reads
 #include "pico/stdlib.h"
-#include "mp3_player.h"
 #include "umm_malloc.h"
 #include "wav.h"
 
@@ -359,20 +356,18 @@ void fileplayer_update(void) {
                                        (to_read < 512 && to_read < remaining)))
         return;  // ring nearly full — wait for the DMA to drain
 
-    // Non-blocking: skip if Core 0 owns the SD card
-    if (!recursive_mutex_try_enter(&g_sdcard_mutex, NULL))
-        return;
-
     // Read a chunk of WAV data (to_read == 0 at the end of the data chunk
-    // takes the end-of-file path below)
-    UINT br = 0;
-    FRESULT res = FR_OK;
-    if (to_read > 0)
-        res = f_read((FIL *)s_current_file, s_wav_buffer, to_read, &br);
-    recursive_mutex_exit(&g_sdcard_mutex);
+    // takes the end-of-file path below). Non-blocking: skip this tick if
+    // Core 0 owns the SD card.
+    int n = to_read > 0
+                ? sdcard_try_fread(s_current_file, s_wav_buffer, (int)to_read) : 0;
+    if (n == SDCARD_BUSY)
+        return;
+    bool res_ok = n >= 0;
+    uint32_t br = n > 0 ? (uint32_t)n : 0;
     br -= br % s_block_align;  // a short read at EOF: whole frames only
 
-    if (res == FR_OK && br > 0) {
+    if (res_ok && br > 0) {
         // WAV data is 16-bit signed PCM. Convert to stereo int16_t pairs
         // and push into the PCM stream ring buffer.
         // Rate resampling: nearest-neighbor. For rate=2.0 we produce half
@@ -430,7 +425,7 @@ void fileplayer_update(void) {
             }
             s_active_player->position += br;
         }
-    } else if (res != FR_OK || br == 0) {
+    } else {
         if (s_active_player->loop) {
             sdcard_fseek(s_current_file, s_data_offset);
             s_active_player->position = 0;

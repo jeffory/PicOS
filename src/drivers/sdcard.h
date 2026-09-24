@@ -44,6 +44,11 @@ typedef void *sdfile_t;  // opaque FIL* handle
 
 sdfile_t sdcard_fopen(const char *path, const char *mode);
 int      sdcard_fread(sdfile_t f, void *buf, int len);
+// Non-blocking read for Core 1's audio pollers: returns SDCARD_BUSY without
+// reading when the other core holds the SD card, else as sdcard_fread
+// (bytes read, -1 on error). Never blocks, never logs.
+#define SDCARD_BUSY (-2)
+int      sdcard_try_fread(sdfile_t f, void *buf, int len);
 int      sdcard_fwrite(sdfile_t f, const void *buf, int len);
 void     sdcard_fclose(sdfile_t f);
 bool     sdcard_fexists(const char *path);

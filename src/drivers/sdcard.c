@@ -281,6 +281,16 @@ int sdcard_fread(sdfile_t f, void *buf, int len) {
     return (res == FR_OK) ? (int)br : -1;
 }
 
+int sdcard_try_fread(sdfile_t f, void *buf, int len) {
+    if (!f) return -1;
+    if (!recursive_mutex_try_enter(&g_sdcard_mutex, NULL))
+        return SDCARD_BUSY;
+    UINT br = 0;
+    FRESULT res = f_read((FIL *)f, buf, (UINT)len, &br);
+    recursive_mutex_exit(&g_sdcard_mutex);
+    return (res == FR_OK) ? (int)br : -1;
+}
+
 int sdcard_fwrite(sdfile_t f, const void *buf, int len) {
     if (!f) return -1;
     recursive_mutex_enter_blocking(&g_sdcard_mutex);

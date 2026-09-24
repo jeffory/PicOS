@@ -25,6 +25,8 @@ typedef struct {
 static fake_file_t s_files[FAKE_FILES];
 static char        s_dirs[FAKE_DIRS][160];
 static int         s_write_limit = -1;
+static bool        s_busy;
+static int         s_try_reads;
 
 static fake_file_t *lookup(const char *path) {
     for (int i = 0; i < FAKE_FILES; i++)
@@ -56,6 +58,8 @@ void sdfake_reset(void) {
     }
     memset(s_dirs, 0, sizeof(s_dirs));
     s_write_limit = -1;
+    s_busy = false;
+    s_try_reads = 0;
 }
 
 void sdfake_put(const char *path, const char *data, size_t len) {
@@ -124,6 +128,18 @@ int sdcard_fread(sdfile_t fh, void *buf, int len) {
     memcpy(buf, h->file->data + h->pos, n);
     h->pos += n;
     return (int)n;
+}
+
+void sdfake_set_busy(bool busy) { s_busy = busy; }
+int sdfake_try_reads(void) { return s_try_reads; }
+
+int sdcard_try_fread(sdfile_t fh, void *buf, int len) {
+    s_try_reads++;
+    if (!fh)
+        return -1;
+    if (s_busy)
+        return SDCARD_BUSY;
+    return sdcard_fread(fh, buf, len);
 }
 
 int sdcard_fwrite(sdfile_t fh, const void *buf, int len) {
