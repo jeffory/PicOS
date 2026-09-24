@@ -181,7 +181,7 @@ static int l_sys_getMemInfo(lua_State *L) {
 
   struct mallinfo mi = mallinfo();
 
-  lua_createtable(L, 0, 10);
+  lua_createtable(L, 0, 14);
   lua_pushinteger(L, (lua_Integer)psram_free);
   lua_setfield(L, -2, "psram_free");
   lua_pushinteger(L, (lua_Integer)psram_used);
@@ -192,6 +192,17 @@ static int l_sys_getMemInfo(lua_State *L) {
   lua_setfield(L, -2, "psram_largest_block");
   lua_pushinteger(L, (lua_Integer)lua_psram_alloc_fragmentation());
   lua_setfield(L, -2, "psram_fragmentation");
+  // Small-object pools (slabs are umm blocks, already counted above).
+  small_stats_t sp;
+  lua_psram_alloc_small_stats(&sp);
+  lua_pushinteger(L, (lua_Integer)sp.slabs);
+  lua_setfield(L, -2, "small_pool_slabs");
+  lua_pushinteger(L, (lua_Integer)sp.slab_bytes);
+  lua_setfield(L, -2, "small_pool_bytes");
+  lua_pushinteger(L, (lua_Integer)sp.objects);
+  lua_setfield(L, -2, "small_pool_objects");
+  lua_pushinteger(L, (lua_Integer)sp.object_bytes);
+  lua_setfield(L, -2, "small_pool_object_bytes");
   lua_pushinteger(L, (lua_Integer)mi.fordblks);
   lua_setfield(L, -2, "sram_free");
   lua_pushinteger(L, (lua_Integer)mi.uordblks);

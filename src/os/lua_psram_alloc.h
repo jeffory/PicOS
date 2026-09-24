@@ -1,13 +1,20 @@
 #pragma once
 
 #include "lua.h"
+#include "small_alloc.h"
 #include <stdbool.h>
 
 // Initialize the PSRAM allocator. Call once on boot.
 void lua_psram_alloc_init(void);
 
-// Allocator function compatible with lua_Alloc
+// Allocator function compatible with lua_Alloc. Requests of up to
+// SMALL_ALLOC_MAX bytes are packed into small_alloc slabs carved from umm;
+// larger ones are umm blocks. Core 0 (the Lua VM) only.
 void *lua_psram_alloc(void *ud, void *ptr, size_t osize, size_t nsize);
+
+// The running VM's small-object pools (all zero when no VM is running).
+// Their slabs are umm blocks, so psram_free / largest block already count them.
+void lua_psram_alloc_small_stats(small_stats_t *out);
 
 // Create a new Lua state using the PSRAM allocator
 lua_State *lua_psram_newstate(void);

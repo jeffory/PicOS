@@ -76,7 +76,10 @@ void *small_realloc(small_heap_t *h, void *ptr, size_t osize, size_t nsize);
 // True if `ptr` lies inside one of this heap's slabs.
 bool small_owns(const small_heap_t *h, const void *ptr);
 
+// `out` is all zero for a NULL heap.
 void small_stats(const small_heap_t *h, small_stats_t *out);
+// Live pooled objects (0 when every slot is free).
+uint32_t small_live_objects(const small_heap_t *h);
 
 // Size of class `cls` (0..SMALL_CLASS_COUNT-1); the class a request of `size`
 // bytes (1..SMALL_ALLOC_MAX) lands in. For tests and stats.

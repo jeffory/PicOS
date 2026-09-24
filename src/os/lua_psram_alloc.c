@@ -1,5 +1,6 @@
 #include "lua_psram_alloc.h"
 #include "crashlog.h"
+#include "small_alloc.h"
 #include "launcher.h"
 #include "../drivers/display.h"
 #include "umm_malloc.h"
@@ -199,26 +200,61 @@ static void hist_record(void *ptr, size_t osize, size_t nsize) {
 }
 #endif
 
+// Small Lua objects live in size-class slabs carved from umm (small_alloc.c):
+// a 32-byte table no longer costs a whole 200-byte umm block, and the heap is
+// no longer capped at ~30,800 live objects by umm's 15-bit block index.
+// Larger requests go to umm as before. The pools are created on the VM's
+// first small request and destroyed when its last pooled object is freed
+// (lua_close), so no slab or bookkeeping block outlives the app and the heap
+// is whole again for the next one (C-Dogs needs one ~5.9 MB block).
+// Core 0 only (the Lua VM); umm's own critical section guards the slabs'
+// allocation against Core 1's umm use.
+// -DPICOS_LUA_SMALL_POOLS=0 builds a firmware or simulator without them, for
+// before/after measurements.
+#ifndef PICOS_LUA_SMALL_POOLS
+#define PICOS_LUA_SMALL_POOLS 1
+#endif
+_Static_assert(SMALL_UMM_BLOCK_BYTES == UMM_BLOCK_BODY_SIZE,
+               "small_alloc slabs are sized in umm blocks");
+static const small_backing_t k_umm_backing = {umm_malloc, umm_realloc, umm_free};
+static small_heap_t *s_small;
+
 void *lua_psram_alloc(void *ud, void *ptr, size_t osize, size_t nsize) {
   (void)ud;
-  (void)osize;
-#ifdef PICOS_LUA_ALLOC_HISTOGRAM
   // Lua passes a type tag, not a size, as osize when ptr is NULL.
-  hist_record(ptr, ptr ? osize : 0, nsize);
+  if (!ptr) osize = 0;
+#ifdef PICOS_LUA_ALLOC_HISTOGRAM
+  hist_record(ptr, osize, nsize);
 #endif
 
-  if (nsize == 0) {
-    umm_free(ptr);
-    return NULL;
-  }
+  if (PICOS_LUA_SMALL_POOLS && !s_small && nsize > 0 && nsize <= SMALL_ALLOC_MAX)
+    s_small = small_create(&k_umm_backing);  // NULL: plain umm until it fits
 
-  void *result = umm_realloc(ptr, nsize);
-  if (!result) {
+  void *result;
+  if (s_small) {
+    // Every block of this VM goes through the pools' entry points, pooled or
+    // not: they route by address, so nothing reaches the wrong free.
+    result = small_realloc(s_small, ptr, osize, nsize);
+    if (ptr && small_live_objects(s_small) == 0) {
+      small_destroy(s_small);
+      s_small = NULL;
+    }
+  } else if (nsize == 0) {
+    umm_free(ptr);  // no pools exist, so ptr is a umm block
+    return NULL;
+  } else {
+    result = umm_realloc(ptr, nsize);
+  }
+  if (!result && nsize) {
     printf("[PSRAM] OOM: failed to allocate %zu bytes (free=%zu largest=%zu frag=%d%%)\n",
            nsize, umm_free_heap_size(), lua_psram_alloc_largest_block(),
            lua_psram_alloc_fragmentation());
   }
   return result;
+}
+
+void lua_psram_alloc_small_stats(small_stats_t *out) {
+  small_stats(s_small, out);
 }
 
 size_t lua_psram_alloc_free_size(void) {

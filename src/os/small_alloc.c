@@ -327,6 +327,10 @@ void *small_realloc(small_heap_t *h, void *ptr, size_t osize, size_t nsize) {
   return q;
 }
 
+uint32_t small_live_objects(const small_heap_t *h) {
+  return h ? h->objects : 0;
+}
+
 void small_stats(const small_heap_t *h, small_stats_t *out) {
   memset(out, 0, sizeof(*out));
   if (!h) return;

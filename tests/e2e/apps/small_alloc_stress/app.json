@@ -1,0 +1,7 @@
+{
+  "id": "com.test.smallalloc",
+  "name": "SmallAllocStress",
+  "description": "E2E fixture: many small Lua objects (the Lua heap's small-object pools)",
+  "version": "1.0.0",
+  "author": "e2e"
+}

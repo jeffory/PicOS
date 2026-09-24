@@ -141,6 +141,7 @@ static void test_small_is_pooled(void) {
   small_stats_t st;
   small_stats(h, &st);
   CHECK_EQ_INT(st.objects, N);
+  CHECK_EQ_INT(small_live_objects(h), N);
   CHECK(st.slabs >= 1 && st.slabs <= SMALL_CLASS_COUNT);
   CHECK_EQ_INT(st.slab_bytes, st.slabs * SMALL_SLAB_BYTES);
   for (int i = 0; i < N; i++) {
@@ -149,6 +150,8 @@ static void test_small_is_pooled(void) {
   }
   small_stats(h, &st);
   CHECK_EQ_INT(st.objects, 0);
+  CHECK_EQ_INT(small_live_objects(h), 0);
+  CHECK_EQ_INT(small_live_objects(NULL), 0);
   CHECK_EQ_INT(st.object_bytes, 0);
   CHECK(st.slabs <= 1);  // at most the one spare survives
   end_heap(h);
