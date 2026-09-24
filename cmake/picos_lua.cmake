@@ -17,7 +17,10 @@
 #     string.format %a/%e/%f/%g, lua_pushfstring %f) to picos_lua_sprintf
 #     when PICOS_LUA_SPRINTF is defined, so number formatting does not depend
 #     on the C library: the firmware's pico_printf %g keeps trailing zeros
-#     ("51.00000") and has no %a, while the simulator uses glibc.
+#     ("51.00000") and has no %a, while the simulator uses glibc. The patch
+#     also defines PICOS_LUA_SPRINTF_PATCHED, which lua_numfmt.c requires
+#     whenever PICOS_LUA_SPRINTF is set (a build that skipped the patch
+#     would otherwise silently print floats through the C library).
 #     Idempotent: each edit is skipped if already applied (a checkout patched
 #     by an older version of this file picks up only the new edits).
 #     Fails the build if the upstream text is not found (version drift).
@@ -80,9 +83,17 @@ function(picos_patch_luaconf _lua_src_dir)
         "#define LUA_IDSIZE\t60\n"
         "#if !defined(LUA_IDSIZE)\n#define LUA_IDSIZE\t60\n#endif\n"
         "LUA_IDSIZE")
+    # A tree patched before PICOS_LUA_SPRINTF_PATCHED existed: add it.
+    set(_old_sprintf "#define l_sprintf(s,sz,f,i)\tpicos_lua_sprintf(s,sz,f,i)\n#elif")
+    string(FIND "${_text}" "${_old_sprintf}" _old_pos)
+    if(NOT _old_pos EQUAL -1)
+        string(REPLACE "${_old_sprintf}"
+            "#define l_sprintf(s,sz,f,i)\tpicos_lua_sprintf(s,sz,f,i)\n#define PICOS_LUA_SPRINTF_PATCHED 1\n#elif"
+            _text "${_text}")
+    endif()
     _picos_luaconf_replace(_text
         "#if !defined(LUA_USE_C89)\n#define l_sprintf(s,sz,f,i)\tsnprintf(s,sz,f,i)\n"
-        "#if defined(PICOS_LUA_SPRINTF)\n/* PicOS: floats bypass the C library's printf (src/os/lua_numfmt.c) */\nint picos_lua_sprintf(char *s, size_t sz, const char *fmt, ...);\n#define l_sprintf(s,sz,f,i)\tpicos_lua_sprintf(s,sz,f,i)\n#elif !defined(LUA_USE_C89)\n#define l_sprintf(s,sz,f,i)\tsnprintf(s,sz,f,i)\n"
+        "#if defined(PICOS_LUA_SPRINTF)\n/* PicOS: floats bypass the C library's printf (src/os/lua_numfmt.c) */\nint picos_lua_sprintf(char *s, size_t sz, const char *fmt, ...);\n#define l_sprintf(s,sz,f,i)\tpicos_lua_sprintf(s,sz,f,i)\n#define PICOS_LUA_SPRINTF_PATCHED 1\n#elif !defined(LUA_USE_C89)\n#define l_sprintf(s,sz,f,i)\tsnprintf(s,sz,f,i)\n"
         "l_sprintf")
 
     if(_text STREQUAL _orig)

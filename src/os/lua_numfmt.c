@@ -10,6 +10,17 @@
 
 #include "lua_numfmt.h"
 
+// Lua's l_sprintf reaches picos_lua_sprintf only through the luaconf.h patch
+// (cmake/picos_lua.cmake).  If a build defines PICOS_LUA_SPRINTF but compiles
+// against an unpatched luaconf.h, floats silently go through the C library
+// again (pico_printf on the firmware): fail the build instead.
+#if defined(PICOS_LUA_SPRINTF)
+#include "luaconf.h"
+#if !defined(PICOS_LUA_SPRINTF_PATCHED)
+#error "PICOS_LUA_SPRINTF is set but luaconf.h lacks the PicOS l_sprintf patch (run cmake: picos_patch_luaconf)"
+#endif
+#endif
+
 #include <stdarg.h>
 #include <stdbool.h>
 #include <stdint.h>
@@ -266,7 +277,10 @@ static int body_a(char *b, uint32_t bits, int prec, bool hash, bool upper) {
     uint64_t rem = f52 & (((uint64_t)1 << drop) - 1);
     uint64_t half = (uint64_t)1 << (drop - 1);
     f52 >>= drop;
-    if (rem > half || (rem == half && (f52 & 1)))
+    // Ties to even on the last digit kept: at precision 0 that is the
+    // leading digit (0x1.8p+0 -> 0x2p+0, as glibc prints).
+    bool odd = prec > 0 ? (f52 & 1) != 0 : (lead & 1) != 0;
+    if (rem > half || (rem == half && odd))
       f52++;
     if (f52 >> (4 * prec)) {  // carried into the leading digit: 0x2p+0
       lead++;

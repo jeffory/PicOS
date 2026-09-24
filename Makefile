@@ -1,7 +1,7 @@
 # PicOS Makefile
 # Automated setup, build, and deployment for ClockworkPi PicoCalc
 
-.PHONY: help setup build clean flash flash-ota rebuild check-env test-lua test-unit fuzz fuzz-build simulator simulator-asan simulator-tsan simulator-run simulator-clean
+.PHONY: help setup build clean flash flash-ota rebuild check-env test-lua test-unit test-numfmt-sweep fuzz fuzz-build simulator simulator-asan simulator-tsan simulator-run simulator-clean
 
 # ── Configuration ─────────────────────────────────────────────────────────────
 
@@ -339,6 +339,13 @@ test-unit:
 		-DCMAKE_BUILD_TYPE=Debug >/dev/null
 	@cmake --build $(UNIT_BUILD_DIR) -j$$(nproc 2>/dev/null || echo 4)
 	@ctest --test-dir $(UNIT_BUILD_DIR) --output-on-failure
+
+# Exhaustive Lua float-format check vs glibc (~35 s), opt-in.
+test-numfmt-sweep:
+	@cmake -S tests/unit -B $(UNIT_BUILD_DIR) -DCMAKE_C_COMPILER=$(UNIT_CC) \
+		-DCMAKE_BUILD_TYPE=Debug >/dev/null
+	@cmake --build $(UNIT_BUILD_DIR) --target numfmt_sweep
+	@./$(UNIT_BUILD_DIR)/numfmt_sweep
 
 # libFuzzer targets (tests/fuzz): clang only. Each runs FUZZ_SECONDS on a
 # working corpus in build_fuzz/corpus/<name>, seeded from tests/fuzz/corpus.

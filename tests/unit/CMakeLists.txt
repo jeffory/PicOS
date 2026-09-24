@@ -65,6 +65,15 @@ picos_unit_test(test_wav SOURCES ${SRC}/drivers/wav.c INCLUDES ${SRC}/drivers)
 picos_unit_test(test_audio_ring INCLUDES ${SRC}/drivers)
 picos_unit_test(test_zip_name SOURCES ${SRC}/os/zip_name.c)
 picos_unit_test(test_text_wrap SOURCES ${SRC}/os/text_wrap.c)
+# Lua float formatting vs glibc (built without PICOS_LUA_SPRINTF: no luaconf).
+picos_unit_test(test_numfmt SOURCES ${SRC}/os/lua_numfmt.c)
+target_link_libraries(test_numfmt PRIVATE m)
+# The exhaustive sweep: opt-in (make test-numfmt-sweep), optimised, no sanitizers.
+add_executable(numfmt_sweep EXCLUDE_FROM_ALL
+    ${CMAKE_CURRENT_SOURCE_DIR}/numfmt_sweep.c ${SRC}/os/lua_numfmt.c)
+target_include_directories(numfmt_sweep PRIVATE ${SRC}/os)
+target_compile_options(numfmt_sweep PRIVATE -O2 -Wno-error)
+target_link_libraries(numfmt_sweep PRIVATE m)
 
 # Modules that use the SD card and umm_*: in-memory SD fake, umm on malloc.
 # simulator/stubs first so umm_malloc.h / pico/mutex.h resolve to the stubs.
