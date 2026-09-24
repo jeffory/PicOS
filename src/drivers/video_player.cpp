@@ -897,10 +897,14 @@ static void video_boost_clock(video_priv_t *priv) {
         // changing sysclk while the driver is still talking to the chip
         // produces an "hdr mismatch" error storm on Core 1 that starves the
         // frame prefetcher and the MP3 decoder for the whole playback.
-        uint64_t deadline = time_us_64() + 500 * 1000;
+        uint64_t deadline =
+            time_us_64() + (uint64_t)WIFI_HW_DISCONNECT_WAIT_MS * 1000;
         while (!wifi_hw_disconnected() && time_us_64() < deadline) {
             sleep_ms(5);
         }
+        if (!wifi_hw_disconnected())
+            printf("[VIDEO] WiFi not idle after %d ms; boosting anyway\n",
+                   WIFI_HW_DISCONNECT_WAIT_MS);
     }
 
     // Boost to 300 MHz for video playback

@@ -65,10 +65,17 @@ bool wifi_get_http_required(void);
 bool wifi_has_internet(void);
 
 // Returns true once the CYW43 hardware disconnect has actually completed on
-// Core 1. wifi_disconnect() is async (queue-based); this flag lets callers
-// wait for the radio to power down before performing voltage-sensitive
-// operations like SD flash programming.
+// Core 1: the station has left the network and Core 1 no longer polls the
+// chip (until the next wifi_connect). wifi_disconnect() is async
+// (queue-based); this flag lets callers wait before voltage- or
+// clock-sensitive operations (SD flash programming, a sysclk change).
 bool wifi_hw_disconnected(void);
+
+// How long a caller should wait for wifi_hw_disconnected() after
+// wifi_disconnect(): Core 1 drains the request on its next tick, but may be
+// inside a long mg_mgr_poll (a TLS handshake) first.  Bounded; the callers
+// that change sysclk (launcher, video) use this one value.
+#define WIFI_HW_DISCONNECT_WAIT_MS 2000
 
 // ── Core 0 → Core 1 request queue ────────────────────────────────────────────
 //

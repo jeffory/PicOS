@@ -681,7 +681,12 @@ static bool run_app(int idx) {
     // Wait for Core 1 to finish the hardware disconnect (bounded) before the
     // clock change: changing sysclk while the driver still talks to the chip
     // triggers an "hdr mismatch" error storm on Core 1.
-    for (int i = 0; i < 100 && !wifi_hw_disconnected(); i++) sleep_ms(5);  // <= 500 ms
+    for (int i = 0; i < WIFI_HW_DISCONNECT_WAIT_MS / 5 && !wifi_hw_disconnected();
+         i++)
+      sleep_ms(5);  // bounded (WIFI_HW_DISCONNECT_WAIT_MS)
+    if (!wifi_hw_disconnected())
+      printf("[LAUNCHER] WiFi not idle after %d ms; changing clock anyway\n",
+             WIFI_HW_DISCONNECT_WAIT_MS);
   }
 
   if (app->system_clock_khz > 0) {
