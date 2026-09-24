@@ -573,8 +573,12 @@ static void launcher_refuse(const app_entry_t *app, const char *title,
   display_draw_text(8, 64, heap, COLOR_GRAY, COLOR_BLACK);
   display_draw_text(8, 88, hint, COLOR_GRAY, COLOR_BLACK);
   display_flush();
+  // Hold the reason on screen; keep serving dev commands meanwhile (still
+  // launcher context, no app running) so a screenshot can capture it.
   for (int i = 0; i < 30 && !sim_test_mode(); i++) {
     watchdog_update();
+    dev_commands_poll();
+    dev_commands_process();
     sleep_ms(100);
   }
   s_running_app_name = NULL;
