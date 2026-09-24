@@ -26,6 +26,7 @@ char lua_bridge_exit_tag; // address used as sentinel, value irrelevant
 
 #include "../dev_commands.h"
 
+#include <math.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -41,6 +42,45 @@ char lua_bridge_exit_tag; // address used as sentinel, value irrelevant
 
 uint16_t l_checkcolor(lua_State *L, int idx) {
   return (uint16_t)luaL_checkinteger(L, idx);
+}
+
+// ── Integer quantity arguments
+// ──────────────────────────────────────────────────────────── lua_Number is
+// float32, so ordinary app arithmetic (x + dx*dt, w/2) yields 199.99998 where
+// double arithmetic landed on 200, and luaL_checkinteger rejects it with
+// "number has no integer representation". Quantity parameters (coordinates,
+// sizes, durations, volumes, ...) use these instead:
+//   - integers (and integer-valued numeric strings) pass through unchanged;
+//   - floats round to nearest, ties toward +inf: floor(x + 0.5), computed as
+//     floor(x) plus a fraction test so no addition can round the input;
+//   - NaN / +-inf raise "number is NaN or infinite";
+//   - floats beyond +-2^24 raise "number out of integer range": past that
+//     float32 no longer holds every integer, so there is nothing meaningful to
+//     round to, and rejecting them keeps casts from wrapping (1e9 would fit
+//     int32 but not the 16-bit fields most of these land in).
+// Discrete identifiers (handles, enums, colours, masks, byte counts, ports)
+// keep luaL_checkinteger.
+#define LB_FLOAT_INT_LIMIT 16777216.0f  // 2^24
+
+lua_Integer lb_checkint(lua_State *L, int idx) {
+  if (lua_isinteger(L, idx))
+    return lua_tointeger(L, idx);
+  lua_Number n = luaL_checknumber(L, idx);
+  if (isnan(n) || isinf(n))
+    luaL_argerror(L, idx, "number is NaN or infinite");
+  if (n > LB_FLOAT_INT_LIMIT || n < -LB_FLOAT_INT_LIMIT)
+    luaL_argerror(L, idx, "number out of integer range");
+  lua_Number f = floorf(n);
+  // The fraction test cannot misround: for |n| >= 0.5 the fraction is a
+  // multiple of 2^-24 below 1, so exact; for n in (-0.5, 0) it is above 0.5
+  // and for n in [0, 0.5) it is n itself.
+  if (n - f >= 0.5f)
+    f += 1.0f;
+  return (lua_Integer)f;
+}
+
+lua_Integer lb_optint(lua_State *L, int idx, lua_Integer def) {
+  return lua_isnoneornil(L, idx) ? def : lb_checkint(L, idx);
 }
 
 // ── Registration

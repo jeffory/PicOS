@@ -43,6 +43,11 @@ typedef struct {
 #define GRAPHICS_IMAGE_MT "picocalc.graphics.image"
 
 uint16_t l_checkcolor(lua_State *L, int idx);
+// Integer "quantity" arguments (coordinates, sizes, durations, volumes...):
+// accept any finite number and round floats to nearest (ties toward +inf);
+// NaN/inf and floats beyond +-2^24 raise an argument error. See lua_bridge.c.
+lua_Integer lb_checkint(lua_State *L, int idx);
+lua_Integer lb_optint(lua_State *L, int idx, lua_Integer def);
 bool fs_sandbox_check(lua_State *L, const char *path, bool write);
 void http_lua_fire_pending(lua_State *L);
 void tcp_lua_fire_pending(lua_State *L);
