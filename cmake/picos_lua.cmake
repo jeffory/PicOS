@@ -12,6 +12,7 @@
 #     are silently overridden (LUA_USER_H cannot help: lua.h includes it after
 #     luaconf.h has already chosen the number types). This wraps each of those
 #     definitions in #if !defined(...) so the values above take effect.
+#     (LUAI_MAXCCALLS needs no patch: llimits.h already guards it.)
 #     Idempotent: a marker comment records that the file is already patched.
 #     Fails the build if the upstream text is not found (version drift).
 #
@@ -23,6 +24,8 @@ set(PICOS_LUA_DEFINITIONS
     LUA_32BITS=1           # 32-bit lua_Integer, single-precision lua_Number
     LUA_USE_LONGJMP=1      # setjmp/longjmp error handling (no C++ exceptions)
     LUAI_MAXSTACK=1000     # Lua stack slots per coroutine (upstream: 1000000)
+    LUAI_MAXCCALLS=60      # nested C calls + parser levels (upstream: 200);
+                           # sized with the 64 KB Lua VM stack (lua_runner.c)
     LUA_IDSIZE=60          # Size of source ids in error messages
 )
 

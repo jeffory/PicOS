@@ -138,6 +138,11 @@ _Static_assert(sizeof(lua_Number) == 4,
                "PICOS_LUA_DEFINITIONS not applied (see cmake/picos_lua.cmake)");
 _Static_assert(LUAI_MAXSTACK == 1000,
                "LUAI_MAXSTACK override not applied (see cmake/picos_lua.cmake)");
+// The Lua VM stack (lua_runner.c LUA_VM_STACK_SIZE) is sized for this many
+// nested C calls; raising it without growing that stack turns the clean
+// "C stack overflow" error into a stack-limit HardFault.
+_Static_assert(LUAI_MAXCCALLS == 60,
+               "LUAI_MAXCCALLS override not applied (see cmake/picos_lua.cmake)");
 
 // load(chunk [, chunkname [, mode [, env]]]) with mode forced to "t".
 // Precompiled bytecode is not verified by the VM, so a crafted chunk can read

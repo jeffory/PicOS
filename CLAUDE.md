@@ -98,8 +98,9 @@ main()
 3. Auto-detects app type: `main.elf` → native, `main.lua` → Lua (native wins if both present)
 4. Shows scrollable menu with battery % header
 5. Dispatches via `AppRunner` vtable (`src/os/app_runner.h`):
-   - **Lua apps** (`src/os/lua_runner.c`): `malloc`s `main.lua`, creates fresh `lua_State`, calls `lua_bridge_register()`, runs `lua_pcall()`, then `lua_close()`
-   - **Native apps** (`src/os/native_loader.c`): ELF32 PIE loader, relocates to PSRAM (code in SRAM if fits), runs on PSP (Process Stack Pointer) via `launch_on_psp()` trampoline
+   - **Lua apps** (`src/os/lua_runner.c`): allocates a 64 KB VM stack, reads `main.lua`, then runs the whole VM lifetime on that stack (PSP): fresh `lua_State`, `lua_bridge_register()`, `lua_pcall()`, error screen, `lua_close()`
+   - **Native apps** (`src/os/native_loader.c`): ELF32 PIE loader, relocates to PSRAM (code in SRAM if fits), runs on PSP (Process Stack Pointer)
+   - Both use `app_stack_run()` (`src/os/app_stack.c`): paints the stack, arms `PSPLIM` above a 32-byte guard (overflow = STKOF HardFault, crash record names `PSP (Lua VM)` / `PSP (native app)`), switches Thread mode to the PSP, calls the runtime, switches back. Only one runner is active, so there is one PSP user at a time; IRQs always use the MSP. The launcher itself stays on the MSP
 
 ### Lua Bridge (split across `src/os/lua_bridge_*.c`)
 The Lua bridge is split into ~20 module files, coordinated by `lua_bridge.c`:
@@ -128,9 +129,10 @@ All `picocalc.*` Lua functions are `static int l_<module>_<fn>(lua_State *L)` wr
 
 Lua 5.4.7 is embedded with restricted stdlib: `base`, `table`, `string`, `math`, `coroutine`, `utf8`. Blocked: `io`, `os`, `package`, `debug`. `load` is text-only (mode forced to `"t"`; bytecode is rejected), as are app `main.lua` and `sys.loadlib`.
 
-Compile-time config lives in one place, `cmake/picos_lua.cmake` (`PICOS_LUA_DEFINITIONS`, applied `PUBLIC` by both the firmware and simulator builds): `LUA_32BITS=1`, `LUA_USE_LONGJMP=1`, `LUAI_MAXSTACK=1000`, `LUA_IDSIZE=60`. Upstream `luaconf.h` hard-codes these, so the same file also patches it (`#if !defined` guards, idempotent, marker comment on line 1) — at CMake configure time, from `make download-lua`, and in the CI workflows. `_Static_assert`s in `lua_bridge.c` fail the build if the patch is lost.
+Compile-time config lives in one place, `cmake/picos_lua.cmake` (`PICOS_LUA_DEFINITIONS`, applied `PUBLIC` by both the firmware and simulator builds): `LUA_32BITS=1`, `LUA_USE_LONGJMP=1`, `LUAI_MAXSTACK=1000`, `LUAI_MAXCCALLS=60`, `LUA_IDSIZE=60`. Upstream `luaconf.h` hard-codes these (`LUAI_MAXCCALLS` is already guarded in `llimits.h`), so the same file also patches it (`#if !defined` guards, idempotent, marker comment on line 1) — at CMake configure time, from `make download-lua`, and in the CI workflows. `_Static_assert`s in `lua_bridge.c` fail the build if the patch is lost.
 - Numbers: `lua_Integer` is 32-bit (wraps at ±2^31; hex literals like `0xDEADBEEF` wrap to negative, `%x` still prints the 32-bit pattern), `lua_Number` is single-precision `float` (~7 significant digits, integers exact only to 2^24, `1e39 == math.huge`). `sys.getTimeMs()` goes negative after ~24.8 days uptime (differences still wrap correctly); `getClock().epoch` overflows in 2038; file sizes above 2 GB read negative.
 - `LUAI_MAXSTACK` counts stack *slots*, not frames: a typical frame costs 10–13 slots, so recursion tops out around 80–100 levels. 500 (the old nominal value) overflowed the minesweeper flood fill on ~3% of first clicks; 1000 is the smallest value that runs every shipped app.
+- `LUAI_MAXCCALLS=60` caps nested C calls and parser levels. Lua→C→Lua recursion (e.g. nested `string.gsub` callbacks, ~864 bytes of C stack per level on device) stops at ~58 levels with a catchable `"C stack overflow"` error, before the 64 KB VM stack runs out (measured peak 51.4 KB). Raise it only together with `LUA_VM_STACK_SIZE` in `lua_runner.c`.
 
 A debug hook fires every 256 opcodes (`lua_sethook` with `LUA_MASKCOUNT`). The hook checks for the Sym (Menu) key and fires pending HTTP Lua callbacks via `http_lua_fire_pending()`.
 
@@ -215,11 +217,12 @@ A debug hook fires every 256 opcodes (`lua_sethook` with `LUA_MASKCOUNT`). The h
 | USB VBUS Sense | GPIO | GP24 |
 
 ### Memory Map
-- **SRAM heap**: ~28.8KB free after BSS (for `malloc`/`free` — tiny, must be freed promptly)
+- **SRAM heap**: ~2.6KB (`__end__`=0x2007f580 to `__HeapLimit`=0x20080000; the double framebuffer takes 400KB of BSS) — effectively none; scratch buffers go through `umm_malloc`
 - **QMI PSRAM (8MB)**: Lua heap via `umm_malloc` at 0x11200000 (cached alias). ELF app data/BSS. Never mix `umm_malloc`/`umm_free` with standard `malloc`/`free`.
 - **PIO PSRAM (8MB)**: MP3 PCM ring buffer (32KB). Accessed via `pio_psram_read`/`pio_psram_write`. Also exposed to native apps via `g_api.psram`.
-- **Main stack**: 4KB in SCRATCH memory (`__StackBottom`=0x20081000, `__StackTop`=0x20082000)
-- **Native app stack**: 8KB static SRAM buffer (`s_native_stack`), runs on PSP
+- **Main stack (MSP)**: 4KB in SCRATCH memory (`__StackBottom`=0x20081000, `__StackTop`=0x20082000), `MSPLIM`-guarded. Boot, the launcher (menus, screenshot save, USB MSC) and every IRQ run here; measured peak ~2.2-2.5KB. The `stack` dev command prints this peak and the running app's stack peak
+- **Lua VM stack**: 64KB `umm_malloc` (QMI PSRAM) per launch, runs on PSP. PSRAM because no SRAM region that size exists; the cost is ~10-50% on C-call-heavy Lua code (pure Lua loops unchanged)
+- **Native app stack**: 16KB SRAM `malloc` if available (in practice never), else 64KB `umm_malloc`; runs on PSP
 
 ## Coding Conventions
 

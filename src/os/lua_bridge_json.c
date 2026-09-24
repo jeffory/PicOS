@@ -9,8 +9,9 @@
 //
 //  * Both directions are ITERATIVE where recursion depth would track input
 //    size, and depth-capped at JSON_MAX_DEPTH otherwise. Lua is built with
-//    LUAI_MAXSTACK=500 here, and the C stack is 4KB on core 0, so a deeply
-//    nested document must produce a clean Lua error rather than a hard fault.
+//    LUAI_MAXSTACK=1000 and runs on a fixed 64 KB C stack (lua_runner.c), so
+//    a deeply nested document must produce a clean Lua error rather than a
+//    stack-limit hard fault.
 //
 //  * decode returns `nil, errmsg` (never raises) so callers can handle bad
 //    input from the network or a corrupted SD file without pcall. encode DOES
