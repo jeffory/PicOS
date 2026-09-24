@@ -397,7 +397,7 @@ static bool load_elf(uc_engine *uc, const char *path, uint32_t *out_entry) {
     // Write the relocated image into Unicorn memory
     uc_err err = uc_mem_write(uc, EMU_CODE_BASE, image_buf, image_size);
     if (err != UC_ERR_OK) {
-        fprintf(stderr, "[UNICORN] Failed to write ELF image: %s\n", uc_strerror(err));
+        load_refused("sim: failed to write ELF image", uc_strerror(err));
         free(image_buf);
         free(phdrs);
         fclose(f);
@@ -487,7 +487,7 @@ bool unicorn_run_app(const char *elf_path, const char *app_dir,
     // Create Unicorn instance (ARM Thumb mode, Cortex-M33)
     err = uc_open(UC_ARCH_ARM, UC_MODE_THUMB | UC_MODE_MCLASS, &uc);
     if (err != UC_ERR_OK) {
-        fprintf(stderr, "[UNICORN] uc_open failed: %s\n", uc_strerror(err));
+        load_refused("sim: uc_open failed", uc_strerror(err));
         return false;
     }
 
@@ -504,35 +504,35 @@ bool unicorn_run_app(const char *elf_path, const char *app_dir,
     // Code region
     err = uc_mem_map(uc, EMU_CODE_BASE, EMU_CODE_SIZE, UC_PROT_ALL);
     if (err != UC_ERR_OK) {
-        fprintf(stderr, "[UNICORN] Failed to map code region: %s\n", uc_strerror(err));
+        load_refused("sim: failed to map code region", uc_strerror(err));
         goto fail;
     }
 
     // Data region (for large ELFs that have data segments far from code)
     err = uc_mem_map(uc, EMU_DATA_BASE, EMU_DATA_SIZE, UC_PROT_ALL);
     if (err != UC_ERR_OK) {
-        fprintf(stderr, "[UNICORN] Failed to map data region: %s\n", uc_strerror(err));
+        load_refused("sim: failed to map data region", uc_strerror(err));
         goto fail;
     }
 
     // Stack (grows down from top)
     err = uc_mem_map(uc, EMU_STACK_BASE, EMU_STACK_SIZE, UC_PROT_ALL);
     if (err != UC_ERR_OK) {
-        fprintf(stderr, "[UNICORN] Failed to map stack: %s\n", uc_strerror(err));
+        load_refused("sim: failed to map stack", uc_strerror(err));
         goto fail;
     }
 
     // Heap
     err = uc_mem_map(uc, EMU_HEAP_BASE, EMU_HEAP_SIZE, UC_PROT_ALL);
     if (err != UC_ERR_OK) {
-        fprintf(stderr, "[UNICORN] Failed to map heap: %s\n", uc_strerror(err));
+        load_refused("sim: failed to map heap", uc_strerror(err));
         goto fail;
     }
 
     // String arena
     err = uc_mem_map(uc, EMU_ARENA_BASE, EMU_ARENA_SIZE, UC_PROT_ALL);
     if (err != UC_ERR_OK) {
-        fprintf(stderr, "[UNICORN] Failed to map arena: %s\n", uc_strerror(err));
+        load_refused("sim: failed to map arena", uc_strerror(err));
         goto fail;
     }
 
@@ -543,7 +543,7 @@ bool unicorn_run_app(const char *elf_path, const char *app_dir,
         uint32_t fb_map_size = (EMU_FB_SIZE + 0xFFF) & ~0xFFFu;
         err = uc_mem_map(uc, EMU_FB_BASE, fb_map_size, UC_PROT_ALL);
         if (err != UC_ERR_OK) {
-            fprintf(stderr, "[UNICORN] Failed to map framebuffer: %s\n", uc_strerror(err));
+            load_refused("sim: failed to map framebuffer", uc_strerror(err));
             goto fail;
         }
     }
@@ -551,14 +551,14 @@ bool unicorn_run_app(const char *elf_path, const char *app_dir,
     // API struct region
     err = uc_mem_map(uc, EMU_API_BASE, EMU_API_SIZE, UC_PROT_ALL);
     if (err != UC_ERR_OK) {
-        fprintf(stderr, "[UNICORN] Failed to map API region: %s\n", uc_strerror(err));
+        load_refused("sim: failed to map API region", uc_strerror(err));
         goto fail;
     }
 
     // Trampoline region
     err = uc_mem_map(uc, EMU_TRAMP_BASE, EMU_TRAMP_SIZE, UC_PROT_ALL);
     if (err != UC_ERR_OK) {
-        fprintf(stderr, "[UNICORN] Failed to map trampoline region: %s\n", uc_strerror(err));
+        load_refused("sim: failed to map trampoline region", uc_strerror(err));
         goto fail;
     }
 
@@ -566,7 +566,7 @@ bool unicorn_run_app(const char *elf_path, const char *app_dir,
     // Write a NOP at REVCALL_BASE so Unicorn's `until` address check fires before executing.
     err = uc_mem_map(uc, EMU_REVCALL_BASE, EMU_REVCALL_SIZE, UC_PROT_ALL);
     if (err != UC_ERR_OK) {
-        fprintf(stderr, "[UNICORN] Failed to map reverse-call region: %s\n", uc_strerror(err));
+        load_refused("sim: failed to map reverse-call region", uc_strerror(err));
         goto fail;
     }
     {
@@ -606,7 +606,7 @@ bool unicorn_run_app(const char *elf_path, const char *app_dir,
                           (void *)trampoline_hook, NULL,
                           1, 0);  // range ignored for INTR hooks
         if (err != UC_ERR_OK) {
-            fprintf(stderr, "[UNICORN] Failed to add interrupt hook: %s\n", uc_strerror(err));
+            load_refused("sim: failed to add interrupt hook", uc_strerror(err));
             goto fail;
         }
     }
