@@ -1,4 +1,4 @@
-name: Build Simulator
+name: Build
 
 on:
   push:
@@ -16,32 +16,18 @@ jobs:
           submodules: recursive
 
       - name: Install dependencies
-        run: |
-          sudo apt-get update -q
-          sudo apt-get install -y \
-            cmake \
-            build-essential \
-            libsdl2-dev \
-            libsdl2-image-dev \
-            libcurl4-openssl-dev
-
-      - name: Fetch Lua
-        run: |
-          mkdir -p third_party/lua-5.4
-          curl -fL https://www.lua.org/ftp/lua-5.4.7.tar.gz \
-            | tar -xz --strip-components=1 -C third_party/lua-5.4/
-          # Make luaconf.h honour the CMake Lua config (see cmake/picos_lua.cmake)
-          cmake -DLUA_SRC_DIR=third_party/lua-5.4/src -P cmake/picos_lua.cmake
+        run: scripts/ci/install-sim-deps.sh
 
       - name: Cache simulator build
         uses: actions/cache@v4
         with:
           path: build_sim
-          key: ${{ runner.os }}-simulator-${{ hashFiles('simulator/**/*.c', 'simulator/**/*.h', 'src/**/*.c', 'src/**/*.h') }}
-          restore-keys: |
-            ${{ runner.os }}-simulator-
+          # Any build-config change invalidates the cache outright; no
+          # restore-keys, so a stale build_sim is never restored.
+          key: ${{ runner.os }}-simulator-${{ hashFiles('simulator/**', 'src/**', 'CMakeLists.txt', 'cmake/**', 'Makefile', 'scripts/ci/install-sim-deps.sh') }}
 
       - name: Build simulator
+        # `make simulator` fetches and patches Lua (download-lua) itself.
         run: make simulator
 
       - name: Upload simulator binary
@@ -50,3 +36,31 @@ jobs:
           name: picos-simulator-linux
           path: build_sim/picos_simulator
           retention-days: 7
+
+  # Firmware compile check on every push and PR, so a firmware-only build
+  # break is caught before a release tag (release.yml was the only firmware
+  # build before).
+  build-firmware:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Toolchain, Pico SDK and third-party sources
+        run: scripts/ci/fetch-firmware-deps.sh
+
+      - name: Configure
+        run: |
+          cmake -S . -B build \
+            -DPICO_SDK_PATH=$HOME/pico-sdk \
+            -DPICO_BOARD=pimoroni_pico_plus2_w_rp2350 \
+            -DCMAKE_BUILD_TYPE=Release
+
+      - name: Build
+        run: cmake --build build --parallel
+
+      - name: Size
+        run: arm-none-eabi-size build/picocalc_os.elf
