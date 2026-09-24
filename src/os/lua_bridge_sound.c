@@ -61,13 +61,19 @@ static void anchor_sample(lua_State *L, int player_idx, int sample_idx) {
     lua_setiuservalue(L, player_idx, PLAYER_UV_SAMPLE);
 }
 
+// __gc NULLs the pointer (the slot may already belong to another player),
+// and a later finaliser can still reach the handle: reject it.
 static fileplayer_t *check_fileplayer(lua_State *L, int idx) {
     fileplayer_t **ud = luaL_checkudata(L, idx, FILEPLAYER_USERDATA);
+    if (!*ud)
+        luaL_error(L, "attempt to use a destroyed fileplayer");
     return *ud;
 }
 
 static mp3_player_t *check_mp3player(lua_State *L, int idx) {
     mp3_player_t **ud = luaL_checkudata(L, idx, MP3PLAYER_USERDATA);
+    if (!*ud)
+        luaL_error(L, "attempt to use a destroyed mp3player");
     return *ud;
 }
 
@@ -777,8 +783,11 @@ static int l_sound_fileplayer_getRate(lua_State *L) {
 }
 
 static int l_sound_fileplayer_gc(lua_State *L) {
-    fileplayer_t *player = check_fileplayer(L, 1);
-    g_api.soundplayer->filePlayerFree(player);
+    fileplayer_t **ud = luaL_checkudata(L, 1, FILEPLAYER_USERDATA);
+    if (*ud) {
+        g_api.soundplayer->filePlayerFree(*ud);
+        *ud = NULL;
+    }
     return 0;
 }
 
@@ -881,8 +890,11 @@ static int l_sound_mp3player_setLoop(lua_State *L) {
 }
 
 static int l_sound_mp3player_gc(lua_State *L) {
-    mp3_player_t *player = check_mp3player(L, 1);
-    g_api.soundplayer->mp3PlayerFree(player);
+    mp3_player_t **ud = luaL_checkudata(L, 1, MP3PLAYER_USERDATA);
+    if (*ud) {
+        g_api.soundplayer->mp3PlayerFree(*ud);
+        *ud = NULL;
+    }
     return 0;
 }
 

@@ -145,6 +145,14 @@ DESTROYED = {
         arm(function() return G.sprite.new() end,
             function(s) s:add() end)
     """,
+    "fileplayer": """
+        arm(function() return pc.sound.fileplayer() end,
+            function(fp) fp:load(APP_DIR .. '/s.wav') end)
+    """,
+    "mp3player": """
+        arm(function() return pc.sound.mp3player() end,
+            function(mp) return mp:isPlaying() end)
+    """,
 }
 
 
@@ -159,7 +167,7 @@ def test_destroyed_object_errors(simulator, name):
         "    T.ok(tostring(R.err):find('destroyed') or tostring(R.err):find('freed'),\n"
         "         'error: ' .. tostring(R.err))\n"
         "end)\n")
-    _stage(simulator, f"dead_{name}", body)
+    _stage(simulator, f"dead_{name}", body, ("audio",))
     run = run_lua_app(simulator, f"dead_{name}", timeout=20)
     run.assert_all_passed(["destroyed"])
 
