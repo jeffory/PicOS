@@ -26,9 +26,12 @@ APP_NAME = ""
 ---@type string
 APP_ID = ""
 
----Requirements granted to this app (booleans). Fields: `filesystem`,
----`root_filesystem`, `http`, `audio`, `clipboard`.
----@type { filesystem: boolean, root_filesystem: boolean, http: boolean, audio: boolean, clipboard: boolean }
+---Requirements granted to this app (booleans): `root_filesystem`, `http`,
+---`audio`. A convenience copy: the OS enforces the C-side identity, so
+---rewriting it grants nothing. `"sysconfig"` and `"system-update"` have no
+---field here; test `picocalc.sysconfig ~= nil` / `picocalc.sys.applyUpdate ~= nil`
+---(each is registered only for an app that declares the requirement).
+---@type { root_filesystem: boolean, http: boolean, audio: boolean }
 APP_REQUIREMENTS = {}
 
 -- =============================================================================
@@ -452,8 +455,13 @@ function picocalc.sys.getPowerStatus() end
 ---@return { synced: boolean, hour: integer, min: integer, sec: integer, epoch: integer }
 function picocalc.sys.getClock() end
 
----Return a snapshot of heap usage.
----@return { psram_free: integer, psram_used: integer, psram_total: integer, sram_free: integer, sram_used: integer }
+---Return a snapshot of heap usage (bytes). `psram_largest_block` is the biggest
+---single free block (what one large allocation can get; compare with
+---`min_psram_kb`), `psram_fragmentation` a 0-100 figure. The `small_pool_*`
+---fields describe the Lua small-object pools (objects of up to 128 B live in
+---4 KB slabs carved from the PSRAM heap): slab count, slab bytes, live objects
+---and their bytes. `pio_psram_*` describe the mainboard PIO PSRAM.
+---@return { psram_free: integer, psram_used: integer, psram_total: integer, psram_largest_block: integer, psram_fragmentation: integer, small_pool_slabs: integer, small_pool_bytes: integer, small_pool_objects: integer, small_pool_object_bytes: integer, sram_free: integer, sram_used: integer, pio_psram_available: boolean, pio_psram_size: integer }
 function picocalc.sys.getMemInfo() end
 
 ---Return the OS firmware version string.
@@ -843,7 +851,9 @@ function picocalc.sound.resetTime() end
 ---@return integer
 function picocalc.sound.playingSources() end
 
----Create a Sample, optionally loading a WAV file immediately.
+---Create a Sample, optionally loading a WAV file immediately. WAVs must be
+---8- or 16-bit PCM, 1-2 channels (float, 24/32-bit, ADPCM are refused); only
+---the first 64 KB of sample data is kept.
 ---@param path_or_duration? string|number WAV file path, or duration in seconds for an empty sample
 ---@return PicOSSample
 function picocalc.sound.sample(path_or_duration) end
@@ -968,7 +978,8 @@ function PicOSSamplePlayer:getRate() end
 
 -- ── PicOSFilePlayer methods ──────────────────────────────────────────────────
 
----Open a WAV file for streaming.
+---Open a WAV file for streaming. 16-bit PCM only (1-2 channels): an 8-bit
+---WAV that a Sample would accept is refused here (returns false).
 ---@param path string
 ---@return boolean ok
 function PicOSFilePlayer:load(path) end
@@ -1199,13 +1210,8 @@ function PicOSHttpConn:get(path, headers) end
 ---@return string? error
 function PicOSHttpConn:post(path, headers, body) end
 
----Alias for `post`.
----@param path string
----@param headers? string
----@param body? string
----@return boolean ok
----@return string? error
-function PicOSHttpConn:query(path, headers, body) end
+-- There is no `query` method (older docs called it an alias for `post`; it
+-- was never registered). Use `post`.
 
 ---Close the connection.
 function PicOSHttpConn:close() end
@@ -1263,15 +1269,24 @@ picocalc.tcp = {}
 ---@class PicOSTcpConn : userdata
 local PicOSTcpConn = {}
 
----Create a TCP (or TLS) connection object.  With `use_ssl` the server
+---Create a TCP (or TLS) connection object (nothing is sent until `connect`).
+---Returns `nil, err` when the 4-socket pool is full.  With `use_ssl` the server
 ---certificate is verified (OS root bundle + host name) and the socket counts
 ---as connected only after the TLS handshake; a TLS connect before SNTP has set
 ---the clock fails with "clock not set".
 ---@param host string Hostname or IP
 ---@param port? integer Default: 80
 ---@param use_ssl? boolean `true` for TLS
----@return PicOSTcpConn
+---@return PicOSTcpConn? conn
+---@return string? err
 function picocalc.tcp.new(host, port, use_ssl) end
+
+---Start connecting (non-blocking). Returns `true`, or `false, err` (WiFi not
+---available, already connecting/connected). Completion: `isConnected()`,
+---`waitConnected()`, the connect callback or `CB_CONNECT` in `getEvents()`.
+---@return boolean ok
+---@return string? err
+function PicOSTcpConn:connect() end
 
 ---Before `connect()`: TLS without certificate verification or the clock
 ---check (self-signed development servers only). Default false.
@@ -1288,16 +1303,17 @@ function PicOSTcpConn:write(data) end
 ---@return string?
 function PicOSTcpConn:read(max_len) end
 
----Close the connection.
+---Close the connection. The object is unusable afterwards (I/O raises).
 function PicOSTcpConn:close() end
 
 ---Return the number of bytes available to read.
 ---@return integer
 function PicOSTcpConn:available() end
 
----Return the last error string, or `nil`.
+---Return the last error string, or `nil`. (The method is `error`, not
+---`getError` as older docs said.)
 ---@return string?
-function PicOSTcpConn:getError() end
+function PicOSTcpConn:error() end
 
 ---Return `true` if the connection is currently established.
 ---@return boolean
@@ -1306,6 +1322,7 @@ function PicOSTcpConn:isConnected() end
 ---@param seconds number
 function PicOSTcpConn:setConnectTimeout(seconds) end
 
+---Read timeout; off by default, 0 disables it. Applies to the connection.
 ---@param seconds number
 function PicOSTcpConn:setReadTimeout(seconds) end
 
@@ -1321,7 +1338,10 @@ function PicOSTcpConn:setReadCallback(fn) end
 ---@param fn fun(conn: PicOSTcpConn)
 function PicOSTcpConn:setCloseCallback(fn) end
 
----Return a bitmask of pending connection events.
+---Return and clear the pending events that have no callback registered, as a
+---bitmask of `picocalc.tcp.CB_CONNECT` (1), `CB_READ` (2), `CB_WRITE` (4),
+---`CB_CLOSED` (8), `CB_FAILED` (16). Callbacks receive the socket and never
+---nest; buffered data stays readable after the peer closes.
 ---@return integer
 function PicOSTcpConn:getEvents() end
 
@@ -1845,6 +1865,7 @@ function PicOSSprite:setTag(tag) end
 ---@return integer
 function PicOSSprite:getTag() end
 
+---Accepted and ignored (no-op): sprites draw opaque/keyed only.
 ---@param mode integer
 function PicOSSprite:setImageDrawMode(mode) end
 
@@ -1856,6 +1877,7 @@ function PicOSSprite:setImageFlip(flipX, flipY) end
 ---@return boolean flipY
 function PicOSSprite:getImageFlip() end
 
+---Stored but not applied yet (no-op).
 ---@param ignore boolean
 function PicOSSprite:setIgnoresDrawOffset(ignore) end
 
@@ -2109,9 +2131,14 @@ picocalc.graphics.animation.blinker = {}
 ---@class PicOSBlinker : userdata
 local PicOSBlinker = {}
 
----Create a blinker (on/off flash timer).
+---Create a blinker (on/off flash timer). Every argument is optional.
+---@param on_ms? integer Milliseconds on (default 500)
+---@param off_ms? integer Milliseconds off (default 500)
+---@param loop? boolean Repeat forever (default true)
+---@param cycles? integer With `loop == false`: stop after this many cycles (0 = never)
+---@param invert? boolean Start in the off state (currently overridden: `start`/`update` begin "on")
 ---@return PicOSBlinker
-function picocalc.graphics.animation.blinker.new() end
+function picocalc.graphics.animation.blinker.new(on_ms, off_ms, loop, cycles, invert) end
 
 ---Update all blinkers.
 function picocalc.graphics.animation.blinker.updateAll() end
@@ -2119,15 +2146,17 @@ function picocalc.graphics.animation.blinker.updateAll() end
 ---Stop all blinkers.
 function picocalc.graphics.animation.blinker.stopAll() end
 
----@param on_ms integer Milliseconds on
----@param off_ms integer Milliseconds off
----@param count? integer Number of cycles (default: 1)
-function PicOSBlinker:start(on_ms, off_ms, count) end
+---Start (or restart) the blinker. Same optional arguments as `blinker.new`;
+---any given replace the stored ones.
+---@param on_ms? integer Milliseconds on
+---@param off_ms? integer Milliseconds off
+---@param loop? boolean Repeat forever
+---@param cycles? integer With `loop == false`: stop after this many cycles
+---@param invert? boolean (currently has no effect: start always begins "on")
+function PicOSBlinker:start(on_ms, off_ms, loop, cycles, invert) end
 
----Start looping indefinitely.
----@param on_ms integer
----@param off_ms integer
-function PicOSBlinker:startLoop(on_ms, off_ms) end
+---Start looping indefinitely with the stored durations (takes no arguments).
+function PicOSBlinker:startLoop() end
 
 ---Stop the blinker.
 function PicOSBlinker:stop() end
