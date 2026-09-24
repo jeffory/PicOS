@@ -7,7 +7,6 @@
 #include "file_browser.h"
 #include "app_identity.h"
 #include "fs_path.h"
-#include "umm_malloc.h"
 
 #include <limits.h>
 
@@ -210,20 +209,34 @@ static int l_fs_exists(lua_State *L) {
   return 1;
 }
 
+// fs.readFile(path) -> string | nil.  The Lua buffer is sized before the
+// file is opened, so an out-of-memory error cannot leave the file open, and
+// the bytes are read straight into it (no umm_malloc copy to leak).
 static int l_fs_readFile(lua_State *L) {
   const char *path = luaL_checkstring(L, 1);
   if (!fs_sandbox_check(L, path, false)) {
     lua_pushnil(L);
     return 1;
   }
-  int len = 0;
-  char *buf = sdcard_read_file(path, &len);
-  if (!buf) {
+  int size = sdcard_fsize(path);
+  if (size < 0) {
     lua_pushnil(L);
     return 1;
   }
-  lua_pushlstring(L, buf, len);
-  umm_free(buf);
+  luaL_Buffer b;
+  char *buf = luaL_buffinitsize(L, &b, (size_t)size);
+  sdfile_t f = sdcard_fopen(path, "rb");
+  if (!f) {
+    lua_pushnil(L);
+    return 1;
+  }
+  int n = size > 0 ? sdcard_fread(f, buf, size) : 0;
+  sdcard_fclose(f);
+  if (n < 0) {
+    lua_pushnil(L);
+    return 1;
+  }
+  luaL_pushresultsize(&b, (size_t)n);
   return 1;
 }
 

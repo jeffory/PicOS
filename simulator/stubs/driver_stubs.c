@@ -605,18 +605,21 @@ char* sdcard_read_file(const char* path, int* out_len) {
     long size = ftell(f);
     fseek(f, 0, SEEK_SET);
     
-    char* buf = (char*)malloc(size + 1);
+    // umm_malloc, as on firmware: every caller frees with umm_free, and a
+    // plain malloc here slipped past the counting allocator (the free then
+    // subtracted bytes that were never added, skewing the heap metrics).
+    char* buf = size >= 0 ? (char*)umm_malloc((size_t)size + 1) : NULL;
     if (!buf) {
         fclose(f);
         if (out_len) *out_len = 0;
         return NULL;
     }
     
-    fread(buf, 1, size, f);
-    buf[size] = '\0';
+    size_t got = fread(buf, 1, (size_t)size, f);
+    buf[got] = '\0';
     fclose(f);
     
-    if (out_len) *out_len = (int)size;
+    if (out_len) *out_len = (int)got;
     return buf;
 }
 int sdcard_list_dir(const char* path,

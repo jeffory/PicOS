@@ -167,6 +167,34 @@ FS_EDGE = {
             collectgarbage("collect")
         end
     """,
+    "readfile_oom_does_not_leak": """
+        -- readFile of a file that needs more memory than is free must fail
+        -- cleanly: the bytes read so far belong to Lua and are collected
+        -- (it used to umm_malloc a copy and leak it when the push failed).
+        local mem = picocalc.sys.getMemInfo
+        collectgarbage("collect"); collectgarbage("collect")
+        local size = math.floor(mem().psram_free * 0.6)
+        local path = fs.appPath("big.bin")
+        local w = T.ok(fs.open(path, "w"), "open w")
+        local chunk = string.rep("x", 65536)
+        local left = size
+        while left > 0 do
+            local n = math.min(left, #chunk)
+            T.eq(fs.write(w, n == #chunk and chunk or chunk:sub(1, n)), n)
+            left = left - n
+        end
+        fs.close(w)
+        chunk = nil
+        collectgarbage("collect"); collectgarbage("collect")
+        local base = mem().psram_free
+        local ok = pcall(fs.readFile, path)   -- needs ~2x size: out of memory
+        collectgarbage("collect"); collectgarbage("collect")
+        local lost = base - mem().psram_free
+        picocalc.sys.log(("DBG base=%d lost=%d size=%d ok=%s"):format(base, lost, size, tostring(ok)))
+        T.ok(lost < 65536, ("readFile leaked %d of %d bytes (ok=%s)")
+             :format(lost, size, tostring(ok)))
+        fs.delete(path)
+    """,
     "methods_and_close_var": """
         local path = fs.appPath("meth.txt")
         do
