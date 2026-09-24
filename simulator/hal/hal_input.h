@@ -76,6 +76,12 @@ void hal_input_release_buttons(uint32_t buttons);
 // Inject a typed character into the char ring buffer (for RPC control)
 void hal_input_inject_char(char c);
 
+// Pop the oldest staged key event (down/up/char, in the order the keys were
+// typed or injected). keyboard_stub.c's kbd_poll drains these into the event
+// queue behind picocalc.input.pollEvent.
+struct kbd_event_s;  // kbd_event_t, src/drivers/keyboard.h
+bool hal_input_pop_event(struct kbd_event_s *out);
+
 // Drop queued chars and pending/active one-shot button injections (the
 // counterpart of keyboard.c's kbd_discard_pending FIFO drain).
 void hal_input_discard_pending(void);

@@ -2,6 +2,7 @@
 // Bridges SDL2 input to PicOS keyboard driver interface
 
 #include "../../src/drivers/keyboard.h"
+#include "../../src/drivers/kbd_event_queue.h"
 #include "../hal/hal_input.h"
 #include "../../src/os/os.h"
 #include <SDL2/SDL.h>
@@ -31,6 +32,10 @@ static char s_last_char = 0;
 static uint8_t s_raw_key = 0;
 static bool s_menu_pressed = false;
 static bool s_screenshot_pressed = false;
+// The firmware's event queue + key-down set (kbd_event_queue.h). The HAL
+// stages events as keys are typed/injected; kbd_poll moves them in here, so
+// pollEvent sees them only after input.update(), as on hardware.
+static kbd_input_t s_in;
 
 // Key mapping from SDL to keyboard keycodes
 static struct {
@@ -103,6 +108,11 @@ void kbd_poll(void) {
         s_screenshot_pressed = true;
     }
     
+    // Staged key events, in order, into the app-facing queue.
+    kbd_event_t ev;
+    while (hal_input_pop_event(&ev))
+        kbd_input_accept(&s_in, ev);
+
     // Get character input
     s_last_char = hal_input_get_char();
     if (s_last_char) {
@@ -144,6 +154,18 @@ uint32_t kbd_get_buttons_released(void) {
     return s_buttons_released;
 }
 
+bool kbd_poll_event(kbd_event_t *out) {
+    return kbd_evq_pop(&s_in.q, out);
+}
+
+bool kbd_is_key_down(uint8_t keycode) {
+    return kbd_keyset_test(&s_in.down, keycode);
+}
+
+void kbd_flush_events(void) {
+    kbd_evq_clear(&s_in.q);
+}
+
 int kbd_get_battery_percent(void) {
     return 100;  // Always full in simulator
 }
@@ -179,6 +201,7 @@ void kbd_clear_state(void) {
     s_buttons_released = 0;
     s_last_char = 0;
     s_raw_key = 0;
+    kbd_input_clear(&s_in);
 }
 
 void kbd_discard_pending(void) {

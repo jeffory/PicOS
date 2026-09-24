@@ -2,6 +2,7 @@
 
 #include "hal_input.h"
 #include "hal_timing.h"
+#include "../../src/drivers/kbd_event_queue.h"
 #include <string.h>
 #include <stdio.h>
 #include <pthread.h>
@@ -45,6 +46,55 @@ static uint32_t g_btn_unread_seq = 0;
 static uint32_t g_btn_pending_seq = 0;
 static uint32_t g_char_seq[256];
 static uint32_t g_menu_seq = 0;
+
+// Key events staged for kbd_poll (keyboard_stub.c), which moves them into the
+// same kbd_event_queue_t the firmware driver fills — so, as on hardware, an
+// app sees them only after input.update(). Written by the SDL thread and the
+// RPC thread under s_input_mutex; sized generously (host memory), the app
+// facing queue keeps the device's KBD_EVENT_QUEUE_LEN.
+#define HAL_EVENT_STAGE_LEN 128
+static kbd_event_t g_ev_stage[HAL_EVENT_STAGE_LEN];
+static int g_ev_head = 0;   // next write
+static int g_ev_count = 0;
+
+// Must be called with s_input_mutex held.
+static void stage_event_locked(uint8_t type, uint8_t key, char ch, uint8_t flags) {
+    if (!key || kbd_key_is_os_only(key)) return;
+    if (g_ev_count == HAL_EVENT_STAGE_LEN) g_ev_count--;  // drop the oldest
+    kbd_event_t e = {type, key, (uint8_t)ch,
+                     (uint8_t)(flags | kbd_mods_from_buttons(g_buttons))};
+    g_ev_stage[g_ev_head] = e;
+    g_ev_head = (g_ev_head + 1) % HAL_EVENT_STAGE_LEN;
+    g_ev_count++;
+}
+
+// Down/up events for every button bit in `bits`. Call after g_buttons has
+// been updated, so the mods byte reflects the new state.
+static void stage_buttons_locked(uint32_t bits, uint8_t type) {
+    bits &= ~BTN_MENU;  // the OS's
+    for (uint32_t b = 1; b && b <= bits; b <<= 1)
+        if (bits & b) stage_event_locked(type, kbd_button_to_keycode(b), 0, 0);
+}
+
+// A typed char as the device reports a tap: down, char, up.
+static void stage_char_tap_locked(char c) {
+    uint8_t key = (uint8_t)c;
+    stage_event_locked(KBD_EV_DOWN, key, 0, 0);
+    stage_event_locked(KBD_EV_CHAR, key, c, 0);
+    stage_event_locked(KBD_EV_UP, key, 0, 0);
+}
+
+bool hal_input_pop_event(kbd_event_t *out) {
+    pthread_mutex_lock(&s_input_mutex);
+    bool ok = g_ev_count > 0;
+    if (ok) {
+        int tail = (g_ev_head - g_ev_count + HAL_EVENT_STAGE_LEN) % HAL_EVENT_STAGE_LEN;
+        if (out) *out = g_ev_stage[tail];
+        g_ev_count--;
+    }
+    pthread_mutex_unlock(&s_input_mutex);
+    return ok;
+}
 
 static uint32_t min_nonzero(uint32_t a, uint32_t b) {
     if (!a) return b;
@@ -101,14 +151,27 @@ void hal_input_handle_event(const SDL_Event* event) {
         
         pthread_mutex_lock(&s_input_mutex);
         
+        // SDL auto-repeat is the desktop's HOLD: flagged, not a new press.
+        uint8_t rep = event->key.repeat ? KBD_EVF_REPEAT : 0;
+
         // Check button mappings
         for (int i = 0; key_mappings[i].sdl_key != 0; i++) {
             if (key_mappings[i].sdl_key == key) {
+                uint32_t mask = key_mappings[i].btn_mask;
+                uint8_t code = kbd_button_to_keycode(mask);
                 if (pressed) {
-                    g_buttons |= key_mappings[i].btn_mask;
-                    g_buttons_pressed |= key_mappings[i].btn_mask;
+                    g_buttons |= mask;
+                    g_buttons_pressed |= mask;
+                    if (!(mask & BTN_MENU))
+                        stage_event_locked(KBD_EV_DOWN, code, 0, rep);
+                    if (mask & BTN_ENTER)
+                        stage_event_locked(KBD_EV_CHAR, code, '\n', rep);
+                    else if (mask & BTN_BACKSPACE)
+                        stage_event_locked(KBD_EV_CHAR, code, '\b', rep);
                 } else {
-                    g_buttons &= ~key_mappings[i].btn_mask;
+                    g_buttons &= ~mask;
+                    if (!(mask & BTN_MENU))
+                        stage_event_locked(KBD_EV_UP, code, 0, 0);
                 }
                 pthread_mutex_unlock(&s_input_mutex);
                 return;
@@ -116,12 +179,18 @@ void hal_input_handle_event(const SDL_Event* event) {
         }
         
         // Character input
-        if (pressed && (key >= 32 && key < 127)) {
-            int next = (g_char_head + 1) % sizeof(g_char_buffer);
-            if (next != g_char_tail) {
-                g_char_buffer[g_char_head] = (char)key;
-                g_char_seq[g_char_head] = 0;
-                g_char_head = next;
+        if (key >= 32 && key < 127) {
+            if (pressed) {
+                int next = (g_char_head + 1) % sizeof(g_char_buffer);
+                if (next != g_char_tail) {
+                    g_char_buffer[g_char_head] = (char)key;
+                    g_char_seq[g_char_head] = 0;
+                    g_char_head = next;
+                }
+                stage_event_locked(KBD_EV_DOWN, (uint8_t)key, 0, rep);
+                stage_event_locked(KBD_EV_CHAR, (uint8_t)key, (char)key, rep);
+            } else {
+                stage_event_locked(KBD_EV_UP, (uint8_t)key, 0, 0);
             }
         }
         
@@ -138,9 +207,11 @@ static void retire_and_publish_injected_click_locked(uint32_t now_ms) {
     bool retired_this_read = false;
     if (g_injected_click &&
         (now_ms - g_injected_click_since_ms >= HAL_INJECT_HOLD_MS)) {
+        uint32_t retired = g_injected_click & ~g_injected_latched;
         g_buttons &= ~g_injected_click;
         g_injected_click = 0;
         retired_this_read = true;
+        stage_buttons_locked(retired, KBD_EV_UP);
     }
     // Publish a queued re-injection only once active is empty AND we didn't
     // just retire it in this very call — guarantees at least one full read
@@ -149,7 +220,9 @@ static void retire_and_publish_injected_click_locked(uint32_t now_ms) {
     // release-then-press edge, mirroring keyboard.c's
     // injected_retired_this_poll guard.
     if (!retired_this_read && !g_injected_click && g_injected_click_pending) {
+        uint32_t fresh = g_injected_click_pending & ~g_buttons;
         g_buttons |= g_injected_click_pending;
+        stage_buttons_locked(fresh, KBD_EV_DOWN);
         g_buttons_pressed |= g_injected_click_pending;
         g_injected_click = g_injected_click_pending;
         g_injected_click_pending = 0;
@@ -191,8 +264,10 @@ void hal_input_inject_buttons(uint32_t buttons) {
     if (fresh) g_btn_unread_seq = min_nonzero(g_btn_unread_seq, seq);
     if (already_active) g_btn_pending_seq = min_nonzero(g_btn_pending_seq, seq);
     if (fresh) {
+        uint32_t newly_down = fresh & ~g_buttons;
         g_buttons |= fresh;
         g_buttons_pressed |= fresh;
+        stage_buttons_locked(newly_down, KBD_EV_DOWN);
         g_injected_click |= fresh;
         g_injected_click_since_ms = hal_get_time_ms();
     }
@@ -214,9 +289,11 @@ void hal_input_inject_buttons(uint32_t buttons) {
 
 void hal_input_hold_buttons(uint32_t buttons) {
     pthread_mutex_lock(&s_input_mutex);
+    uint32_t newly_down = buttons & ~g_buttons;
     g_buttons |= buttons;
     g_buttons_pressed |= buttons;
     g_injected_latched |= buttons;
+    stage_buttons_locked(newly_down, KBD_EV_DOWN);
     g_btn_unread_seq = min_nonzero(g_btn_unread_seq, ++g_seq_issued);
     // A held button must not be auto-released by an earlier click of the
     // same key, nor resurrected later by a queued re-injection of it.
@@ -228,7 +305,9 @@ void hal_input_hold_buttons(uint32_t buttons) {
 void hal_input_release_buttons(uint32_t buttons) {
     pthread_mutex_lock(&s_input_mutex);
     g_btn_unread_seq = min_nonzero(g_btn_unread_seq, ++g_seq_issued);
+    uint32_t going_up = buttons & g_buttons;
     g_buttons &= ~buttons;
+    stage_buttons_locked(going_up, KBD_EV_UP);
     g_injected_click &= ~buttons;
     g_injected_click_pending &= ~buttons;
     g_injected_latched &= ~buttons;
@@ -244,6 +323,7 @@ void hal_input_inject_char(char c) {
         g_char_seq[g_char_head] = seq;
         g_char_head = next;
     }
+    stage_char_tap_locked(c);
     pthread_mutex_unlock(&s_input_mutex);
 }
 
@@ -312,6 +392,7 @@ void hal_input_get_seq_state(uint32_t *issued, uint32_t *consumed) {
 void hal_input_discard_pending(void) {
     pthread_mutex_lock(&s_input_mutex);
     g_char_tail = g_char_head;
+    g_ev_count = 0;
     g_buttons &= ~g_injected_click;
     g_buttons_pressed = 0;
     g_injected_click = 0;
