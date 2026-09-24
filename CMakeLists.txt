@@ -429,6 +429,9 @@ target_compile_definitions(picocalc_os PRIVATE
     PICO_RP2350=1
     PICO_MALLOC_PANIC=0   # Return NULL on SRAM OOM instead of HardFault
     PICO_STACK_SIZE=4096  # Reduced to 4KB to fit in SCRATCH_X/Y
+    # MSPLIM on both cores; main.c supplies the hook to add a margin.
+    PICO_USE_STACK_GUARDS=1
+    PICO_RUNTIME_NO_INIT_PER_CORE_INSTALL_STACK_GUARD=1
     MG_ENABLE_MBEDTLS=1
     # Re-enable pico_stdio_usb features that get auto-disabled when
     # tinyusb_device is linked directly. We provide our own descriptors

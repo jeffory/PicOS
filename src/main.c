@@ -5,6 +5,7 @@
 #include "hardware/watchdog.h"
 #include "pico/bootrom.h"
 #include "pico/multicore.h"
+#include "pico/runtime_init.h"
 #include "pico/stdlib.h"
 
 #include <stdarg.h>
@@ -31,6 +32,25 @@ uint32_t    launcher_get_app_uptime_ms(void);
 extern uint32_t __StackTop;    // initial SP (stack grows DOWN from here)
 extern uint32_t __StackBottom; // lowest valid address (4KB below StackTop)
 extern uint32_t __StackOneBottom; // Core 1 MSP lower bound (SCRATCH_X)
+
+// ── Stack limits (ARMv8-M MSPLIM) ─────────────────────────────────────────────
+// PICO_USE_STACK_GUARDS=1 (CMakeLists.txt) makes the SDK call this hook for
+// each core before its code runs: Core 0 from runtime_init() with
+// &__StackBottom, Core 1 from core1_wrapper() with __StackOneBottom. We supply
+// the implementation (PICO_RUNTIME_NO_INIT_PER_CORE_INSTALL_STACK_GUARD=1) to
+// keep a margin above the bottom: an overflow faults with CFSR.STKOF while
+// STACK_LIMIT_MARGIN bytes are still free, and isr_hardfault drops the limit
+// so the handler can use them. 320 = FP exception frame (104) + hardfault_c's
+// own frame (184) + the launcher getters it calls first (32), so the crash
+// record in watchdog scratch is always written; the printf/display path that
+// follows may run below the bottom (into Core 1's stack top / the heap end),
+// which is tolerable because the handler reboots.
+// Runs before runtime init completes: no printf, no asserts.
+#define STACK_LIMIT_MARGIN 320u
+void runtime_init_per_core_install_stack_guard(void *stack_bottom) {
+  uint32_t limit = ((uint32_t)(uintptr_t)stack_bottom + STACK_LIMIT_MARGIN + 7u) & ~7u;
+  __asm volatile ("msr msplim, %0" : : "r"(limit));
+}
 
 // ── HardFault handler ─────────────────────────────────────────────────────────
 // Captures the exception frame (stacked registers) and prints fault registers
@@ -157,6 +177,10 @@ static void __attribute__((used)) hardfault_c(uint32_t *frame, uint32_t exc_retu
     stack_limit = (uint32_t)(uintptr_t)&__StackBottom;
     stack_overflow = (sp_at_fault < stack_limit);
   }
+  // A MSPLIM/PSPLIM hit clamps SP at the limit (above the bottom), so the
+  // SP comparison alone misses it; CFSR.STKOF is the authoritative signal.
+  if (cfsr & (1u << 20))
+    stack_overflow = true;
 
   // ── UART output (always works — polling-based, no IRQ required) ────────────
   printf("\n!!! HARDFAULT (core %lu) !!!\n", (unsigned long)core);
@@ -311,6 +335,10 @@ static void __attribute__((used)) hardfault_c(uint32_t *frame, uint32_t exc_retu
 // then pass its address to the C handler.
 void __attribute__((naked)) isr_hardfault(void) {
   __asm volatile (
+    // After a stack-limit fault MSP sits AT MSPLIM: the handler's first push
+    // would fault again and lock up. Drop this core's limit before any push.
+    "movs r2, #0     \n"
+    "msr  msplim, r2 \n"
     "mov  r1, lr     \n" // r1 = EXC_RETURN (2nd arg to hardfault_c)
     "tst  lr, #4     \n" // bit 2 of EXC_RETURN: 0=MSP, 1=PSP
     "ite  eq         \n"
@@ -1602,7 +1630,7 @@ static void crash_log_save(const char *app_name) {
   if (cfsr & (1u<< 0)) n += snprintf(line+n, sizeof(line)-n, "  IACCVIOL: MPU instruction access violation\n");
   if (cfsr & (1u<<25)) n += snprintf(line+n, sizeof(line)-n, "  DIVBYZERO\n");
   if (cfsr & (1u<<24)) n += snprintf(line+n, sizeof(line)-n, "  UNALIGNED access\n");
-  if (cfsr & (1u<<20)) n += snprintf(line+n, sizeof(line)-n, "  STKOF: stack limit violation\n");
+  if (cfsr & (1u<<20)) n += snprintf(line+n, sizeof(line)-n, "  STKOF: stack overflow (MSPLIM/PSPLIM limit hit)\n");
   if (hfsr & (1u<<30)) n += snprintf(line+n, sizeof(line)-n, "  HFSR: FORCED escalation\n");
   if (hfsr & (1u<< 1)) n += snprintf(line+n, sizeof(line)-n, "  HFSR: vector table fault\n");
   if (sfsr & (1u<<0))  n += snprintf(line+n, sizeof(line)-n, "  SFSR INVEP: invalid NS->S entry\n");

@@ -804,8 +804,19 @@ static bool native_run(const app_entry_t *app) {
 
   g_core1_pause = false;
 
+  // ARMv8-M PSP limit just above the canary words: an app push past it
+  // faults with CFSR.STKOF (HardFault, recorded as a stack overflow) instead
+  // of silently running through the canaries into whatever lies below.
+  // Set here rather than inside the naked trampoline, which has no spare
+  // argument register; nothing else uses PSP. Cleared once the app returns.
+  uint32_t psp_limit =
+      ((uint32_t)(uintptr_t)(guard + NATIVE_STACK_GUARD_WORDS) + 7u) & ~7u;
+  __asm volatile ("msr psplim, %0" : : "r"(psp_limit));
+
   launch_on_psp(stack_top, entry_fn,
                 (const PicoCalcAPI *)&g_api, app->path, app->id, app->name);
+
+  __asm volatile ("msr psplim, %0" : : "r"(0u));
 
   ok = true;
   for (int i = 0; i < NATIVE_STACK_GUARD_WORDS; i++) {
