@@ -1,4 +1,4 @@
-"""Blitter clipping, colour key + flip and PNG decode.
+"""Blitter clipping, colour key + flip, PNG decode and off-screen shape rejection.
 
 Drives tests/e2e/apps/blit_test phase by phase (ENTER) and probes the screen
 with get_pixel. Expected pixels come from an independent Python model of the
@@ -10,16 +10,22 @@ changed golden.
 Regression targets (code review 2026-09-24, Graphics):
 - PNGdec's zlib made misaligned 32-bit copies on every real PNG (UBSan abort
   in the ASan simulator on image.load).
+- drawImageNN / drawScaledNN with negative, non-multiple offsets.
+- No trivial rejection of off-screen shapes: drawLine(0,0,1e9,1e9),
+  circles of radius 1e9 and huge triangles looped for ~1e9 pixels.
+- draw3DWireframeEx divided by zero for a vertex on the camera plane.
 """
 
 import os
+import re
 
 from PIL import Image
 
 APP = "blit_test"
 APP_DIR = os.path.join(os.path.dirname(__file__), "apps", APP)
 
-PHASES = ["png", "keyed_flip"]
+PHASES = ["png", "keyed_flip", "nn_negative", "line_huge", "circle_huge",
+          "tri_huge", "cube_behind"]
 
 
 def rgb565(r, g, b):
@@ -27,6 +33,7 @@ def rgb565(r, g, b):
 
 
 BG = rgb565(0, 0, 80)
+INK = rgb565(0, 255, 0)
 KEY = rgb565(248, 0, 248)
 
 
@@ -102,6 +109,15 @@ def _goto(simulator, target):
     raise AssertionError(f"unknown phase {target}")
 
 
+def _ms(simulator, name):
+    for line in simulator.get_log_buffer()["lines"]:
+        text = line if isinstance(line, str) else line.get("text", "")
+        m = re.search(rf"BT:MS {name} (\d+)", text)
+        if m:
+            return int(m.group(1))
+    raise AssertionError(f"no BT:MS {name} line")
+
+
 def _check(sim, m, spots, what, w=16, h=16):
     for (x, y) in spots:
         got = region(sim, x, y, w, h)
@@ -111,6 +127,11 @@ def _check(sim, m, spots, what, w=16, h=16):
 
 PATTERN = load565("pattern.png")
 SPRITE = load565("sprite.png")
+
+# Off-screen shapes must be rejected or clipped before the pixel loop. The
+# unfixed loops ran ~1e9 iterations (minutes); a clipped one is microseconds.
+PROMPT_MS = 1000
+
 
 def test_png_decode_and_clipped_blit(simulator):
     """A real PNG through PNGdec's inflate, drawn opaque and clipped."""
@@ -136,3 +157,55 @@ def test_keyed_flipped_sprite(simulator):
     m.blit(16, -2, SPRITE, flip_x=True, key=KEY)
     _check(simulator, m, [(16, 16), (32, 16), (48, 16), (64, 16), (0, 40),
                           (304, 40), (16, 0)], "keyed/flip")
+
+
+def test_nn_scale_negative_offset(simulator):
+    """Integer NN scale starting at a negative, non-multiple offset."""
+    _goto(simulator, "nn_negative")
+    m = Model()
+    m.blit_nn(-3, -5, SPRITE, 4, key=KEY)
+    m.blit_nn(300, 310, SPRITE, 3, key=KEY)
+    _check(simulator, m, [(0, 0), (16, 0), (0, 16), (304, 304)], "nn")
+
+
+def test_huge_lines_clipped(simulator):
+    _goto(simulator, "line_huge")
+    m = Model()
+    for k in range(320):
+        m.px[k * 320 + k] = INK          # (0,0)->(1e9,1e9): the diagonal
+        m.px[50 * 320 + k] = INK         # y = 50 across the whole screen
+    _check(simulator, m, [(0, 0), (304, 304), (0, 48), (160, 48), (304, 48)],
+           "line")
+    assert _ms(simulator, "line_huge") < PROMPT_MS
+
+
+def test_huge_circles_clipped(simulator):
+    _goto(simulator, "circle_huge")
+    m = Model()
+    for k in range(320):
+        m.px[60 * 320 + k] = INK         # outline grazing y = 60
+    m.px[200 * 320 + 160] = INK          # fill: apex pixel on row 200
+    for y in range(201, 320):
+        for k in range(320):
+            m.px[y * 320 + k] = INK
+    _check(simulator, m, [(0, 52), (152, 52), (304, 52), (0, 192), (152, 192),
+                          (304, 304)], "circle")
+    assert _ms(simulator, "circle_huge") < PROMPT_MS
+
+
+def test_huge_triangle_clipped(simulator):
+    _goto(simulator, "tri_huge")
+    m = Model()
+    for y in range(100, 320):
+        for k in range(320):
+            m.px[y * 320 + k] = INK
+    _check(simulator, m, [(0, 92), (304, 92), (0, 304), (304, 304)], "tri")
+    assert _ms(simulator, "tri_huge") < PROMPT_MS
+
+
+def test_3d_vertex_behind_camera(simulator):
+    _goto(simulator, "cube_behind")
+    # Front face (z = -40, depth 60) top edge: y = 160 - 40*100/60 -> 93.
+    got = region(simulator, 104, 93, 16, 1)
+    assert got == [INK] * 16, f"cube front edge missing: {got}"
+    assert _ms(simulator, "cube_behind") < PROMPT_MS

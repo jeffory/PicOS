@@ -46,6 +46,13 @@ static uint16_t* s_last_presented = g_front_buffer;
 static int s_clip_x0 = 0, s_clip_y0 = 0;
 static int s_clip_x1 = 319, s_clip_y1 = 319;
 
+// The clip-once rasterisers are shared with the firmware driver; this
+// framebuffer is host order, so they run with swap = false.
+#include "../../src/drivers/display_clip.h"
+static inline disp_clip_t cur_clip(void) {
+    return (disp_clip_t){s_clip_x0, s_clip_y0, s_clip_x1, s_clip_y1};
+}
+
 // ── Hardware vertical scroll emulation (ST7365P VSCRDEF/VSCRSADD) ──────────
 // The sim keeps a GRAM analog: every flush writes rows into s_gram, and
 // present_gram() maps GRAM rows to screen rows through the scroll registers
@@ -109,17 +116,8 @@ uint16_t* display_get_back_buffer(void) {
 }
 
 void display_fill_rect(int x, int y, int w, int h, uint16_t color) {
-    uint16_t* fb = display_get_back_buffer();
-    if (x < s_clip_x0) { w -= (s_clip_x0 - x); x = s_clip_x0; }
-    if (y < s_clip_y0) { h -= (s_clip_y0 - y); y = s_clip_y0; }
-    if (x + w - 1 > s_clip_x1) w = s_clip_x1 - x + 1;
-    if (y + h - 1 > s_clip_y1) h = s_clip_y1 - y + 1;
-    if (w <= 0 || h <= 0) return;
-    for (int dy = y; dy < y + h && dy < 320; dy++) {
-        for (int dx = x; dx < x + w && dx < 320; dx++) {
-            if (dx >= 0 && dy >= 0) fb[dy * 320 + dx] = color;
-        }
-    }
+    disp_clip_t c = cur_clip();
+    disp_fill(display_get_back_buffer(), 320, &c, x, y, w, h, color);
 }
 
 void display_draw_rect(int x, int y, int w, int h, uint16_t color) {
@@ -238,20 +236,19 @@ void display_set_pixel(int x, int y, uint16_t color) {
 }
 
 void display_draw_line(int x0, int y0, int x1, int y1, uint16_t color) {
-    // Bresenham's line algorithm
-    int dx = abs(x1 - x0), sx = x0 < x1 ? 1 : -1;
-    int dy = -abs(y1 - y0), sy = y0 < y1 ? 1 : -1;
-    int err = dx + dy;
-    while (1) {
-        display_set_pixel(x0, y0, color);
-        if (x0 == x1 && y0 == y1) break;
-        int e2 = 2 * err;
-        if (e2 >= dy) { err += dy; x0 += sx; }
-        if (e2 <= dx) { err += dx; y0 += sy; }
-    }
+    // Bresenham clipped to the visible steps (shared with the firmware).
+    disp_clip_t c = cur_clip();
+    disp_line(display_get_back_buffer(), 320, &c, x0, y0, x1, y1, color);
 }
 
 void display_draw_circle(int x, int y, int r, uint16_t color) {
+    // Same rejection and large-radius path as the firmware driver.
+    disp_clip_t c = cur_clip();
+    if (disp_circle_rejected(&c, x, y, r)) return;
+    if (r > DISP_CIRCLE_MIDPOINT_MAX) {
+        disp_circle_big(display_get_back_buffer(), 320, &c, x, y, r, color);
+        return;
+    }
     int f = 1 - r;
     int ddF_x = 0;
     int ddF_y = -2 * r;
@@ -282,56 +279,17 @@ void display_draw_circle(int x, int y, int r, uint16_t color) {
 }
 
 void display_fill_circle(int x, int y, int r, uint16_t color) {
-    for (int dy = -r; dy <= r; dy++) {
-        int dx = (int)sqrt(r * r - dy * dy);
-        display_draw_line(x - dx, y + dy, x + dx, y + dy, color);
-    }
+    // One span per visible row, half-width floor(sqrt(r^2 - dy^2)) — the
+    // pixels of the old per-row (int)sqrt loop, without its 2r iterations.
+    disp_clip_t c = cur_clip();
+    if (disp_circle_rejected(&c, x, y, r)) return;
+    disp_fill_circle_rows(display_get_back_buffer(), 320, &c, x, y, r, color);
 }
 
 void display_fill_triangle(int x0, int y0, int x1, int y1, int x2, int y2, uint16_t color) {
-    // Sort vertices by Y coordinate
-    if (y0 > y1) { int t; t=y0; y0=y1; y1=t; t=x0; x0=x1; x1=t; }
-    if (y0 > y2) { int t; t=y0; y0=y2; y2=t; t=x0; x0=x2; x2=t; }
-    if (y1 > y2) { int t; t=y1; y1=y2; y2=t; t=x1; x1=x2; x2=t; }
-    if (y0 == y2) return;
-    float inv_dy02 = 1.0f / (float)(y2 - y0);
-    if (y0 == y1) {
-        for (int y = y0; y <= y2; y++) {
-            float t = (float)(y - y0) * inv_dy02;
-            int xa = x0 + (int)((x2 - x0) * t);
-            int xb = x1 + (int)((x2 - x1) * t);
-            if (xa > xb) { int tmp = xa; xa = xb; xb = tmp; }
-            display_draw_line(xa, y, xb, y, color);
-        }
-    } else if (y1 == y2) {
-        float inv_dy01 = 1.0f / (float)(y1 - y0);
-        for (int y = y0; y <= y1; y++) {
-            float t = (float)(y - y0) * inv_dy01;
-            int xa = x0 + (int)((x1 - x0) * t);
-            int xb = x0 + (int)((x2 - x0) * t);
-            if (xa > xb) { int tmp = xa; xa = xb; xb = tmp; }
-            display_draw_line(xa, y, xb, y, color);
-        }
-    } else {
-        float inv_dy01 = 1.0f / (float)(y1 - y0);
-        float inv_dy12 = 1.0f / (float)(y2 - y1);
-        for (int y = y0; y <= y1; y++) {
-            float t_short = (float)(y - y0) * inv_dy01;
-            float t_long  = (float)(y - y0) * inv_dy02;
-            int xa = x0 + (int)((x1 - x0) * t_short);
-            int xb = x0 + (int)((x2 - x0) * t_long);
-            if (xa > xb) { int tmp = xa; xa = xb; xb = tmp; }
-            display_draw_line(xa, y, xb, y, color);
-        }
-        for (int y = y1; y <= y2; y++) {
-            float t_short = (float)(y - y1) * inv_dy12;
-            float t_long  = (float)(y - y0) * inv_dy02;
-            int xa = x1 + (int)((x2 - x1) * t_short);
-            int xb = x0 + (int)((x2 - x0) * t_long);
-            if (xa > xb) { int tmp = xa; xa = xb; xb = tmp; }
-            display_draw_line(xa, y, xb, y, color);
-        }
-    }
+    disp_clip_t c = cur_clip();
+    disp_fill_triangle(display_get_back_buffer(), 320, &c, x0, y0, x1, y1, x2,
+                       y2, color);
 }
 
 void display_draw_textured_column(int x, int y0, int y1,
@@ -506,6 +464,15 @@ void display_draw_image(int x, int y, const uint16_t* data, int w, int h) {
             }
         }
     }
+}
+
+// Twin of the firmware's native drawImageNN (the Unicorn trampoline calls it):
+// clipped to the clip rect, host-order pixels.
+void display_draw_image_nn(int x, int y, const uint16_t *data,
+                           int src_w, int src_h, int scale) {
+    disp_clip_t c = cur_clip();
+    disp_blit_nn(display_get_back_buffer(), 320, &c, x, y, data, src_w, src_h,
+                 scale, false);
 }
 
 void display_draw_image_partial(int x, int y, int img_w, int img_h,

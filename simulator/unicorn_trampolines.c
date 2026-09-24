@@ -68,6 +68,7 @@ extern int  display_draw_text(int x, int y, const char *text, uint16_t fg, uint1
 extern void display_flush(void);
 extern void display_set_brightness(uint8_t brightness);
 extern uint16_t *display_get_back_buffer(void);
+extern void display_draw_image_nn(int x, int y, const uint16_t *data, int src_w, int src_h, int scale);
 extern void display_fill_vline(int x, int y0, int y1, uint16_t color);
 extern void display_fill_hline(int y, int x0, int x1, uint16_t color);
 extern void display_fill_triangle(int x0, int y0, int x1, int y1, int x2, int y2, uint16_t color);
@@ -862,19 +863,8 @@ static void tramp_display_draw_image_nn(uc_engine *uc) {
     // to the panel). The SDL back buffer is also host-order, so no
     // conversion is needed here — unlike the EMU_FB_BASE paths below,
     // which read the emulated (big-endian, panel-format) framebuffer.
-
-    // Use drawImage with nearest-neighbor scaling
-    // The simulator doesn't have display_draw_image_nn, so implement it inline
-    uint16_t *fb = display_get_back_buffer();
-    for (int dy = 0; dy < src_h * scale && y + dy < 320; dy++) {
-        for (int dx = 0; dx < src_w * scale && x + dx < 320; dx++) {
-            int px = x + dx;
-            int py = y + dy;
-            if (px >= 0 && py >= 0) {
-                fb[py * 320 + px] = buf[(dy / scale) * src_w + (dx / scale)];
-            }
-        }
-    }
+    // Same clip-once blitter as the firmware (display_clip.h).
+    display_draw_image_nn(x, y, buf, src_w, src_h, scale);
     free(buf);
     s_back_buffer_dirty = 1;  // Tell flush() not to overwrite from EMU_FB_BASE
 }

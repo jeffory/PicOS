@@ -19,6 +19,7 @@
 
 #include "../os/image_decoders.h"
 #include "../fonts/font_registry.h"
+#include "display_clip.h"
 
 // ── Framebuffer ──────────────────────────────────────────────────────────────
 // Placed in internal SRAM smoothly now that the Lua heap has been relocated
@@ -55,6 +56,14 @@ static uint16_t s_transparent_color = 0;
 // (whole-framebuffer by design), and the tgx rotated-blit path.
 static int s_clip_x0 = 0, s_clip_y0 = 0;
 static int s_clip_x1 = FB_WIDTH - 1, s_clip_y1 = FB_HEIGHT - 1;
+
+// The clip rect in the form the shared rasterisers (display_clip.h) take.
+static inline disp_clip_t cur_clip(void) {
+  return (disp_clip_t){s_clip_x0, s_clip_y0, s_clip_x1, s_clip_y1};
+}
+
+// Host RGB565 -> the framebuffer's byte-swapped (panel) order.
+static inline uint16_t fb_color(uint16_t c) { return disp_px(c, true); }
 
 // ── Active font ─────────────────────────────────────────────────────────────
 // All glyph data and the renderer live in src/fonts/. This driver only
@@ -363,40 +372,10 @@ void display_set_pixel(int x, int y, uint16_t color) {
 }
 
 void display_fill_rect(int x, int y, int w, int h, uint16_t color) {
-  if (x < s_clip_x0) {
-    w -= (s_clip_x0 - x);
-    x = s_clip_x0;
-  }
-  if (y < s_clip_y0) {
-    h -= (s_clip_y0 - y);
-    y = s_clip_y0;
-  }
-  if (x + w - 1 > s_clip_x1)
-    w = s_clip_x1 - x + 1;
-  if (y + h - 1 > s_clip_y1)
-    h = s_clip_y1 - y + 1;
-  if (w <= 0 || h <= 0)
-    return;
-
-  uint16_t be = (color >> 8) | (color << 8);
-
-  // Optimize for full-width fills
-  if (x == 0 && w == FB_WIDTH) {
-    uint32_t color32 = ((uint32_t)be << 16) | be;
-    uint32_t *fb32 = (uint32_t *)&s_framebuffer[y * FB_WIDTH];
-    size_t count32 = (w * h) / 2;
-    for (size_t i = 0; i < count32; i++) {
-      fb32[i] = color32;
-    }
-    return;
-  }
-
-  // Standard per-row fill
-  for (int row = y; row < y + h; row++) {
-    uint16_t *p = &s_framebuffer[row * FB_WIDTH + x];
-    for (int col = 0; col < w; col++)
-      p[col] = be;
-  }
+  // Clipped once in int64 (x + w cannot overflow); full-width bands use
+  // 32-bit stores.
+  disp_clip_t c = cur_clip();
+  disp_fill(s_framebuffer, FB_WIDTH, &c, x, y, w, h, fb_color(color));
 }
 
 void display_draw_rect(int x, int y, int w, int h, uint16_t color) {
@@ -406,29 +385,23 @@ void display_draw_rect(int x, int y, int w, int h, uint16_t color) {
   display_fill_rect(x + w - 1, y, 1, h, color);
 }
 
+// Bresenham, started at the first step inside the clip and stopped after the
+// last (display_clip.h): drawLine(0,0,1e9,1e9) costs 320 steps, not 1e9.
 void display_draw_line(int x0, int y0, int x1, int y1, uint16_t color) {
-  // Bresenham's line algorithm
-  int dx = abs(x1 - x0), sx = x0 < x1 ? 1 : -1;
-  int dy = -abs(y1 - y0), sy = y0 < y1 ? 1 : -1;
-  int err = dx + dy, e2;
-  while (true) {
-    display_set_pixel(x0, y0, color);
-    if (x0 == x1 && y0 == y1)
-      break;
-    e2 = 2 * err;
-    if (e2 >= dy) {
-      err += dy;
-      x0 += sx;
-    }
-    if (e2 <= dx) {
-      err += dx;
-      y0 += sy;
-    }
-  }
+  disp_clip_t c = cur_clip();
+  disp_line(s_framebuffer, FB_WIDTH, &c, x0, y0, x1, y1, fb_color(color));
 }
 
-// Midpoint circle algorithm (outline only)
+// Midpoint circle algorithm (outline only). Circles whose bounding box misses
+// the clip are rejected; radii past DISP_CIRCLE_MIDPOINT_MAX (where the O(r)
+// loop would spin for up to minutes) are drawn per visible row/column.
 void display_draw_circle(int cx, int cy, int r, uint16_t color) {
+  disp_clip_t c = cur_clip();
+  if (disp_circle_rejected(&c, cx, cy, r)) return;
+  if (r > DISP_CIRCLE_MIDPOINT_MAX) {
+    disp_circle_big(s_framebuffer, FB_WIDTH, &c, cx, cy, r, fb_color(color));
+    return;
+  }
   int x = r, y = 0, d = 1 - r;
   while (x >= y) {
     display_set_pixel(cx + x, cy + y, color);
@@ -449,8 +422,16 @@ void display_draw_circle(int cx, int cy, int r, uint16_t color) {
   }
 }
 
-// Filled circle using horizontal spans
+// Filled circle using horizontal spans (rejection and the large-radius path
+// as for the outline above).
 void display_fill_circle(int cx, int cy, int r, uint16_t color) {
+  disp_clip_t c = cur_clip();
+  if (disp_circle_rejected(&c, cx, cy, r)) return;
+  if (r > DISP_CIRCLE_MIDPOINT_MAX) {
+    disp_fill_circle_rows(s_framebuffer, FB_WIDTH, &c, cx, cy, r,
+                          fb_color(color));
+    return;
+  }
   int x = r, y = 0, d = 1 - r;
   while (x >= y) {
     display_fill_rect(cx - x, cy + y, 2 * x + 1, 1, color);
@@ -572,83 +553,13 @@ void display_fill_vline_gradient(int x, int y0, int y1, uint16_t color_top,
   }
 }
 
-// Fill a triangle using scanline algorithm
+// Scanline triangle: rows clipped to the clip rect before the loop, each row
+// a span fill (display_clip.h keeps the original edge formulas).
 void display_fill_triangle(int x0, int y0, int x1, int y1, int x2, int y2,
                            uint16_t color) {
-  // Sort vertices by Y coordinate
-  if (y0 > y1) {
-    int temp = y0;
-    y0 = y1;
-    y1 = temp;
-    temp = x0;
-    x0 = x1;
-    x1 = temp;
-  }
-  if (y0 > y2) {
-    int temp = y0;
-    y0 = y2;
-    y2 = temp;
-    temp = x0;
-    x0 = x2;
-    x2 = temp;
-  }
-  if (y1 > y2) {
-    int temp = y1;
-    y1 = y2;
-    y2 = temp;
-    temp = x1;
-    x1 = x2;
-    x2 = temp;
-  }
-
-  // Degenerate: all same y
-  if (y0 == y2) return;
-
-  float inv_dy02 = 1.0f / (float)(y2 - y0);  // long edge, always valid
-
-  if (y0 == y1) {
-    // Top-flat: both v0 and v1 at top, scan down to v2
-    for (int y = y0; y <= y2; y++) {
-      float t = (float)(y - y0) * inv_dy02;
-      int xa = x0 + (int)((x2 - x0) * t);  // v0->v2
-      int xb = x1 + (int)((x2 - x1) * t);  // v1->v2 (same span since y0==y1)
-      if (xa > xb) { int tmp = xa; xa = xb; xb = tmp; }
-      display_draw_line(xa, y, xb, y, color);
-    }
-  } else if (y1 == y2) {
-    // Bottom-flat: v0 at top, both v1 and v2 at bottom
-    float inv_dy01 = 1.0f / (float)(y1 - y0);
-    for (int y = y0; y <= y1; y++) {
-      float t = (float)(y - y0) * inv_dy01;
-      int xa = x0 + (int)((x1 - x0) * t);  // v0->v1
-      int xb = x0 + (int)((x2 - x0) * t);  // v0->v2 (same span since y1==y2)
-      if (xa > xb) { int tmp = xa; xa = xb; xb = tmp; }
-      display_draw_line(xa, y, xb, y, color);
-    }
-  } else {
-    // General: split at y1
-    float inv_dy01 = 1.0f / (float)(y1 - y0);
-    float inv_dy12 = 1.0f / (float)(y2 - y1);
-
-    // Top half (y0 to y1): short edge v0->v1, long edge v0->v2
-    for (int y = y0; y <= y1; y++) {
-      float t_short = (float)(y - y0) * inv_dy01;
-      float t_long  = (float)(y - y0) * inv_dy02;
-      int xa = x0 + (int)((x1 - x0) * t_short);
-      int xb = x0 + (int)((x2 - x0) * t_long);
-      if (xa > xb) { int tmp = xa; xa = xb; xb = tmp; }
-      display_draw_line(xa, y, xb, y, color);
-    }
-    // Bottom half (y1 to y2): short edge v1->v2, long edge v0->v2
-    for (int y = y1; y <= y2; y++) {
-      float t_short = (float)(y - y1) * inv_dy12;
-      float t_long  = (float)(y - y0) * inv_dy02;
-      int xa = x1 + (int)((x2 - x1) * t_short);
-      int xb = x0 + (int)((x2 - x0) * t_long);
-      if (xa > xb) { int tmp = xa; xa = xb; xb = tmp; }
-      display_draw_line(xa, y, xb, y, color);
-    }
-  }
+  disp_clip_t c = cur_clip();
+  disp_fill_triangle(s_framebuffer, FB_WIDTH, &c, x0, y0, x1, y1, x2, y2,
+                     fb_color(color));
 }
 
 // Text goes through the shared renderer in src/fonts/font.c. The hardware
@@ -841,60 +752,15 @@ void display_draw_image_scaled(int x, int y, int img_w, int img_h,
   }
 }
 
+// Native drawImageNN: integer nearest-neighbour upscale, clipped once
+// (display_clip.h). Negative offsets that are not a multiple of scale start
+// mid-block; they used to be rounded to a block boundary and wrote rows above
+// the framebuffer.
 void display_draw_image_nn(int x, int y, const uint16_t *data,
                            int src_w, int src_h, int scale) {
-  if (!data || src_w <= 0 || src_h <= 0 || scale <= 0)
-    return;
-
-  int dst_w = src_w * scale;
-  int dst_h = src_h * scale;
-
-  // Early reject if entirely outside the clip rect
-  if (x > s_clip_x1 || y > s_clip_y1 || x + dst_w - 1 < s_clip_x0 || y + dst_h - 1 < s_clip_y0)
-    return;
-
-  // Clamp source region to the clip rect
-  int src_y0 = 0, src_y1 = src_h;
-  int src_x0 = 0, src_x1 = src_w;
-  if (y < s_clip_y0) { src_y0 = (s_clip_y0 - y) / scale; y += src_y0 * scale; }
-  if (x < s_clip_x0) { src_x0 = (s_clip_x0 - x) / scale; x += src_x0 * scale; }
-  if (y + (src_y1 - src_y0) * scale - 1 > s_clip_y1)
-    src_y1 = src_y0 + (s_clip_y1 - y + 1) / scale;
-  if (x + (src_x1 - src_x0) * scale - 1 > s_clip_x1)
-    src_x1 = src_x0 + (s_clip_x1 - x + 1) / scale;
-
-  uint16_t *fb = s_framebuffer;
-  int clamped_w = (src_x1 - src_x0) * scale;
-
-  for (int sy = src_y0; sy < src_y1; sy++) {
-    const uint16_t *src_row = &data[sy * src_w + src_x0];
-    int fb_y = y + (sy - src_y0) * scale;
-    uint16_t *dst_row = &fb[fb_y * FB_WIDTH + x];
-
-    // Build one scaled row with byte-swap
-    if (scale == 2) {
-      // Fast path: 32-bit writes for scale==2 (halves store count)
-      for (int sx = 0; sx < src_x1 - src_x0; sx++) {
-        uint16_t c = src_row[sx];
-        uint16_t be = (c >> 8) | (c << 8);
-        uint32_t pair = ((uint32_t)be << 16) | be;
-        *(uint32_t *)&dst_row[sx * 2] = pair;
-      }
-    } else {
-      for (int sx = 0; sx < src_x1 - src_x0; sx++) {
-        uint16_t c = src_row[sx];
-        uint16_t be = (c >> 8) | (c << 8);
-        int dx = sx * scale;
-        for (int s = 0; s < scale; s++)
-          dst_row[dx + s] = be;
-      }
-    }
-
-    // Duplicate the row (scale-1) times
-    for (int s = 1; s < scale; s++) {
-      memcpy(&fb[(fb_y + s) * FB_WIDTH + x], dst_row, clamped_w * sizeof(uint16_t));
-    }
-  }
+  disp_clip_t c = cur_clip();
+  disp_blit_nn(s_framebuffer, FB_WIDTH, &c, x, y, data, src_w, src_h, scale,
+               true);
 }
 
 void display_blit_be(int x, int y, const uint16_t *data, int w, int h) {

@@ -68,6 +68,9 @@ picos_unit_test(test_pio_psram_range INCLUDES ${SRC}/drivers)
 picos_unit_test(test_pio_psram_xip INCLUDES ${SRC}/drivers)
 picos_unit_test(test_zip_name SOURCES ${SRC}/os/zip_name.c)
 picos_unit_test(test_text_wrap SOURCES ${SRC}/os/text_wrap.c)
+# Clip-once rasterisers shared by the firmware display and the simulator.
+picos_unit_test(test_display_clip INCLUDES ${SRC}/drivers)
+target_link_libraries(test_display_clip PRIVATE m)
 # Lua float formatting vs glibc (built without PICOS_LUA_SPRINTF: no luaconf).
 picos_unit_test(test_numfmt SOURCES ${SRC}/os/lua_numfmt.c)
 target_link_libraries(test_numfmt PRIVATE m)

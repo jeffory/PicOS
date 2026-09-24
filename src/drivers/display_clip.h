@@ -1,0 +1,344 @@
+// display_clip.h — clip-once rasterisers shared by the firmware display driver
+// (src/drivers/display.c) and the simulator's display (simulator/stubs/
+// driver_stubs.c), and host-tested by tests/unit/test_display_clip.c.
+//
+// Everything here is pure: it draws into a caller-supplied 16-bit buffer
+// (`fb`, row pitch `stride` pixels) inside an inclusive clip rect, and knows
+// nothing about the panel. The firmware framebuffer holds byte-SWAPPED RGB565
+// (the panel wants big-endian over the 8-bit PIO SPI DMA) and the simulator's
+// holds host-order RGB565, so the blitters take a `swap` flag. Callers pass a
+// literal true/false; every function is static inline, so each call site gets
+// its own loop with the swap folded away.
+//
+// Contract, for every primitive:
+//   * The destination rect is clipped ONCE, before any pixel loop, so the
+//     loops run only over visible pixels with no per-pixel bounds test.
+//   * Coordinates and sizes are full-range ints: the clip math is done in
+//     int64, so x + w, src_w * scale, a line to (1e9, 1e9) or a circle of
+//     radius 1e9 neither overflow nor iterate over off-screen pixels.
+//   * Output is pixel-identical to the per-pixel reference loops these
+//     replaced (the unit test checks this exhaustively on small cases).
+#ifndef DISPLAY_CLIP_H
+#define DISPLAY_CLIP_H
+
+#include <stdbool.h>
+#include <stddef.h>
+#include <stdint.h>
+#include <string.h>
+
+// Inclusive clip rect. Empty when x1 < x0 or y1 < y0.
+typedef struct {
+  int x0, y0, x1, y1;
+} disp_clip_t;
+
+// A destination rect after clipping: its visible part (x, y, w, h) and how
+// many columns/rows of the unclipped rect were cut off on the left/top.
+typedef struct {
+  int x, y, w, h;
+  int64_t skip_x, skip_y;
+} disp_span_t;
+
+// Clip the w x h rect at (x, y). Returns false when nothing is visible.
+static inline bool disp_clip_rect(const disp_clip_t *c, int64_t x, int64_t y,
+                                  int64_t w, int64_t h, disp_span_t *o) {
+  if (w <= 0 || h <= 0) return false;
+  int64_t xa = x, ya = y, xb = x + w - 1, yb = y + h - 1;
+  if (xa < c->x0) xa = c->x0;
+  if (ya < c->y0) ya = c->y0;
+  if (xb > c->x1) xb = c->x1;
+  if (yb > c->y1) yb = c->y1;
+  if (xa > xb || ya > yb) return false;
+  o->x = (int)xa;
+  o->y = (int)ya;
+  o->w = (int)(xb - xa + 1);
+  o->h = (int)(yb - ya + 1);
+  o->skip_x = xa - x;
+  o->skip_y = ya - y;
+  return true;
+}
+
+static inline uint16_t disp_px(uint16_t c, bool swap) {
+  return swap ? (uint16_t)((c >> 8) | (c << 8)) : c;
+}
+
+// ── Solid fills ─────────────────────────────────────────────────────────────
+
+// Fill a clipped rect with an already-converted pixel value.
+static inline void disp_fill(uint16_t *fb, int stride, const disp_clip_t *c,
+                             int64_t x, int64_t y, int64_t w, int64_t h,
+                             uint16_t v) {
+  disp_span_t s;
+  if (!disp_clip_rect(c, x, y, w, h, &s)) return;
+  uint16_t *row = fb + (size_t)s.y * stride + s.x;
+  if (s.w == stride && s.x == 0 && ((uintptr_t)row & 3) == 0 &&
+      ((size_t)s.w * s.h) % 2 == 0) {
+    // Full-width band: 32-bit stores over the whole block.
+    uint32_t v2 = ((uint32_t)v << 16) | v;
+    uint32_t *p = (uint32_t *)(void *)row;
+    size_t n = (size_t)s.w * s.h / 2;
+    for (size_t i = 0; i < n; i++) p[i] = v2;
+    return;
+  }
+  for (int r = 0; r < s.h; r++, row += stride)
+    for (int i = 0; i < s.w; i++) row[i] = v;
+}
+
+// Horizontal span xa..xb (either order) on row y.
+static inline void disp_hspan(uint16_t *fb, int stride, const disp_clip_t *c,
+                              int64_t y, int64_t xa, int64_t xb, uint16_t v) {
+  if (xa > xb) { int64_t t = xa; xa = xb; xb = t; }
+  disp_fill(fb, stride, c, xa, y, xb - xa + 1, 1, v);
+}
+
+static inline void disp_plot(uint16_t *fb, int stride, const disp_clip_t *c,
+                             int64_t x, int64_t y, uint16_t v) {
+  if (x >= c->x0 && x <= c->x1 && y >= c->y0 && y <= c->y1)
+    fb[(size_t)y * stride + (size_t)x] = v;
+}
+
+// ── Lines ───────────────────────────────────────────────────────────────────
+// The drivers' Bresenham (err = dx + dy, e2 = 2*err) has a closed form: after
+// k steps along the major axis it has taken n = floor((2*k*minor + major) /
+// (2*major)) minor-axis steps, and err = |dx| - |dy| - xsteps*|dy| +
+// ysteps*|dx|. So the loop can start at the first step whose major coordinate
+// is inside the clip and stop after the last: a line runs at most clip width
+// (or height) + 1 iterations however long it is, and plots exactly the pixels
+// the unclipped loop would have (the unit test checks this against the loop).
+static inline void disp_line(uint16_t *fb, int stride, const disp_clip_t *c,
+                             int x0, int y0, int x1, int y1, uint16_t v) {
+  if (c->x1 < c->x0 || c->y1 < c->y0) return;
+  // Trivial reject: bounding box misses the clip.
+  if ((x0 < c->x0 && x1 < c->x0) || (x0 > c->x1 && x1 > c->x1) ||
+      (y0 < c->y0 && y1 < c->y0) || (y0 > c->y1 && y1 > c->y1))
+    return;
+  const int64_t a = x1 > x0 ? (int64_t)x1 - x0 : (int64_t)x0 - x1;  // |dx|
+  const int64_t b = y1 > y0 ? (int64_t)y1 - y0 : (int64_t)y0 - y1;  // |dy|
+  const int sx = x0 < x1 ? 1 : -1, sy = y0 < y1 ? 1 : -1;
+  const bool xmajor = a >= b;
+  const int64_t major = xmajor ? a : b;
+  // Major-axis steps whose coordinate lies inside the clip.
+  const int64_t m0 = xmajor ? x0 : y0;
+  const int msgn = xmajor ? sx : sy;
+  const int64_t lo = xmajor ? c->x0 : c->y0, hi = xmajor ? c->x1 : c->y1;
+  int64_t k_lo = msgn > 0 ? lo - m0 : m0 - hi;
+  int64_t k_hi = msgn > 0 ? hi - m0 : m0 - lo;
+  if (k_lo < 0) k_lo = 0;
+  if (k_hi > major) k_hi = major;
+  if (k_lo > k_hi) return;
+  // State at step k_lo. P = k*minor fits uint64 (k <= major < 2^33).
+  int64_t x, y, err;
+  if (major == 0) {
+    x = x0; y = y0; err = a - b;
+  } else {
+    const uint64_t minor = (uint64_t)(xmajor ? b : a);
+    const uint64_t P = (uint64_t)k_lo * minor;
+    const uint64_t q = P / (uint64_t)major, r = P % (uint64_t)major;
+    const uint64_t d = (2 * r >= (uint64_t)major) ? 1 : 0;
+    const int64_t n = (int64_t)(q + d);  // minor-axis steps taken
+    if (xmajor) {
+      x = (int64_t)x0 + sx * k_lo;
+      y = (int64_t)y0 + sy * n;
+      err = a - b + (int64_t)d * a - (int64_t)r;
+    } else {
+      x = (int64_t)x0 + sx * n;
+      y = (int64_t)y0 + sy * k_lo;
+      err = a - b + (int64_t)r - (int64_t)d * b;
+    }
+  }
+  for (int64_t k = k_lo;; k++) {
+    disp_plot(fb, stride, c, x, y, v);
+    if (k == k_hi) break;
+    const int64_t e2 = 2 * err;
+    if (e2 >= -b) { err -= b; x += sx; }
+    if (e2 <= a) { err += a; y += sy; }
+  }
+}
+
+// ── Circles ─────────────────────────────────────────────────────────────────
+// Radii up to DISP_CIRCLE_MIDPOINT_MAX keep the drivers' own midpoint loops
+// (cheap, and their exact pixels are what apps and goldens were drawn with).
+// Beyond that the midpoint loop is O(r) — a radius of 1e9 spins for minutes —
+// so larger circles are rasterised per visible row/column from an integer
+// square root instead: O(clip size), and the same pixels within +-1 of the
+// true circle.
+#define DISP_CIRCLE_MIDPOINT_MAX 4096
+
+static inline uint64_t disp_isqrt(uint64_t n) {  // floor(sqrt(n))
+  uint64_t r = 0, bit = (uint64_t)1 << 62;
+  while (bit > n) bit >>= 2;
+  while (bit) {
+    if (n >= r + bit) { n -= r + bit; r = (r >> 1) + bit; }
+    else r >>= 1;
+    bit >>= 2;
+  }
+  return r;
+}
+
+static inline uint64_t disp_isqrt_round(uint64_t n) {
+  uint64_t s = disp_isqrt(n);
+  return (n - s * s > s) ? s + 1 : s;  // n >= s^2 + s + 1 rounds up
+}
+
+// True when the circle's bounding box misses the clip entirely.
+static inline bool disp_circle_rejected(const disp_clip_t *c, int64_t cx,
+                                        int64_t cy, int64_t r) {
+  return r < 0 || c->x1 < c->x0 || c->y1 < c->y0 || cx + r < c->x0 ||
+         cx - r > c->x1 || cy + r < c->y0 || cy - r > c->y1;
+}
+
+// Outline for large radii: two points per visible row, two per visible
+// column (so flat stretches of the arc have no gaps).
+static inline void disp_circle_big(uint16_t *fb, int stride,
+                                   const disp_clip_t *c, int64_t cx,
+                                   int64_t cy, int64_t r, uint16_t v) {
+  const uint64_t rr = (uint64_t)r * (uint64_t)r;
+  for (int64_t yy = c->y0; yy <= c->y1; yy++) {
+    int64_t d = yy - cy;
+    if (d < -r || d > r) continue;
+    int64_t h = (int64_t)disp_isqrt_round(rr - (uint64_t)(d * d));
+    disp_plot(fb, stride, c, cx - h, yy, v);
+    disp_plot(fb, stride, c, cx + h, yy, v);
+  }
+  for (int64_t xx = c->x0; xx <= c->x1; xx++) {
+    int64_t d = xx - cx;
+    if (d < -r || d > r) continue;
+    int64_t h = (int64_t)disp_isqrt_round(rr - (uint64_t)(d * d));
+    disp_plot(fb, stride, c, xx, cy - h, v);
+    disp_plot(fb, stride, c, xx, cy + h, v);
+  }
+}
+
+// Filled disc as one span per visible row: half-width floor(sqrt(r^2 - dy^2)).
+static inline void disp_fill_circle_rows(uint16_t *fb, int stride,
+                                         const disp_clip_t *c, int64_t cx,
+                                         int64_t cy, int64_t r, uint16_t v) {
+  const uint64_t rr = (uint64_t)r * (uint64_t)r;
+  int64_t ya = cy - r < c->y0 ? c->y0 : cy - r;
+  int64_t yb = cy + r > c->y1 ? c->y1 : cy + r;
+  for (int64_t yy = ya; yy <= yb; yy++) {
+    int64_t d = yy - cy;
+    int64_t h = (int64_t)disp_isqrt(rr - (uint64_t)(d * d));
+    disp_fill(fb, stride, c, cx - h, yy, 2 * h + 1, 1, v);
+  }
+}
+
+// ── Triangles ───────────────────────────────────────────────────────────────
+// The drivers' scanline triangle (same float edge formulas and the same row
+// split, including the shared middle row painted from both halves), with the
+// row loop clipped to the clip rect and each row a span fill instead of a
+// Bresenham line (a horizontal Bresenham line is exactly that span). Edge x
+// values are clamped to one pixel outside the clip, which cannot change the
+// visible span.
+static inline int64_t disp_tri_x(int64_t base, float delta, float t,
+                                 const disp_clip_t *c) {
+  // |delta * t| <= |delta| < 2^33, so the int64 conversion is defined; within
+  // int range it truncates exactly like the original (int) cast.
+  int64_t x = base + (int64_t)(delta * t);
+  if (x < (int64_t)c->x0 - 1) x = (int64_t)c->x0 - 1;
+  if (x > (int64_t)c->x1 + 1) x = (int64_t)c->x1 + 1;
+  return x;
+}
+
+static inline void disp_fill_triangle(uint16_t *fb, int stride,
+                                      const disp_clip_t *c, int x0, int y0,
+                                      int x1, int y1, int x2, int y2,
+                                      uint16_t v) {
+  int t;
+  if (y0 > y1) { t = y0; y0 = y1; y1 = t; t = x0; x0 = x1; x1 = t; }
+  if (y0 > y2) { t = y0; y0 = y2; y2 = t; t = x0; x0 = x2; x2 = t; }
+  if (y1 > y2) { t = y1; y1 = y2; y2 = t; t = x1; x1 = x2; x2 = t; }
+  if (y0 == y2) return;  // degenerate: all on one row
+  if (c->x1 < c->x0 || c->y1 < c->y0 || y2 < c->y0 || y0 > c->y1) return;
+
+  const float d20 = (float)((int64_t)x2 - x0), d10 = (float)((int64_t)x1 - x0),
+              d21 = (float)((int64_t)x2 - x1);
+  const float inv_dy02 = 1.0f / (float)((int64_t)y2 - y0);
+  // Clip a row range [ya, yb] to the clip rect.
+#define DISP_TRI_ROWS(ya, yb, lo, hi)                                        \
+  int64_t lo = (ya) < c->y0 ? c->y0 : (ya), hi = (yb) > c->y1 ? c->y1 : (yb)
+
+  if (y0 == y1) {
+    DISP_TRI_ROWS(y0, y2, ra, rb);
+    for (int64_t y = ra; y <= rb; y++) {
+      float tt = (float)(y - y0) * inv_dy02;
+      disp_hspan(fb, stride, c, y, disp_tri_x(x0, d20, tt, c),
+                 disp_tri_x(x1, d21, tt, c), v);
+    }
+  } else if (y1 == y2) {
+    const float inv_dy01 = 1.0f / (float)((int64_t)y1 - y0);
+    DISP_TRI_ROWS(y0, y1, ra, rb);
+    for (int64_t y = ra; y <= rb; y++) {
+      float tt = (float)(y - y0) * inv_dy01;
+      disp_hspan(fb, stride, c, y, disp_tri_x(x0, d10, tt, c),
+                 disp_tri_x(x0, d20, tt, c), v);
+    }
+  } else {
+    const float inv_dy01 = 1.0f / (float)((int64_t)y1 - y0);
+    const float inv_dy12 = 1.0f / (float)((int64_t)y2 - y1);
+    {
+      DISP_TRI_ROWS(y0, y1, ra, rb);
+      for (int64_t y = ra; y <= rb; y++) {
+        float ts = (float)(y - y0) * inv_dy01;
+        float tl = (float)(y - y0) * inv_dy02;
+        disp_hspan(fb, stride, c, y, disp_tri_x(x0, d10, ts, c),
+                   disp_tri_x(x0, d20, tl, c), v);
+      }
+    }
+    {
+      DISP_TRI_ROWS(y1, y2, ra, rb);
+      for (int64_t y = ra; y <= rb; y++) {
+        float ts = (float)(y - y1) * inv_dy12;
+        float tl = (float)(y - y0) * inv_dy02;
+        disp_hspan(fb, stride, c, y, disp_tri_x(x1, d21, ts, c),
+                   disp_tri_x(x0, d20, tl, c), v);
+      }
+    }
+  }
+#undef DISP_TRI_ROWS
+}
+
+// ── Blitters ────────────────────────────────────────────────────────────────
+
+// Integer nearest-neighbour upscale: each source pixel becomes a scale x scale
+// block. No colour key (the native drawImageNN contract). The destination rect
+// is clipped once; a negative offset that is not a multiple of scale starts
+// mid-block (the first visible row/column repeats only scale - skip % scale
+// times) instead of being rounded to a block boundary, which used to write
+// rows above the framebuffer (y = -3, scale 2 wrote row -1).
+static inline void disp_blit_nn(uint16_t *fb, int stride, const disp_clip_t *c,
+                                int x, int y, const uint16_t *data, int src_w,
+                                int src_h, int scale, bool swap) {
+  if (!data || src_w <= 0 || src_h <= 0 || scale <= 0) return;
+  disp_span_t s;
+  if (!disp_clip_rect(c, x, y, (int64_t)src_w * scale, (int64_t)src_h * scale,
+                      &s))
+    return;
+  const int64_t col0 = s.skip_x / scale;
+  const int lead = scale - (int)(s.skip_x % scale);
+  uint16_t *row = fb + (size_t)s.y * stride + s.x;
+  int64_t src_row = -1;
+  for (int r = 0; r < s.h; r++, row += stride) {
+    const int64_t sr = (s.skip_y + r) / scale;
+    if (sr == src_row) {  // same source row as the line above: copy it
+      memcpy(row, row - stride, (size_t)s.w * sizeof(uint16_t));
+      continue;
+    }
+    src_row = sr;
+    const uint16_t *sp = data + (size_t)sr * src_w + col0;
+    if (scale == 1) {
+      for (int i = 0; i < s.w; i++) row[i] = disp_px(sp[i], swap);
+      continue;
+    }
+    int rep = lead;
+    uint16_t v = disp_px(*sp, swap);
+    for (int i = 0; i < s.w; i++) {
+      row[i] = v;
+      if (--rep == 0 && i + 1 < s.w) {
+        rep = scale;
+        v = disp_px(*++sp, swap);
+      }
+    }
+  }
+}
+
+#endif  // DISPLAY_CLIP_H
