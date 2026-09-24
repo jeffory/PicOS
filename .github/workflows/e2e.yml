@@ -25,10 +25,12 @@ jobs:
           - sim: release
             target: simulator
             build_dir: build_sim
+            expect_sanitize: ''
             timeout: 10
           - sim: asan-ubsan
             target: simulator-asan
             build_dir: build_sim_asan
+            expect_sanitize: address,undefined
             timeout: 20
 
     steps:
@@ -75,6 +77,11 @@ jobs:
           # against the ASan build. ASAN/UBSAN_OPTIONS come from
           # tests/e2e/picos_simulator.py (every report is fatal).
           export PICOS_SIM_BINARY=${{ matrix.build_dir }}/picos_simulator
+          # conftest refuses to run unless --build-info confirms these, so a
+          # failed probe can't quietly skip every asan_only test.
+          export PICOS_SIM_EXPECT_SANITIZE="${{ matrix.expect_sanitize }}"
+          # Symbolised stacks (the sanitizer self-test looks for a frame name).
+          export ASAN_SYMBOLIZER_PATH="$(command -v llvm-symbolizer || true)"
           # Per-test timeout (60 s), strict xfail and the skip allow-list come
           # from pytest.ini and tests/e2e/conftest.py. Each failing test's
           # simulator stdout/stderr, log buffer, error.log and screenshot land
@@ -130,6 +137,8 @@ jobs:
           set -o pipefail
           export SDL_VIDEODRIVER=dummy
           export PICOS_SIM_BINARY=build_sim_tsan/picos_simulator
+          export PICOS_SIM_EXPECT_SANITIZE=thread
+          export TSAN_SYMBOLIZER_PATH="$(command -v llvm-symbolizer || true)"
           # One report file per simulator process, for the artifact.
           export TSAN_OPTIONS="halt_on_error=0:second_deadlock_stack=1:suppressions=$PWD/tests/e2e/tsan.supp:log_path=$PWD/reports/tsan/tsan"
           pytest tests/e2e/ -q --tb=line -n auto \

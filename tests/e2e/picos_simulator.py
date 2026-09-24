@@ -76,12 +76,14 @@ def default_binary() -> Path:
 _build_info_cache: dict = {}
 
 
-def binary_sanitizers(binary) -> str:
+def binary_sanitizers(binary) -> Optional[str]:
     """The -fsanitize= list a simulator binary was built with ('' for a
-    release build), from `picos_simulator --build-info`."""
+    release build), from `picos_simulator --build-info`; None when the probe
+    failed (missing binary, crash, timeout, no sanitize= line), so callers
+    can tell "not sanitized" from "don't know"."""
     key = str(binary)
     if key not in _build_info_cache:
-        san = ""
+        san = None
         try:
             out = subprocess.run([key, "--build-info"], capture_output=True,
                                  text=True, timeout=30,
@@ -91,6 +93,8 @@ def binary_sanitizers(binary) -> str:
                     san = line[len("sanitize="):].strip()
         except (OSError, subprocess.SubprocessError):
             pass
+        if san is None:
+            return None  # not cached: the binary may be built later
         _build_info_cache[key] = san
     return _build_info_cache[key]
 

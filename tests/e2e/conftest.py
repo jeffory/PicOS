@@ -58,14 +58,45 @@ def pytest_addoption(parser):
     )
 
 
+def sim_sanitizers(config):
+    """(probe_ok, kinds) for the simulator under test: kinds is the set of
+    -fsanitize= kinds from its `--build-info` (empty for a release build).
+    probe_ok is False when the probe failed, so nothing is known.
+    PICOS_SIM_SANITIZE set by hand overrides the probe."""
+    manual = os.environ.get("PICOS_SIM_SANITIZE")
+    if manual:
+        return True, set(re.split(r"[;,]", manual)) - {""}
+    san = binary_sanitizers(Path(config.getoption("--simulator-path")))
+    if san is None:
+        return False, set()
+    return True, set(san.split(",")) - {""}
+
+
 def sim_is_sanitized(config) -> bool:
-    """True when the simulator under test is an ASan build: its
-    `--build-info` says so (make simulator-asan), or PICOS_SIM_SANITIZE is
-    set by hand."""
-    if os.environ.get("PICOS_SIM_SANITIZE"):
-        return "address" in os.environ["PICOS_SIM_SANITIZE"]
-    binary = Path(config.getoption("--simulator-path"))
-    return binary.exists() and "address" in binary_sanitizers(binary)
+    """True when the simulator under test is an ASan build."""
+    return "address" in sim_sanitizers(config)[1]
+
+
+def pytest_configure(config):
+    """PICOS_SIM_EXPECT_SANITIZE (set by the sanitizer CI legs, e.g.
+    "address"): refuse to run unless the binary's --build-info confirms it,
+    so a failed probe can't turn an ASan leg into a release run whose
+    asan_only tests all skip."""
+    expect = set(re.split(r"[;,]", os.environ.get("PICOS_SIM_EXPECT_SANITIZE", ""))) - {""}
+    if not expect:
+        return
+    probe_ok, kinds = sim_sanitizers(config)
+    binary = config.getoption("--simulator-path")
+    if not probe_ok:
+        raise pytest.UsageError(
+            f"PICOS_SIM_EXPECT_SANITIZE={','.join(sorted(expect))} but "
+            f"`{binary} --build-info` failed (missing binary, crash or timeout)")
+    missing = expect - kinds
+    if missing:
+        raise pytest.UsageError(
+            f"PICOS_SIM_EXPECT_SANITIZE={','.join(sorted(expect))} but "
+            f"{binary} was built with sanitize="
+            f"{','.join(sorted(kinds)) or '(none)'}; missing {','.join(sorted(missing))}")
 
 
 def pytest_collection_modifyitems(config, items):
@@ -378,8 +409,12 @@ def pytest_runtest_logreport(report):
         _quarantined.append(report)
 
 
-def _skip_allowed(report, patterns) -> bool:
-    if "hardware" in report.keywords or "asan_only" in report.keywords:
+def _skip_allowed(report, patterns, probe_ok: bool = True) -> bool:
+    if "hardware" in report.keywords:
+        return True
+    # An asan_only skip is fine on a release build, but not when the
+    # --build-info probe failed: then nobody knows the tests didn't need to run.
+    if "asan_only" in report.keywords and probe_ok:
         return True
     nodeid = report.nodeid
     # Patterns are relative to tests/e2e so they work from any rootdir.
@@ -392,7 +427,8 @@ def pytest_sessionfinish(session, exitstatus):
     if hasattr(session.config, "workerinput"):
         return  # xdist worker: the controller sees every report
     patterns = _allowlist()
-    bad = [r for r in _skipped if not _skip_allowed(r, patterns)]
+    probe_ok = sim_sanitizers(session.config)[0]
+    bad = [r for r in _skipped if not _skip_allowed(r, patterns, probe_ok)]
     if bad:
         session.config._picos_bad_skips = bad
         if session.exitstatus == 0:

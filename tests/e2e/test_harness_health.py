@@ -258,6 +258,50 @@ def test_real_sanitizer_report_fails_the_test(pytester, simulator_binary):
     assert "h_sanitizer_selftest" in out, out  # the stack came through
 
 
+def test_sanitizer_expectation_mismatch_fails_the_run(pytester, simulator_binary):
+    """PICOS_SIM_EXPECT_SANITIZE names a sanitizer the binary's --build-info
+    does not report: the run stops with a usage error instead of running
+    (and skipping every asan_only test)."""
+    pytester._monkeypatch.setenv("PICOS_SIM_EXPECT_SANITIZE", "memory")
+    pytester._monkeypatch.delenv("PICOS_SIM_SANITIZE", raising=False)
+    result = _inner(pytester, simulator_binary, """
+        def test_never_runs():
+            pass
+    """)
+    assert result.ret == pytest.ExitCode.USAGE_ERROR, result.stdout.str()
+    err = result.stderr.str()
+    assert "PICOS_SIM_EXPECT_SANITIZE=memory" in err and "missing memory" in err, err
+
+
+def test_sanitizer_expectation_with_failed_probe_fails_the_run(pytester, tmp_path):
+    """An expected sanitizer build whose --build-info probe fails (here: no
+    binary) is a usage error, not a silent release run."""
+    pytester._monkeypatch.setenv("PICOS_SIM_EXPECT_SANITIZE", "address")
+    pytester._monkeypatch.delenv("PICOS_SIM_SANITIZE", raising=False)
+    result = _inner(pytester, tmp_path / "no_such_simulator", """
+        def test_never_runs():
+            pass
+    """)
+    assert result.ret == pytest.ExitCode.USAGE_ERROR, result.stdout.str()
+    assert "--build-info` failed" in result.stderr.str(), result.stderr.str()
+
+
+def test_asan_only_skip_not_allowed_when_probe_fails(pytester, tmp_path):
+    """asan_only skips are allow-listed only when the probe says the binary
+    is a release build; if the probe failed the skip fails the run."""
+    pytester._monkeypatch.delenv("PICOS_SIM_EXPECT_SANITIZE", raising=False)
+    pytester._monkeypatch.delenv("PICOS_SIM_SANITIZE", raising=False)
+    result = _inner(pytester, tmp_path / "no_such_simulator", """
+        import pytest
+        @pytest.mark.asan_only
+        def test_needs_asan():
+            pass
+    """)
+    result.assert_outcomes(skipped=1)
+    assert result.ret == pytest.ExitCode.TESTS_FAILED, result.stdout.str()
+    assert "skips not on tests/e2e/skip_allowlist.txt" in result.stdout.str()
+
+
 def test_sanitizer_options_merge_per_key(monkeypatch):
     """A caller's ASAN_OPTIONS overrides only the keys it sets; the suite's
     other options survive (setdefault used to drop them all)."""

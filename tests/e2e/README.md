@@ -31,7 +31,11 @@ skip (allow-listed) otherwise. Every simulator gets `ASAN_OPTIONS`,
 `UBSAN_OPTIONS` and `TSAN_OPTIONS` from `picos_simulator.SANITIZER_ENV` (any
 already set in the environment win): ASan and UBSan reports are fatal, leak
 checking is off (options you set yourself are merged in per key and win).
-The sanitizer build leaves SIGSEGV/SIGABRT to the sanitizer, so the
+Set `PICOS_SIM_EXPECT_SANITIZE=address` (the ASan CI leg does) to make the run
+refuse to start unless `--build-info` confirms the sanitizer; if the probe
+fails without it, `asan_only` skips are no longer allow-listed. Install
+`llvm-symbolizer` (or set `ASAN_SYMBOLIZER_PATH`) for symbolised stacks. The
+sanitizer build leaves SIGSEGV/SIGABRT to the sanitizer, so the
 evidence is the report on stderr rather than the sim's crash log. stderr is
 drained from the moment the process starts, and the report is captured apart
 from the 2000-line tail (capped at 600 lines), so neither report volume nor
