@@ -1561,10 +1561,12 @@ static inline void core1_relay_watchdog(void) {
     watchdog_update();
 }
 
-// app_stack_run_os() adapter for the boot-time Core 0 RNG seed.
-static void rng_boot_seed(void *arg) {
+// app_stack_run_os() adapter: Core 0 RNG seed + CA bundle parse at boot.
+static void boot_crypto_init(void *arg) {
   (void)arg;
   (void)rng_init_this_core();
+  // Same stack, same reason: parse the TLS root bundle once (wifi.h).
+  (void)wifi_tls_init();
 }
 
 static void core1_entry(void) {
@@ -1572,6 +1574,10 @@ static void core1_entry(void) {
   *scb_ccr &= ~(1u << 3);
   __asm volatile ("dsb sy" ::: "memory");
   __asm volatile ("isb sy" ::: "memory");
+
+  // Paint Core 1's stack for the `stack` dev command's core1_peak (the
+  // verified-TLS handshake runs on this 4 KB stack).
+  app_stack_paint_core1();
 
   // Seed Core 1's CSPRNG (Mongoose TLS) here, at the bottom of its 4 KB
   // stack: the seed path is ~2 KB deep and must never run inside
@@ -2193,7 +2199,7 @@ int main(void) {
   // Seed Core 0's CSPRNG before anything draws from it (wifi_init's
   // mg_tcpip_init already calls mg_random).  Seeding needs ~2 KB of stack:
   // run it on the OS stack, not the 4 KB MSP (see rng.h).
-  if (!app_stack_run_os(rng_boot_seed, NULL))
+  if (!app_stack_run_os(boot_crypto_init, NULL))
     printf("[RNG] core 0: no OS stack for seeding\n");
   watchdog_update();
 

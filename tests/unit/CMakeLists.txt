@@ -106,6 +106,10 @@ picos_unit_test(test_ota_verify
                         ${SD_FAKE}
                 INCLUDES ${SD_INCLUDES})
 target_link_libraries(test_ota_verify PRIVATE picos_host_mbedtls)
+# The TLS root bundle parses whole and verifies the chains PicOS relies on.
+picos_unit_test(test_ca_bundle SOURCES ${SRC}/drivers/ca_bundle.c
+                INCLUDES ${SRC}/drivers)
+target_link_libraries(test_ca_bundle PRIVATE picos_host_mbedtls)
 
 if(PICOS_FUZZ)
     add_subdirectory(${PICOS_ROOT}/tests/fuzz ${CMAKE_CURRENT_BINARY_DIR}/fuzz)

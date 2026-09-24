@@ -125,6 +125,31 @@ uint32_t app_stack_msp_high_water(void) {
   return used_above(lo, (const uint32_t *)&__StackTop);
 }
 
+// Core 1's stack (SCRATCH_X), used by multicore_launch_core1.
+extern uint32_t __StackOneTop;
+extern uint32_t __StackOneBottom;
+
+void app_stack_paint_core1(void) {
+  uint32_t irq = save_and_disable_interrupts();
+  uint32_t sp;
+  __asm volatile("mov %0, sp" : "=r"(sp));
+  uint32_t *lo =
+      (uint32_t *)((uintptr_t)&__StackOneBottom + MSP_PAINT_SKIP_BOTTOM);
+  uint32_t *hi = (uint32_t *)((sp - MSP_PAINT_SKIP_BELOW_SP) & ~3u);
+  paint_words(lo, hi);
+  restore_interrupts(irq);
+}
+
+uint32_t app_stack_core1_high_water(void) {
+  const uint32_t *lo =
+      (const uint32_t *)((uintptr_t)&__StackOneBottom + MSP_PAINT_SKIP_BOTTOM);
+  return used_above(lo, (const uint32_t *)&__StackOneTop);
+}
+
+uint32_t app_stack_core1_size(void) {
+  return (uint32_t)((uintptr_t)&__StackOneTop - (uintptr_t)&__StackOneBottom);
+}
+
 bool app_stack_active(void) {
   // CONTROL.SPSEL: Thread mode uses the PSP. Only the app runners and
   // app_stack_run_os() set it, so this is the ground truth for "on an app
@@ -157,6 +182,9 @@ uint32_t app_stack_high_water(const uint8_t *base, uint32_t size) {
 
 void app_stack_paint_msp(void) {}
 uint32_t app_stack_msp_high_water(void) { return 0; }
+void app_stack_paint_core1(void) {}
+uint32_t app_stack_core1_high_water(void) { return 0; }
+uint32_t app_stack_core1_size(void) { return 0; }
 
 bool app_stack_active(void) { return g_app_stack_base != NULL; }
 

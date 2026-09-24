@@ -1,6 +1,9 @@
-// mbedTLS configuration for HOST builds (simulator and tests/unit): only what
-// src/os/ota_verify.c needs — PEM public-key parsing, ECDSA P-256 verify and
-// SHA-256.  The firmware uses src/mbedtls_config.h instead.
+// mbedTLS configuration for HOST builds (simulator and tests/unit): what
+// src/os/ota_verify.c needs (PEM public-key parsing, ECDSA P-256 verify,
+// SHA-256) plus X.509 chain verification for tests/unit/test_ca_bundle.c.
+// No MBEDTLS_HAVE_TIME_DATE: the chain test checks trust paths and names,
+// not dates (so its captured fixtures never expire).  The firmware uses
+// src/mbedtls_config.h instead.
 #ifndef PICOS_MBEDTLS_HOST_CONFIG_H
 #define PICOS_MBEDTLS_HOST_CONFIG_H
 
@@ -17,5 +20,15 @@
 #define MBEDTLS_BASE64_C
 #define MBEDTLS_MD_C
 #define MBEDTLS_SHA256_C
+#define MBEDTLS_SHA224_C
+#define MBEDTLS_SHA384_C
+#define MBEDTLS_SHA512_C
+#define MBEDTLS_SHA1_C
+#define MBEDTLS_ECP_DP_SECP384R1_ENABLED
+#define MBEDTLS_RSA_C
+#define MBEDTLS_PKCS1_V15
+#define MBEDTLS_PKCS1_V21
+#define MBEDTLS_X509_USE_C
+#define MBEDTLS_X509_CRT_PARSE_C
 
 #endif

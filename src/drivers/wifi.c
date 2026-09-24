@@ -11,6 +11,7 @@
 #include "http.h"
 
 #include "mongoose.h"
+#include "umm_malloc.h"
 #include "hardware/sync.h"
 #include "pico/multicore.h"
 #include "pico/stdlib.h"
@@ -249,8 +250,38 @@ static bool tls_clock_ready(void) {
   return false;
 }
 
-// Start TLS on nc: SNI + host-name check, and the root bundle unless the
-// connection opted out (opts.ca empty => MBEDTLS_SSL_VERIFY_NONE).
+// The root bundle, parsed ONCE (wifi_tls_init, at boot) into one chain that
+// every connection shares read-only, instead of Mongoose re-parsing ~15 KB
+// of PEM into PSRAM on Core 1 for each connection.  NULL if parsing failed:
+// verifying connections are then refused.
+static mbedtls_x509_crt *s_ca_chain = NULL;
+
+bool wifi_tls_init(void) {
+  if (s_ca_chain) return true;
+  mbedtls_x509_crt *crt = (mbedtls_x509_crt *)umm_calloc(1, sizeof(*crt));
+  if (!crt) return false;
+  mbedtls_x509_crt_init(crt);
+  // PEM: the length includes the terminating NUL.
+  int rc = mbedtls_x509_crt_parse(crt, (const unsigned char *)g_ca_bundle_pem,
+                                  g_ca_bundle_pem_len + 1);
+  if (rc != 0) {  // > 0: that many roots failed to parse
+    printf("[TLS] CA bundle parse failed (%d) — verified TLS disabled\n", rc);
+    mbedtls_x509_crt_free(crt);
+    umm_free(crt);
+    return false;
+  }
+  int n = 0;
+  for (mbedtls_x509_crt *c = crt; c && c->raw.len; c = c->next) n++;
+  printf("[TLS] CA bundle: %d roots parsed\n", n);
+  s_ca_chain = crt;
+  return true;
+}
+
+// Start TLS on nc: SNI + host-name check, and the shared root chain unless
+// the connection opted out.  mg_tls_init gets no opts.ca, so Mongoose sets
+// VERIFY_NONE and loads nothing; we then attach the pre-parsed chain and
+// require verification (safe: the handshake has not started yet, and mbedTLS
+// reads ca_chain/authmode from the config at certificate-verify time).
 static bool tls_start(struct mg_connection *nc, const char *host,
                       bool insecure) {
   // mbedTLS draws every nonce and ephemeral key from mg_random: never run a
@@ -259,17 +290,23 @@ static bool tls_start(struct mg_connection *nc, const char *host,
     printf("[TLS] %s: refused, no seeded RNG on Core 1\n", host);
     return false;
   }
+  if (!insecure && !s_ca_chain) {
+    printf("[TLS] %s: refused, no CA bundle\n", host);
+    return false;
+  }
   struct mg_tls_opts opts = {0};
   opts.name = mg_str(host);
-  if (!insecure) {
-    // PEM: Mongoose passes len + 1 so the parser sees the terminating NUL.
-    opts.ca = mg_str_n(g_ca_bundle_pem, g_ca_bundle_pem_len);
-  } else {
+  if (insecure)
     printf("[TLS] %s: certificate verification DISABLED (setInsecure)\n",
            host);
-  }
   mg_tls_init(nc, &opts);
-  return nc->is_tls_hs;
+  if (!nc->is_tls_hs || !nc->tls) return false;
+  if (!insecure) {
+    struct mg_tls *tls = (struct mg_tls *)nc->tls;
+    mbedtls_ssl_conf_ca_chain(&tls->conf, s_ca_chain, NULL);
+    mbedtls_ssl_conf_authmode(&tls->conf, MBEDTLS_SSL_VERIFY_REQUIRED);
+  }
+  return true;
 }
 
 bool wifi_tls_verify_error(struct mg_connection *nc, char *out, size_t n) {

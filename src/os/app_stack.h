@@ -85,3 +85,12 @@ uint32_t app_stack_high_water(const uint8_t *base, uint32_t size);
 // bytes used since then. Both no-ops / 0 in the simulator.
 void app_stack_paint_msp(void);
 uint32_t app_stack_msp_high_water(void);
+
+// Core 1 stack high-water (SCRATCH_X, 4 KB): core1_entry paints it first
+// thing (app_stack_paint_core1, called ON Core 1); the `stack` dev command
+// reports app_stack_core1_high_water() — peak bytes used since then — so the
+// verified-TLS handshake depth on Core 1 can be measured on hardware.
+// No-ops / 0 in the simulator.
+void app_stack_paint_core1(void);
+uint32_t app_stack_core1_high_water(void);
+uint32_t app_stack_core1_size(void);

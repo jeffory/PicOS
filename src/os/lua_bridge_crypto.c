@@ -1,5 +1,6 @@
 #include "lua_bridge_internal.h"
 #include "crypto.h"
+#include "../drivers/rng.h"
 #include "mbedtls/platform_util.h"
 
 // ── AES-CTR cipher userdata ─────────────────────────────────────────────────
@@ -128,7 +129,17 @@ static int l_crypto_random_bytes(lua_State *L) {
     uint8_t *buf = umm_malloc((size_t)n);
     if (!buf) return luaL_error(L, "randomBytes: out of memory");
 
+    // No TRNG-seeded DRBG on this core: raise rather than hand back zeros.
+    if (!rng_ready()) {
+        umm_free(buf);
+        return luaL_error(L, "randomBytes: no cryptographic RNG "
+                             "(TRNG seeding failed)");
+    }
     g_api.crypto->randomBytes(buf, (uint32_t)n);
+    if (!rng_ready()) {  // the DRBG failed during this request (buf zeroed)
+        umm_free(buf);
+        return luaL_error(L, "randomBytes: cryptographic RNG failed");
+    }
 
     lua_pushlstring(L, (const char *)buf, (size_t)n);
     umm_free(buf);

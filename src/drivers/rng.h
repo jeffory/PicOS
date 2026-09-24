@@ -27,12 +27,13 @@
 // refused (wifi.c) instead of running on weak randomness.
 bool rng_init_this_core(void);
 
-// True once rng_init_this_core() succeeded on the calling core.
+// True once rng_init_this_core() succeeded on the calling core and no DRBG
+// request has failed since.
 bool rng_ready(void);
 
 // Fill buf with len random bytes from this core's DRBG.  False if this core
-// has no seeded DRBG (see rng_init_this_core); buf is then zeroed and must
-// not be used.
+// has no seeded DRBG (see rng_init_this_core) or its DRBG has failed (after
+// which rng_ready() stays false); buf is then zeroed and must not be used.
 bool rng_bytes(void *buf, size_t len);
 
 // Top up this core's pool of pre-generated DRBG output (512 bytes) so later

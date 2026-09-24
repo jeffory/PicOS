@@ -39,8 +39,20 @@ static spin_lock_t *trng_lock(void) {
   return spin_lock_instance(PICO_SPINLOCK_ID_RAND);
 }
 
+// Leave the TRNG as the SDK found it: source off, software-reset (which also
+// clears a latched autocorrelation halt and restores the reset-default
+// configuration), status cleared.  pico_rand's capture_additional_trng_samples
+// waits on TRNG_BUSY with no timeout and IRQs masked, so it must never find a
+// halted block.  Called with the TRNG lock held, after EVERY use.
+static void trng_park(void) {
+  trng_hw->rnd_source_enable = 0;
+  trng_hw->trng_sw_reset = 1;
+  busy_wait_us_32(2);
+  trng_hw->rng_icr = 0xFFFFFFFFu;
+}
+
 // One 192-bit EHR block (6 words) with VNC, CRNGT and autocorrelation on.
-// Called with the TRNG lock held.
+// Called with the TRNG lock held; always parks the block before returning.
 static bool trng_block(uint32_t words[6]) {
   for (int attempt = 0; attempt <= TRNG_MAX_RETRIES; attempt++) {
     trng_hw->rnd_source_enable = 0;
@@ -68,12 +80,10 @@ static bool trng_block(uint32_t words[6]) {
     if ((isr & TRNG_ERR_BITS) || !(isr & TRNG_RNG_ISR_EHR_VALID_BITS))
       continue;
     for (int i = 0; i < 6; i++) words[i] = trng_hw->ehr_data[i];
-    trng_hw->rnd_source_enable = 0;
-    trng_hw->rng_icr = 0xFFFFFFFFu;
+    trng_park();
     return true;
   }
-  trng_hw->rnd_source_enable = 0;
-  trng_hw->rng_icr = 0xFFFFFFFFu;
+  trng_park();  // failure exit: a halted TRNG would hang pico_rand
   return false;
 }
 
@@ -127,6 +137,7 @@ static int trng_entropy_source(void *data, unsigned char *out, size_t len,
 typedef struct {
   mbedtls_entropy_context entropy;
   mbedtls_ctr_drbg_context drbg;
+  bool failed;                     // a DRBG request failed: never used again
   uint16_t pool_avail;             // unread bytes at the END of pool[]
   uint8_t pool[RNG_POOL_BYTES];
 } rng_state_t;
@@ -134,7 +145,8 @@ typedef struct {
 static rng_state_t *s_state[2];  // indexed by core; umm-allocated
 
 bool rng_ready(void) {
-  return s_state[get_core_num()] != NULL;
+  rng_state_t *st = s_state[get_core_num()];
+  return st != NULL && !st->failed;
 }
 
 bool rng_init_this_core(void) {
@@ -192,7 +204,7 @@ static int drbg_fill(rng_state_t *st, unsigned char *out, size_t len) {
 int rng_mbedtls_random(void *p_rng, unsigned char *out, size_t len) {
   (void)p_rng;
   rng_state_t *st = s_state[get_core_num()];
-  if (!st) return MBEDTLS_ERR_CTR_DRBG_ENTROPY_SOURCE_FAILED;
+  if (!st || st->failed) return MBEDTLS_ERR_CTR_DRBG_ENTROPY_SOURCE_FAILED;
   if (len <= st->pool_avail) {
     uint8_t *src = st->pool + (RNG_POOL_BYTES - st->pool_avail);
     memcpy(out, src, len);
@@ -200,16 +212,29 @@ int rng_mbedtls_random(void *p_rng, unsigned char *out, size_t len) {
     st->pool_avail = (uint16_t)(st->pool_avail - len);
     return 0;
   }
-  return drbg_fill(st, out, len);
+  int rc = drbg_fill(st, out, len);
+  if (rc != 0) {
+    // Fail closed: rng_ready() turns false, so wifi.c refuses new TLS and
+    // picocalc.crypto.randomBytes raises.
+    st->failed = true;
+    st->pool_avail = 0;
+    mbedtls_platform_zeroize(st->pool, sizeof(st->pool));
+    printf("[RNG] core %u: DRBG request failed (-0x%04x) — RNG disabled\n",
+           get_core_num(), (unsigned)-rc);
+  }
+  return rc;
 }
 
 void rng_refill(void) {
   rng_state_t *st = s_state[get_core_num()];
-  if (!st || st->pool_avail == RNG_POOL_BYTES) return;
-  if (drbg_fill(st, st->pool, RNG_POOL_BYTES) == 0)
+  if (!st || st->failed || st->pool_avail == RNG_POOL_BYTES) return;
+  if (drbg_fill(st, st->pool, RNG_POOL_BYTES) == 0) {
     st->pool_avail = RNG_POOL_BYTES;
-  else
+  } else {
+    st->failed = true;
     st->pool_avail = 0;
+    mbedtls_platform_zeroize(st->pool, sizeof(st->pool));
+  }
 }
 
 bool rng_bytes(void *buf, size_t len) {
@@ -219,17 +244,13 @@ bool rng_bytes(void *buf, size_t len) {
 }
 
 // ── Mongoose (MG_ENABLE_CUSTOM_RANDOM) ──────────────────────────────────────
-// Mongoose's mbedTLS glue passes mg_random to mbedtls_ssl_conf_rng and
-// ignores its return value.  Without a seeded DRBG, the bytes come from
-// get_rand_32 (fine for DNS ids and ephemeral ports) and false is returned;
-// TLS never gets there because wifi.c refuses to start TLS unless
-// rng_ready().  (Halting instead would turn a TRNG fault into a boot loop:
-// mg_tcpip_init calls this during wifi_init.)
-#include "pico/rand.h"
-
+// Fails hard: without a working DRBG the buffer is zeroed and false is
+// returned — never a get_rand_* fallback (pico_rand can spin on the TRNG with
+// IRQs masked, and its output is not a CSPRNG).  TLS never reaches here in
+// that state, because wifi.c refuses to start TLS unless rng_ready().  The
+// non-TLS users (mg_tcpip_init's ephemeral port, DHCP/DNS ids) tolerate
+// zeros.  No panic: that would turn a TRNG fault into a boot loop, since
+// mg_tcpip_init calls this during wifi_init.
 bool mg_random(void *buf, size_t len) {
-  if (rng_bytes(buf, len)) return true;
-  uint8_t *p = (uint8_t *)buf;
-  for (size_t i = 0; i < len; i++) p[i] = (uint8_t)get_rand_32();
-  return false;
+  return rng_bytes(buf, len);
 }

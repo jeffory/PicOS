@@ -416,9 +416,12 @@ static void dev_command_run(void *arg) {
     } else if (strcmp(s_cmd_buf, "stack") == 0) {
         // Peak use of Core 0's 4 KB main stack since boot, and of the app
         // runtime's PSP stack since launch (when an app is running).
-        printf("[DEV] Stack: msp_peak=%lu msp_size=%lu",
+        printf("[DEV] Stack: msp_peak=%lu msp_size=%lu core1_peak=%lu "
+               "core1_size=%lu",
                (unsigned long)app_stack_msp_high_water(),
-               (unsigned long)PICO_STACK_SIZE);
+               (unsigned long)PICO_STACK_SIZE,
+               (unsigned long)app_stack_core1_high_water(),
+               (unsigned long)app_stack_core1_size());
         // At the launcher this command itself runs on the OS command stack;
         // report the app runtime's stack only while an app owns the PSP.
         uint8_t *base = g_app_stack_base;

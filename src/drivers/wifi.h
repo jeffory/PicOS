@@ -110,6 +110,12 @@ bool wifi_req_push(const conn_req_t *req);
 #define WIFI_TLS_ERR_CLOCK "clock not set: TLS needs the time from SNTP " \
                            "(stay online a few seconds and retry)"
 
+// Parse the CA bundle once into the chain every verifying connection shares.
+// Call at boot, before Core 1 starts, on a large stack (x509 parsing of RSA-
+// 4096/P-384 roots is deep): main() runs it via app_stack_run_os.  False if
+// it failed; verifying TLS is then refused (insecure connections still work).
+bool wifi_tls_init(void);
+
 // If nc failed because the peer's certificate did not verify, write a
 // readable reason ("TLS: certificate not trusted ...") to out and return
 // true.  Call from MG_EV_ERROR, while nc->tls is still valid.
