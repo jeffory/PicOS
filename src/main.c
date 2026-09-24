@@ -102,9 +102,18 @@ static uint32_t native_addr_to_elf_vaddr(uint32_t addr) {
 // hardfault_c), [7] app uptime in seconds.
 #define CRASH_TAG           0xFA170000u
 #define CRASH_TAG_MASK      0xFFFF0000u
+#define CRASH_F_BOOTING     (1u << 15) // fault hit before boot completed
+#define CRASH_BOOT_ATTEMPT_SHIFT 13    // bits 14-13: that boot's attempt no.
+#define CRASH_BOOT_ATTEMPT_MASK  (3u << CRASH_BOOT_ATTEMPT_SHIFT)
 #define CRASH_F_PSP         (1u << 12) // fault frame on PSP (native app)
 #define CRASH_F_HFSR_FORCED (1u << 11) // HFSR bit 30
 #define CRASH_F_HFSR_VECTBL (1u << 10) // HFSR bit 1
+
+// Boot-loop detection (main): while booting, scratch[0] holds
+// BOOT_MAGIC | attempt; it is zeroed once the launcher is about to run.
+#define BOOT_MAGIC_MASK  0xFFFFFF00u
+#define BOOT_MAGIC       0xB0070000u
+#define BOOT_MAX_RETRIES 3
 
 static void __attribute__((used)) hardfault_c(uint32_t *frame, uint32_t exc_return) {
   // ARM exception frame layout (8 words pushed by hardware on entry):
@@ -145,9 +154,22 @@ static void __attribute__((used)) hardfault_c(uint32_t *frame, uint32_t exc_retu
     instr16 = *(volatile uint16_t *)pc_probe;
   }
 
+  // A fault before boot completed must count toward the boot-loop limit, so
+  // carry the attempt number from the boot counter (or from a record the
+  // other core already wrote) into the crash record.
+  uint32_t prev0 = watchdog_hw->scratch[0];
+  uint32_t boot_bits = 0;
+  if ((prev0 & BOOT_MAGIC_MASK) == BOOT_MAGIC) {
+    uint32_t attempt = prev0 & 0xFFu;
+    if (attempt > BOOT_MAX_RETRIES) attempt = BOOT_MAX_RETRIES;
+    boot_bits = CRASH_F_BOOTING | (attempt << CRASH_BOOT_ATTEMPT_SHIFT);
+  } else if ((prev0 & CRASH_TAG_MASK) == CRASH_TAG) {
+    boot_bits = prev0 & (CRASH_F_BOOTING | CRASH_BOOT_ATTEMPT_MASK);
+  }
+
   // Persist fault data in watchdog scratch registers so it survives the
   // reboot and can be dumped to SD on next boot (layout above hardfault_c).
-  watchdog_hw->scratch[0] = CRASH_TAG
+  watchdog_hw->scratch[0] = CRASH_TAG | boot_bits
                           | ((exc_return & 4u) ? CRASH_F_PSP : 0u)
                           | ((hfsr & (1u << 30)) ? CRASH_F_HFSR_FORCED : 0u)
                           | ((hfsr & (1u << 1)) ? CRASH_F_HFSR_VECTBL : 0u)
@@ -1661,6 +1683,11 @@ static void crash_log_save(const char *app_name) {
     (unsigned long)hfsr, (unsigned long)sfsr,
     was_psp ? "PSP (native app)" : "MSP (OS)");
 
+  if (flags & CRASH_F_BOOTING)
+    n += snprintf(line+n, CRASH_LINE_CAP-n, "  During boot (attempt %lu)\n",
+                  (unsigned long)(((flags & CRASH_BOOT_ATTEMPT_MASK)
+                                   >> CRASH_BOOT_ATTEMPT_SHIFT) + 1u));
+
   // scratch[6] decode mirrors hardfault_c's packing conditions.
   if (sfsr & (1u << 6)) {
     n += snprintf(line+n, CRASH_LINE_CAP-n, "  SFAR = 0x%08lx\n",
@@ -1711,13 +1738,13 @@ static void crash_log_save(const char *app_name) {
 int main(void) {
   // ── Boot-loop detection using watchdog scratch[0] ──────────────────────────
   // scratch[0] encoding:
-  //   CRASH_TAG   (0xFA17xxxx) = HardFault record present (see hardfault_c)
-  //   BOOT_MAGIC  (0xB007xx00) = boot attempt counter (low byte = count)
+  //   CRASH_TAG   (0xFA17xxxx) = HardFault record present (see hardfault_c);
+  //                              CRASH_F_BOOTING marks a fault during boot
+  //   BOOT_MAGIC  (0xB00700xx) = boot attempt counter (low byte = count)
   //   anything else            = fresh boot (power-on or clean reset)
-  #define BOOT_MAGIC_MASK  0xFFFFFF00u
-  #define BOOT_MAGIC       0xB0070000u
-  #define BOOT_MAX_RETRIES 3
-
+  // A boot that hangs (watchdog) or faults counts as a failed attempt. The
+  // counter only goes back to 0 when a boot reaches the launcher; power-on
+  // clears the scratch registers.
   uint32_t scratch0 = watchdog_hw->scratch[0];
   bool wdt_reset = watchdog_caused_reboot();
   int boot_attempt = 0;
@@ -1727,23 +1754,28 @@ int main(void) {
     // HardFault crash recovery — preserve fault data for later display
     memcpy(s_crash_data, (void *)watchdog_hw->scratch, sizeof(s_crash_data));
     s_had_crash = true;
+    if (scratch0 & CRASH_F_BOOTING)
+      boot_attempt = (int)((scratch0 & CRASH_BOOT_ATTEMPT_MASK)
+                           >> CRASH_BOOT_ATTEMPT_SHIFT) + 1;
   } else if ((scratch0 & BOOT_MAGIC_MASK) == BOOT_MAGIC) {
     // Previous boot failed during init — increment attempt counter
-    boot_attempt = (scratch0 & 0xFF) + 1;
-    if (boot_attempt >= BOOT_MAX_RETRIES) {
-      // Too many boot failures — disable watchdog so device stays on
-      // error screen instead of looping.  User can read the message
-      // and power-cycle / reinsert SD.
-      skip_boot_watchdog = true;
-      boot_attempt = 0; // reset for next power cycle
-    }
+    boot_attempt = (int)(scratch0 & 0xFF) + 1;
   } else if (watchdog_caused_reboot()) {
     // Watchdog timeout without HardFault or boot counter (legacy path)
     printf("[WATCHDOG] Reset due to timeout (no fault data)\n");
   }
+  if (boot_attempt >= BOOT_MAX_RETRIES) {
+    // Too many boot failures — leave the watchdog off for the rest of boot
+    // so the device stays on whatever screen it stops at instead of
+    // looping. The count stays at the limit (not reset), so a further
+    // reset keeps the watchdog off; power-cycling clears it.
+    skip_boot_watchdog = true;
+    boot_attempt = BOOT_MAX_RETRIES;
+    watchdog_disable();
+  }
 
   // Write boot attempt counter — cleared once launcher starts successfully
-  watchdog_hw->scratch[0] = BOOT_MAGIC | (boot_attempt & 0xFF);
+  watchdog_hw->scratch[0] = BOOT_MAGIC | (uint32_t)boot_attempt;
 
   // Overclock to 200 MHz for better display throughput (RP2350 supports 150+)
   // NOTE: If the keyboard fails to initialise reliably, try commenting this
@@ -1785,6 +1817,9 @@ int main(void) {
   printf("[BOOT] scratch0_at_entry=0x%08lx s_had_crash=%d boot_attempt=%d\n",
          (unsigned long)scratch0, s_had_crash, boot_attempt);
   printf("[BOOT] watchdog_caused_reboot=%d\n", watchdog_caused_reboot());
+  if (skip_boot_watchdog)
+    printf("[BOOT] %d failed boots in a row: boot watchdog off, QMI PSRAM "
+           "stays in serial mode\n", BOOT_MAX_RETRIES);
 
   // Wire up the global API struct
   g_api.input = &s_input_impl;
@@ -1819,13 +1854,19 @@ int main(void) {
   // next boot sees the flag and stays on the reset-default serial mode.
 #ifdef PICO_RP2350
 #define QMI_QUAD_ATTEMPT_MAGIC 0x51AD9E7Bu
-  if (watchdog_hw->scratch[4] == QMI_QUAD_ATTEMPT_MAGIC) {
-    printf("[QMI_PSRAM] previous quad-mode attempt hung — serial mode\n");
+  //
+  // After BOOT_MAX_RETRIES failed boots the watchdog must stay off, and the
+  // quad attempt is unguarded without it, so stay on serial mode then too.
+  if (watchdog_hw->scratch[4] == QMI_QUAD_ATTEMPT_MAGIC || skip_boot_watchdog) {
+    if (!skip_boot_watchdog)
+      printf("[QMI_PSRAM] previous quad-mode attempt hung — serial mode\n");
     gpio_set_function(47, GPIO_FUNC_XIP_CS1);
     xip_ctrl_hw->ctrl |= XIP_CTRL_WRITABLE_M1_BITS;
   } else {
-    watchdog_hw->scratch[4] = QMI_QUAD_ATTEMPT_MAGIC;
+    // watchdog_enable() itself writes scratch[4] (the SDK's non-reboot
+    // magic), so set the attempt flag after it, not before.
     watchdog_enable(8000, true);
+    watchdog_hw->scratch[4] = QMI_QUAD_ATTEMPT_MAGIC;
     qmi_psram_init(47);
     watchdog_update();
     watchdog_hw->scratch[4] = 0;
@@ -2061,6 +2102,9 @@ int main(void) {
   // Boot completed successfully — clear the boot attempt counter so a
   // future watchdog reset starts fresh.
   watchdog_hw->scratch[0] = 0;
+  // The loop guard only covers boot: an app hang must still reset.
+  if (skip_boot_watchdog)
+    watchdog_enable(10000, true);
 
   // Hand off to the launcher — this never returns
   launcher_run();
