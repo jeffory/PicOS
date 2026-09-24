@@ -215,7 +215,6 @@ static int l_repl_readline(lua_State *L) {
 // built in a Lua buffer (no fixed-size C buffer to overrun).
 static int l_repl_print(lua_State *L) {
     int n = lua_gettop(L);
-    repl_state_t *r = repl_state(L);
     luaL_Buffer b;
     luaL_buffinit(L, &b);
     for (int i = 1; i <= n; i++) {
@@ -225,6 +224,9 @@ static int l_repl_print(lua_State *L) {
         luaL_addvalue(&b);
     }
     luaL_pushresult(&b);
+    // The state only now: a __tostring above may have run repl.clear(),
+    // which frees it.
+    repl_state_t *r = repl_state(L);
     size_t len;
     const char *text = lua_tolstring(L, -1, &len);
     term_print(r, text, len);

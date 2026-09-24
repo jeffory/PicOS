@@ -30,6 +30,18 @@ T.case("repl_scrollback_is_bounded", function()
     pc.repl.clear()                             -- clear with nothing allocated
 end)
 
+-- A __tostring that clears the REPL used to free the state repl.print had
+-- already fetched (use-after-free in term_print).
+T.case("repl_print_tostring_clears", function()
+    pc.repl.print("before")
+    local v = setmetatable({}, {__tostring = function()
+        pc.repl.clear()
+        return "x"
+    end})
+    pc.repl.print(v, v)
+    pc.repl.print("after")
+end)
+
 T.case("repl_readline_idle", function()
     T.eq(pc.repl.readline(), nil)
     pc.repl.echo(false)
