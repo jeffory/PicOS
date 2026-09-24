@@ -22,6 +22,47 @@ T.case("corrupt_file_reads_nil", function()
     T.eq(save.get("bad"), nil, "a corrupt save must read as no save")
 end)
 
+T.case("nested_roundtrip", function()
+    local src = {
+        quote = 'say "hi"',
+        lines = "one\ntwo\r\tthree",
+        slash = "back\\slash",
+        big = 2147483647,
+        neg = -2147483647,
+        pi = 3.14159,
+        half = 0.5,
+        yes = true,
+        no = false,
+        nested = { deep = { deeper = "kept" }, list = { 1, 2, 3 } },
+    }
+    T.ok(save.set("nested", src), "set")
+    local b = T.ok(save.get("nested"), "get")
+    T.eq(b.quote, src.quote, "quote")
+    T.eq(b.lines, src.lines, "lines")
+    T.eq(b.slash, src.slash, "slash")
+    T.eq(b.big, 2147483647, "big")
+    T.eq(math.type(b.big), "integer", "big stays an integer")
+    T.eq(b.neg, -2147483647, "neg")
+    T.eq(b.pi, src.pi, "float")
+    T.eq(math.type(b.pi), "float", "pi stays a float")
+    T.eq(b.half, 0.5, "half")
+    T.eq(b.yes, true, "true")
+    T.eq(b.no, false, "false")
+    T.eq(b.nested.deep.deeper, "kept", "nested.deep.deeper")
+    T.eq(#b.nested.list, 3, "list length")
+    T.eq(b.nested.list[3], 3, "list[3]")
+end)
+
+T.case("large_save_roundtrip", function()
+    -- Well past LUAL_BUFFERSIZE (256 B on device, 512 in the sim).
+    local t = {}
+    for i = 1, 200 do t[i] = { n = i, s = "entry \"" .. i .. "\"" } end
+    T.ok(save.set("large", { items = t }), "set")
+    local b = T.ok(save.get("large"), "get")
+    T.eq(#b.items, 200, "count")
+    T.eq(b.items[200].s, 'entry "200"', "last entry")
+end)
+
 T.case("list_returns_saved_names", function()
     T.ok(save.set("list_a", { v = 1 }), "set list_a")
     T.ok(save.set("list_b", { v = 2 }), "set list_b")
