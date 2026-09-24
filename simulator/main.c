@@ -407,15 +407,15 @@ static void http_post_w(pchttp_t c, const char *path, const char *extra_hdrs, co
 static int http_read_w(pchttp_t c, uint8_t *buf, uint32_t len) { return (int)http_read((http_conn_t *)c, buf, len); }
 static uint32_t http_available_w(pchttp_t c) { return http_bytes_available((http_conn_t *)c); }
 static void http_close_w(pchttp_t c) { http_free((http_conn_t *)c); }
-static int http_getStatus_w(pchttp_t c) { return ((http_conn_t *)c)->status_code; }
-static const char *http_getError_w(pchttp_t c) { http_conn_t *hc = (http_conn_t *)c; return hc->err[0] ? hc->err : NULL; }
-static int http_getProgress_w(pchttp_t c, int *received, int *total) { http_conn_t *hc = (http_conn_t *)c; if (received) *received = (int)hc->body_received; if (total) *total = (int)hc->content_length; return (int)hc->content_length; }
+static int http_getStatus_w(pchttp_t c) { return http_get_status((http_conn_t *)c); }
+static const char *http_getError_w(pchttp_t c) { return http_get_error((http_conn_t *)c); }
+static int http_getProgress_w(pchttp_t c, int *received, int *total) { int r, t; http_get_progress((http_conn_t *)c, &r, &t); if (received) *received = r; if (total) *total = t; return t; }
 static void http_setKeepAlive_w(pchttp_t c, bool ka) { ((http_conn_t *)c)->keep_alive = ka; }
 static void http_setByteRange_w(pchttp_t c, int from, int to) { ((http_conn_t *)c)->range_from = from; ((http_conn_t *)c)->range_to = to; }
 static void http_setConnectTimeout_w(pchttp_t c, int s) { ((http_conn_t *)c)->connect_timeout_ms = (uint32_t)(s * 1000); }
 static void http_setReadTimeout_w(pchttp_t c, int s) { ((http_conn_t *)c)->read_timeout_ms = (uint32_t)(s * 1000); }
 static bool http_setReadBufferSize_w(pchttp_t c, int bytes) { return http_set_recv_buf((http_conn_t *)c, (uint32_t)bytes); }
-static bool http_isComplete_w(pchttp_t c) { http_conn_t *hc = (http_conn_t *)c; return hc->state == HTTP_STATE_DONE || hc->state == HTTP_STATE_FAILED; }
+static bool http_isComplete_w(pchttp_t c) { return http_is_complete((http_conn_t *)c); }
 // The simulator's libcurl transport keeps its own TLS policy; the flag is
 // stored so the API behaves the same (see src/drivers/wifi.c for firmware).
 static void http_setInsecure_w(pchttp_t c, bool insecure) { ((http_conn_t *)c)->insecure = insecure; }

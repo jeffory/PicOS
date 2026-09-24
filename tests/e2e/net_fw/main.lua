@@ -69,8 +69,9 @@ local function request(path, opts)
     local conn = opts.conn or net.http.new(HOST, cfg.http, false, "e2e")
     T.ok(conn, "http.new returned nil")
     r.conn = conn
-    -- Guarded: callbacks can re-enter (http_callbacks_not_reentrant), and a
-    -- nested drain would append later bytes before the outer drain's chunk.
+    -- Guarded anyway: a nested drain would append later bytes before the
+    -- outer drain's chunk (callbacks no longer re-enter:
+    -- http_callbacks_not_reentrant).
     local draining = false
     local function drain()
         if draining then return end
@@ -277,7 +278,7 @@ case_fw("http_after_inflight_exit", function()
     for _, r in ipairs(rs) do r.conn:close() end
 end)
 
--- ── HTTP: review bugs (strict xfail on the Python side) ─────────────────────
+-- ── HTTP: the code review's bugs (strict xfails until Task 13 fixed them) ──
 
 -- A request callback must not run inside another one. sys.sleep fires the
 -- pending callbacks with the instruction hook live, so the hook (every 256
@@ -473,6 +474,42 @@ case_fw("tcp_close_then_reuse_slot", function()
     b:close()
 end)
 
+-- A request on a connection that is still busy is refused (it used to free
+-- buffers Core 1 was reading and open a second connection on the slot).
+case_fw("http_request_while_busy_refused", function()
+    local r = request("/drip")
+    local ok, why = r.conn:get("/ok")
+    T.eq(ok, false, "second get on a busy connection")
+    T.ok(why and why:find("in progress"), "reason " .. tostring(why))
+    T.ok(wait(function() return #r.chunks >= 2 end, 3000),
+         "the first request stopped")
+    r.conn:close()
+    check_stack_alive("after a refused request")
+end)
+
+-- A close-delimited body larger than the ring, not read until the server
+-- has closed: what did not fit is kept (spilled), so the whole body is
+-- still readable after COMPLETE.
+case_fw("http_close_delimited_small_ring", function()
+    local conn = net.http.new(HOST, cfg.http, false, "spill")
+    T.ok(conn:setReadBufferSize(4), "bufsize")
+    local complete, closed = false, false
+    conn:setRequestCompleteCallback(function() complete = true end)
+    conn:setConnectionClosedCallback(function() closed = true end)
+    T.ok(conn:get("/close"), "get")
+    T.ok(wait(function() return complete or closed end, 3000), "never finished")
+    T.ok(complete, "not complete (closed=" .. tostring(closed) .. ", err=" ..
+         tostring(conn:getError()) .. ")")
+    local parts = {}
+    while true do
+        local d = conn:read(3)
+        if not d then break end
+        parts[#parts + 1] = d
+    end
+    T.eq(table.concat(parts), "hello picos", "the whole body after the close")
+    conn:close()
+end)
+
 -- TCP callbacks fire, with the socket as their argument (they used to be
 -- dropped: tcp_lua_fire_pending took the events and discarded them).
 case_fw("tcp_callbacks_fire", function()
@@ -536,6 +573,39 @@ case_fw("tcp_read_timeout", function()
     T.ok(now() - t0 >= 900, "timed out too early")
     T.eq(s:isConnected(), false, "isConnected after the timeout")
     s:close()
+end)
+
+-- Churn both pools (20 HTTP requests, 10 TCP echo round trips, each closed
+-- right after), then fill them: all 8 HTTP and 4 TCP slots came back, and
+-- one more of each is refused.  Slots are reclaimed asynchronously (Core 1
+-- acknowledges each close); allocation waits briefly for that.
+case_fw("pool_churn_then_fill", function()
+    for i = 1, 20 do
+        local r = request("/ok")
+        T.ok(wait(function() return r.complete or r.closed end, 3000),
+             "http " .. i .. " never finished")
+        T.eq(body(r), "hello picos", "http " .. i .. " body")
+        r.conn:close()
+    end
+    for i = 1, 10 do
+        local s = tcp_open()
+        T.eq(s:write("x"), 1, "tcp " .. i .. " write")
+        T.eq(tcp_read_until(s, 1), "x", "tcp " .. i .. " echo")
+        s:close()
+    end
+    local hs, ts = {}, {}
+    for i = 1, 8 do
+        hs[i] = net.http.new(HOST, cfg.http, false, "fill")
+        T.ok(hs[i], "http slot " .. i .. " of 8 after the churn")
+    end
+    T.eq(net.http.new(HOST, cfg.http, false, "fill"), nil, "9th http")
+    for i = 1, 4 do
+        ts[i] = pc.tcp.new(HOST, cfg.echo, false)
+        T.ok(ts[i], "tcp slot " .. i .. " of 4 after the churn")
+    end
+    T.eq(pc.tcp.new(HOST, cfg.echo, false), nil, "5th tcp")
+    for _, c in ipairs(hs) do c:close() end
+    for _, s in ipairs(ts) do s:close() end
 end)
 
 case_fw("tcp_connect_timeout", function()

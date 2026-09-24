@@ -667,6 +667,8 @@ static void sys_poll(void) {
   kbd_poll();
   core0_heartbeat();
   http_fire_c_pending();
+  http_reap();  // reclaim connection slots Core 1 has released
+  tcp_reap();
   if (kbd_consume_menu_press()) {
     if (system_menu_show_for_native())
       s_native_exit = true;
@@ -968,19 +970,19 @@ static void http_close_w(pchttp_t c) {
 }
 
 static int http_getStatus_w(pchttp_t c) {
-    return ((http_conn_t *)c)->status_code;
+    return http_get_status((http_conn_t *)c);
 }
 
 static const char *http_getError_w(pchttp_t c) {
-    http_conn_t *hc = (http_conn_t *)c;
-    return hc->err[0] ? hc->err : NULL;
+    return http_get_error((http_conn_t *)c);
 }
 
 static int http_getProgress_w(pchttp_t c, int *received, int *total) {
-    http_conn_t *hc = (http_conn_t *)c;
-    if (received) *received = (int)hc->body_received;
-    if (total)    *total    = (int)hc->content_length;  // -1 if unknown
-    return (int)hc->content_length;
+    int r, t;
+    http_get_progress((http_conn_t *)c, &r, &t);  // t = -1 if unknown
+    if (received) *received = r;
+    if (total)    *total    = t;
+    return t;
 }
 
 static void http_setKeepAlive_w(pchttp_t c, bool keep_alive) {
@@ -1005,8 +1007,7 @@ static bool http_setReadBufferSize_w(pchttp_t c, int bytes) {
 }
 
 static bool http_isComplete_w(pchttp_t c) {
-    http_conn_t *hc = (http_conn_t *)c;
-    return hc->state == HTTP_STATE_DONE || hc->state == HTTP_STATE_FAILED;
+    return http_is_complete((http_conn_t *)c);
 }
 
 static void http_setInsecure_w(pchttp_t c, bool insecure) {

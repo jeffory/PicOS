@@ -18,8 +18,8 @@ the one case named in /data/<APP_ID>/servers.json, next to the ports of the
 local servers (net_servers.py). A case that crashes the simulator therefore
 fails alone, with the crash or sanitizer report as its evidence.
 
-Cases that fail because of a known review bug are strict xfails: the fix
-turns them into XPASS, which fails the run until the marker is removed.
+Cases that fail because of a known bug are strict xfails (KNOWN_BUGS): the
+fix turns them into XPASS, which fails the run until the marker is removed.
 """
 
 from __future__ import annotations
@@ -31,7 +31,7 @@ from pathlib import Path
 import pytest
 
 from helpers import E2E_DIR, case_params, lua_case_names, new_simulator, \
-    run_lua_app, stage_lua_app, known_bug
+    run_lua_app, stage_lua_app
 from net_servers import (BlackholeServer, HttpTestServer, TcpEchoServer,
                          big_body)
 
@@ -44,62 +44,21 @@ APP_SRC = E2E_DIR / "net_fw" / "main.lua"
 # The Lua-side cases, one pytest id each. Two are halves of a Python-driven
 # scenario (test_http_inflight_across_app_exit) and one is the app's own
 # "unknown case" guard; tcp_leave_open is driven by
-# test_tcp_app_exit_closes_sockets and http_read_timeout_hang by
-# test_read_timeout_fires_before_headers.
+# test_tcp_app_exit_closes_sockets, http_read_timeout_hang by
+# test_read_timeout_fires_before_headers and pool_churn_then_fill by
+# test_pool_churn_releases_every_slot.
 _DRIVEN = {"http_leave_inflight", "http_after_inflight_exit",
-           "tcp_leave_open", "http_read_timeout_hang", "unknown_case"}
+           "tcp_leave_open", "http_read_timeout_hang", "pool_churn_then_fill",
+           "unknown_case"}
 CASES = [n for n in lua_case_names(APP_SRC) if n not in _DRIVEN]
 
-# Every file:line below is against develop after d49ff75 (the firmware
-# http.c and wifi.c HTTP paths are unchanged since); re-derive them if the
-# code moves.
-HTTP_TIMEOUT_UAF = ("review: HTTP timeout-path use-after-free — every "
-                    "http_check_timeouts branch (connect http.c:766-774, read "
-                    "777-785, transfer 787-795) sets is_closing and drops pcb "
-                    "but keeps nc->fn_data; the bridge frees the slot on "
-                    "FAILED (lua_bridge_network.c:140) and MG_EV_CLOSE then "
-                    "runs pending_set on the zeroed slot (http.c:447 -> 45)")
-HTTP_READ_TIMEOUT_ARMING = (
-    "new: the read timeout is armed but never checked before the headers — "
-    "MG_EV_CONNECT sets deadline_read with the state SENDING (http.c:195-197), "
-    "http_check_timeouts reads deadline_read only in HEADERS/BODY "
-    "(http.c:777) and HTTP_STATE_HEADERS is dead (never assigned), so a "
-    "server that accepts and never answers hangs the request forever")
-
-KNOWN_BUGS = {
-    "http_pool_exhaustion":
-        "review: each HTTP/TCP object claims its own hardware spinlock "
-        "(spin_lock_claim_unused(true), http.c:509, tcp.c:41) — only ids "
-        "24-31 are claimable, so the 7th live object panics instead of the "
-        "9th failing cleanly",
-    "http_connect_timeout": HTTP_TIMEOUT_UAF,
-    "http_read_timeout_mid_body": HTTP_TIMEOUT_UAF,
-    "http_callbacks_not_reentrant":
-        "new: HTTP callbacks re-enter — http_lua_fire_pending is called with "
-        "the instruction hook live from sys.sleep (lua_bridge_sys.c:62-63) "
-        "and the terminal's wait loop (lua_bridge_terminal.c:253-254), and "
-        "the hook (lua_bridge.c:142-143) calls it again from inside the "
-        "running callback; tcp_lua_fire_pending sits at the same three "
-        "sites, so TCP callbacks will re-enter the same way once it "
-        "dispatches them",
-    "http_keepalive_reuse":
-        "review: keep-alive reuse always fails — the reuse path "
-        "(wifi.c:393-399) sends the second request on the connection whose "
-        "HTTP handler the first response detached (http.c:284), so the "
-        "response is never parsed",
-    "http_chunked_body":
-        "review: the headers handler's mg_iobuf_del detaches Mongoose's "
-        "HTTP handler, so chunk-size lines leak into the body and COMPLETE "
-        "never fires (http.c:284)",
-    "http_close_delimited_body":
-        "review: COMPLETE never fires for a close-delimited response "
-        "(http.c:284 detach; MG_EV_CLOSE reports CLOSED, http.c:443-447)",
-    "http_post_binary":
-        "review: the POST body is copied with http_strdup (strlen, "
-        "http.c:25-29; called at http.c:652) and sent with "
-        "memcpy(tx_len) (http.c:141): truncated at the first NUL and a heap "
-        "over-read",
-}
+# Cases that fail today because of a known, unfixed bug: {case: reason}
+# (strict xfail).  Task 13 fixed every one this suite started with — the
+# tcp_free and HTTP timeout-path use-after-frees, the per-object spinlocks,
+# the read-timeout arming, callback re-entrancy, keep-alive reuse, chunked
+# and close-delimited bodies, binary POST, TCP timeouts and the tcp_connect
+# strncpy overlap — so it is empty.
+KNOWN_BUGS: dict[str, str] = {}
 
 
 @pytest.fixture
@@ -173,7 +132,6 @@ def test_case(servers, simulator, case):
     assert run.outcome.get("result") == "returned", run.describe()
 
 
-@known_bug(KNOWN_BUGS["http_post_binary"])
 def test_post_binary_server_side(servers, simulator):
     """The bytes the server received for the binary POST (the Lua case
     checks the echo; this pins what went on the wire)."""
@@ -185,16 +143,14 @@ def test_post_binary_server_side(servers, simulator):
         f"server got {len(got)} of {len(payload)} bytes: {got[:16]!r}")
 
 
-@known_bug(HTTP_READ_TIMEOUT_ARMING)
 def test_read_timeout_fires_before_headers(request, servers, simulator_binary,
                                            test_sd_card, tmp_path):
     """setReadTimeout(1) on a server that accepts and never answers: the
-    firmware must give up and hang up within ~1 s. Judged on the server side
-    only (/hang records when the client closes), on a simulator this test
-    starts itself so the health hook ignores it: once the timeout fires,
-    today's timeout-path use-after-free (HTTP_TIMEOUT_UAF, owned by
-    http_read_timeout_mid_body) crashes the simulator right after, and the
-    arming fix must still flip this test to XPASS on its own."""
+    firmware must give up and hang up within ~1 s (the read timeout is armed
+    once the request is sent, state HEADERS). Judged on the server side only
+    (/hang records when the client closes), on a simulator this test starts
+    itself, so the verdict does not depend on the teardown (the timeout
+    path's own safety is http_read_timeout_mid_body's job)."""
     sim = new_simulator(request.config, simulator_binary, test_sd_card,
                         tmp_path / "crash_unwatched.log")
     try:
@@ -241,6 +197,17 @@ def test_http_inflight_across_app_exit(servers, simulator):
     first.check_case("http_leave_inflight")
     second = run_case(simulator, servers, "http_after_inflight_exit")
     second.check_case("http_after_inflight_exit")
+
+
+def test_pool_churn_releases_every_slot(servers, simulator):
+    """20 HTTP and 10 TCP open/use/close cycles, then both pools fill to
+    exactly their size (pool_churn_then_fill): no slot leaked. And every TCP
+    connection of the churn was really closed (the server saw each EOF)."""
+    run = run_case(simulator, servers, "pool_churn_then_fill")
+    run.check_case("pool_churn_then_fill")
+    assert servers["echo"].accepted == 10, servers["echo"].accepted
+    still_open = servers["echo"].wait_all_closed(timeout=2.0)
+    assert still_open == 0, f"{still_open} of 10 churned TCP connections still open"
 
 
 def test_open_close_churn_leaves_heap_flat(servers, simulator):

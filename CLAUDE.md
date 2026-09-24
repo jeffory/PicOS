@@ -155,7 +155,9 @@ A debug hook fires every 256 opcodes (`lua_sethook` with `LUA_MASKCOUNT`). The h
 ### WiFi / Network Stack (`src/drivers/wifi.c`, `http.c`, `tcp.c`)
 - CYW43 on SPI1; `WIFI_ENABLED=1` defined by CMake for WiFi boards; all CYW43 code is `#ifdef WIFI_ENABLED` guarded
 - **Core 1 exclusively owns the Mongoose event manager** (`s_mgr`). Core 0 never calls `mg_*` functions.
-- Core 0 → Core 1 IPC: spinlock-guarded 8-slot ring buffer; push via `wifi_req_push()`. Request types: `CONN_REQ_HTTP_START`, `CONN_REQ_HTTP_CLOSE`, `CONN_REQ_WIFI_CONNECT`, `CONN_REQ_WIFI_DISCONNECT`
+- Core 0 → Core 1 IPC: lock-free (C11 acquire/release) 8-slot ring buffer; push via `wifi_req_push()`. Request types: `CONN_REQ_HTTP_START`, `CONN_REQ_HTTP_CLOSE`, `CONN_REQ_TCP_CONNECT`, `CONN_REQ_TCP_WRITE`, `CONN_REQ_TCP_CLOSE`, `CONN_REQ_WIFI_CONNECT`, `CONN_REQ_WIFI_DISCONNECT`
+- **Close protocol (HTTP and TCP slots; state machines in `http.h` / `tcp.h`).** Core 0 never frees a slot Core 1 may still touch: `http_free` / `tcp_free` only mark it `CLOSING` and queue `CONN_REQ_*_CLOSE` (a full ring leaves it `CLOSING`; the reap retries the push). Core 1's one close handler (`http_c1_release` / `tcp_c1_release`) clears `nc->fn_data`, closes the connection, then stores `RELEASED`. Core 0 frees the buffers and zeroes the slot only on seeing `RELEASED` (`http_reap` / `tcp_reap`, from the Lua hook path, native `sys->poll`, `*_alloc` and `*_close_all`). Every Core 1 path that drops `pcb` also clears `fn_data` (`http_c1_detach` / `tcp_c1_detach`). `*_alloc` waits up to 100 ms for a slot being released; app teardown runs `http_close_all` / `tcp_close_all` (Lua: next app's bridge init; native: loader cleanup)
+- **One spinlock per pool** (claimed once in `http_init` / `tcp_init`) guards state changes, pending bits, the receive rings and `in_use`; `state` is also atomic so Core 0 reads it lock-free (`http_get_state` / `tcp_get_state`, `http_get_error`, `http_get_status`, `http_headers_ready`)
 - Auto-connects on boot if `"wifi_ssid"` / `"wifi_pass"` exist in config
 
 ### TLS policy (`src/drivers/wifi.c`, `ca_bundle.c`, `rng.c`)
@@ -170,7 +172,9 @@ A debug hook fires every 256 opcodes (`lua_sethook` with `LUA_MASKCOUNT`). The h
 - Mongoose-based HTTP/1.1 client running on Core 1
 - Static pool of 8 simultaneous connections (`HTTP_MAX_CONNECTIONS`)
 - **HTTPS supported** via `pico_lwip_mbedtls` + `pico_mbedtls` (see `src/mbedtls_config.h`), certificate-verified (see TLS policy)
-- `pending` bitmask set by Core 1 (`http_ev_fn`); Lua callbacks fired by Core 0 via `http_lua_fire_pending()`
+- `pending` bitmask set by Core 1 (`http_ev_fn`); Lua callbacks fired by Core 0 via `http_lua_fire_pending()`, which is never re-entered (a callback that sleeps or trips the hook leaves later events for the outer call)
+- The response is parsed in `http_ev_fn` (connections are plain `mg_connect`, no Mongoose HTTP handler): Content-Length, chunked (decoded) and close-delimited bodies (COMPLETE on the server's close; bytes that did not fit the ring are spilled and stay readable), keep-alive reuse. A body cut short (reset, early close, OOM) is FAILED, never COMPLETE
+- A request (`get`/`post`) is accepted only in IDLE/DONE/FAILED; otherwise it returns false ("a request is already in progress"). POST bodies are binary-safe. The read timeout runs from the moment the request is sent (state HEADERS), not only once headers arrive
 - `http_close_all()` called at start of `lua_bridge_register()` to clear stale connections between apps
 
 ### TCP Sockets (`src/drivers/tcp.c`)

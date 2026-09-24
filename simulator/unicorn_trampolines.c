@@ -1969,20 +1969,20 @@ static void tramp_http_available(uc_engine *uc) {
 static void tramp_http_close(uc_engine *uc) {
     uint32_t handle = read_reg(uc, UC_ARM_REG_R0);
     http_conn_t *c = handle_unwrap(handle);
-    if (c) { http_close(c); http_free(c); }
+    if (c) http_free(c);  // releases the slot (firmware: asynchronously)
     handle_free(handle);
 }
 
 static void tramp_http_get_status(uc_engine *uc) {
     uint32_t handle = read_reg(uc, UC_ARM_REG_R0);
     http_conn_t *c = handle_unwrap(handle);
-    write_reg(uc, UC_ARM_REG_R0, c ? (uint32_t)c->status_code : 0);
+    write_reg(uc, UC_ARM_REG_R0, c ? (uint32_t)http_get_status(c) : 0);
 }
 
 static void tramp_http_get_error(uc_engine *uc) {
     uint32_t handle = read_reg(uc, UC_ARM_REG_R0);
     http_conn_t *c = handle_unwrap(handle);
-    const char *err = (c && c->err[0]) ? c->err : NULL;
+    const char *err = c ? http_get_error(c) : NULL;
     write_reg(uc, UC_ARM_REG_R0, err ? arena_write_string(uc, err) : 0);
 }
 
@@ -1992,10 +1992,8 @@ static void tramp_http_get_progress(uc_engine *uc) {
     uint32_t total_addr = read_reg(uc, UC_ARM_REG_R2);
     http_conn_t *c = handle_unwrap(handle);
     int received = 0, total = 0;
-    if (c) {
-        received = (int)c->body_received;
-        total = (int)c->content_length;
-    }
+    if (c)
+        http_get_progress(c, &received, &total);
     if (recv_addr) uc_mem_write(uc, recv_addr, &received, 4);
     if (total_addr) uc_mem_write(uc, total_addr, &total, 4);
     write_reg(uc, UC_ARM_REG_R0, (uint32_t)total);
@@ -2040,7 +2038,7 @@ static void tramp_http_set_read_buffer_size(uc_engine *uc) {
 static void tramp_http_is_complete(uc_engine *uc) {
     uint32_t handle = read_reg(uc, UC_ARM_REG_R0);
     http_conn_t *c = handle_unwrap(handle);
-    bool complete = c && (c->state == HTTP_STATE_DONE || c->state == HTTP_STATE_FAILED);
+    bool complete = c && http_is_complete(c);
     write_reg(uc, UC_ARM_REG_R0, complete ? 1 : 0);
 }
 

@@ -67,6 +67,10 @@ static const luaL_Reg l_wifi_lib[] = {{"isAvailable", l_wifi_isAvailable},
 // always safe to call there.
 
 #define HTTP_MT "picocalc.network.http" // metatable registry key
+// Registry key of a weak-valued table: light userdata (the http_ud_t) → the
+// connection object.  http_lua_fire_pending keeps the object on the stack
+// while its callbacks run, so a collection inside one cannot free the ud.
+#define HTTP_OBJS "picocalc.network.http.objs"
 
 typedef struct {
   http_conn_t *conn; // NULL once closed/GC'd
@@ -81,67 +85,66 @@ static void http_ud_unref_all(lua_State *L, http_ud_t *ud);
 // ── HTTP callback dispatcher (called from menu_lua_hook)
 // ──────────────────────
 
-// Iterates the C connection pool, reads & clears pending flags, and fires the
-// corresponding Lua callbacks via lua_pcall.  Safe because we are OUTSIDE of
-// wifi_poll() / cyw43_arch_poll() when this runs.
+static void http_fire(lua_State *L, http_ud_t *ud, http_conn_t *c, int ref,
+                      const char *what) {
+  // A callback that ran before this one may have closed the connection.
+  if (ud->conn != c || ref == LUA_NOREF)
+    return;
+  lua_rawgeti(L, LUA_REGISTRYINDEX, ref);
+  if (lua_pcall(L, 0, 0, 0) != LUA_OK) {
+    printf("[HTTP-LUA] %s callback error: %s\n", what, lua_tostring(L, -1));
+    lua_pop(L, 1);
+  }
+}
+
+// Reclaims released slots, then iterates the C connection pool, reads &
+// clears pending flags, and fires the corresponding Lua callbacks via
+// lua_pcall.  Called from the instruction hook, sys.sleep and the terminal's
+// wait loop — all outside wifi_poll(), on Core 0.  Never re-entered: while a
+// callback runs (and sleeps, or runs long enough for the hook to fire),
+// nested calls return at once and the events wait for the outer loop.
 void http_lua_fire_pending(lua_State *L) {
+  static bool s_firing = false;
+  if (s_firing)
+    return;
+  s_firing = true;
+  http_reap();
   for (int i = 0; i < HTTP_MAX_CONNECTIONS; i++) {
     http_conn_t *c = http_get_conn(i);
     if (!c || !c->lua_ud)
       continue;
-
-    uint8_t pend = http_take_pending(c);
-    if (!pend)
-      continue;
-
     http_ud_t *ud = (http_ud_t *)c->lua_ud;
 
-    // Fire in order: headers → data → complete → closed
-    if ((pend & HTTP_CB_HEADERS) && ud->cb_headers != LUA_NOREF) {
-      lua_rawgeti(L, LUA_REGISTRYINDEX, ud->cb_headers);
-      if (lua_pcall(L, 0, 0, 0) != LUA_OK) {
-        printf("[HTTP-LUA] headers callback error: %s\n", lua_tostring(L, -1));
-        lua_pop(L, 1);
-      }
+    // The object, or nil if it was collected (its __gc releases the slot).
+    lua_getfield(L, LUA_REGISTRYINDEX, HTTP_OBJS);
+    if (!lua_istable(L, -1) || lua_rawgetp(L, -1, ud) != LUA_TUSERDATA) {
+      lua_pop(L, lua_istable(L, -1) ? 2 : 1);
+      continue;
     }
-    if ((pend & HTTP_CB_REQUEST) && ud->cb_request != LUA_NOREF) {
-      lua_rawgeti(L, LUA_REGISTRYINDEX, ud->cb_request);
-      if (lua_pcall(L, 0, 0, 0) != LUA_OK) {
-        printf("[HTTP-LUA] request callback error: %s\n", lua_tostring(L, -1));
-        lua_pop(L, 1);
-      }
-    }
-    if ((pend & HTTP_CB_COMPLETE) && ud->cb_complete != LUA_NOREF) {
-      lua_rawgeti(L, LUA_REGISTRYINDEX, ud->cb_complete);
-      if (lua_pcall(L, 0, 0, 0) != LUA_OK) {
-        printf("[HTTP-LUA] complete callback error: %s\n", lua_tostring(L, -1));
-        lua_pop(L, 1);
-      }
-    }
-    if ((pend & (HTTP_CB_CLOSED | HTTP_CB_FAILED)) &&
-        ud->cb_closed != LUA_NOREF) {
-      lua_rawgeti(L, LUA_REGISTRYINDEX, ud->cb_closed);
-      if (lua_pcall(L, 0, 0, 0) != LUA_OK) {
-        printf("[HTTP-LUA] closed callback error: %s\n", lua_tostring(L, -1));
-        lua_pop(L, 1);
-      }
-    }
+    lua_remove(L, -2);
+    int obj = lua_gettop(L);  // keeps ud alive while the callbacks run
 
-    // If connection is closed or failed, unref callbacks and free the
-    // underlying C connection immediately.  Without this, the http_conn_t
-    // (and its hardware spinlock) stays allocated until Lua GC collects
-    // the userdata — which may not happen before a retry allocates a new
-    // connection, exhausting the spinlock pool.
-    if (pend & (HTTP_CB_CLOSED | HTTP_CB_FAILED)) {
+    uint8_t pend = http_take_pending(c);
+    // Fire in order: headers → data → complete → closed
+    if (pend & HTTP_CB_HEADERS)
+      http_fire(L, ud, c, ud->cb_headers, "headers");
+    if (pend & HTTP_CB_REQUEST)
+      http_fire(L, ud, c, ud->cb_request, "request");
+    if (pend & HTTP_CB_COMPLETE)
+      http_fire(L, ud, c, ud->cb_complete, "complete");
+    if (pend & (HTTP_CB_CLOSED | HTTP_CB_FAILED))
+      http_fire(L, ud, c, ud->cb_closed, "closed");
+
+    // Closed or failed: unref the callbacks and release the C connection
+    // now rather than at GC, so a retry finds a free slot.
+    if ((pend & (HTTP_CB_CLOSED | HTTP_CB_FAILED)) && ud->conn == c) {
       http_ud_unref_all(L, ud);
-      if (ud->conn) {
-        ud->conn->lua_ud = NULL;
-        ud->conn->pending = 0;
-        g_api.http->close(ud->conn);  // = http_free: releases spinlock
-        ud->conn = NULL;
-      }
+      ud->conn = NULL;
+      g_api.http->close(c);  // = http_free: asynchronous release
     }
+    lua_settop(L, obj - 1);
   }
+  s_firing = false;
 }
 
 // ── Helpers
@@ -240,10 +243,9 @@ static void http_ud_unref_all(lua_State *L, http_ud_t *ud) {
 static int l_http_gc(lua_State *L) {
   http_ud_t *ud = check_http(L, 1);
   if (ud->conn) {
-    ud->conn->lua_ud = NULL;
-    ud->conn->pending = 0;
-    g_api.http->close(ud->conn);
+    http_conn_t *c = ud->conn;
     ud->conn = NULL;
+    g_api.http->close(c);  // = http_free: asynchronous release
   }
   http_ud_unref_all(L, ud);
   return 0;
@@ -270,10 +272,15 @@ static int l_http_new(lua_State *L) {
   ud->cb_headers = LUA_NOREF;
   ud->cb_complete = LUA_NOREF;
   ud->cb_closed = LUA_NOREF;
-  conn->lua_ud = ud;
 
   luaL_getmetatable(L, HTTP_MT);
   lua_setmetatable(L, -2);
+
+  lua_getfield(L, LUA_REGISTRYINDEX, HTTP_OBJS);
+  lua_pushvalue(L, -2);
+  lua_rawsetp(L, -2, ud);
+  lua_pop(L, 1);
+  conn->lua_ud = ud;
   return 1;
 }
 
@@ -281,10 +288,9 @@ static int l_http_new(lua_State *L) {
 static int l_http_close(lua_State *L) {
   http_ud_t *ud = check_http(L, 1);
   if (ud->conn) {
-    ud->conn->lua_ud = NULL;
-    ud->conn->pending = 0;
-    g_api.http->close(ud->conn);
+    http_conn_t *c = ud->conn;
     ud->conn = NULL;
+    g_api.http->close(c);  // = http_free: asynchronous release
   }
   return 0;
 }
@@ -366,17 +372,17 @@ static int do_request(lua_State *L, bool has_body) {
       hdrs = lua_headers_to_str(L, 3);
   }
 
-  if (has_body)
-    g_api.http->post(ud->conn, path, hdrs, body, (uint32_t)body_len);
-  else
-    g_api.http->get(ud->conn, path, hdrs);
-  const char *req_err = g_api.http->getError(ud->conn);
-  bool ok = (req_err == NULL);
-
+  bool ok = has_body ? http_post(ud->conn, path, hdrs, body, body_len)
+                     : http_get(ud->conn, path, hdrs);
   umm_free(hdrs);
 
   lua_pushboolean(L, ok);
   if (!ok) {
+    const char *req_err = http_get_error(ud->conn);
+    if (!req_err)
+      req_err = !wifi_is_available()
+                    ? "WiFi not available"
+                    : "a request is already in progress on this connection";
     lua_pushstring(L, req_err);
     return 2;
   }
@@ -477,7 +483,7 @@ static int l_http_getResponseStatus(lua_State *L) {
 // conn:getResponseHeaders() -> table {key=value} or nil
 static int l_http_getResponseHeaders(lua_State *L) {
   http_ud_t *ud = check_http(L, 1);
-  if (!ud->conn || !ud->conn->headers_done) {
+  if (!ud->conn || !http_headers_ready(ud->conn)) {
     lua_pushnil(L);
     return 1;
   }
@@ -647,6 +653,13 @@ void lua_bridge_network_init(lua_State *L) {
   lua_pushinteger(L, WIFI_STATUS_FAILED); lua_setfield(L, -2, "STATUS_FAILED");
   lua_pushinteger(L, WIFI_STATUS_ONLINE); lua_setfield(L, -2, "STATUS_ONLINE");
   lua_pop(L, 1);
+
+  lua_newtable(L);  // HTTP_OBJS, weak values
+  lua_newtable(L);
+  lua_pushliteral(L, "v");
+  lua_setfield(L, -2, "__mode");
+  lua_setmetatable(L, -2);
+  lua_setfield(L, LUA_REGISTRYINDEX, HTTP_OBJS);
 
   // Install HTTP connection metatable
   static const luaL_Reg http_meta[] = {{"__gc", l_http_gc}, {NULL, NULL}};

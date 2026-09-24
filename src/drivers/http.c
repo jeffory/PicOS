@@ -36,40 +36,83 @@ static char *http_strdup(const char *s) {
 // ───────────────────────────────────────────────────────────────
 
 static http_conn_t s_conns[HTTP_MAX_CONNECTIONS];
+static spin_lock_t *s_lock;  // the pool lock (see http.h)
+
+// Chunked-body decoder states (http_conn_t.chunk_state)
+enum { CH_SIZE = 0, CH_DATA, CH_DATA_CRLF, CH_TRAILER, CH_DONE };
+
+// A response head this large without its blank line is refused.
+#define HTTP_HEAD_MAX (HTTP_HEADER_BUF_MAX + 1024)
+// Body bytes Mongoose may hold beyond the ring before the transfer is failed
+// (there is no TCP backpressure on the device stack; see the report).
+#define HTTP_RECV_OVERFLOW (512u * 1024u)
+// How long http_alloc waits for a slot that is being released.
+#define HTTP_ALLOC_WAIT_MS 100
 
 // ── Internal helpers
 // ──────────────────────────────────────────────────────────
 
-// Atomically set pending callback bits (called from Core 1)
-static inline void pending_set(http_conn_t *c, uint8_t bits) {
-  uint32_t irq = spin_lock_blocking(c->rx_spinlock);
-  c->pending |= bits;
-  spin_unlock(c->rx_spinlock, irq);
+static inline http_state_t st_get(const http_conn_t *c) {
+  return __atomic_load_n(&c->state, __ATOMIC_ACQUIRE);
+}
+static inline void st_put(http_conn_t *c, http_state_t s) {
+  __atomic_store_n(&c->state, s, __ATOMIC_RELEASE);
+}
+static inline bool st_released(http_state_t s) {
+  return s == HTTP_STATE_CLOSING || s == HTTP_STATE_RELEASED;
+}
+static inline bool st_active(http_state_t s) {  // Core 1 has work to do
+  return s == HTTP_STATE_SENDING || s == HTTP_STATE_HEADERS ||
+         s == HTTP_STATE_BODY;
+}
+static inline uint32_t now_ms(void) {
+  return to_ms_since_boot(get_absolute_time());
+}
+static inline bool deadline_passed(uint32_t now, uint32_t deadline) {
+  return deadline != 0 && (int32_t)(now - deadline) > 0;
 }
 
-static void conn_fail(http_conn_t *c, const char *fmt, ...) {
-  // If we already finished the request successfully, ignore late errors
-  if (c->state == HTTP_STATE_DONE)
-    return;
+// Atomically set pending callback bits (Core 1), unless being released
+static inline void pending_set(http_conn_t *c, uint8_t bits) {
+  uint32_t irq = spin_lock_blocking(s_lock);
+  if (!st_released(st_get(c)))
+    c->pending |= bits;
+  spin_unlock(s_lock, irq);
+}
 
+// FAILED with an error text, FAILED|CLOSED callbacks.  Ignored once the
+// request finished or failed, or the slot is being released.  The text is
+// written before the state store that publishes it.
+static void conn_fail(http_conn_t *c, const char *fmt, ...) {
+  char msg[HTTP_ERR_MAX];
   va_list ap;
   va_start(ap, fmt);
-  vsnprintf(c->err, sizeof(c->err), fmt, ap);
+  vsnprintf(msg, sizeof(msg), fmt, ap);
   va_end(ap);
-  printf("[HTTP] Error (state %d): %s\n", (int)c->state, c->err);
-  c->state = HTTP_STATE_FAILED;
-  pending_set(c, HTTP_CB_FAILED | HTTP_CB_CLOSED);
+
+  uint32_t irq = spin_lock_blocking(s_lock);
+  http_state_t st = st_get(c);
+  if (st_released(st) || st == HTTP_STATE_DONE || st == HTTP_STATE_FAILED) {
+    spin_unlock(s_lock, irq);
+    return;
+  }
+  memcpy(c->err, msg, sizeof(c->err));
+  c->deadline_connect = c->deadline_read = c->deadline_transfer = 0;
+  st_put(c, HTTP_STATE_FAILED);
+  c->pending |= HTTP_CB_FAILED | HTTP_CB_CLOSED;
+  spin_unlock(s_lock, irq);
+  printf("[HTTP] Error (state %d): %s\n", (int)st, msg);
 }
 
-// Returns actual bytes written (may be less than len if buffer is full)
+// Returns actual bytes written (may be less than len if the ring is full)
 static uint32_t rx_write(http_conn_t *c, const uint8_t *data, uint32_t len) {
-  uint32_t irq = spin_lock_blocking(c->rx_spinlock);
+  uint32_t irq = spin_lock_blocking(s_lock);
 
   uint32_t space = c->rx_cap - c->rx_count;
   if (len > space)
     len = space;
-  if (len == 0) {
-    spin_unlock(c->rx_spinlock, irq);
+  if (len == 0 || !c->rx_buf) {
+    spin_unlock(s_lock, irq);
     return 0;
   }
 
@@ -89,15 +132,87 @@ static uint32_t rx_write(http_conn_t *c, const uint8_t *data, uint32_t len) {
   }
   c->rx_count += len;
 
-  spin_unlock(c->rx_spinlock, irq);
+  spin_unlock(s_lock, irq);
   return len;
 }
 
-// ── Build and send HTTP request in a single PSRAM buffer ─────────────────────
-// Uses umm_malloc (PSRAM) to assemble the full request, then mg_send() to
-// append it to the Mongoose send iobuf in one resize.
+// Where decoded body bytes go: the ring (sink == NULL) or, when the server
+// closes with more than the ring can take, a spill buffer.
+typedef struct {
+  uint8_t *buf;
+  uint32_t len, cap;
+} spill_sink_t;
 
-void http_build_and_send_request(struct mg_connection *nc, http_conn_t *c) {
+static uint32_t sink_put(http_conn_t *c, spill_sink_t *sp, const uint8_t *d,
+                         uint32_t n) {
+  if (!sp)
+    return rx_write(c, d, n);
+  uint32_t room = sp->cap - sp->len;
+  if (n > room)
+    n = room;
+  memcpy(rx_buf_uncached(sp->buf) + sp->len, d, n);
+  sp->len += n;
+  return n;
+}
+
+static int hexval(uint8_t ch) {
+  if (ch >= '0' && ch <= '9') return ch - '0';
+  if (ch >= 'a' && ch <= 'f') return ch - 'a' + 10;
+  if (ch >= 'A' && ch <= 'F') return ch - 'A' + 10;
+  return -1;
+}
+
+// ── Core 1: connection handling ─────────────────────────────────────────────
+
+void http_c1_detach(http_conn_t *c) {
+  struct mg_connection *nc = (struct mg_connection *)c->pcb;
+  if (!nc)
+    return;
+  nc->fn_data = NULL;  // no later event reaches the slot
+  nc->is_closing = 1;
+  c->pcb = NULL;
+}
+
+void http_c1_fail(http_conn_t *c, const char *msg) {
+  conn_fail(c, "%s", msg);
+  http_c1_detach(c);
+}
+
+bool http_c1_begin(http_conn_t *c, http_state_t next) {
+  bool ok = false;
+  uint32_t irq = spin_lock_blocking(s_lock);
+  if (st_get(c) == HTTP_STATE_QUEUED) {
+    st_put(c, next);
+    ok = true;
+  }
+  spin_unlock(s_lock, irq);
+  return ok;
+}
+
+void http_c1_release(http_conn_t *c) {
+  if (st_get(c) != HTTP_STATE_CLOSING)
+    return;  // not a release request
+  http_c1_detach(c);
+  uint32_t irq = spin_lock_blocking(s_lock);
+  st_put(c, HTTP_STATE_RELEASED);  // Core 1 never touches the slot again
+  spin_unlock(s_lock, irq);
+}
+
+void http_c1_fail_all(const char *msg) {
+  for (int i = 0; i < HTTP_MAX_CONNECTIONS; i++) {
+    http_conn_t *c = &s_conns[i];
+    uint32_t irq = spin_lock_blocking(s_lock);
+    http_state_t st = st_get(c);
+    bool live = c->in_use && st >= HTTP_STATE_QUEUED && st <= HTTP_STATE_BODY;
+    spin_unlock(s_lock, irq);
+    if (live)
+      http_c1_fail(c, msg);
+  }
+}
+
+// Build the full request in one PSRAM buffer and mg_send() it; then the
+// request waits for the response head with the read timeout armed.
+void http_c1_send_request(struct mg_connection *nc, http_conn_t *c) {
   size_t path_len = c->path ? strlen(c->path) : 1;
   size_t hdrs_len = c->extra_hdrs ? strlen(c->extra_hdrs) : 0;
   size_t need = path_len + strlen(c->server) + hdrs_len + 256;
@@ -106,7 +221,7 @@ void http_build_and_send_request(struct mg_connection *nc, http_conn_t *c) {
 
   char *buf = umm_malloc(need);
   if (!buf) {
-    conn_fail(c, "request build OOM");
+    http_c1_fail(c, "request build OOM");
     return;
   }
 
@@ -124,556 +239,667 @@ void http_build_and_send_request(struct mg_connection *nc, http_conn_t *c) {
       "%s"
       "%s"
       "Connection: %s\r\n",
-      c->method, c->path, c->server,
+      c->method, c->path ? c->path : "/", c->server,
       has_ua ? "" : "User-Agent: PicOS/1.0\r\n",
       has_ae ? "" : "Accept-Encoding: identity\r\n",
-      c->keep_alive ? "keep-alive" : "close");
+      c->req_keep_alive ? "keep-alive" : "close");
 
-  if (c->extra_hdrs) {
+  if (c->extra_hdrs)
     off += snprintf(buf + off, need - off, "%s", c->extra_hdrs);
-    umm_free(c->extra_hdrs);
-    c->extra_hdrs = NULL;
-  }
 
   if (c->tx_buf && c->tx_len > 0) {
     off += snprintf(buf + off, need - off,
         "Content-Length: %u\r\n\r\n", (unsigned)c->tx_len);
-    memcpy(buf + off, c->tx_buf, c->tx_len);
+    memcpy(buf + off, c->tx_buf, c->tx_len);  // binary safe
     off += c->tx_len;
-    umm_free(c->tx_buf);
-    c->tx_buf = NULL;
   } else {
     off += snprintf(buf + off, need - off, "\r\n");
   }
 
-  mg_send(nc, buf, off);
+  bool sent = mg_send(nc, buf, off);
   umm_free(buf);
+  if (!sent) {
+    http_c1_fail(c, "send failed (out of memory)");
+    return;
+  }
+
+  uint32_t irq = spin_lock_blocking(s_lock);
+  http_state_t st = st_get(c);
+  if (st == HTTP_STATE_CONNECTING || st == HTTP_STATE_SENDING) {
+    c->deadline_connect = 0;
+    c->deadline_read = now_ms() + c->req_read_timeout_ms;
+    st_put(c, HTTP_STATE_HEADERS);
+  }
+  spin_unlock(s_lock, irq);
+}
+
+// Copy the parsed header fields into hdr_buf (lower-case names).
+static void copy_headers(http_conn_t *c, const struct mg_http_message *hm) {
+  c->hdr_count = 0;
+  size_t hdr_off = 0;
+  for (int i = 0; i < MG_MAX_HTTP_HEADERS && hm->headers[i].name.len > 0;
+       i++) {
+    const struct mg_http_header *h = &hm->headers[i];
+    size_t need = h->name.len + 1 + h->value.len + 1;
+    if (hdr_off + need > HTTP_HEADER_BUF_MAX) {
+      printf("[HTTP] Header buf overflow: need %u, have %u/%u\n",
+             (unsigned)need, (unsigned)hdr_off,
+             (unsigned)HTTP_HEADER_BUF_MAX);
+      break;
+    }
+    if (c->hdr_count >= HTTP_MAX_HDR_ENTRIES)
+      break;
+
+    c->hdr_keys[c->hdr_count] = &c->hdr_buf[hdr_off];
+    for (size_t j = 0; j < h->name.len; j++)
+      c->hdr_buf[hdr_off++] =
+          (h->name.buf[j] >= 'A' && h->name.buf[j] <= 'Z')
+              ? h->name.buf[j] + 32
+              : h->name.buf[j];
+    c->hdr_buf[hdr_off++] = '\0';
+
+    c->hdr_vals[c->hdr_count] = &c->hdr_buf[hdr_off];
+    memcpy(&c->hdr_buf[hdr_off], h->value.buf, h->value.len);
+    hdr_off += h->value.len;
+    c->hdr_buf[hdr_off++] = '\0';
+
+    c->hdr_count++;
+  }
+  c->hdr_len = hdr_off;
+}
+
+// Parse the response head once it is complete in nc->recv.  True once the
+// headers are in (state BODY); false if not yet (or the response is bad).
+static bool c1_parse_head(struct mg_connection *nc, http_conn_t *c) {
+  for (;;) {
+    int n = mg_http_get_request_len(nc->recv.buf, nc->recv.len);
+    if (n < 0) {
+      http_c1_fail(c, "malformed response headers");
+      return false;
+    }
+    if (n == 0) {
+      if (nc->recv.len > HTTP_HEAD_MAX) {
+        http_c1_fail(c, "response headers too large");
+      }
+      return false;
+    }
+    struct mg_http_message hm;
+    if (mg_http_parse((const char *)nc->recv.buf, nc->recv.len, &hm) <= 0) {
+      http_c1_fail(c, "malformed response headers");
+      return false;
+    }
+    int status = mg_http_status(&hm);
+    if (status >= 100 && status < 200) {  // interim (100 Continue): skip it
+      mg_iobuf_del(&nc->recv, 0, (size_t)n);
+      continue;
+    }
+
+    copy_headers(c, &hm);
+    c->status_code = status;
+    c->chunked = false;
+    c->chunk_state = CH_SIZE;
+    c->chunk_left = 0;
+    c->content_length = -1;
+    struct mg_str *te = mg_http_get_header(&hm, "Transfer-Encoding");
+    struct mg_str *cl = mg_http_get_header(&hm, "Content-Length");
+    if (te && mg_strcasecmp(*te, mg_str("chunked")) == 0) {
+      c->chunked = true;
+    } else if (cl) {
+      c->content_length = atoi(cl->buf);
+      if (c->content_length < 0)
+        c->content_length = 0;
+    }
+    // No body, whatever the headers say
+    if (status == 204 || status == 304 || strcmp(c->method, "HEAD") == 0) {
+      c->chunked = false;
+      c->content_length = 0;
+    }
+    mg_iobuf_del(&nc->recv, 0, (size_t)n);
+    printf("[HTTP] Headers received, status %d, %s %d\n", status,
+           c->chunked ? "chunked" : "Content-Length", (int)c->content_length);
+
+    uint32_t irq = spin_lock_blocking(s_lock);
+    bool ok = !st_released(st_get(c));
+    if (ok) {
+      __atomic_store_n(&c->headers_done, true, __ATOMIC_RELEASE);
+      c->deadline_connect = 0;
+      c->deadline_read = now_ms() + c->req_read_timeout_ms;
+      st_put(c, HTTP_STATE_BODY);
+      c->pending |= HTTP_CB_HEADERS;
+    }
+    spin_unlock(s_lock, irq);
+    return ok;
+  }
+}
+
+static bool body_complete(const http_conn_t *c) {
+  if (c->chunked)
+    return c->chunk_state == CH_DONE;
+  return c->content_length >= 0 &&
+         c->body_received >= (uint32_t)c->content_length;
+}
+
+// Move body bytes from nc->recv into the sink (ring or spill), decoding
+// chunked framing.  Consumes from nc->recv only what the sink took.
+// Returns false if the body is malformed (the request has been failed).
+static bool c1_feed_body(struct mg_connection *nc, http_conn_t *c,
+                         spill_sink_t *sp) {
+  const uint8_t *p = nc->recv.buf;
+  size_t len = nc->recv.len;
+  size_t used = 0;
+  uint32_t wrote = 0;
+  bool bad = false;
+
+  if (!c->chunked) {
+    size_t want = len;
+    if (c->content_length >= 0) {
+      uint32_t left = (uint32_t)c->content_length - c->body_received;
+      if (want > left)
+        want = left;
+    }
+    wrote = sink_put(c, sp, p, (uint32_t)want);
+    used = wrote;
+  } else {
+    while (used < len && c->chunk_state != CH_DONE) {
+      const uint8_t *q = p + used;
+      size_t avail = len - used;
+      if (c->chunk_state == CH_SIZE || c->chunk_state == CH_TRAILER) {
+        const uint8_t *nl = memchr(q, '\n', avail);
+        if (!nl) {
+          if (avail > 1024) bad = true;  // no line end in sight
+          break;
+        }
+        size_t line = (size_t)(nl - q) + 1;
+        if (c->chunk_state == CH_SIZE) {
+          uint32_t v = 0;
+          size_t k = 0;
+          int h;
+          while (k < line && (h = hexval(q[k])) >= 0) {
+            if (v > 0x07FFFFFFu) { bad = true; break; }
+            v = v * 16 + (uint32_t)h;
+            k++;
+          }
+          if (bad || k == 0) { bad = true; break; }
+          used += line;  // size line (chunk extensions ignored)
+          if (v == 0) {
+            c->chunk_state = CH_TRAILER;
+          } else {
+            c->chunk_left = v;
+            c->chunk_state = CH_DATA;
+          }
+        } else {  // trailer lines until the empty one
+          used += line;
+          if (line == 1 || (line == 2 && q[0] == '\r'))
+            c->chunk_state = CH_DONE;
+        }
+      } else if (c->chunk_state == CH_DATA) {
+        uint32_t n = avail < c->chunk_left ? (uint32_t)avail : c->chunk_left;
+        uint32_t w = sink_put(c, sp, q, n);
+        used += w;
+        wrote += w;
+        c->chunk_left -= w;
+        if (c->chunk_left == 0)
+          c->chunk_state = CH_DATA_CRLF;
+        if (w < n)
+          break;  // sink full
+      } else {  // CH_DATA_CRLF
+        if (q[0] == '\n') {
+          used += 1;
+        } else if (q[0] == '\r') {
+          if (avail < 2) break;
+          if (q[1] != '\n') { bad = true; break; }
+          used += 2;
+        } else {
+          bad = true;
+          break;
+        }
+        c->chunk_state = CH_SIZE;
+      }
+    }
+  }
+
+  if (used)
+    mg_iobuf_del(&nc->recv, 0, used);
+
+  uint32_t irq = spin_lock_blocking(s_lock);
+  c->body_received += wrote;
+  if (!st_released(st_get(c))) {
+    if (wrote)
+      c->pending |= HTTP_CB_REQUEST;
+    // Bytes arrived or are waiting for ring space: the transfer is not idle.
+    if (used || nc->recv.len)
+      c->deadline_read = now_ms() + c->req_read_timeout_ms;
+  }
+  spin_unlock(s_lock, irq);
+
+  if (bad) {
+    http_c1_fail(c, "malformed chunked body");
+    return false;
+  }
+  return true;
+}
+
+static void c1_complete(struct mg_connection *nc, http_conn_t *c,
+                        bool closing) {
+  uint32_t irq = spin_lock_blocking(s_lock);
+  bool done = st_get(c) == HTTP_STATE_BODY;
+  if (done) {
+    c->deadline_read = c->deadline_transfer = 0;
+    st_put(c, HTTP_STATE_DONE);
+    c->pending |= HTTP_CB_COMPLETE;
+  }
+  spin_unlock(s_lock, irq);
+  if (done && !closing && !c->req_keep_alive)
+    nc->is_closing = 1;
+}
+
+// Body bytes still in nc->recv when the connection goes away: decode the
+// rest into a spill buffer so the app can read all of it.
+static bool c1_spill_rest(struct mg_connection *nc, http_conn_t *c) {
+  if (nc->recv.len == 0)
+    return true;
+  spill_sink_t sp = {umm_malloc(nc->recv.len), 0, (uint32_t)nc->recv.len};
+  if (!sp.buf) {
+    http_c1_fail(c, "out of memory keeping the end of the response");
+    return false;
+  }
+  if (!c1_feed_body(nc, c, &sp)) {
+    umm_free(sp.buf);
+    return false;
+  }
+  if (sp.len == 0) {
+    umm_free(sp.buf);
+    return true;
+  }
+  uint32_t irq = spin_lock_blocking(s_lock);
+  uint8_t *old = c->spill;  // never set twice for one response
+  c->spill = sp.buf;
+  c->spill_len = sp.len;
+  c->spill_off = 0;
+  spin_unlock(s_lock, irq);
+  if (old)
+    umm_free(old);
+  return true;
+}
+
+// Parse and move whatever nc->recv holds.  `closing`: the connection is
+// going away (MG_EV_CLOSE), so a close-delimited body ends here and nothing
+// may be left behind in nc->recv.
+static void c1_process(struct mg_connection *nc, http_conn_t *c,
+                       bool closing) {
+  if (!st_active(st_get(c)))
+    return;
+  if (!__atomic_load_n(&c->headers_done, __ATOMIC_RELAXED) &&
+      !c1_parse_head(nc, c)) {
+    if (closing)
+      conn_fail(c, "connection closed before the response headers");
+    return;
+  }
+  if (st_get(c) != HTTP_STATE_BODY)
+    return;
+  if (!c1_feed_body(nc, c, NULL))
+    return;
+
+  if (closing && !body_complete(c)) {
+    if (!c1_spill_rest(nc, c))
+      return;
+    if (!c->chunked && c->content_length < 0) {
+      c1_complete(nc, c, true);  // close-delimited: the close ends the body
+      return;
+    }
+    if (!body_complete(c)) {
+      if (c->chunked)
+        conn_fail(c, "connection closed inside the chunked body");
+      else
+        conn_fail(c, "connection closed after %u of %d bytes",
+                  (unsigned)c->body_received, (int)c->content_length);
+      return;
+    }
+  }
+  if (body_complete(c)) {
+    c1_complete(nc, c, closing);
+  } else if (nc->recv.len > HTTP_RECV_OVERFLOW) {
+    // The app is not reading and Mongoose keeps buffering: give up rather
+    // than exhaust Core 1's pool (and never report this as complete).
+    http_c1_fail(c, "receive buffer overflow (the app is not reading)");
+  }
 }
 
 // ── Mongoose Event Handler ───────────────────────────────────────────────────
-// Non-static: called by wifi.c drain_requests() via mg_http_connect().
-// Runs exclusively on Core 1 inside mg_mgr_poll().
-// Supports streaming: fires HTTP_CB_REQUEST incrementally as data arrives.
+// Runs exclusively on Core 1 inside mg_mgr_poll().  Streaming: fires
+// HTTP_CB_REQUEST incrementally as body data arrives.
 
 void http_ev_fn(struct mg_connection *nc, int ev, void *ev_data) {
   http_conn_t *c = (http_conn_t *)nc->fn_data;
   if (!c)
     return;
+  // A stale connection of this slot (detached connections have no fn_data;
+  // belt and braces).  pcb is still NULL during mg_connect itself.
+  if (c->pcb != NULL && c->pcb != nc)
+    return;
+  http_state_t st = st_get(c);
+  if (st_released(st))
+    return;  // Core 0 let go; the close request is on its way
 
-  // Drain pending nc->recv data into ring buffer on every poll cycle.
-  // MG_EV_READ only fires on NEW TCP data.  If the ring buffer was full
-  // when data arrived, that data stays in nc->recv.  After Lua drains
-  // the ring buffer (http_read on Core 0), this poll handler moves the
-  // buffered data forward — preventing a deadlock where the ring buffer
-  // is empty, nc->recv is full, and no new TCP triggers MG_EV_READ.
-  if (ev == MG_EV_POLL && c->headers_done &&
-      c->state == HTTP_STATE_BODY && nc->recv.len > 0) {
-    uint32_t space = (c->rx_count < c->rx_cap) ? c->rx_cap - c->rx_count : 0;
-    if (space > 0) {
-      uint32_t avail = (uint32_t)nc->recv.len;
-      uint32_t to_copy = (avail < space) ? avail : space;
-      if (to_copy > 0) {
-        uint32_t written = rx_write(c, nc->recv.buf, to_copy);
-        if (written > 0) {
-          mg_iobuf_del(&nc->recv, 0, written);
-          c->body_received += written;
-          c->deadline_read =
-              to_ms_since_boot(get_absolute_time()) + c->read_timeout_ms;
-          pending_set(c, HTTP_CB_REQUEST);
-
-          if (c->content_length >= 0 &&
-              c->body_received >= (uint32_t)c->content_length) {
-            c->state = HTTP_STATE_DONE;
-            pending_set(c, HTTP_CB_COMPLETE);
-            if (!c->keep_alive)
-              nc->is_closing = 1;
-          }
-        }
-      }
+  if (ev == MG_EV_CONNECT) {
+    if (st == HTTP_STATE_CONNECTING) {
+      printf("[HTTP] Connected, sending %s %s\n", c->method,
+             c->path ? c->path : "/");
+      http_c1_send_request(nc, c);
     }
-  } else if (ev == MG_EV_CONNECT) {
-    c->state = HTTP_STATE_SENDING;
-    c->deadline_connect = 0; // connected — cancel connect timeout
-    c->deadline_read = to_ms_since_boot(get_absolute_time()) + c->read_timeout_ms;
-    printf("[HTTP] Connected, sending %s (%u bytes) %s\n", c->method,
-           (unsigned)strlen(c->path), c->path);
-    http_build_and_send_request(nc, c);
-  } else if (ev == MG_EV_HTTP_HDRS) {
-    if (c->headers_done)
-      return;  // Already processed headers for this connection
-    // Headers parsed - extract status code and Content-Length
-    struct mg_http_message *hm = (struct mg_http_message *)ev_data;
-    c->status_code = atoi(hm->message.buf + 9);
-    printf("[HTTP] Headers received, status %d\n", c->status_code);
-
-    struct mg_str *cl = mg_http_get_header(hm, "Content-Length");
-    if (cl) {
-      c->content_length = atoi(cl->buf);
-      printf("[HTTP] Content-Length %d\n", c->content_length);
-    }
-
-    // Parse response headers into hdr_keys/hdr_vals for Lua access.
-    // Must be done here (not MG_EV_HTTP_MSG) because streaming detach
-    // below prevents MG_EV_HTTP_MSG from firing for large responses.
-    c->hdr_count = 0;
-    size_t hdr_off = 0;
-    for (int i = 0; i < MG_MAX_HTTP_HEADERS && hm->headers[i].name.len > 0;
-         i++) {
-      struct mg_http_header *h = &hm->headers[i];
-      size_t need = h->name.len + 1 + h->value.len + 1;
-      if (hdr_off + need > HTTP_HEADER_BUF_MAX) {
-        printf("[HTTP] Header buf overflow: need %u, have %u/%u\n",
-               (unsigned)need, (unsigned)hdr_off,
-               (unsigned)HTTP_HEADER_BUF_MAX);
-        break;
-      }
-      if (c->hdr_count >= HTTP_MAX_HDR_ENTRIES)
-        break;
-
-      // Copy name (lowercased for consistent Lua lookups)
-      c->hdr_keys[c->hdr_count] = &c->hdr_buf[hdr_off];
-      for (size_t j = 0; j < h->name.len; j++)
-        c->hdr_buf[hdr_off++] =
-            (h->name.buf[j] >= 'A' && h->name.buf[j] <= 'Z')
-                ? h->name.buf[j] + 32
-                : h->name.buf[j];
-      c->hdr_buf[hdr_off++] = '\0';
-
-      // Copy value
-      c->hdr_vals[c->hdr_count] = &c->hdr_buf[hdr_off];
-      memcpy(&c->hdr_buf[hdr_off], h->value.buf, h->value.len);
-      hdr_off += h->value.len;
-      c->hdr_buf[hdr_off++] = '\0';
-
-      c->hdr_count++;
-    }
-    c->hdr_len = hdr_off;
-
-    // Copy any body bytes that arrived with the headers.
-    // IMPORTANT: hm->body.len is the Content-Length (total expected), NOT the
-    // bytes currently in the recv buffer.  Actual body data available is:
-    //   recv.len - (body_start - recv_start)
-    // Copying hm->body.len would read past received data into zero-filled
-    // mg_calloc memory, producing a body of mostly null bytes.
-    {
-      size_t body_offset = (size_t)(hm->body.buf - (char *)nc->recv.buf);
-      size_t actual_body = (nc->recv.len > body_offset)
-                               ? nc->recv.len - body_offset
-                               : 0;
-      if (actual_body > hm->body.len)
-        actual_body = hm->body.len;  // never exceed Content-Length
-      if (actual_body > 0) {
-        uint32_t written =
-            rx_write(c, (const uint8_t *)hm->body.buf, (uint32_t)actual_body);
-        if (written > 0) {
-          c->body_received += written;
-          pending_set(c, HTTP_CB_REQUEST);
-        }
-      }
-    }
-
-    c->headers_done = true;
-    c->state = HTTP_STATE_BODY;
-    c->deadline_read = to_ms_since_boot(get_absolute_time()) + c->read_timeout_ms;
-    pending_set(c, HTTP_CB_HEADERS);
-
-    // Trigger Mongoose streaming detach: clear the recv buffer so Mongoose
-    // sees recv.len changed (mongoose.c:2663) and sets pfn=NULL. All
-    // subsequent data arrives as raw MG_EV_READ events instead of being
-    // buffered for MG_EV_HTTP_MSG — critical for large downloads.
-    mg_iobuf_del(&nc->recv, 0, nc->recv.len);
-
-    // Check if the entire body already arrived with headers (small response)
-    if (c->content_length >= 0 &&
-        c->body_received >= (uint32_t)c->content_length) {
-      c->state = HTTP_STATE_DONE;
-      pending_set(c, HTTP_CB_COMPLETE);
-      if (!c->keep_alive) nc->is_closing = 1;
-    }
-  } else if (ev == MG_EV_READ && c->headers_done && c->state != HTTP_STATE_DONE) {
-    // STREAMING: Copy body data incrementally to our rx_buf.
-    // After MG_EV_HTTP_HDRS detach, all body data arrives here as raw reads.
-
-    // Guard: if ring buffer is full and nc->recv is growing dangerously large,
-    // close the connection cleanly before Mongoose hits OOM.  Without TCP
-    // backpressure (MG_ENABLE_TCPIP=1), nc->recv grows unbounded.
-    if (nc->recv.len > 524288) {  // 512KB threshold
-      printf("[HTTP] recv overflow: %lu bytes buffered, ring full — closing\n",
-             (unsigned long)nc->recv.len);
-      snprintf(c->err, sizeof(c->err), "recv overflow (%lu bytes)",
-               (unsigned long)nc->recv.len);
-      c->state = HTTP_STATE_DONE;
-      pending_set(c, HTTP_CB_REQUEST | HTTP_CB_COMPLETE);
-      nc->is_draining = 1;
-    } else {
-      uint32_t avail = (uint32_t)nc->recv.len;
-      if (avail > 0 && c->rx_count < c->rx_cap) {
-        uint32_t space = c->rx_cap - c->rx_count;
-        uint32_t to_copy = (avail < space) ? avail : space;
-
-        if (to_copy > 0) {
-          uint32_t written = rx_write(c, nc->recv.buf, to_copy);
-          if (written > 0) {
-            mg_iobuf_del(&nc->recv, 0, written);  // FREE only what was actually copied
-            c->body_received += written;
-            c->deadline_read = to_ms_since_boot(get_absolute_time()) + c->read_timeout_ms;
-            pending_set(c, HTTP_CB_REQUEST);  // Fire Lua callback with new data
-          }
-        }
-
-        // Check for download completion (streaming mode)
-        if (c->content_length >= 0 &&
-            c->body_received >= (uint32_t)c->content_length) {
-          c->state = HTTP_STATE_DONE;
-          pending_set(c, HTTP_CB_COMPLETE);
-          if (!c->keep_alive) nc->is_closing = 1;
-        }
-      } else if (avail > 0 && c->rx_count >= c->rx_cap) {
-        // Ring buffer full — data stays in nc->recv until Lua drains via
-        // http_read().  Reset deadline so the read timeout doesn't fire
-        // while data is actively arriving (just can't be consumed yet).
-        c->deadline_read =
-            to_ms_since_boot(get_absolute_time()) + c->read_timeout_ms;
-        MG_DEBUG(("[HTTP] Ring buffer full (%u/%u), nc->recv=%lu pending",
-                  (unsigned)c->rx_count, (unsigned)c->rx_cap,
-                  (unsigned long)nc->recv.len));
-      }
-    }
-    // If rx_buf is full, don't consume from nc->recv — TCP backpressure
-    // will pause the sender until Lua drains the buffer via http_read()
-  } else if (ev == MG_EV_HTTP_MSG) {
-    // This only fires for non-streamed connections (where detach didn't happen,
-    // e.g. chunked encoding without Content-Length). Streamed connections
-    // complete via MG_EV_READ completion check above.
-    if (c->headers_done)
-      return;  // Already handled via streaming detach in MG_EV_HTTP_HDRS
-
-    struct mg_http_message *hm = (struct mg_http_message *)ev_data;
-    printf("[HTTP] Response complete (non-streamed), status %d, body_len %zu\n",
-           atoi(hm->message.buf + 9), hm->body.len);
-
-    c->status_code = atoi(hm->message.buf + 9);
-
-    // Log error response bodies for diagnostics
-    if (c->status_code >= 400 && hm->body.len > 0) {
-      size_t show = hm->body.len < 256 ? hm->body.len : 256;
-      printf("[HTTP] Error body: %.*s\n", (int)show, hm->body.buf);
-    }
-
-    // Parse response headers into hdr_keys/hdr_vals for Lua access
-    c->hdr_count = 0;
-    size_t hdr_off = 0;
-    for (int i = 0; i < MG_MAX_HTTP_HEADERS && hm->headers[i].name.len > 0;
-         i++) {
-      struct mg_http_header *h = &hm->headers[i];
-      size_t need = h->name.len + 1 + h->value.len + 1;
-      if (hdr_off + need > HTTP_HEADER_BUF_MAX) {
-        printf("[HTTP] Header buf overflow: need %u, have %u/%u\n",
-               (unsigned)need, (unsigned)hdr_off,
-               (unsigned)HTTP_HEADER_BUF_MAX);
-        break;
-      }
-      if (c->hdr_count >= HTTP_MAX_HDR_ENTRIES)
-        break;
-
-      // Copy name (lowercased for consistent Lua lookups)
-      c->hdr_keys[c->hdr_count] = &c->hdr_buf[hdr_off];
-      for (size_t j = 0; j < h->name.len; j++)
-        c->hdr_buf[hdr_off++] =
-            (h->name.buf[j] >= 'A' && h->name.buf[j] <= 'Z')
-                ? h->name.buf[j] + 32
-                : h->name.buf[j];
-      c->hdr_buf[hdr_off++] = '\0';
-
-      // Copy value
-      c->hdr_vals[c->hdr_count] = &c->hdr_buf[hdr_off];
-      memcpy(&c->hdr_buf[hdr_off], h->value.buf, h->value.len);
-      hdr_off += h->value.len;
-      c->hdr_buf[hdr_off++] = '\0';
-
-      c->hdr_count++;
-    }
-    c->hdr_len = hdr_off;
-
-    // Copy body data
-    if (hm->body.len > 0) {
-      uint32_t written = rx_write(c, (uint8_t *)hm->body.buf, (uint32_t)hm->body.len);
-      c->body_received += written;
-    }
-
-    c->headers_done = true;
-    c->state = HTTP_STATE_DONE;
-    pending_set(c, HTTP_CB_HEADERS | HTTP_CB_COMPLETE);
-
-    if (!c->keep_alive) {
-      nc->is_closing = 1;
-    }
+  } else if (ev == MG_EV_READ || ev == MG_EV_POLL) {
+    // POLL too: data left in nc->recv while the ring was full moves once the
+    // app has read (MG_EV_READ fires only for new bytes).
+    if (st_active(st) && nc->recv.len > 0)
+      c1_process(nc, c, false);
   } else if (ev == MG_EV_ERROR) {
-    // If we've received any body data (streaming), treat as partial success
-    // TLS errors after some data received are often benign (late errors)
-    uint32_t pending_data = (nc && c->headers_done) ? (uint32_t)nc->recv.len : 0;
-    if (c->state == HTTP_STATE_DONE) {
-      // Already processed, ignore
-    } else if (c->body_received > 0 || pending_data > 0) {
-      // Got some data - copy any pending data and treat as partial success
-      printf("[HTTP] Partial response: got %u bytes, %u pending in buffer\n", 
-             c->body_received, pending_data);
-      if (pending_data > 0) {
-        uint32_t written = rx_write(c, nc->recv.buf, pending_data);
-        if (written > 0) {
-          mg_iobuf_del(&nc->recv, 0, written);
-          c->body_received += written;
-        }
-      }
-      // Fire both REQUEST (for data) and COMPLETE (for done)
-      // Set error so Lua can distinguish partial from clean completion
-      snprintf(c->err, sizeof(c->err), "partial: %s", (char *)ev_data);
-      c->state = HTTP_STATE_DONE;
-      pending_set(c, HTTP_CB_REQUEST | HTTP_CB_COMPLETE);
-      nc->is_closing = 1;
-    } else {
-      // No data received, treat as failure.  A certificate that did not
-      // verify gets a readable reason instead of mbedTLS's error number.
-      char tls_err[HTTP_ERR_MAX];
-      if (wifi_tls_verify_error(nc, tls_err, sizeof(tls_err)))
-        conn_fail(c, "%s", tls_err);
-      else
-        conn_fail(c, "Mongoose error: %s", (char *)ev_data);
-    }
+    if (st == HTTP_STATE_DONE || st == HTTP_STATE_FAILED)
+      return;  // late error after the response was complete
+    char tls_err[HTTP_ERR_MAX];
+    if (wifi_tls_verify_error(nc, tls_err, sizeof(tls_err)))
+      conn_fail(c, "%s", tls_err);
+    else if (c->body_received > 0)
+      conn_fail(c, "partial: %s", (char *)ev_data);  // truncated, not done
+    else
+      conn_fail(c, "Mongoose error: %s", (char *)ev_data);
+    // Mongoose closes nc itself; MG_EV_CLOSE clears pcb.
   } else if (ev == MG_EV_CLOSE) {
     printf("[HTTP] Connection closed (slot %ld, state %d)\n",
-           (long)(c - s_conns), (int)c->state);
-    if (c->state != HTTP_STATE_DONE && c->state != HTTP_STATE_FAILED) {
-      pending_set(c, HTTP_CB_CLOSED);
-    }
-    c->pcb = NULL;
+           (long)(c - s_conns), (int)st);
+    if (st_active(st))
+      c1_process(nc, c, true);
+    else if (st == HTTP_STATE_QUEUED || st == HTTP_STATE_CONNECTING)
+      conn_fail(c, "connection closed");
+    if (c->pcb == nc)
+      c->pcb = NULL;
   }
 }
 
-// ── Public API
+// ── Timeout enforcement (called from wifi_poll on Core 1) ───────────────────
+
+void http_check_timeouts(void) {
+  uint32_t now = now_ms();
+  for (int i = 0; i < HTTP_MAX_CONNECTIONS; i++) {
+    http_conn_t *c = &s_conns[i];
+    char msg[48];
+    msg[0] = '\0';
+    uint32_t irq = spin_lock_blocking(s_lock);
+    if (c->in_use) {
+      http_state_t st = st_get(c);
+      bool connecting = st == HTTP_STATE_QUEUED ||
+                        st == HTTP_STATE_CONNECTING ||
+                        st == HTTP_STATE_SENDING;
+      bool receiving = st == HTTP_STATE_HEADERS || st == HTTP_STATE_BODY;
+      // Connect timeout: QUEUED → CONNECTING → SENDING
+      if (connecting && deadline_passed(now, c->deadline_connect))
+        snprintf(msg, sizeof(msg), "connect timeout (%ums)",
+                 (unsigned)c->req_connect_timeout_ms);
+      // Read timeout: waiting for the head or the body, nothing arriving
+      else if (receiving && deadline_passed(now, c->deadline_read))
+        snprintf(msg, sizeof(msg), "read timeout (%ums)",
+                 (unsigned)c->req_read_timeout_ms);
+      // Transfer deadline: hard ceiling regardless of data trickle
+      else if (receiving && deadline_passed(now, c->deadline_transfer))
+        snprintf(msg, sizeof(msg), "transfer timeout (%ums)",
+                 (unsigned)c->req_max_transfer_ms);
+    }
+    spin_unlock(s_lock, irq);
+    if (msg[0])
+      http_c1_fail(c, msg);  // clears fn_data: no event reaches the slot
+  }
+}
+
+// ── Public API (Core 0)
 // ────────────────────────────────────────────────────────────────
 
-void http_init(void) { memset(s_conns, 0, sizeof(s_conns)); }
+void http_init(void) {
+  memset(s_conns, 0, sizeof(s_conns));
+  if (!s_lock)
+    s_lock = spin_lock_instance(spin_lock_claim_unused(true));
+}
 
-void http_close_all(void (*on_free)(void *lua_ud)) {
-  // Push CLOSE requests for all in-use connections.  If a CONN_REQ_HTTP_START
-  // for any of these is already in the queue, the FIFO ordering guarantees
-  // that Core 1 processes START before CLOSE — so c->pcb will be set before
-  // the CLOSE is handled.
+static void push_close(http_conn_t *c) {
+  conn_req_t req = {.type = CONN_REQ_HTTP_CLOSE, .conn = c};
+  c->close_queued = wifi_req_push(&req);
+}
+
+static bool any_releasing(void);
+
+// Claim a free slot for the two buffers (NULL if none).
+static http_conn_t *claim_slot(char *hdr, uint8_t *rx) {
+  http_conn_t *got = NULL;
+  uint32_t irq = spin_lock_blocking(s_lock);
   for (int i = 0; i < HTTP_MAX_CONNECTIONS; i++) {
-    if (s_conns[i].in_use) {
-      conn_req_t req = {.type = CONN_REQ_HTTP_CLOSE, .conn = &s_conns[i]};
-      wifi_req_push(&req);
+    http_conn_t *c = &s_conns[i];
+    if (!c->in_use) {
+      memset(c, 0, sizeof(*c));
+      c->range_from = -1;
+      c->range_to = -1;
+      c->connect_timeout_ms = 10000;
+      c->read_timeout_ms = 30000;
+      c->content_length = -1;
+      c->hdr_buf = hdr;
+      c->rx_buf = rx;
+      c->rx_cap = HTTP_RECV_BUF_DEFAULT;
+      c->in_use = true;
+      got = c;
+      break;
     }
   }
-
-  // Wait for all connections to close: pcb cleared (by CONN_REQ_HTTP_CLOSE
-  // or MG_EV_CLOSE) and no connection still queued/pending.
-  uint32_t start_ms = to_ms_since_boot(get_absolute_time());
-  bool any_pending;
-  do {
-    any_pending = false;
-    for (int i = 0; i < HTTP_MAX_CONNECTIONS; i++) {
-      if (s_conns[i].in_use &&
-          (s_conns[i].pcb != NULL ||
-           s_conns[i].state == HTTP_STATE_QUEUED)) {
-        any_pending = true;
-        break;
-      }
-    }
-    if (any_pending)
-      sleep_ms(5);
-  } while (any_pending &&
-           (to_ms_since_boot(get_absolute_time()) - start_ms) < 500);
-
-  // Free all connections
-  for (int i = 0; i < HTTP_MAX_CONNECTIONS; i++) {
-    if (s_conns[i].in_use) {
-      if (on_free && s_conns[i].lua_ud)
-        on_free(s_conns[i].lua_ud);
-      http_free(&s_conns[i]);
-    }
-  }
+  spin_unlock(s_lock, irq);
+  return got;
 }
 
 http_conn_t *http_alloc(void) {
-  for (int i = 0; i < HTTP_MAX_CONNECTIONS; i++) {
-    if (!s_conns[i].in_use) {
-      memset(&s_conns[i], 0, sizeof(s_conns[i]));
-      s_conns[i].in_use = true;
-      s_conns[i].range_from = -1;
-      s_conns[i].range_to = -1;
-      s_conns[i].connect_timeout_ms = 10000;
-      s_conns[i].read_timeout_ms = 30000;
-      // Claim a hardware spinlock for cross-core ring buffer protection
-      s_conns[i].rx_spin_num = spin_lock_claim_unused(true);
-      s_conns[i].rx_spinlock = spin_lock_instance(s_conns[i].rx_spin_num);
-      s_conns[i].hdr_buf = umm_malloc(HTTP_HEADER_BUF_MAX);
-      s_conns[i].rx_buf = umm_malloc(HTTP_RECV_BUF_DEFAULT);
-      s_conns[i].rx_cap = HTTP_RECV_BUF_DEFAULT;
-      if (!s_conns[i].hdr_buf || !s_conns[i].rx_buf) {
-        printf("[HTTP] Failed to allocate buffers for connection %d (OOM)\n",
-               i);
-        http_free(&s_conns[i]);
-        return NULL;
-      }
-      printf("[HTTP] Allocated connection %d\n", i);
-      return &s_conns[i];
-    }
+  http_reap();
+  char *hdr = umm_malloc(HTTP_HEADER_BUF_MAX);
+  uint8_t *rx = umm_malloc(HTTP_RECV_BUF_DEFAULT);
+  if (!hdr || !rx) {
+    printf("[HTTP] Failed to allocate connection buffers (OOM)\n");
+    umm_free(hdr);
+    umm_free(rx);
+    return NULL;
   }
-  printf("[HTTP] Failed to allocate connection: all %d slots in use\n",
-         HTTP_MAX_CONNECTIONS);
-  return NULL;
-}
-
-void http_close(http_conn_t *c) {
-  if (!c)
-    return;
-  if (c->pcb) {
-    // Queue CLOSE for Core 1 — do not touch nc->is_closing from Core 0
-    conn_req_t req = {.type = CONN_REQ_HTTP_CLOSE, .conn = c};
-    wifi_req_push(&req);
-    // Note: c->pcb is NOT cleared here; Core 1 clears it in
-    // CONN_REQ_HTTP_CLOSE processing and again in MG_EV_CLOSE.
+  http_conn_t *got = claim_slot(hdr, rx);
+  // Pool full but a connection is being released (closed just now): Core 1
+  // acknowledges within a tick or two, so wait briefly rather than fail a
+  // close-then-reopen.
+  uint32_t start = now_ms();
+  while (!got && any_releasing() && now_ms() - start < HTTP_ALLOC_WAIT_MS) {
+    sleep_ms(1);
+    http_reap();
+    got = claim_slot(hdr, rx);
   }
-  // Do not free extra_hdrs or tx_buf here: if a CONN_REQ_HTTP_START is in
-  // the queue, Core 1 owns those buffers until after MG_EV_CONNECT fires.
-  // They will be freed by http_ev_fn() MG_EV_CONNECT, drain_requests()
-  // (keep-alive path), or http_free() after waiting for Core 1.
-  if (c->state != HTTP_STATE_QUEUED) {
-    c->state = HTTP_STATE_IDLE;
+  if (!got) {
+    umm_free(hdr);
+    umm_free(rx);
+    printf("[HTTP] Failed to allocate connection: all %d slots in use\n",
+           HTTP_MAX_CONNECTIONS);
+    return NULL;
   }
-  uint32_t irq = spin_lock_blocking(c->rx_spinlock);
-  c->pending = 0;
-  spin_unlock(c->rx_spinlock, irq);
+  printf("[HTTP] Allocated connection %d\n", (int)(got - s_conns));
+  return got;
 }
 
 void http_free(http_conn_t *c) {
   if (!c)
     return;
-
-  // Enqueue a close if there is an active connection
-  if (c->pcb) {
-    conn_req_t req = {.type = CONN_REQ_HTTP_CLOSE, .conn = c};
-    wifi_req_push(&req);
+  uint32_t irq = spin_lock_blocking(s_lock);
+  if (!c->in_use || st_released(st_get(c))) {
+    spin_unlock(s_lock, irq);
+    return;
   }
+  st_put(c, HTTP_STATE_CLOSING);
+  c->pending = 0;
+  spin_unlock(s_lock, irq);
+  c->lua_ud = NULL;
+  push_close(c);  // on failure the slot stays CLOSING; http_reap retries
+}
 
-  // Wait briefly for Core 1 to process any pending requests for this conn
-  // so we don't free extra_hdrs/tx_buf while Core 1 is still using them.
-  uint32_t start_ms = to_ms_since_boot(get_absolute_time());
-  while ((c->pcb != NULL || c->state == HTTP_STATE_QUEUED) &&
-         (to_ms_since_boot(get_absolute_time()) - start_ms) < 200) {
-    sleep_ms(1);
-  }
-  if (c->pcb != NULL || c->state == HTTP_STATE_QUEUED)
-    printf("[HTTP] http_free: timeout waiting for Core 1 (conn %d)\n",
-           (int)(c - s_conns));
-  __dmb(); // ensure Core 1 writes visible before we free buffers
+void http_close(http_conn_t *c) { http_free(c); }
 
-  umm_free(c->path);
-  c->path = NULL;
-  umm_free(c->extra_hdrs);
-  c->extra_hdrs = NULL;
-  umm_free(c->tx_buf);
-  c->tx_buf = NULL;
-  umm_free(c->rx_buf);
-  umm_free(c->hdr_buf);
-  // Unclaim spinlock before zeroing the struct
-  if (c->rx_spinlock) {
-    spin_lock_unclaim(c->rx_spin_num);
+void http_reap(void) {
+  for (int i = 0; i < HTTP_MAX_CONNECTIONS; i++) {
+    http_conn_t *c = &s_conns[i];
+    void *bufs[6] = {0};
+    bool retry = false;
+    uint32_t irq = spin_lock_blocking(s_lock);
+    if (c->in_use) {
+      http_state_t st = st_get(c);
+      if (st == HTTP_STATE_RELEASED) {
+        bufs[0] = c->path;
+        bufs[1] = c->extra_hdrs;
+        bufs[2] = c->tx_buf;
+        bufs[3] = c->rx_buf;
+        bufs[4] = c->hdr_buf;
+        bufs[5] = c->spill;
+        memset(c, 0, sizeof(*c));  // in_use = false
+      } else if (st == HTTP_STATE_CLOSING && !c->close_queued) {
+        retry = true;
+      }
+    }
+    spin_unlock(s_lock, irq);
+    for (int k = 0; k < 6; k++)
+      umm_free(bufs[k]);
+    if (retry)
+      push_close(c);
   }
-  memset(c, 0, sizeof(*c));
+}
+
+static bool any_releasing(void) {
+  bool r = false;
+  uint32_t irq = spin_lock_blocking(s_lock);
+  for (int i = 0; i < HTTP_MAX_CONNECTIONS && !r; i++)
+    r = s_conns[i].in_use && st_released(st_get(&s_conns[i]));
+  spin_unlock(s_lock, irq);
+  return r;
+}
+
+void http_close_all(void (*on_free)(void *lua_ud)) {
+  for (int i = 0; i < HTTP_MAX_CONNECTIONS; i++) {
+    http_conn_t *c = http_get_conn(i);
+    if (!c || st_released(st_get(c)))
+      continue;
+    if (on_free && c->lua_ud)
+      on_free(c->lua_ud);
+    http_free(c);
+  }
+  // Wait (bounded) for Core 1 to release them, reclaiming as they come.
+  uint32_t start_ms = now_ms();
+  for (;;) {
+    http_reap();
+    if (!any_releasing() || now_ms() - start_ms >= 500)
+      break;
+    sleep_ms(5);
+  }
+  if (any_releasing())
+    printf("[HTTP] close_all: Core 1 has not released every slot yet\n");
 }
 
 bool http_set_recv_buf(http_conn_t *c, uint32_t bytes) {
   if (!c || bytes == 0 || bytes > HTTP_RECV_BUF_MAX)
     return false;
-  // Use free + malloc instead of realloc to avoid memcpy creating stale
-  // XIP cache entries on Core 0.  Core 1 writes response data to rx_buf;
-  // if Core 0's cache has entries from a realloc copy, it reads stale data
-  // (RP2350 has per-core XIP caches, no hardware coherency for PSRAM).
-  uint32_t irq = spin_lock_blocking(c->rx_spinlock);
-  umm_free(c->rx_buf);
-  c->rx_buf = umm_malloc(bytes);
-  if (!c->rx_buf) {
-    c->rx_cap = 0;
-    spin_unlock(c->rx_spinlock, irq);
-    return false;
-  }
+  // A fresh buffer rather than realloc: a realloc memcpy would leave stale
+  // XIP cache lines on Core 0 for a buffer Core 1 writes (RP2350 has
+  // per-core XIP caches, no hardware coherency for PSRAM).
+  uint8_t *nb = umm_malloc(bytes);
+  if (!nb)
+    return false;  // the old buffer stays
+  uint32_t irq = spin_lock_blocking(s_lock);
+  uint8_t *old = c->rx_buf;
+  c->rx_buf = nb;
   c->rx_cap = bytes;
   c->rx_head = 0;
   c->rx_tail = 0;
   c->rx_count = 0;
-  spin_unlock(c->rx_spinlock, irq);
+  spin_unlock(s_lock, irq);
+  umm_free(old);
   return true;
 }
 
 static bool start_request(http_conn_t *c, const char *method, const char *path,
                           const char *extra_hdr, const char *body,
                           size_t body_len) {
-  if (!c)
+  if (!c || !path)
     return false;
 
   if (!wifi_is_available())
     return false;
 
-  // Reset state for a new request — hold spinlock while resetting ring buffer
+  // Only between requests: never while Core 1 may still read the buffers
+  // below or run a connection for this slot.
+  http_state_t st = st_get(c);
+  if (st != HTTP_STATE_IDLE && st != HTTP_STATE_DONE &&
+      st != HTTP_STATE_FAILED)
+    return false;
+
+  // Request buffers: Core 0 allocates and frees them; Core 1 only reads
+  // them between CONN_REQ_HTTP_START and sending.  The body is binary.
+  char *new_path = http_strdup(path);
+  char *new_hdrs = extra_hdr ? http_strdup(extra_hdr) : NULL;
+  char *new_tx = NULL;
+  if (body && body_len > 0) {
+    new_tx = umm_malloc(body_len);
+    if (new_tx)
+      memcpy(new_tx, body, body_len);
+  }
+  if (!new_path || (extra_hdr && !new_hdrs) ||
+      (body && body_len > 0 && !new_tx)) {
+    umm_free(new_path);
+    umm_free(new_hdrs);
+    umm_free(new_tx);
+    snprintf(c->err, sizeof(c->err), "request alloc failed (OOM)");
+    return false;
+  }
+
+  uint32_t now = now_ms();
+  uint32_t irq = spin_lock_blocking(s_lock);
+  char *old_path = c->path, *old_hdrs = c->extra_hdrs, *old_tx = c->tx_buf;
+  uint8_t *old_spill = c->spill;
+  c->path = new_path;
+  c->extra_hdrs = new_hdrs;
+  c->tx_buf = new_tx;
+  c->tx_len = new_tx ? (uint32_t)body_len : 0;
+  strncpy(c->method, method, sizeof(c->method) - 1);
+  c->method[sizeof(c->method) - 1] = '\0';
+
   c->status_code = 0;
   c->content_length = -1;
   c->body_received = 0;
-  c->headers_done = false;
+  __atomic_store_n(&c->headers_done, false, __ATOMIC_RELAXED);
+  c->chunked = false;
+  c->chunk_state = CH_SIZE;
+  c->chunk_left = 0;
   c->hdr_count = 0;
   c->hdr_len = 0;
   c->err[0] = '\0';
-  {
-    uint32_t irq = spin_lock_blocking(c->rx_spinlock);
-    c->rx_head = 0;
-    c->rx_tail = 0;
-    c->rx_count = 0;
-    c->pending = 0;
-    spin_unlock(c->rx_spinlock, irq);
-  }
+  c->spill = NULL;
+  c->spill_len = c->spill_off = 0;
+  c->rx_head = c->rx_tail = c->rx_count = 0;
+  c->pending = 0;
 
-  strncpy(c->method, method, sizeof(c->method) - 1);
-
-  umm_free(c->path);
-  c->path = http_strdup(path);
-  if (!c->path) {
-    conn_fail(c, "path alloc failed");
-    return false;
-  }
-
-  // Allocate request buffers — ownership transfers to Core 1 at push time.
-  // Core 1 frees them in drain_requests() (keep-alive) or http_ev_fn()
-  // MG_EV_CONNECT (new connection).
-  umm_free(c->extra_hdrs);
-  c->extra_hdrs = extra_hdr ? http_strdup(extra_hdr) : NULL;
-  umm_free(c->tx_buf);
-  c->tx_buf = body ? http_strdup(body) : NULL;
-  c->tx_len = (uint32_t)body_len;
-
-  // Mark as queued so http_close_all() and http_free() know to wait
-  c->state = HTTP_STATE_QUEUED;
-  uint32_t now_ms = to_ms_since_boot(get_absolute_time());
-  c->deadline_connect = now_ms + c->connect_timeout_ms;
+  c->req_keep_alive = c->keep_alive;
+  c->req_connect_timeout_ms = c->connect_timeout_ms;
+  c->req_read_timeout_ms = c->read_timeout_ms;
+  c->req_max_transfer_ms = c->max_transfer_ms;
+  c->deadline_connect = now + c->req_connect_timeout_ms;
   c->deadline_read = 0;
-  c->deadline_transfer = (c->max_transfer_ms > 0) ? now_ms + c->max_transfer_ms : 0;
+  c->deadline_transfer =
+      c->req_max_transfer_ms > 0 ? now + c->req_max_transfer_ms : 0;
+  st_put(c, HTTP_STATE_QUEUED);
+  spin_unlock(s_lock, irq);
 
-  // Push to Core 1's request queue — it will call mg_http_connect() /
-  // mg_printf() / etc. from within drain_requests().
+  umm_free(old_path);
+  umm_free(old_hdrs);
+  umm_free(old_tx);
+  umm_free(old_spill);
+
+  // Core 1 runs mg_connect / the keep-alive reuse from drain_requests().
   conn_req_t req = {.type = CONN_REQ_HTTP_START, .conn = c};
   if (!wifi_req_push(&req)) {
-    // Queue full — fail immediately and release buffers
-    umm_free(c->path);
-    c->path = NULL;
-    umm_free(c->extra_hdrs);
-    c->extra_hdrs = NULL;
-    umm_free(c->tx_buf);
-    c->tx_buf = NULL;
-    conn_fail(c, "request queue full");
+    conn_fail(c, "request queue full");  // Core 1 never saw it
     return false;
   }
-
   return true;
 }
 
@@ -690,57 +916,105 @@ uint32_t http_read(http_conn_t *c, uint8_t *out, uint32_t len) {
   if (!c || !out || len == 0)
     return 0;
 
-  uint32_t irq = spin_lock_blocking(c->rx_spinlock);
-
-  if (c->rx_count == 0) {
-    spin_unlock(c->rx_spinlock, irq);
-    return 0;
-  }
+  uint32_t irq = spin_lock_blocking(s_lock);
   uint32_t n = (len < c->rx_count) ? len : c->rx_count;
-
-  // Read through uncached alias — bypasses Core 0's XIP cache to see
-  // fresh data written by Core 1 to physical PSRAM.
-  const uint8_t *uc = rx_buf_uncached(c->rx_buf);
-  uint32_t till_end = c->rx_cap - c->rx_tail;
-  if (n <= till_end) {
-    memcpy(out, &uc[c->rx_tail], n);
-    c->rx_tail += n;
-    if (c->rx_tail == c->rx_cap)
-      c->rx_tail = 0;
-  } else {
-    memcpy(out, &uc[c->rx_tail], till_end);
-    memcpy(out + till_end, uc, n - till_end);
-    c->rx_tail = n - till_end;
+  if (n > 0) {
+    // Read through uncached alias — bypasses Core 0's XIP cache to see
+    // fresh data written by Core 1 to physical PSRAM.
+    const uint8_t *uc = rx_buf_uncached(c->rx_buf);
+    uint32_t till_end = c->rx_cap - c->rx_tail;
+    if (n <= till_end) {
+      memcpy(out, &uc[c->rx_tail], n);
+      c->rx_tail += n;
+      if (c->rx_tail == c->rx_cap)
+        c->rx_tail = 0;
+    } else {
+      memcpy(out, &uc[c->rx_tail], till_end);
+      memcpy(out + till_end, uc, n - till_end);
+      c->rx_tail = n - till_end;
+    }
+    c->rx_count -= n;
   }
-  c->rx_count -= n;
-
-  spin_unlock(c->rx_spinlock, irq);
-
+  // The ring first, then what was spilled when the server closed.
+  if (n < len && c->spill && c->spill_off < c->spill_len) {
+    uint32_t m = c->spill_len - c->spill_off;
+    if (m > len - n)
+      m = len - n;
+    memcpy(out + n, rx_buf_uncached(c->spill) + c->spill_off, m);
+    c->spill_off += m;
+    n += m;
+  }
+  spin_unlock(s_lock, irq);
   return n;
 }
 
 uint32_t http_bytes_available(http_conn_t *c) {
   if (!c) return 0;
-  uint32_t irq = spin_lock_blocking(c->rx_spinlock);
-  uint32_t n = c->rx_count;
-  spin_unlock(c->rx_spinlock, irq);
+  uint32_t irq = spin_lock_blocking(s_lock);
+  uint32_t n = c->rx_count + (c->spill ? c->spill_len - c->spill_off : 0);
+  spin_unlock(s_lock, irq);
   return n;
 }
 
 http_conn_t *http_get_conn(int idx) {
-  return (idx >= 0 && idx < HTTP_MAX_CONNECTIONS && s_conns[idx].in_use)
-             ? &s_conns[idx]
-             : NULL;
+  if (idx < 0 || idx >= HTTP_MAX_CONNECTIONS)
+    return NULL;
+  uint32_t irq = spin_lock_blocking(s_lock);
+  bool used = s_conns[idx].in_use;
+  spin_unlock(s_lock, irq);
+  return used ? &s_conns[idx] : NULL;
 }
 
 uint8_t http_take_pending(http_conn_t *c) {
   if (!c)
     return 0;
-  uint32_t irq = spin_lock_blocking(c->rx_spinlock);
+  uint32_t irq = spin_lock_blocking(s_lock);
   uint8_t p = c->pending;
   c->pending = 0;
-  spin_unlock(c->rx_spinlock, irq);
+  spin_unlock(s_lock, irq);
   return p;
+}
+
+http_state_t http_get_state(http_conn_t *c) {
+  return c ? st_get(c) : HTTP_STATE_IDLE;
+}
+
+const char *http_get_error(http_conn_t *c) {
+  if (!c)
+    return NULL;
+  // Core 1 writes err only before publishing FAILED (or a DONE it reached);
+  // in these states nobody is writing it.
+  http_state_t st = st_get(c);
+  if (st != HTTP_STATE_IDLE && st != HTTP_STATE_DONE &&
+      st != HTTP_STATE_FAILED)
+    return NULL;
+  return c->err[0] ? c->err : NULL;
+}
+
+bool http_headers_ready(http_conn_t *c) {
+  return c && __atomic_load_n(&c->headers_done, __ATOMIC_ACQUIRE);
+}
+
+int http_get_status(http_conn_t *c) {
+  return http_headers_ready(c) ? c->status_code : 0;
+}
+
+void http_get_progress(http_conn_t *c, int *received, int *total) {
+  int r = 0, t = -1;
+  if (c) {
+    uint32_t irq = spin_lock_blocking(s_lock);
+    r = (int)c->body_received;
+    spin_unlock(s_lock, irq);
+    if (http_headers_ready(c))
+      t = (int)c->content_length;
+  }
+  if (received) *received = r;
+  if (total) *total = t;
+}
+
+bool http_is_complete(http_conn_t *c) {
+  http_state_t st = http_get_state(c);
+  return st == HTTP_STATE_DONE || st == HTTP_STATE_FAILED;
 }
 
 void http_poll(void) {}
@@ -752,48 +1026,6 @@ void http_poll(void) {}
 // can call it safely every poll cycle.
 void http_fire_c_pending(void) {
   // Future: iterate s_conns, check pending flags, call C callbacks.
-}
-
-// ── Timeout enforcement (called from wifi_poll on Core 1) ───────────────────
-
-void http_check_timeouts(void) {
-  uint32_t now = to_ms_since_boot(get_absolute_time());
-  for (int i = 0; i < HTTP_MAX_CONNECTIONS; i++) {
-    http_conn_t *c = &s_conns[i];
-    if (!c->in_use) continue;
-
-    // Connect timeout: covers QUEUED → CONNECTING → SENDING
-    if ((c->state == HTTP_STATE_QUEUED || c->state == HTTP_STATE_CONNECTING ||
-         c->state == HTTP_STATE_SENDING) &&
-        c->deadline_connect > 0 && now > c->deadline_connect) {
-      conn_fail(c, "connect timeout (%ums)", (unsigned)c->connect_timeout_ms);
-      if (c->pcb) {
-        ((struct mg_connection *)c->pcb)->is_closing = 1;
-        c->pcb = NULL;
-      }
-      c->deadline_connect = 0;
-    }
-    // Read timeout: covers HEADERS and BODY (idle — no data arriving)
-    else if ((c->state == HTTP_STATE_HEADERS || c->state == HTTP_STATE_BODY) &&
-             c->deadline_read > 0 && now > c->deadline_read) {
-      conn_fail(c, "read timeout (%ums)", (unsigned)c->read_timeout_ms);
-      if (c->pcb) {
-        ((struct mg_connection *)c->pcb)->is_closing = 1;
-        c->pcb = NULL;
-      }
-      c->deadline_read = 0;
-    }
-    // Transfer deadline: hard ceiling regardless of data trickle (slowloris)
-    else if ((c->state == HTTP_STATE_HEADERS || c->state == HTTP_STATE_BODY) &&
-             c->deadline_transfer > 0 && now > c->deadline_transfer) {
-      conn_fail(c, "transfer timeout (%ums)", (unsigned)c->max_transfer_ms);
-      if (c->pcb) {
-        ((struct mg_connection *)c->pcb)->is_closing = 1;
-        c->pcb = NULL;
-      }
-      c->deadline_transfer = 0;
-    }
-  }
 }
 
 // ── Custom Mongoose Allocator ────────────────────────────────────────────────

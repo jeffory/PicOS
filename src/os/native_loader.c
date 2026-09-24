@@ -4,8 +4,10 @@
 #include "app_abi.h"
 #include "../drivers/audio.h"
 #include "../drivers/display.h"
+#include "../drivers/http.h"
 #include "../drivers/keyboard.h"
 #include "../drivers/sdcard.h"
+#include "../drivers/tcp.h"
 #include "../os/os.h"
 
 #include "umm_malloc.h"
@@ -593,6 +595,10 @@ out:
   g_native_code_base = g_native_code_limit = 0;
   g_native_data_base = g_native_data_limit = 0;
   g_native_code_vaddr = g_native_data_vaddr = 0;
+  // Release the app's HTTP/TCP connections while Core 1 still runs: it has
+  // to acknowledge each close before the slot can be reclaimed.
+  http_close_all(NULL);
+  tcp_close_all();
   g_core1_pause = true;
   for (int i = 0; i < 200 && !g_core1_paused; i++)
     sleep_ms(1);

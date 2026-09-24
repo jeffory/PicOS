@@ -390,81 +390,57 @@ static void drain_requests(void) {
         http_conn_t *c = req.conn;
         if (!c) break;
 
-        if (c->keep_alive && c->pcb != NULL) {
-          // Reuse existing keep-alive connection — send new request immediately
-          struct mg_connection *nc = (struct mg_connection *)c->pcb;
-          c->state = HTTP_STATE_SENDING;
-          c->pending = 0;
+        struct mg_connection *old = (struct mg_connection *)c->pcb;
+        if (c->req_keep_alive && old && !old->is_closing && !old->is_draining) {
+          // Reuse the kept-alive connection.  The response is parsed by
+          // http_ev_fn itself (no Mongoose HTTP handler to re-attach).
+          if (!http_c1_begin(c, HTTP_STATE_SENDING)) break;
+          mg_iobuf_del(&old->recv, 0, old->recv.len);  // stray bytes
           printf("[HTTP] Reusing connection for %s %s\n", c->method, c->path);
-          http_build_and_send_request(nc, c);
-        } else {
-          // New connection
-          char url[320];
-          snprintf(url, sizeof(url), "%s://%s:%u",
-                   c->use_ssl ? "https" : "http", c->server, c->port);
-          printf("[HTTP] Connecting to %s (SSL=%d)...\n", url, c->use_ssl);
-
-          // Transition away from QUEUED *before* any mg_* call so that
-          // http_close_all()'s busy-wait detects progress correctly.
-          c->state = HTTP_STATE_CONNECTING;
-
-          if (c->use_ssl && !c->insecure && !tls_clock_ready()) {
-            printf("[HTTP] Refusing TLS to %s: clock not set\n", c->server);
-            snprintf(c->err, sizeof(c->err), "%s", WIFI_TLS_ERR_CLOCK);
-            c->state = HTTP_STATE_FAILED;
-            c->pending |= HTTP_CB_FAILED | HTTP_CB_CLOSED;
-            umm_free(c->extra_hdrs); c->extra_hdrs = NULL;
-            umm_free(c->tx_buf);     c->tx_buf = NULL;
-            break;
-          }
-
-          struct mg_connection *nc = mg_http_connect(&s_mgr, url, http_ev_fn, c);
-          if (!nc) {
-            printf("[HTTP] mg_http_connect failed\n");
-            c->err[0] = '\0';
-            snprintf(c->err, sizeof(c->err), "%s", "mg_http_connect failed");
-            c->state = HTTP_STATE_FAILED;
-            c->pending |= HTTP_CB_FAILED | HTTP_CB_CLOSED;
-            // Free buffers now — fn() MG_EV_CONNECT will never fire
-            umm_free(c->extra_hdrs); c->extra_hdrs = NULL;
-            umm_free(c->tx_buf);     c->tx_buf = NULL;
-            break;
-          }
-
-          if (c->use_ssl) {
-            if (!tls_start(nc, c->server, c->insecure)) {
-              printf("[HTTP] TLS init failed\n");
-              mg_close_conn(nc);
-              snprintf(c->err, sizeof(c->err), "%s", "TLS init failed");
-              c->state = HTTP_STATE_FAILED;
-              c->pending |= HTTP_CB_FAILED | HTTP_CB_CLOSED;
-              umm_free(c->extra_hdrs); c->extra_hdrs = NULL;
-              umm_free(c->tx_buf);     c->tx_buf = NULL;
-              break;
-            }
-          }
-
-          c->pcb = (void *)nc;
-          // extra_hdrs and tx_buf are freed in http_ev_fn() MG_EV_CONNECT
-          // after the HTTP request is sent.
+          http_c1_send_request(old, c);
+          break;
         }
+
+        // Released (or failed) before Core 1 got here: nothing to start.
+        // Otherwise leave QUEUED *before* any mg_* call.
+        if (!http_c1_begin(c, HTTP_STATE_CONNECTING)) break;
+        http_c1_detach(c);  // the previous request's connection, if open
+
+        char url[320];
+        snprintf(url, sizeof(url), "%s://%s:%u",
+                 c->use_ssl ? "https" : "http", c->server, c->port);
+        printf("[HTTP] Connecting to %s (SSL=%d)...\n", url, c->use_ssl);
+
+        if (c->use_ssl && !c->insecure && !tls_clock_ready()) {
+          printf("[HTTP] Refusing TLS to %s: clock not set\n", c->server);
+          http_c1_fail(c, WIFI_TLS_ERR_CLOCK);
+          break;
+        }
+
+        // Plain mg_connect: http_ev_fn parses the response itself.
+        struct mg_connection *nc = mg_connect(&s_mgr, url, http_ev_fn, c);
+        if (!nc) {
+          http_c1_fail(c, "mg_connect failed");
+          break;
+        }
+
+        if (c->use_ssl && !tls_start(nc, c->server, c->insecure)) {
+          printf("[HTTP] TLS init failed\n");
+          nc->fn_data = NULL;  // keep MG_EV_CLOSE off the slot
+          mg_close_conn(nc);
+          http_c1_fail(c, "TLS init failed");
+          break;
+        }
+
+        c->pcb = (void *)nc;
         break;
       }
 
-      case CONN_REQ_HTTP_CLOSE: {
-        http_conn_t *c = req.conn;
-        if (!c || !c->pcb) break;
-        struct mg_connection *nc = (struct mg_connection *)c->pcb;
-        // Clear fn_data BEFORE marking for close.  If the pool slot is
-        // freed (http_free) and reallocated before Mongoose fires
-        // MG_EV_CLOSE, fn_data would point to the NEW connection's
-        // struct — causing use-after-free corruption.  The null check
-        // in http_ev_fn() safely skips the stale MG_EV_CLOSE.
-        nc->fn_data = NULL;
-        nc->is_closing = 1;
-        c->pcb = NULL;
+      case CONN_REQ_HTTP_CLOSE:
+        // The close handler: fn_data cleared, connection closed, then the
+        // slot is RELEASED for Core 0 to reclaim (http.h).
+        if (req.conn) http_c1_release(req.conn);
         break;
-      }
 
       case CONN_REQ_TCP_CONNECT: {
         tcp_conn_t *tc = (tcp_conn_t *)req.conn;
