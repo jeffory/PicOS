@@ -416,7 +416,7 @@ typedef struct {
     void     (*filePlayerPause)(pcfileplayer_t fp);
     void     (*filePlayerResume)(pcfileplayer_t fp);
     bool     (*filePlayerIsPlaying)(pcfileplayer_t fp);
-    void     (*filePlayerSetVolume)(pcfileplayer_t fp, uint8_t vol);  // sets both L/R channels to same value
+    void     (*filePlayerSetVolume)(pcfileplayer_t fp, uint8_t vol);  // 0-100 (clamped), both L/R channels
     uint8_t  (*filePlayerGetVolume)(pcfileplayer_t fp);
     uint32_t (*filePlayerGetOffset)(pcfileplayer_t fp);
     void     (*filePlayerSetOffset)(pcfileplayer_t fp, uint32_t pos);
@@ -431,7 +431,7 @@ typedef struct {
     void     (*mp3PlayerPause)(pcmp3player_t mp);
     void     (*mp3PlayerResume)(pcmp3player_t mp);
     bool     (*mp3PlayerIsPlaying)(pcmp3player_t mp);
-    void     (*mp3PlayerSetVolume)(pcmp3player_t mp, uint8_t vol);
+    void     (*mp3PlayerSetVolume)(pcmp3player_t mp, uint8_t vol);  // 0-100 (clamped)
     uint8_t  (*mp3PlayerGetVolume)(pcmp3player_t mp);
     void     (*mp3PlayerSetLoop)(pcmp3player_t mp, bool loop);
     void     (*mp3PlayerFree)(pcmp3player_t mp);
@@ -439,11 +439,14 @@ typedef struct {
 
 // --- App Config -------------------------------------------------------------
 // Per-app key/value config persisted at /data/<APP_ID>/config.json.
-// load() is called by the launcher before app start. Max 4 keys, 32-char keys,
+// Nothing loads it for a native app: the store is unbound at every app start
+// and exit, so call load() with your own id first. Max 4 keys, 32-char keys,
 // 256-char values.
 
 typedef struct {
-    // Load config for the given app_id. Called by launcher automatically.
+    // Bind and load the running app's own config. Only the running app's id
+    // is accepted (case-insensitive); another app's id returns false and
+    // leaves the binding unchanged. Not called for you by the launcher.
     bool        (*load)(const char *app_id);
     // Save in-memory config to /data/<APP_ID>/config.json.
     bool        (*save)(void);

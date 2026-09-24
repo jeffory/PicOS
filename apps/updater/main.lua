@@ -715,7 +715,7 @@ local function fetch_firmware(url, redirect_count)
         return
     end
 
-    -- Use fallback download with smaller buffer (512KB) to avoid OOM
+    -- Streaming download: 256 KB PSRAM receive ring, 32 KB if that fails
     download_fallback(host, port, ssl, path)
 end
 

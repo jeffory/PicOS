@@ -3565,5 +3565,5 @@ void unicorn_build_api_struct(uc_engine *uc, uint32_t api_base, uint32_t tramp_b
     write32(uc, api_base + 72, zip_addr);
     write32(uc, api_base + 76, 8);  // version = 8 (http->setInsecure, tcp->connectEx; 7 = video seek/OSD; matches src/main.c g_api.version)
 
-    printf("[UNICORN] PicoCalcAPI struct at 0x%08x, version=7\n", api_base);
+    printf("[UNICORN] PicoCalcAPI struct at 0x%08x, version=8\n", api_base);
 }

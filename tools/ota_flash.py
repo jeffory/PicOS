@@ -26,8 +26,8 @@ Usage:
 Notes:
   - Hardware only.  The simulator has no flash; this tool never falls back
     to the simulator transport.
-  - The device must be at the launcher: reboot is ignored while an app is
-    running, so a running app is asked to exit first.
+  - The device must be at the launcher: `reboot-ota` is dropped while an app
+    is running, so a running app is asked to exit first.
   - Do not run this while another process (for example the picos MCP server
     with an active hardware log monitor) is reading the same serial port.
   - Recovery if an update bricks the device: hold BOOTSEL, connect USB and
@@ -81,7 +81,9 @@ def get_running_app(port: str) -> str | None:
 
 
 def ensure_launcher(port: str) -> None:
-    """Reboot is ignored while an app runs — exit to the launcher first."""
+    """Exit to the launcher first: the final `reboot-ota` is dropped while an
+    app runs (plain `reboot`/`reboot-flash` are honoured mid-app, but without
+    the OTA token the boot renames the image to update.bin.stale)."""
     app = get_running_app(port)
     if app is None:
         print("  (firmware predates the `status` command — assuming launcher)")
