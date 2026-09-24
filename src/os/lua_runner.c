@@ -11,6 +11,7 @@
 #include "../drivers/audio.h"
 #include "../drivers/display.h"
 #include "../drivers/fileplayer.h"
+#include "../drivers/keyboard.h"
 #include "../drivers/mp3_player.h"
 #include "../drivers/sdcard.h"
 #include "../drivers/sound.h"
@@ -246,6 +247,11 @@ static bool lua_run_app(const app_entry_t *app) {
 
   printf("[LUA] Loaded %d bytes, PSRAM free: %zu\n",
          lua_len, lua_psram_alloc_free_size());
+
+  // A key held through the launch must not carry its down/unseen state into
+  // the app (the native loader does the same); lua_bridge_input_init only
+  // flushes the event queue.
+  kbd_clear_state();
 
   lua_vm_ctx_t ctx = {app, lua_src, lua_len, false};
   app_stack_run(stack, LUA_VM_STACK_SIZE, APP_STACK_LUA, lua_vm_body, &ctx);
