@@ -54,6 +54,10 @@ static inline bool lua_bridge_is_exit_sentinel(lua_State *L, int idx) {
          lua_touserdata(L, idx) == &lua_bridge_exit_tag;
 }
 
+// Frees the REPL scrollback (allocated on first repl.* use). The runner calls
+// it when the app exits.
+void lua_bridge_repl_release(void);
+
 // Run one update tick: poll input, check for menu button, yield to app.
 // Returns false if the app requested exit (returned from its update()).
 bool lua_bridge_tick(lua_State *L);

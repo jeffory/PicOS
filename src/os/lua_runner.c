@@ -203,6 +203,7 @@ static void lua_vm_body(void *arg) {
 
   lua_close(L);
   lua_bridge_exit_reset(NULL);  // a __gc handler may have called sys.exit()
+  lua_bridge_repl_release();
 }
 
 static bool lua_run_app(const app_entry_t *app) {
