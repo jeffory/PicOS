@@ -8,6 +8,7 @@
 #include "hardware/dma.h"
 #include "hardware/clocks.h"
 #include "hardware/irq.h"
+#include "hardware/sync.h"
 #include "pico/mutex.h"
 #include "pico/time.h"
 #include "pio_psram.h"
@@ -68,8 +69,13 @@ static uint32_t s_pio_psram_base = 0;
 
 #define STAGING_BUF_SIZE  (DMA_BUF_SAMPLES * 4 * 8)
 static uint8_t  s_staging_buf[STAGING_BUF_SIZE] __attribute__((aligned(4)));
-static size_t   s_staging_avail = 0;
-static size_t   s_staging_pos   = 0;
+// Shared with the DMA ISR (fill_dma_buffer, on Core 1 like the refill):
+// the ISR consumes from s_staging_pos and shrinks s_staging_avail; the
+// refill compacts and appends. Both indices change only with the ISR
+// masked on the refilling core (refill_staging_buf) or while the DMA is
+// stopped (the Core 0 resets in play/stop/load), never under its feet.
+static volatile size_t s_staging_avail = 0;
+static volatile size_t s_staging_pos   = 0;
 static uint32_t s_out_phase     = 0;  // rate-convert accumulator (AUDIO_OUT_RATE)
 static volatile uint32_t s_last_fill_consumed = 0;  // source frames consumed by last fill
 
@@ -178,36 +184,47 @@ static void refill_staging_buf(void) {
         return;
 
     s_diag_refill_calls++;
-    if (s_staging_pos > 0 && s_staging_avail > 0) {
-        memmove(s_staging_buf, s_staging_buf + s_staging_pos, s_staging_avail);
-    }
+    // Compact with the DMA ISR masked: it reads s_staging_buf[pos..] and
+    // moves pos/avail, so a memmove plus index reset it could preempt used
+    // to double or drop whole blocks (clicks). At most half the buffer
+    // moves (a few microseconds); the DMA is playing the other ping-pong
+    // buffer meanwhile.
+    uint32_t irq = save_and_disable_interrupts();
+    size_t pos = s_staging_pos, have = s_staging_avail;
+    if (pos > 0 && have > 0)
+        memmove(s_staging_buf, s_staging_buf + pos, have);
     s_staging_pos = 0;
+    restore_interrupts(irq);
+    // From here the ISR only consumes from [0, have): append after it.
 
-    size_t space = STAGING_BUF_SIZE - s_staging_avail;
+    size_t space = STAGING_BUF_SIZE - have;
     size_t avail = ring_available();
     size_t to_read = (space < avail) ? space : avail;
     if (to_read == 0) { s_diag_refill_empty++; return; }
 
     size_t rd = atomic_load_explicit(&s_ring_rd, memory_order_relaxed);
     size_t to_end = PCM_RING_SIZE - rd;
+    uint8_t *dst = s_staging_buf + have;
 
     if (s_use_pio_psram) {
         if (to_read <= to_end) {
-            pio_psram_read(s_pio_psram_base + rd, s_staging_buf + s_staging_avail, to_read);
+            pio_psram_read(s_pio_psram_base + rd, dst, to_read);
         } else {
-            pio_psram_read(s_pio_psram_base + rd, s_staging_buf + s_staging_avail, to_end);
-            pio_psram_read(s_pio_psram_base, s_staging_buf + s_staging_avail + to_end, to_read - to_end);
+            pio_psram_read(s_pio_psram_base + rd, dst, to_end);
+            pio_psram_read(s_pio_psram_base, dst + to_end, to_read - to_end);
         }
     } else {
         if (to_read <= to_end) {
-            memcpy(s_staging_buf + s_staging_avail, s_pcm_ring + rd, to_read);
+            memcpy(dst, s_pcm_ring + rd, to_read);
         } else {
-            memcpy(s_staging_buf + s_staging_avail, s_pcm_ring + rd, to_end);
-            memcpy(s_staging_buf + s_staging_avail + to_end, s_pcm_ring, to_read - to_end);
+            memcpy(dst, s_pcm_ring + rd, to_end);
+            memcpy(dst + to_end, s_pcm_ring, to_read - to_end);
         }
     }
     atomic_store_explicit(&s_ring_rd, (rd + to_read) % PCM_RING_SIZE, memory_order_release);
-    s_staging_avail += to_read;
+    irq = save_and_disable_interrupts();
+    s_staging_avail += to_read;  // read-modify-write the ISR also writes
+    restore_interrupts(irq);
 }
 
 // ── Fill one DMA buffer from the staging buffer (called from DMA ISR) ───────
@@ -252,17 +269,20 @@ static void __time_critical_func(fill_dma_buffer)(uint32_t *buf, int count) {
     size_t bytes_per_pair = (s_pcm_channels > 1) ? 4 : 2;
     uint32_t vol_scale = s_vol_scale;
     s_last_fill_consumed = 0;
+    // Indices in locals, written back once: nothing preempts this ISR that
+    // touches them (refill_staging_buf masks it around its updates).
+    size_t pos = s_staging_pos, avail = s_staging_avail;
 
     for (int i = 0; i < count; i++) {
         int32_t lv, rv;
 
-        if (s_staging_avail < bytes_per_pair) {
+        if (avail < bytes_per_pair) {
             s_staging_underruns++;
             lv = PWM_MID;
             rv = PWM_MID;
         } else {
             uint8_t raw[4];
-            memcpy(raw, s_staging_buf + s_staging_pos, bytes_per_pair);
+            memcpy(raw, s_staging_buf + pos, bytes_per_pair);
             s_last_fill_consumed++;
 
             // Advance the source at the content's own rate (nearest-neighbor
@@ -270,9 +290,9 @@ static void __time_critical_func(fill_dma_buffer)(uint32_t *buf, int count) {
             s_out_phase += s_player.sample_rate;
             while (s_out_phase >= AUDIO_OUT_RATE) {
                 s_out_phase -= AUDIO_OUT_RATE;
-                if (s_staging_avail >= bytes_per_pair) {
-                    s_staging_pos   += bytes_per_pair;
-                    s_staging_avail -= bytes_per_pair;
+                if (avail >= bytes_per_pair) {
+                    pos   += bytes_per_pair;
+                    avail -= bytes_per_pair;
                 }
             }
 
@@ -313,6 +333,8 @@ static void __time_critical_func(fill_dma_buffer)(uint32_t *buf, int count) {
 
         buf[i] = ((uint32_t)rv << 16) | (uint32_t)lv;
     }
+    s_staging_pos = pos;
+    s_staging_avail = avail;
 }
 
 // ── DMA completion ISR: swap buffers, restart, refill ───────────────────────
@@ -809,6 +831,10 @@ bool mp3_player_play(mp3_player_t *player, uint8_t repeat_count) {
 
     mutex_enter_blocking(&s_mp3_mutex);
 
+    // Stop the DMA before resetting the staging indices under it (a play()
+    // while already playing used to race the ISR on Core 1).
+    stop_playback();
+
     player->playing = true;
     player->paused  = false;
 
@@ -976,6 +1002,7 @@ void mp3_player_start_dma_fed(void) {
 
     mutex_enter_blocking(&s_mp3_mutex);
 
+    stop_playback();  // no ISR may be consuming while we pre-fill
     // Decode compressed data from fed ring into PCM ring
     decode_fill_ring();
     // Copy PCM data to SRAM staging buffer
