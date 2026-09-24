@@ -42,11 +42,10 @@ extern uint32_t __StackOneBottom; // Core 1 MSP lower bound (SCRATCH_X)
 // multiple of 8 (the MSPLIM granule). A limit hit taken during exception-entry
 // stacking clamps SP at the limit, so that frame still lands inside the real
 // stack rather than in whatever lies below it. The margin is deliberately not
-// sized for the handler: isr_hardfault clears MSPLIM before hardfault_c
-// pushes anything, and the handler (frame + printf/display path) may run
-// below the bottom (Core 1's stack top / the heap end), which is tolerable
-// because it reboots. Keeping the margin small preserves almost the full
-// 4 KB of usable stack on both cores.
+// sized for the handler: isr_hardfault clears MSPLIM and, when MSP is near
+// the bottom, moves it to the top of this core's (now dead) stack before
+// hardfault_c runs. Keeping the margin small preserves almost the full 4 KB
+// of usable stack on both cores.
 // Runs before runtime init completes: no printf, no asserts.
 #define STACK_LIMIT_MARGIN 32u
 void runtime_init_per_core_install_stack_guard(void *stack_bottom) {
@@ -346,7 +345,33 @@ void __attribute__((naked)) isr_hardfault(void) {
     "ite  eq         \n"
     "mrseq r0, msp   \n" // frame on MSP (normal for thread mode without RTOS)
     "mrsne r0, psp   \n" // frame on PSP (if PSP was active thread stack)
-    "b    hardfault_c\n"
+    // If MSP is within 1KB of this core's stack bottom (a stack-limit fault,
+    // or just very deep), hardfault_c and its printf path (~1KB) would run
+    // below the bottom: Core 0 into Core 1's live stack, which then faults and
+    // overwrites the crash record; Core 1 into the heap end. This core's stack
+    // is dead anyway (the handler reboots), so move MSP to its top: the frame
+    // r0 points at sits near the bottom, well clear of the handler's usage.
+    "movs r2, #0            \n"
+    "movt r2, #0xd000       \n" // SIO base: CPUID at offset 0
+    "ldr  r2, [r2]          \n"
+    "cbnz r2, 1f            \n"
+    "movw r2, #:lower16:__StackBottom    \n"
+    "movt r2, #:upper16:__StackBottom    \n"
+    "movw r3, #:lower16:__StackTop       \n"
+    "movt r3, #:upper16:__StackTop       \n"
+    "b    2f                \n"
+    "1:                     \n"
+    "movw r2, #:lower16:__StackOneBottom \n"
+    "movt r2, #:upper16:__StackOneBottom \n"
+    "movw r3, #:lower16:__StackOneTop    \n"
+    "movt r3, #:upper16:__StackOneTop    \n"
+    "2:                     \n"
+    "add  r2, r2, #1024     \n"
+    "mrs  r12, msp          \n"
+    "cmp  r12, r2           \n"
+    "it   lo                \n"
+    "msrlo msp, r3          \n"
+    "b    hardfault_c       \n"
   );
 }
 
