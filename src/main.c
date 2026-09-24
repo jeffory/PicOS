@@ -167,6 +167,18 @@ static void __attribute__((used)) hardfault_c(uint32_t *frame, uint32_t exc_retu
   } else if ((prev0 & CRASH_TAG_MASK) == CRASH_TAG) {
     boot_bits = prev0 & (CRASH_F_BOOTING | CRASH_BOOT_ATTEMPT_MASK);
   }
+  // This boot fault uses up the last attempt: rebooting would only fault
+  // again (every boot + 3 s, appending a crashlog entry each time once the
+  // SD is up). Halt on the fault screen instead. The watchdog goes off first
+  // so nothing can reset us; Core 1 only ever feeds it, never enables it.
+  // Power-cycling clears the scratch registers (reset value 0, kept only
+  // through soft resets) and with them the attempt count.
+  uint32_t boot_failures = ((boot_bits & CRASH_BOOT_ATTEMPT_MASK)
+                            >> CRASH_BOOT_ATTEMPT_SHIFT) + 1u;
+  bool boot_halt = (boot_bits & CRASH_F_BOOTING) &&
+                   boot_failures >= BOOT_MAX_RETRIES;
+  if (boot_halt)
+    watchdog_disable();
 
   // Persist fault data in watchdog scratch registers so it survives the
   // reboot and can be dumped to SD on next boot (layout above hardfault_c).
@@ -357,7 +369,22 @@ static void __attribute__((used)) hardfault_c(uint32_t *frame, uint32_t exc_retu
   if (sfsr & (1u<<7))  { display_draw_text(4, y, "SFSR LSERR",                  warn, 0); y += 14; }
   if (y == 136)        { display_draw_text(4, y, "(no fault flags set)",         warn, 0); }
 
+  if (boot_halt) {
+    snprintf(ln, sizeof(ln), "Boot failed %lu times - halted.",
+             (unsigned long)boot_failures);
+    display_draw_text(4, 290, ln, 0xF800, 0x0000);
+    display_draw_text(4, 304, "Power-cycle to retry.", 0xF800, 0x0000);
+    printf("  Boot failed %lu times: halted (no reboot). Power-cycle to retry.\n",
+           (unsigned long)boot_failures);
+    stdio_flush();
+  }
+
   display_flush();
+
+  if (boot_halt) {
+    // No reboot, so no further boots and no further SD writes.
+    while (1) tight_loop_contents();
+  }
 
   // Hold the fault screen long enough to read (~3 s), then reboot. Bounded
   // and well inside the 10 s watchdog (8 s during the boot QMI init), so the
