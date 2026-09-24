@@ -4,9 +4,7 @@
 #include <stdlib.h>
 #include <string.h>
 
-static int s_fails = 0;
-#define CHECK(cond) do { if (!(cond)) { \
-  printf("FAIL %s:%d: %s\n", __FILE__, __LINE__, #cond); s_fails++; } } while (0)
+#include "check.h"
 
 // A 3-glyph, 4x3 font covering 'A'..'C'. Bit rows, MSB = leftmost.
 //   A = full block 4 wide, B = left column only, C = empty
@@ -168,7 +166,5 @@ int main(void) {
   test_render_stride2();
   test_from_blob();
   test_demo_pfn_file();
-  if (s_fails) { printf("%d failure(s)\n", s_fails); return 1; }
-  printf("test_font: all passed\n");
-  return 0;
+  return check_report("test_font");
 }

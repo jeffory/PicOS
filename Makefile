@@ -41,6 +41,7 @@ help:
 	@echo ""
 	@echo "Testing:"
 	@echo "  make test-lua       - Test Lua app syntax before deployment"
+	@echo "  make test-unit      - Host unit tests (ctest, build_unit/)"
 	@echo ""
 	@echo "Environment:"
 	@echo "  PICO_BOARD          - Target board (default: $(PICO_BOARD))"
@@ -326,8 +327,15 @@ simulator-clean:
 
 # ── Host unit tests ──────────────────────────────────────────────────────────
 
+# One CMake/ctest project (tests/unit/CMakeLists.txt): one executable per
+# module, ASan+UBSan when the compiler has them. Clang when available (its
+# compiler-rt carries the sanitizer and libFuzzer runtimes).
+UNIT_BUILD_DIR := build_unit
+UNIT_CC ?= $(shell command -v clang 2>/dev/null || echo cc)
+
 test-unit:
-	@mkdir -p build_sim
-	@gcc -std=c11 -Wall -Wextra -Werror -Isrc/fonts \
-		tests/unit/test_font.c src/fonts/font.c -o build_sim/test_font
-	@./build_sim/test_font
+	@cmake -S tests/unit -B $(UNIT_BUILD_DIR) -DCMAKE_C_COMPILER=$(UNIT_CC) \
+		-DCMAKE_BUILD_TYPE=Debug >/dev/null
+	@cmake --build $(UNIT_BUILD_DIR) -j$$(nproc 2>/dev/null || echo 4)
+	@ctest --test-dir $(UNIT_BUILD_DIR) --output-on-failure
+
