@@ -79,8 +79,8 @@ static void repeat_reset(void) {
 
 // setRepeat(delayMs, rateMs) — delayMs = 0 disables repeat entirely.
 static int l_input_setRepeat(lua_State *L) {
-  lua_Integer delay = luaL_checkinteger(L, 1);
-  lua_Integer rate  = luaL_optinteger(L, 2, 80);
+  lua_Integer delay = lb_checkint(L, 1);
+  lua_Integer rate  = lb_optint(L, 2, 80);
   if (delay < 0) delay = 0;
   // A zero rate would fire every frame and swamp the caller; 1ms is the floor.
   if (rate < 1) rate = 1;

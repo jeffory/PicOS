@@ -41,7 +41,7 @@ static int l_sound_sample_new(lua_State *L) {
 
         if (lua_istable(L, 2)) {
             lua_getfield(L, 2, "sampleRate");
-            if (!lua_isnil(L, -1)) sample_rate = (uint32_t)lua_tointeger(L, -1);
+            if (!lua_isnil(L, -1)) sample_rate = (uint32_t)lb_checkint(L, -1);
             lua_pop(L, 1);
 
             lua_getfield(L, 2, "bits");
@@ -139,8 +139,8 @@ static int l_sound_sample_decompress(lua_State *L) {
 
 static int l_sound_sample_getSubsample(lua_State *L) {
     sound_sample_t *sample = check_sample(L, 1);
-    uint32_t start = (uint32_t)luaL_checkinteger(L, 2);
-    uint32_t end = (uint32_t)luaL_checkinteger(L, 3);
+    uint32_t start = (uint32_t)lb_checkint(L, 2);
+    uint32_t end = (uint32_t)lb_checkint(L, 3);
 
     sound_sample_t *sub = sound_sample_get_subsample(sample, start, end);
     if (!sub) {
@@ -158,7 +158,7 @@ static int l_sound_sample_getSubsample(lua_State *L) {
 // sample:play([repeatCount], [rate]) — convenience: create temp player, play, return it
 static int l_sound_sample_play(lua_State *L) {
     sound_sample_t *sample = check_sample(L, 1);
-    uint8_t repeat = (uint8_t)luaL_optinteger(L, 2, 1);
+    uint8_t repeat = (uint8_t)lb_optint(L, 2, 1);
     float rate = (float)luaL_optnumber(L, 3, 1.0);
 
     sound_player_t *player = (sound_player_t *)g_api.soundplayer->playerNew();
@@ -178,8 +178,8 @@ static int l_sound_sample_play(lua_State *L) {
 static int l_sound_sample_playAt(lua_State *L) {
     sound_sample_t *sample = check_sample(L, 1);
     (void)luaL_checknumber(L, 2); // 'when' — ignored on this hardware (no scheduler)
-    uint8_t vol = (uint8_t)luaL_optinteger(L, 3, 100);
-    (void)luaL_optinteger(L, 4, vol); // rightvol — mono PWM, use left
+    uint8_t vol = (uint8_t)lb_optint(L, 3, 100);
+    (void)lb_optint(L, 4, vol); // rightvol — mono PWM, use left
     float rate = (float)luaL_optnumber(L, 5, 1.0);
 
     sound_player_t *player = (sound_player_t *)g_api.soundplayer->playerNew();
@@ -315,7 +315,7 @@ static int l_sound_sampleplayer_setSample(lua_State *L) {
 
 static int l_sound_sampleplayer_play(lua_State *L) {
     sound_player_t *player = check_player(L, 1);
-    uint8_t repeat = (uint8_t)luaL_optinteger(L, 2, 1);
+    uint8_t repeat = (uint8_t)lb_optint(L, 2, 1);
     g_api.soundplayer->playerPlay(player, repeat);
     lua_pushboolean(L, true);
     return 1;
@@ -335,7 +335,7 @@ static int l_sound_sampleplayer_isPlaying(lua_State *L) {
 
 static int l_sound_sampleplayer_setVolume(lua_State *L) {
     sound_player_t *player = check_player(L, 1);
-    uint8_t vol = (uint8_t)luaL_checkinteger(L, 2);
+    uint8_t vol = (uint8_t)lb_checkint(L, 2);
     g_api.soundplayer->playerSetVolume(player, vol);
     return 0;
 }
@@ -403,8 +403,8 @@ static int l_sound_sampleplayer_getSample(lua_State *L) {
 
 static int l_sound_sampleplayer_setPlayRange(lua_State *L) {
     sound_player_t *player = check_player(L, 1);
-    uint32_t start = (uint32_t)luaL_checkinteger(L, 2);
-    uint32_t end = (uint32_t)luaL_checkinteger(L, 3);
+    uint32_t start = (uint32_t)lb_checkint(L, 2);
+    uint32_t end = (uint32_t)lb_checkint(L, 3);
     sound_player_set_play_range(player, start, end);
     return 0;
 }
@@ -455,7 +455,7 @@ static int l_sound_fileplayer_load(lua_State *L) {
 
 static int l_sound_fileplayer_play(lua_State *L) {
     fileplayer_t *player = check_fileplayer(L, 1);
-    uint8_t repeat = (uint8_t)luaL_optinteger(L, 2, 1);
+    uint8_t repeat = (uint8_t)lb_optint(L, 2, 1);
     g_api.soundplayer->filePlayerPlay(player, repeat);
     lua_pushboolean(L, true);
     return 1;
@@ -493,15 +493,15 @@ static int l_sound_fileplayer_getOffset(lua_State *L) {
 
 static int l_sound_fileplayer_setOffset(lua_State *L) {
     fileplayer_t *player = check_fileplayer(L, 1);
-    uint32_t seconds = (uint32_t)luaL_checkinteger(L, 2);
+    uint32_t seconds = (uint32_t)lb_checkint(L, 2);
     g_api.soundplayer->filePlayerSetOffset(player, seconds);
     return 0;
 }
 
 static int l_sound_fileplayer_setVolume(lua_State *L) {
     fileplayer_t *player = check_fileplayer(L, 1);
-    uint8_t left = (uint8_t)luaL_checkinteger(L, 2);
-    uint8_t right = (uint8_t)luaL_optinteger(L, 3, left);
+    uint8_t left = (uint8_t)lb_checkint(L, 2);
+    uint8_t right = (uint8_t)lb_optint(L, 3, left);
     // API takes a single volume value; use left channel value (sets both channels)
     (void)right;
     g_api.soundplayer->filePlayerSetVolume(player, left);
@@ -518,8 +518,8 @@ static int l_sound_fileplayer_getVolume(lua_State *L) {
 
 static int l_sound_fileplayer_setLoopRange(lua_State *L) {
     fileplayer_t *player = check_fileplayer(L, 1);
-    uint32_t start = (uint32_t)luaL_optinteger(L, 2, 0);
-    uint32_t end = (uint32_t)luaL_optinteger(L, 3, 0);
+    uint32_t start = (uint32_t)lb_optint(L, 2, 0);
+    uint32_t end = (uint32_t)lb_optint(L, 3, 0);
     fileplayer_set_loop_range(player, start, end);
     return 0;
 }
@@ -724,7 +724,7 @@ static int l_sound_mp3player_load(lua_State *L) {
 
 static int l_sound_mp3player_play(lua_State *L) {
     mp3_player_t *player = check_mp3player(L, 1);
-    uint8_t repeat = (uint8_t)luaL_optinteger(L, 2, 1);
+    uint8_t repeat = (uint8_t)lb_optint(L, 2, 1);
     g_api.soundplayer->mp3PlayerSetLoop(player, repeat == 0);
     g_api.soundplayer->mp3PlayerPlay(player, repeat);
     lua_pushboolean(L, true);
@@ -769,7 +769,7 @@ static int l_sound_mp3player_getLength(lua_State *L) {
 
 static int l_sound_mp3player_setVolume(lua_State *L) {
     mp3_player_t *player = check_mp3player(L, 1);
-    uint8_t vol = (uint8_t)luaL_checkinteger(L, 2);
+    uint8_t vol = (uint8_t)lb_checkint(L, 2);
     g_api.soundplayer->mp3PlayerSetVolume(player, vol);
     return 0;
 }

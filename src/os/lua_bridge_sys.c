@@ -43,7 +43,7 @@ static int l_sys_log(lua_State *L) {
 }
 
 static int l_sys_sleep(lua_State *L) {
-  int ms = (int)luaL_checkinteger(L, 1);
+  int ms = (int)lb_checkint(L, 1);
   // Do NOT call kbd_poll() here — it would drain the STM32 FIFO and consume
   // character/button events that the app expects to read via input.update().
   // The Lua instruction hook (fires every 256 opcodes) handles menu detection

@@ -76,7 +76,7 @@ static int l_video_isPaused(lua_State *L) {
 
 static int l_video_seek(lua_State *L) {
     video_player_t *player = check_video(L, 1);
-    uint32_t frame = (uint32_t)luaL_checkinteger(L, 2);
+    uint32_t frame = (uint32_t)lb_checkint(L, 2);
     video_player_seek(player, frame);
     return 0;
 }
@@ -130,14 +130,14 @@ static int l_video_getPositionMs(lua_State *L) {
 
 static int l_video_seekMs(lua_State *L) {
     video_player_t *player = check_video(L, 1);
-    lua_Integer ms = luaL_checkinteger(L, 2);
+    lua_Integer ms = lb_checkint(L, 2);
     video_player_seek_ms(player, ms < 0 ? 0 : (uint32_t)ms);
     return 0;
 }
 
 static int l_video_seekRelativeMs(lua_State *L) {
     video_player_t *player = check_video(L, 1);
-    video_player_seek_relative_ms(player, (int32_t)luaL_checkinteger(L, 2));
+    video_player_seek_relative_ms(player, (int32_t)lb_checkint(L, 2));
     return 0;
 }
 
@@ -158,7 +158,7 @@ static int l_video_showOSD(lua_State *L) {
 
 static int l_video_setOSDTimeout(lua_State *L) {
     video_player_t *player = check_video(L, 1);
-    lua_Integer ms = luaL_checkinteger(L, 2);
+    lua_Integer ms = lb_checkint(L, 2);
     video_player_set_osd_timeout(player, ms < 0 ? 0 : (uint32_t)ms);
     return 0;
 }
@@ -171,7 +171,7 @@ static int l_video_hasAudio(lua_State *L) {
 
 static int l_video_setVolume(lua_State *L) {
     video_player_t *player = check_video(L, 1);
-    uint8_t vol = (uint8_t)luaL_checkinteger(L, 2);
+    uint8_t vol = (uint8_t)lb_checkint(L, 2);
     video_player_set_audio_volume(player, vol);
     return 0;
 }

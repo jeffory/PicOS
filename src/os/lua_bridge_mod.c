@@ -62,7 +62,7 @@ static int l_mod_is_playing(lua_State *L) {
 
 static int l_mod_set_volume(lua_State *L) {
     mod_player_t *p = check_modplayer(L, 1);
-    int vol = (int)luaL_checkinteger(L, 2);
+    int vol = (int)lb_checkint(L, 2);
     if (vol < 0) vol = 0;
     if (vol > 100) vol = 100;
     mod_player_set_volume(p, (uint8_t)vol);
