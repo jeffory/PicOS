@@ -10,6 +10,7 @@ threads, and records what it saw so a test can assert on the server side too
     /big       200, 1 MiB of a known pattern (big_body()), Content-Length
     /chunked   200, Transfer-Encoding: chunked, body "alphabetagamma"
     /close     200, no Content-Length, body then close (close-delimited)
+    /closelater  like /close, but the server closes 300 ms after the body
     /drip      200, Content-Length 400, one byte every 50 ms
     /hang      reads the request, never answers; records when the client
                hangs up in .hang_closed (monotonic seconds since the request)
@@ -96,6 +97,16 @@ class _Handler(BaseHTTPRequestHandler):
                 self.end_headers()
                 self.wfile.write(OK_BODY)
                 self.wfile.flush()
+                self.close_connection = True
+            elif path == "/closelater":
+                # Close-delimited: the body, then the server closes 300 ms
+                # later (the client is still in BODY when the FIN arrives).
+                self.send_response(200)
+                self.send_header("Connection", "close")
+                self.end_headers()
+                self.wfile.write(OK_BODY)
+                self.wfile.flush()
+                time.sleep(0.3)
                 self.close_connection = True
             elif path == "/drip":
                 self.send_response(200)

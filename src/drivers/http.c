@@ -164,6 +164,9 @@ static int hexval(uint8_t ch) {
 
 // ── Core 1: connection handling ─────────────────────────────────────────────
 
+// pcb is non-NULL only while Mongoose still owns that connection: every
+// MG_EV_CLOSE that reaches the slot clears it (http_ev_fn), and a detached
+// connection no longer reaches the slot.  So pcb here is never freed memory.
 void http_c1_detach(http_conn_t *c) {
   struct mg_connection *nc = (struct mg_connection *)c->pcb;
   if (!nc)
@@ -569,6 +572,9 @@ static void c1_process(struct mg_connection *nc, http_conn_t *c,
 // Runs exclusively on Core 1 inside mg_mgr_poll().  Streaming: fires
 // HTTP_CB_REQUEST incrementally as body data arrives.
 
+static void c1_event(struct mg_connection *nc, http_conn_t *c, int ev,
+                     void *ev_data);
+
 void http_ev_fn(struct mg_connection *nc, int ev, void *ev_data) {
   http_conn_t *c = (http_conn_t *)nc->fn_data;
   if (!c)
@@ -577,6 +583,17 @@ void http_ev_fn(struct mg_connection *nc, int ev, void *ev_data) {
   // belt and braces).  pcb is still NULL during mg_connect itself.
   if (c->pcb != NULL && c->pcb != nc)
     return;
+  c1_event(nc, c, ev, ev_data);
+  // Invariant: pcb never outlives its connection.  Mongoose frees nc right
+  // after MG_EV_CLOSE, so drop it here whatever the handler did — also for
+  // a CLOSING slot, whose close handler (http_c1_release) would otherwise
+  // detach a freed connection.
+  if (ev == MG_EV_CLOSE && c->pcb == nc)
+    c->pcb = NULL;
+}
+
+static void c1_event(struct mg_connection *nc, http_conn_t *c, int ev,
+                     void *ev_data) {
   http_state_t st = st_get(c);
   if (st_released(st))
     return;  // Core 0 let go; the close request is on its way
@@ -610,8 +627,7 @@ void http_ev_fn(struct mg_connection *nc, int ev, void *ev_data) {
       c1_process(nc, c, true);
     else if (st == HTTP_STATE_QUEUED || st == HTTP_STATE_CONNECTING)
       conn_fail(c, "connection closed");
-    if (c->pcb == nc)
-      c->pcb = NULL;
+    // pcb is cleared by http_ev_fn after this returns.
   }
 }
 

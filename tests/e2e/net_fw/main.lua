@@ -488,6 +488,33 @@ case_fw("http_request_while_busy_refused", function()
     check_stack_alive("after a refused request")
 end)
 
+-- The server closes a connection whose slot the app has already released
+-- but Core 1 has not yet let go of (CLOSING): the CLOSE request is dropped
+-- because the request ring is full (filled with TCP writes), and hooks do
+-- not retry it while this callback runs.  MG_EV_CLOSE then arrives for the
+-- CLOSING slot; the retried CLOSE must not touch the freed connection
+-- (ASan: heap-use-after-free in http_c1_detach before the fix).
+case_fw("http_server_closes_released_slot", function()
+    local s = tcp_open()
+    local conn = net.http.new(HOST, cfg.http, false, "rel")
+    local done, ring_full = false, false
+    conn:setRequestCallback(function()
+        if done then return end
+        done = true
+        for _ = 1, 100 do
+            if s:write("x") < 0 then ring_full = true; break end
+        end
+        conn:close()   -- CLOSE dropped: the ring is full
+        spin(800)      -- the server closes at ~300 ms, slot still CLOSING
+    end)
+    T.ok(conn:get("/closelater"), "get")
+    T.ok(wait(function() return done end, 3000), "no data")
+    T.ok(ring_full, "the request ring never filled")
+    spin(300)          -- the retried CLOSE reaches Core 1
+    check_stack_alive("after a released slot's server closed")
+    s:close()
+end)
+
 -- A close-delimited body larger than the ring, not read until the server
 -- has closed: what did not fit is kept (spilled), so the whole body is
 -- still readable after COMPLETE.
