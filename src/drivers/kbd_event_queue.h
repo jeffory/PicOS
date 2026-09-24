@@ -53,6 +53,7 @@ typedef struct {
 typedef struct {
   kbd_event_queue_t q;
   kbd_keyset_t down;
+  kbd_keyset_t unseen; // held keys whose press we never saw (quiet HOLD)
   char chars[KBD_CHAR_BACKLOG];
   uint8_t char_head;
   uint8_t char_count;
@@ -196,15 +197,17 @@ static inline bool kbd_evq_pop(kbd_event_queue_t *q, kbd_event_t *out) {
   return true;
 }
 
-// Remove the newest `n` events except those of type `keep` (order kept).
-static inline void kbd_evq_drop_newest_except(kbd_event_queue_t *q, unsigned n,
-                                              uint8_t keep) {
+// Remove the newest `n` events except "up" events of keys in `seen` (keys
+// the app saw go down before them); order kept. For the idle-dim wake
+// swallow: an up whose down was swallowed too would be an orphan.
+static inline void kbd_evq_drop_newest_keep_ups(kbd_event_queue_t *q, unsigned n,
+                                                const kbd_keyset_t *seen) {
   if (n > q->count)
     n = q->count;
   unsigned first = q->count - n, out = first;
   for (unsigned i = first; i < q->count; i++) {
     kbd_event_t e = q->ev[(q->head + i) % KBD_EVENT_QUEUE_LEN];
-    if (e.type == keep)
+    if (e.type == KBD_EV_UP && kbd_keyset_test(seen, e.key))
       q->ev[(q->head + out++) % KBD_EVENT_QUEUE_LEN] = e;
   }
   q->count = (uint8_t)out;
@@ -297,8 +300,11 @@ static inline void kbd_buttons_begin_poll(kbd_buttons_t *b) {
 //          a repeat: down + char events flagged KBD_EVF_REPEAT and a backlog
 //          char (getChar has always repeated on HOLD), no new press edge.
 //          For a key whose press we did not see (it predates kbd_clear_state
-//          or kbd_discard_pending), the key is quietly marked held: no events,
-//          no char, and its button bit is set in prev too, so no press edge.
+//          or kbd_discard_pending), the key is quietly marked held and
+//          "unseen": no events, no char, and its button bit is set in prev
+//          too, so no press edge. Every later HOLD of an unseen key is quiet
+//          as well (the STM32 may repeat HOLD), until the key is released and
+//          pressed again — a held 'y' can never answer ui_confirm.
 // RELEASED up event if the key was down. A button pressed during this same
 //          poll stays held until the next poll (see kbd_buttons_begin_poll).
 static inline uint8_t kbd_fifo_apply(kbd_input_t *in, kbd_buttons_t *b,
@@ -310,6 +316,7 @@ static inline uint8_t kbd_fifo_apply(kbd_input_t *in, kbd_buttons_t *b,
   switch (state) {
   case KBD_FIFO_PRESSED: {
     kbd_keyset_set(&in->down, key);
+    kbd_keyset_clear(&in->unseen, key);
     if (btn) {
       b->curr |= btn;
       b->tapped |= btn;
@@ -331,8 +338,9 @@ static inline uint8_t kbd_fifo_apply(kbd_input_t *in, kbd_buttons_t *b,
       b->curr |= btn;
       b->prev |= btn; // held, but not a fresh press edge
     }
-    if (!was_down) {
+    if (!was_down || kbd_keyset_test(&in->unseen, key)) {
       kbd_keyset_set(&in->down, key);
+      kbd_keyset_set(&in->unseen, key);
       return 0;
     }
     if (!os_only) {
@@ -348,6 +356,7 @@ static inline uint8_t kbd_fifo_apply(kbd_input_t *in, kbd_buttons_t *b,
   }
   case KBD_FIFO_RELEASED: {
     kbd_keyset_clear(&in->down, key);
+    kbd_keyset_clear(&in->unseen, key);
     if (btn) {
       if ((b->tapped & btn) && !(b->prev & btn))
         b->deferred |= btn;

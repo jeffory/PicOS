@@ -38,8 +38,9 @@
 
 // Button masks (held / previous poll / tap bookkeeping, see kbd_event_queue.h)
 static kbd_buttons_t s_btn;
-// Event queue, key-down set and getChar backlog. ~104 bytes of SRAM: 16
-// four-byte events, a 256-bit key set, 4 backlog chars and counters.
+// Event queue, key-down and unseen-press sets and getChar backlog. 140 bytes
+// of SRAM: 16 four-byte events, two 256-bit key sets, 4 backlog chars and
+// counters.
 static kbd_input_t s_in;
 static char s_last_char = 0;
 static uint8_t s_last_raw_key =
@@ -382,10 +383,12 @@ done_polling:;
       s_btn.curr &= s_btn.prev; // drop fresh press edges
       s_btn.deferred = 0;
       s_last_raw_key = 0;
-      // ...and this poll's queued presses and chars. Its releases stay, so
-      // a key the app saw go down still comes up; keys first seen down in
-      // this poll are forgotten (their HOLD then reads as a quiet hold).
-      kbd_evq_drop_newest_except(&s_in.q, s_in.ev_pushed, KBD_EV_UP);
+      // ...and this poll's queued presses and chars. Releases of keys that
+      // were down before this poll stay, so a key the app saw go down still
+      // comes up; ups of keys pressed in this poll go with their downs. Keys
+      // first seen down in this poll are forgotten (their HOLD then reads as
+      // a quiet hold).
+      kbd_evq_drop_newest_keep_ups(&s_in.q, s_in.ev_pushed, &down_before);
       kbd_chars_drop_newest(&s_in, s_in.char_pushed);
       for (int i = 0; i < 8; i++)
         s_in.down.bits[i] &= down_before.bits[i];

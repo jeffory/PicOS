@@ -132,6 +132,36 @@ static void test_hold_after_clear_is_not_a_press(void) {
 // A button pressed and released inside one 50 ms poll used to produce no
 // edge at all. It now reads as held (with a press edge) for that poll and is
 // released at the next.
+// The STM32 may repeat HOLD. A key held across a clear stays quiet on every
+// HOLD (not just the first) until it is released and pressed again: a 'y'
+// held from typing when ui_confirm opens can never answer it.
+static void test_repeated_hold_after_clear_stays_quiet(void) {
+  reset();
+  begin_poll();
+  kbd_fifo_apply(&in, &btn, KBD_FIFO_PRESSED, 'y');
+  reset(); // kbd_discard_pending
+  for (int i = 0; i < 3; i++) {
+    begin_poll();
+    CHECK_EQ_INT(kbd_fifo_apply(&in, &btn, KBD_FIFO_HOLD, 'y'), 0);
+    CHECK_EQ_INT(kbd_fifo_apply(&in, &btn, KBD_FIFO_HOLD, KEY_ENTER), 0);
+    CHECK_EQ_U32(pressed(), 0);
+  }
+  CHECK_EQ_INT(in.q.count, 0);
+  CHECK_EQ_INT(kbd_chars_pop(&in), 0);
+  CHECK(kbd_keyset_test(&in.down, 'y')); // physically held, truthfully
+  begin_poll();
+  kbd_fifo_apply(&in, &btn, KBD_FIFO_RELEASED, 'y');
+  kbd_evq_clear(&in.q);
+  begin_poll();
+  kbd_fifo_apply(&in, &btn, KBD_FIFO_PRESSED, 'y');
+  kbd_chars_pop(&in);
+  kbd_evq_clear(&in.q);
+  begin_poll();
+  CHECK_EQ_INT(kbd_fifo_apply(&in, &btn, KBD_FIFO_HOLD, 'y'), 'y');
+  CHECK_EV(pop(), KBD_EV_DOWN, 'y', 0, KBD_EVF_REPEAT);
+  CHECK_EQ_INT(kbd_chars_pop(&in), 'y'); // a seen press repeats again
+}
+
 static void test_tap_inside_one_poll(void) {
   reset();
   begin_poll();
@@ -208,13 +238,19 @@ static void test_char_backlog_drops_oldest(void) {
 
 // The idle-dim wake swallow drops the waking poll's presses and chars but
 // keeps its releases, so a key the app saw go down still comes up.
+// ...and drops the ups of keys pressed in the waking poll (their downs are
+// dropped too, so the ups would be orphans).
 static void test_drop_newest_keeps_ups(void) {
   reset();
+  kbd_keyset_t before;
+  memset(&before, 0, sizeof(before));
+  kbd_keyset_set(&before, 'x');
   kbd_input_push(&in, KBD_EV_DOWN, 'x', 0, 0);  // an earlier poll
   kbd_input_push(&in, KBD_EV_UP, 'x', 0, 0);    // this poll ...
   kbd_input_push(&in, KBD_EV_DOWN, 'y', 0, 0);
   kbd_input_push(&in, KBD_EV_CHAR, 'y', 'y', 0);
-  kbd_evq_drop_newest_except(&in.q, 3, KBD_EV_UP);
+  kbd_input_push(&in, KBD_EV_UP, 'y', 0, 0);
+  kbd_evq_drop_newest_keep_ups(&in.q, 4, &before);
   CHECK_EQ_INT(in.q.count, 2);
   CHECK_EV(pop(), KBD_EV_DOWN, 'x', 0, 0);
   CHECK_EV(pop(), KBD_EV_UP, 'x', 0, 0);
@@ -248,6 +284,7 @@ int main(void) {
   test_shifted_letter_release();
   test_hold_is_a_repeat();
   test_hold_after_clear_is_not_a_press();
+  test_repeated_hold_after_clear_stays_quiet();
   test_tap_inside_one_poll();
   test_tap_then_press_again();
   test_ctrl_letter();
