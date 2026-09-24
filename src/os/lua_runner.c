@@ -64,6 +64,11 @@ static void lua_show_launch_failure(const app_entry_t *app, const char *line1,
 //
 // PSRAM, not SRAM: the SRAM heap is ~2.6 KB after the framebuffers and
 // static buffers (link map), so no SRAM region of this size exists.
+// PSRAM-stack-sensitive path: picocalc.video play/stop boosts sysclk to
+// 300 MHz via launcher_apply_clock(), which retimes QMI M1 (this stack's
+// memory) while running on this stack. Verified on hardware (5 play/stop
+// cycles x 11 runs, no fault); keep flash writes and QMI direct-mode code
+// off this stack entirely.
 #define LUA_VM_STACK_SIZE (64u * 1024u)
 
 typedef struct {
