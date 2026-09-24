@@ -185,6 +185,11 @@ bool file_browser_show(const char *start_path, const char *root_path,
   display_get_clip_rect(&saved_cx, &saved_cy, &saved_cw, &saved_ch);
   display_clear_clip_rect();
 
+  // Start from a clean keyboard: edges gathered by sys.sleep's background
+  // polls, or injections queued before this modal opened, were not typed
+  // at this browser and must not navigate or select on its behalf.
+  kbd_clear_state();
+
   int sel = 0;
   int scroll = 0;
   bool need_redraw = true;

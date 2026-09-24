@@ -126,6 +126,11 @@ bool tz_picker_show(void) {
 
     display_darken();
 
+    // Start from a clean keyboard: edges gathered by sys.sleep's background
+    // polls, or injections queued before this modal opened, were not typed
+    // at this picker and must not filter or select on its behalf.
+    kbd_clear_state();
+
     while (running) {
         if (need_redraw) {
             // Outer border

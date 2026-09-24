@@ -453,10 +453,13 @@ static void test_bg_wake_swallow_keeps_earlier_edges(void) {
   apply(KBD_FIFO_RELEASED, KEY_ENTER);
   poll_start(true);
   uint32_t cb = btn.curr, pb = btn.prev;
+  uint8_t raw_before = raw;                // s_last_raw_key before this poll's own decode
   apply(KBD_FIFO_PRESSED, KEY_UP);         // this poll's key wakes the screen
   kbd_buttons_swallow(&btn, true, cb, pb);
+  raw = raw_before;                        // keyboard.c:412 — bg_run ? raw_before : 0
   poll_start(false);
   CHECK_EQ_U32(pressed(), BTN_ENTER);
+  CHECK_EQ_INT(raw, KEY_ENTER);            // the earlier key (A) survives, not the waking key (B) or 0
   poll_start(false);
   CHECK_EQ_U32(released(), BTN_ENTER);
   CHECK_EQ_U32(btn.curr, 0);               // the swallowed Up never appears

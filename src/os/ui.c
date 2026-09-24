@@ -261,6 +261,11 @@ bool ui_text_input(const char *prompt, const char *default_val,
                     hint, DLG_DIM, DLG_BG);
   display_flush();
 
+  // Start from a clean keyboard: edges gathered by sys.sleep's background
+  // polls, or injections queued before this modal opened, were not typed
+  // at this dialog and must not accept/cancel it.
+  kbd_clear_state();
+
   // Input buffer
   const int MAX_CHARS = 127;
   char buf[128] = "";
