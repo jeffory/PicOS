@@ -285,6 +285,7 @@ add_executable(picocalc_os
     src/drivers/audio.c
     src/drivers/sound.c
     src/drivers/fileplayer.c
+    src/drivers/wav.c
     src/drivers/mp3_player.c
     src/drivers/video_player.cpp
     src/drivers/keyboard.c

@@ -5,6 +5,7 @@
 #include "pico/time.h"
 #include "pico/stdlib.h"
 #include "umm_malloc.h"
+#include "wav.h"
 
 #include <stdlib.h>
 #include <string.h>
@@ -13,45 +14,28 @@
 static sound_context_t s_context;
 
 static bool parse_wav_header(sound_sample_t *sample, uint8_t *data, uint32_t size) {
-    if (size < 44)
+    wav_info_t info;
+    wav_err_t err = wav_parse(data, size, &info);
+    if (err != WAV_OK) {
+        printf("sound: %s\n", wav_strerror(err));
         return false;
-
-    if (memcmp(data, "RIFF", 4) != 0)
-        return false;
-    if (memcmp(data + 8, "WAVE", 4) != 0)
-        return false;
-
-    uint32_t data_offset = 0;
-    uint32_t data_size = 0;
-
-    uint32_t pos = 12;
-    while (pos + 8 < size) {
-        uint32_t chunk_id = *(uint32_t *)(data + pos);
-        uint32_t chunk_size = *(uint32_t *)(data + pos + 4);
-
-        if (chunk_size > size - pos - 8)
-            break; // malformed chunk — would read past buffer
-
-        if (chunk_id == *(uint32_t *)"fmt ") {
-            sample->channels = *(uint16_t *)(data + pos + 10);
-            sample->sample_rate = *(uint32_t *)(data + pos + 12);
-            sample->bits_per_sample = *(uint16_t *)(data + pos + 22);
-        } else if (chunk_id == *(uint32_t *)"data") {
-            data_offset = pos + 8;
-            data_size = chunk_size;
-            break;
-        }
-
-        pos += 8 + chunk_size;
-        if (chunk_size % 2 != 0)
-            pos++;
     }
 
-    if (data_offset == 0 || data_size == 0)
-        return false;
-
+    // Keep what was read (the file is capped at SOUND_MAX_SAMPLE_SIZE), in
+    // whole frames.
+    uint32_t data_offset = info.data_offset;
+    uint32_t data_size = info.data_size;
+    if (data_size > size - data_offset)
+        data_size = size - data_offset;
     if (data_size > SOUND_MAX_SAMPLE_SIZE)
         data_size = SOUND_MAX_SAMPLE_SIZE;
+    data_size -= data_size % info.block_align;
+    if (data_size == 0)
+        return false;
+
+    sample->channels = (uint8_t)info.channels;
+    sample->sample_rate = info.sample_rate;
+    sample->bits_per_sample = (uint8_t)info.bits_per_sample;
 
     sample->data = umm_malloc(data_size);
     if (!sample->data)

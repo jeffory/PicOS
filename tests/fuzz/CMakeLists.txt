@@ -31,3 +31,4 @@ endfunction()
 
 picos_fuzz_target(fuzz_elf_plan SOURCES ${PICOS_ROOT}/src/os/elf_plan.c)
 picos_fuzz_target(fuzz_app_manifest SOURCES ${PICOS_ROOT}/src/os/app_manifest.c)
+picos_fuzz_target(fuzz_wav SOURCES ${PICOS_ROOT}/src/drivers/wav.c INCLUDES ${PICOS_ROOT}/src/drivers)

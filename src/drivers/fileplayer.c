@@ -6,6 +6,7 @@
 #include "pico/stdlib.h"
 #include "mp3_player.h"
 #include "umm_malloc.h"
+#include "wav.h"
 
 #include <string.h>
 #include <stdio.h>
@@ -23,38 +24,38 @@ static sdfile_t s_current_file = NULL;
 static uint8_t *s_wav_buffer = NULL;
 static volatile bool s_underflow = false;
 
-static bool parse_wav_header(sdfile_t f, uint32_t *sample_rate, uint16_t *channels, uint16_t *bits_per_sample, uint32_t *data_size) {
-    uint8_t header[44];
-    if (sdcard_fread(f, header, 44) < 44) {
+// Where the current WAV's sample data lives (set by fileplayer_load):
+// playback seeks to s_data_offset, reads whole frames of s_block_align bytes
+// and stops after s_data_size bytes (trailing chunks are not audio).
+static uint32_t s_data_offset = 44;
+static uint32_t s_data_size = 0;
+static uint16_t s_block_align = 4;
+
+// Parse the header window at the start of f (RIFF chunk walk in wav.c).
+// The window buffer comes from PSRAM, not the 4 KB main stack.
+static bool parse_wav_header(sdfile_t f, int file_size, wav_info_t *info) {
+    uint8_t *hdr = (uint8_t *)umm_malloc(WAV_HEADER_WINDOW);
+    if (!hdr)
+        return false;
+    int n = sdcard_fread(f, hdr, WAV_HEADER_WINDOW);
+    wav_err_t err = n > 0 ? wav_parse(hdr, (size_t)n, info) : WAV_ERR_NOT_WAV;
+    umm_free(hdr);
+    if (err != WAV_OK) {
+        printf("fileplayer: %s\n", wav_strerror(err));
         return false;
     }
-
-    if (memcmp(header, "RIFF", 4) != 0 || memcmp(header + 8, "WAVE", 4) != 0) {
+    // The streaming path converts 16-bit PCM only.
+    if (info->bits_per_sample != 16) {
+        printf("fileplayer: %u-bit WAV not supported (16-bit only)\n",
+               info->bits_per_sample);
         return false;
     }
-
-    uint32_t pos = 12;
-    /* A canonical 44-byte WAV header has the data chunk header at bytes
-     * 36-43 — `pos + 8 < 44` rejects it (36+8 is not < 44). Allow the chunk
-     * header to end exactly at the window edge. */
-    while (pos + 8 <= 44) {
-        uint32_t chunk_id = *(uint32_t *)(header + pos);
-        uint32_t chunk_size = *(uint32_t *)(header + pos + 4);
-
-        if (chunk_id == *(uint32_t *)"fmt ") {
-            *channels = *(uint16_t *)(header + pos + 10);
-            *sample_rate = *(uint32_t *)(header + pos + 12);
-            *bits_per_sample = *(uint16_t *)(header + pos + 22);
-        } else if (chunk_id == *(uint32_t *)"data") {
-            *data_size = chunk_size;
-            return true;
-        }
-
-        pos += 8 + chunk_size;
-        if (chunk_size % 2 != 0) pos++;
-    }
-
-    return false;
+    // Clamp a data chunk that claims more than the file holds.
+    uint32_t avail = file_size > (int)info->data_offset
+                         ? (uint32_t)file_size - info->data_offset : 0;
+    if (info->data_size > avail)
+        info->data_size = avail - avail % info->block_align;
+    return true;
 }
 
 static fileplayer_type_t detect_file_type(sdfile_t f) {
@@ -163,18 +164,23 @@ bool fileplayer_load(fileplayer_t *player, const char *path) {
         return false;
     }
 
-    uint32_t sample_rate = 44100, data_size = 0;
-    uint16_t wav_channels = 2, bits = 16;
-    if (!parse_wav_header(s_current_file, &sample_rate, &wav_channels, &bits, &data_size)) {
+    wav_info_t info;
+    if (!parse_wav_header(s_current_file, sdcard_fsize_handle(s_current_file),
+                          &info)) {
         sdcard_fclose(s_current_file);
         s_current_file = NULL;
         printf("fileplayer: failed to parse WAV\n");
         return false;
     }
+    uint32_t sample_rate = info.sample_rate;
+    uint16_t wav_channels = info.channels, bits = info.bits_per_sample;
 
     s_sample_rate = sample_rate;
+    s_data_offset = info.data_offset;
+    s_data_size = info.data_size;
+    s_block_align = info.block_align;
     player->channels = wav_channels;
-    player->length = data_size / (wav_channels * bits / 8);
+    player->length = info.data_size / info.block_align;
     player->position = 0;
 
     printf("fileplayer: loaded %s (%lu Hz, %u bit, %u ch, %lu samples)\n",
@@ -194,7 +200,7 @@ bool fileplayer_play(fileplayer_t *player, uint8_t repeat_count) {
     // eliminating the 44.1kHz timer ISR that used to preempt Core 0.
     audio_start_stream(s_sample_rate);
 
-    sdcard_fseek(s_current_file, 44);
+    sdcard_fseek(s_current_file, s_data_offset);
     player->position = 0;
 
     return true;
@@ -285,14 +291,17 @@ void fileplayer_set_loop_callback(fileplayer_t *player, int (*cb)(void *), void 
 
 void fileplayer_set_offset(fileplayer_t *player, uint32_t seconds) {
     if (!player || !s_current_file) return;
-    uint32_t offset = seconds * s_sample_rate * 4;
-    sdcard_fseek(s_current_file, 44 + offset);
-    player->position = offset;
+    // Whole frames from the start of the data chunk.
+    uint64_t offset = (uint64_t)seconds * s_sample_rate * s_block_align;
+    if (offset > s_data_size)
+        offset = s_data_size;
+    sdcard_fseek(s_current_file, s_data_offset + (uint32_t)offset);
+    player->position = (uint32_t)offset;
 }
 
 uint32_t fileplayer_get_offset(const fileplayer_t *player) {
     if (!player) return 0;
-    return player->position / 4 / s_sample_rate;
+    return player->position / s_block_align / s_sample_rate;
 }
 
 void fileplayer_set_stop_on_underrun(fileplayer_t *player, bool flag) {
@@ -332,21 +341,32 @@ void fileplayer_update(void) {
      * second. Only read what the ring can actually accept. */
     float space_rate = s_active_player->rate;
     if (space_rate < 0.1f) space_rate = 0.1f;
+    // Bytes of sample data left in the data chunk (trailing chunks such as
+    // LIST are not audio).
+    uint32_t pos = s_active_player->position;
+    uint32_t remaining = pos < s_data_size ? s_data_size - pos : 0;
     size_t to_read = 4096;
     size_t max_by_space = (size_t)(audio_ring_free() * 2 * space_rate);
     if (to_read > max_by_space) to_read = max_by_space;
-    to_read &= ~(size_t)1;  // 16-bit alignment
-    if (to_read < 512)
+    if (to_read > remaining) to_read = remaining;
+    // Whole frames only: a 2-byte step on stereo data swaps L/R from then on.
+    to_read -= to_read % s_block_align;
+    if (remaining >= s_block_align && (to_read == 0 ||
+                                       (to_read < 512 && to_read < remaining)))
         return;  // ring nearly full — wait for the DMA to drain
 
     // Non-blocking: skip if Core 0 owns the SD card
     if (!recursive_mutex_try_enter(&g_sdcard_mutex, NULL))
         return;
 
-    // Read a chunk of WAV data
+    // Read a chunk of WAV data (to_read == 0 at the end of the data chunk
+    // takes the end-of-file path below)
     UINT br = 0;
-    FRESULT res = f_read((FIL *)s_current_file, s_wav_buffer, to_read, &br);
+    FRESULT res = FR_OK;
+    if (to_read > 0)
+        res = f_read((FIL *)s_current_file, s_wav_buffer, to_read, &br);
     recursive_mutex_exit(&g_sdcard_mutex);
+    br -= br % s_block_align;  // a short read at EOF: whole frames only
 
     if (res == FR_OK && br > 0) {
         // WAV data is 16-bit signed PCM. Convert to stereo int16_t pairs
@@ -408,7 +428,7 @@ void fileplayer_update(void) {
         }
     } else if (res != FR_OK || br == 0) {
         if (s_active_player->loop) {
-            sdcard_fseek(s_current_file, 44);
+            sdcard_fseek(s_current_file, s_data_offset);
             s_active_player->position = 0;
             if (s_active_player->loop_callback)
                 s_active_player->loop_callback(s_active_player->loop_callback_arg);
