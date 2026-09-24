@@ -588,6 +588,9 @@ function picocalc.fs.tell(file) end
 function picocalc.fs.exists(path) end
 
 ---Read an entire file into a string.
+---Returns `nil` when the path is denied, missing or unreadable. A file too
+---big for free memory raises a memory error ("not enough memory") instead of
+---returning `nil`; use `pcall` when the size is not known to fit.
 ---@param path string
 ---@return string? contents `nil` on error
 function picocalc.fs.readFile(path) end
