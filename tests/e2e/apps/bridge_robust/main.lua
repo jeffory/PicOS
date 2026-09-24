@@ -36,4 +36,26 @@ T.case("repl_readline_idle", function()
     pc.repl.echo(true)
 end)
 
+-- ── terminal.new ─────────────────────────────────────────────────────────
+-- cols/rows were unchecked: 0 or negative silently became the default and
+-- cols*rows*2 could wrap (32-bit size_t on the device).
+T.case("terminal_new_rejects_bad_sizes", function()
+    T.raises(function() pc.terminal.new(1000000, 1000000) end, "cols")
+    T.raises(function() pc.terminal.new(0, 10) end, "cols")
+    T.raises(function() pc.terminal.new(-1, 10) end, "cols")
+    T.raises(function() pc.terminal.new(54, 10) end, "cols")
+    T.raises(function() pc.terminal.new(10, 0) end, "rows")
+    T.raises(function() pc.terminal.new(10, 27) end, "rows")
+    T.raises(function() pc.terminal.new(200, 200) end, "cols")
+end)
+
+T.case("terminal_new_accepts_screen_sizes", function()
+    local a = T.ok(pc.terminal.new(53, 26, 5000))
+    local b = T.ok(pc.terminal.new(1, 1, 0))
+    local c = T.ok(pc.terminal.new())
+    a:write("x"); b:write("y"); c:write("z")
+    a, b, c = nil, nil, nil
+    collectgarbage("collect")
+end)
+
 T.done()

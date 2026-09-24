@@ -2,6 +2,7 @@
 #include "../os/terminal.h"
 #include "../os/terminal_parser.h"
 #include "../os/terminal_render.h"
+#include "../fonts/font_scientifica.h"
 #include "../dev_commands.h"
 #include "umm_malloc.h"
 #include "pico/time.h"
@@ -39,21 +40,36 @@ static int l_terminal_gc(lua_State* L) {
     return 0;
 }
 
+// The panel is 320x320; a terminal cell is FONT_SCI_WIDTH x FONT_SCI_HEIGHT.
+#define TERM_MAX_COLS (320 / FONT_SCI_WIDTH)   // 53
+#define TERM_MAX_ROWS (320 / FONT_SCI_HEIGHT)  // 26
+
 static int l_terminal_new(lua_State* L) {
-    int cols = lb_optint(L, 1, TERM_DEFAULT_COLS);
-    int rows = lb_optint(L, 2, TERM_DEFAULT_ROWS);
-    int scrollback = lb_optint(L, 3, TERM_DEFAULT_SCROLLBACK);
+    lua_Integer cols = lb_optint(L, 1, TERM_DEFAULT_COLS);
+    lua_Integer rows = lb_optint(L, 2, TERM_DEFAULT_ROWS);
+    lua_Integer scrollback = lb_optint(L, 3, TERM_DEFAULT_SCROLLBACK);
+    if (cols < 1 || cols > TERM_MAX_COLS)
+        return luaL_argerror(L, 1, lua_pushfstring(L, "cols must be 1-%d",
+                                                   TERM_MAX_COLS));
+    if (rows < 1 || rows > TERM_MAX_ROWS)
+        return luaL_argerror(L, 2, lua_pushfstring(L, "rows must be 1-%d",
+                                                   TERM_MAX_ROWS));
+    // <= 0 keeps meaning "the default"; terminal_new caps the maximum.
+    if (scrollback > TERM_MAX_SCROLLBACK) scrollback = TERM_MAX_SCROLLBACK;
+    if (scrollback < 0) scrollback = 0;
 
-    terminal_t* term = terminal_new(cols, rows, scrollback);
+    // The userdata first, so a failure below leaves nothing to leak: its
+    // __gc ignores a NULL term.
+    lua_terminal_t* t = (lua_terminal_t*)lua_newuserdatauv(L, sizeof(lua_terminal_t), 0);
+    t->term = NULL;
+    luaL_setmetatable(L, TERMINAL_MT);
+
+    terminal_t* term = terminal_new((int)cols, (int)rows, (int)scrollback);
     if (!term) {
-        return luaL_error(L, "failed to create terminal");
+        return luaL_error(L, "failed to create terminal (out of memory)");
     }
-
-    lua_terminal_t* t = (lua_terminal_t*)lua_newuserdata(L, sizeof(lua_terminal_t));
     t->term = term;
     terminal_parser_init(&t->parser, term);
-
-    luaL_setmetatable(L, TERMINAL_MT);
 
 #ifdef PICOS_SIMULATOR
     sim_set_active_terminal(term);
