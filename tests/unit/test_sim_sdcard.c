@@ -61,7 +61,7 @@ static void test_open_limit(void) {
   CHECK(mkdtemp(dir) != NULL);
   CHECK(hal_sdcard_init(dir));
   void *h[HAL_SDCARD_MAX_OPEN];
-  char name[32];
+  char name[256];  // holds "<dir>/data/extra.txt": 32 truncated it and leaked dir
   CHECK(hal_sdcard_open("/missing/nope.txt", "r") == NULL);
   CHECK(hal_sdcard_open("/apps", "r") == NULL);
   CHECK(hal_sdcard_open_count() == 0);
