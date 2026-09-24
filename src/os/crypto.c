@@ -248,6 +248,7 @@ int crypto_ecdh_compute_shared(crypto_ecdh_t *ctx,
     if (out_len && *out_len < copy_len) copy_len = *out_len;
     if (out) memcpy(out, secret, copy_len);
     if (out_len) *out_len = (uint32_t)olen;
+    mbedtls_platform_zeroize(secret, sizeof(secret));
     return 0;
 }
 

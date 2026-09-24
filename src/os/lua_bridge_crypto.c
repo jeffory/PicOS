@@ -1,5 +1,6 @@
 #include "lua_bridge_internal.h"
 #include "crypto.h"
+#include "mbedtls/platform_util.h"
 
 // ── AES-CTR cipher userdata ─────────────────────────────────────────────────
 #define AES_CTR_MT "picocalc.crypto.aes_ctr"
@@ -82,15 +83,22 @@ static int l_ecdh_compute_shared(lua_State *L) {
     const char *peer_pub = luaL_checklstring(L, 2, &peer_len);
 
     uint8_t secret[66]; // up to P-256 (65 bytes) or X25519 (32 bytes)
-    uint32_t olen = 0;
+    // In/out: capacity in, secret length out. Passing 0 made the callee copy
+    // nothing yet report the full length, so Lua received stack garbage.
+    uint32_t olen = sizeof(secret);
     int ret = g_api.crypto->ecdhComputeShared(ud->ctx,
                                                (const uint8_t *)peer_pub,
                                                (uint32_t)peer_len,
                                                secret, &olen);
-    if (ret != 0)
-        return luaL_error(L, "ecdh: compute_shared failed (%d)", ret);
+    if (ret != 0 || olen == 0 || olen > sizeof(secret)) {
+        mbedtls_platform_zeroize(secret, sizeof(secret));
+        lua_pushnil(L);
+        lua_pushfstring(L, "ecdh: compute_shared failed (%d)", ret);
+        return 2;
+    }
 
     lua_pushlstring(L, (const char *)secret, (size_t)olen);
+    mbedtls_platform_zeroize(secret, sizeof(secret));
     return 1;
 }
 

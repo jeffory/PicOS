@@ -447,8 +447,12 @@ function transport:do_kex()
     end
 
     -- Compute shared secret
-    local shared = ecdh:computeShared(f)
+    local shared, ecdh_err = ecdh:computeShared(f)
     ecdh:free()
+    if not shared then
+        self.error = ecdh_err or "ECDH shared secret failed"
+        return false
+    end
 
     local K_mpint = wire.mpint(shared)
 
