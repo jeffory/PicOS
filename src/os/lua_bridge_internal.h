@@ -42,6 +42,16 @@ typedef struct {
 
 #define GRAPHICS_IMAGE_MT "picocalc.graphics.image"
 
+// The live image at idx, or a Lua error (wrong type, or pixels freed by its
+// finaliser: data is NULL only after __gc). Every image argument goes
+// through this, never a bare luaL_checkudata.
+static inline lua_image_t *lb_check_image(lua_State *L, int idx) {
+  lua_image_t *img = (lua_image_t *)luaL_checkudata(L, idx, GRAPHICS_IMAGE_MT);
+  if (!img->data)
+    luaL_error(L, "attempt to use a freed image");
+  return img;
+}
+
 // sys.qmiPsramAlloc buffer handle (lua_bridge_sys.c): a full userdata that
 // owns a umm_malloc block. p is NULL once freed. Check it with
 // luaL_checkudata/luaL_testudata(L, idx, QMI_BUF_MT), never lua_touserdata.

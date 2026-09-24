@@ -3,8 +3,12 @@
 
 #define MODPLAYER_USERDATA "modplayer"
 
+// The live player at idx, or a Lua error. The pointer is NULL once __gc ran
+// (reachable only from a later finaliser: __gc is not a method).
 static mod_player_t *check_modplayer(lua_State *L, int idx) {
     mod_player_t **ud = luaL_checkudata(L, idx, MODPLAYER_USERDATA);
+    if (!*ud)
+        luaL_error(L, "attempt to use a destroyed modplayer");
     return *ud;
 }
 
@@ -87,8 +91,11 @@ static int l_mod_set_loop(lua_State *L) {
 }
 
 static int l_mod_gc(lua_State *L) {
-    mod_player_t *p = check_modplayer(L, 1);
-    mod_player_destroy(p);
+    mod_player_t **ud = luaL_checkudata(L, 1, MODPLAYER_USERDATA);
+    if (*ud) {
+        mod_player_destroy(*ud);
+        *ud = NULL;
+    }
     return 0;
 }
 

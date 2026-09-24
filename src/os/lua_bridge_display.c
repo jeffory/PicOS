@@ -156,9 +156,7 @@ static int l_display_clearClipRect(lua_State *L) {
 // drawPlane(image, cam_x, cam_y, cam_z, angle, horizon_y, scale)
 // Mode 7 perspective ground plane — see display_draw_plane().
 static int l_display_drawPlane(lua_State *L) {
-  lua_image_t *img = (lua_image_t *)luaL_checkudata(L, 1, GRAPHICS_IMAGE_MT);
-  if (!img->data)
-    return luaL_error(L, "invalid image");
+  lua_image_t *img = lb_check_image(L, 1);
   float cam_x = (float)luaL_checknumber(L, 2);
   float cam_y = (float)luaL_checknumber(L, 3);
   float cam_z = (float)luaL_checknumber(L, 4);
@@ -317,10 +315,7 @@ static int l_display_applyEffect(lua_State *L) {
     display_effect_grayscale();
   } else if (strcmp(name, "blend") == 0) {
     // Arg 2: image userdata, Arg 3: alpha (0-255)
-    lua_image_t *img = (lua_image_t *)luaL_checkudata(L, 2, GRAPHICS_IMAGE_MT);
-    if (!img->data) {
-      return luaL_error(L, "blend: image has been freed");
-    }
+    lua_image_t *img = lb_check_image(L, 2);
     uint8_t alpha = (uint8_t)lb_clamp_int(lb_optint(L, 3, 128), 0, 255);
     display_effect_blend(img->data, img->w, img->h, alpha);
   } else if (strcmp(name, "palette") == 0) {
@@ -364,10 +359,7 @@ static int l_display_drawTexturedColumn(lua_State *L) {
   int x = (int)lb_checkint(L, 1);
   int y0 = (int)lb_checkint(L, 2);
   int y1 = (int)lb_checkint(L, 3);
-  lua_image_t *img =
-      (lua_image_t *)luaL_checkudata(L, 4, GRAPHICS_IMAGE_MT);
-  if (!img->data)
-    return luaL_error(L, "invalid image");
+  lua_image_t *img = lb_check_image(L, 4);
   int tex_x = (int)lb_checkint(L, 5);
   int tex_y0 = (int)lb_checkint(L, 6);
   int tex_y1 = (int)lb_checkint(L, 7);

@@ -7,6 +7,11 @@ holds only metamethods and is locked (__metatable = false). So obj:__gc()
 is "attempt to call a nil value", never a second finaliser run, and
 getmetatable(obj) is false.
 
+A destroyed object can still be reached from Lua through resurrection: a
+finaliser that runs after the object's own __gc can use it. Those cases
+build that order deliberately (Lua 5.4 runs finalisers newest-marked first)
+and require a clean Lua error rather than a NULL dereference.
+
 Each case is its own inline app on its own simulator, because a regression
 takes the simulator down. video (hardware-only; the sim stubs the player) and
 crypto (absent in the sim) are hardware-pending.
@@ -86,3 +91,74 @@ def test_metamethods_hidden(simulator, name):
     _stage(simulator, f"mt_{name}", HIDDEN % expr, req)
     run = run_lua_app(simulator, f"mt_{name}", timeout=20)
     run.assert_all_passed(["hidden"])
+
+
+# ── Using an object after its own finaliser ran ─────────────────────────────
+
+# arm(make, use) creates a holder with a finaliser, then the object (so the
+# object is finalised first), and has the holder's finaliser call use(obj).
+# The result of that call lands in R after a full collection.
+AFTER = """
+local R = {}
+local function arm(make, use)
+    local holder = setmetatable({}, {__gc = function(h)
+        R.ran = true
+        R.ok, R.err = pcall(use, h.obj, h.extra)
+    end})
+    holder.obj, holder.extra = make()
+end
+local function settle()
+    for _ = 1, 3 do collectgarbage('collect') end
+end
+"""
+
+DESTROYED = {
+    "terminal": """
+        arm(function() return pc.terminal.new(10, 5) end,
+            function(t) return t:getCols() end)
+    """,
+    "image": """
+        arm(function() return G.image.new(8, 8) end,
+            function(img) img:draw(0, 0) end)
+    """,
+    "image_under_loop": """
+        -- loop is marked before the holder, the image after it: the image
+        -- is finalised first, then the holder draws through the live loop.
+        local loop = G.animation.loop.new(100)
+        local holder = setmetatable({}, {__gc = function(h)
+            R.ran = true
+            R.ok, R.err = pcall(h.loop.draw, h.loop, 0, 0)
+        end})
+        holder.loop = loop
+        loop:setImageTable({G.image.new(8, 8)})
+        loop, holder = nil, nil
+    """,
+    "modplayer": """
+        arm(function() return pc.modplayer.create() end,
+            function(m) return m:getVolume() end)
+    """,
+    "blinker": """
+        arm(function() return G.animation.blinker.new() end,
+            function(b) b:start() end)
+    """,
+    "sprite": """
+        arm(function() return G.sprite.new() end,
+            function(s) s:add() end)
+    """,
+}
+
+
+@pytest.mark.parametrize("name", list(DESTROYED))
+def test_destroyed_object_errors(simulator, name):
+    body = AFTER + (
+        "T.case('destroyed', function()\n"
+        + DESTROYED[name] +
+        "    settle()\n"
+        "    T.ok(R.ran, 'the holder finaliser never ran')\n"
+        "    T.eq(R.ok, false, 'using a destroyed object succeeded')\n"
+        "    T.ok(tostring(R.err):find('destroyed') or tostring(R.err):find('freed'),\n"
+        "         'error: ' .. tostring(R.err))\n"
+        "end)\n")
+    _stage(simulator, f"dead_{name}", body)
+    run = run_lua_app(simulator, f"dead_{name}", timeout=20)
+    run.assert_all_passed(["destroyed"])

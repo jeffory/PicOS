@@ -10,8 +10,14 @@
 static uint16_t s_graphics_color = COLOR_WHITE;
 static uint16_t s_graphics_bg_color = COLOR_BLACK;
 
+// ── Destroyed objects ────────────────────────────────────────────────────────
+// __gc is not reachable from Lua (lb_register_type), but a finaliser that
+// runs after an object's own (resurrection) can still hand it to a method.
+// So every __gc leaves its object marked dead (an image's data is NULL, the
+// other types set `destroyed`) and every check_* rejects a dead object with a
+// Lua error. Finalisers use luaL_checkudata directly.
 static lua_image_t *check_image(lua_State *L, int idx) {
-  return (lua_image_t *)luaL_checkudata(L, idx, GRAPHICS_IMAGE_MT);
+  return lb_check_image(L, idx);
 }
 
 // ── Lifetime anchors ─────────────────────────────────────────────────────────
@@ -30,7 +36,7 @@ static void anchor_set(lua_State *L, int idx, int slot, int valueidx) {
 }
 
 static int l_graphics_image_gc(lua_State *L) {
-  lua_image_t *img = check_image(L, 1);
+  lua_image_t *img = (lua_image_t *)luaL_checkudata(L, 1, GRAPHICS_IMAGE_MT);
   if (img->data) {
     umm_free(img->data);
     img->data = NULL;
@@ -784,10 +790,14 @@ typedef struct {
   int map_w, map_h;      // map dimensions in tiles
   int tile_w, tile_h;    // tile size in pixels
   int tiles_per_row;     // tiles per row in the tileset image
+  bool destroyed;        // set by __gc
 } lua_tilemap_t;
 
 static lua_tilemap_t *check_tilemap(lua_State *L, int idx) {
-  return (lua_tilemap_t *)luaL_checkudata(L, idx, GRAPHICS_TILEMAP_MT);
+  lua_tilemap_t *tm = (lua_tilemap_t *)luaL_checkudata(L, idx, GRAPHICS_TILEMAP_MT);
+  if (tm->destroyed)
+    luaL_error(L, "attempt to use a destroyed tilemap");
+  return tm;
 }
 
 // Draw visible tiles from a tilemap at the given scroll offset
@@ -838,10 +848,14 @@ typedef struct {
   int font_id;        // registry id; >= FONT_REGISTRY_BUILTIN when owned
   bool owned;         // true when this object loaded the slot and must free it
   char name[64];      // built-in name or the path it was loaded from
+  bool destroyed;     // set by __gc (an owned slot is unloaded then)
 } lua_font_t;
 
 static lua_font_t *check_font(lua_State *L, int idx) {
-  return (lua_font_t *)luaL_checkudata(L, idx, GRAPHICS_FONT_MT);
+  lua_font_t *f = (lua_font_t *)luaL_checkudata(L, idx, GRAPHICS_FONT_MT);
+  if (f->destroyed)
+    luaL_error(L, "attempt to use a destroyed font");
+  return f;
 }
 
 // Resolve the pc_font_t a Lua call should measure with: the font object at
@@ -953,6 +967,7 @@ typedef struct {
   uint8_t stencil_pattern[8];  // 8x8 dither stencil pattern
   bool has_stencil_pattern;    // true if stencil_pattern is active
   void *tilemap;               // lua_tilemap_t* if set (renders tilemap instead of image)
+  bool destroyed;              // set by __gc
 } lua_sprite_t;
 
 static lua_sprite_t *s_sprites[MAX_SPRITES];
@@ -962,7 +977,10 @@ static uint8_t s_global_stencil[8];
 static bool s_has_global_stencil = false;
 
 static lua_sprite_t *check_sprite(lua_State *L, int idx) {
-  return (lua_sprite_t *)luaL_checkudata(L, idx, GRAPHICS_SPRITE_MT);
+  lua_sprite_t *s = (lua_sprite_t *)luaL_checkudata(L, idx, GRAPHICS_SPRITE_MT);
+  if (s->destroyed)
+    luaL_error(L, "attempt to use a destroyed sprite");
+  return s;
 }
 
 // ── Display list ─────────────────────────────────────────────────────────────
@@ -1122,7 +1140,7 @@ static int l_sprite_addEmptyCollisionSprite(lua_State *L);
 static int l_graphics_setStencilPattern(lua_State *L);
 
 static int l_sprite_gc(lua_State *L) {
-  lua_sprite_t *s = check_sprite(L, 1);
+  lua_sprite_t *s = (lua_sprite_t *)luaL_checkudata(L, 1, GRAPHICS_SPRITE_MT);
   // A listed sprite is anchored, so this only happens at lua_close. Unlink
   // it anyway: s_sprites[] must never hold a freed sprite.
   int i = sprite_list_find(s);
@@ -1133,7 +1151,9 @@ static int l_sprite_gc(lua_State *L) {
   }
   s->image = NULL;
   s->stencil = NULL;
+  s->tilemap = NULL;
   s->has_stencil_pattern = false;
+  s->destroyed = true;  // never re-listed: s_sprites[] would outlive it
   return 0;
 }
 
@@ -2581,7 +2601,7 @@ static int l_graphics_setStencilPattern(lua_State *L) {
 
 static int l_sprite_alphaCollision(lua_State *L) {
   lua_sprite_t *a = check_sprite(L, 1);
-  lua_sprite_t *b = (lua_sprite_t *)luaL_checkudata(L, 2, GRAPHICS_SPRITE_MT);
+  lua_sprite_t *b = check_sprite(L, 2);
 
   // Pixel data with its real dimensions; a sprite without pixels uses its
   // bounds for the AABB fallback. Never the sprite size as a stride.
@@ -2783,27 +2803,35 @@ typedef struct {
   int frame_y[MAX_FRAMES];
   int frame_w[MAX_FRAMES];
   int frame_h[MAX_FRAMES];
+  bool destroyed;  // set by __gc
 } lua_spritesheet_t;
 
 static lua_spritesheet_t *check_spritesheet(lua_State *L, int idx) {
-  return (lua_spritesheet_t *)luaL_checkudata(L, idx, GRAPHICS_SPRITESHEET_MT);
+  lua_spritesheet_t *ss =
+      (lua_spritesheet_t *)luaL_checkudata(L, idx, GRAPHICS_SPRITESHEET_MT);
+  if (ss->destroyed)
+    luaL_error(L, "attempt to use a destroyed spritesheet");
+  return ss;
 }
 
 static int l_spritesheet_gc(lua_State *L) {
-  lua_spritesheet_t *ss = check_spritesheet(L, 1);
+  lua_spritesheet_t *ss =
+      (lua_spritesheet_t *)luaL_checkudata(L, 1, GRAPHICS_SPRITESHEET_MT);
   ss->image = NULL;
+  ss->destroyed = true;
   return 0;
 }
 
 static int l_spritesheet_new(lua_State *L) {
   lua_image_t *img = NULL;
   if (lua_isuserdata(L, 1)) {
-    img = (lua_image_t *)luaL_checkudata(L, 1, GRAPHICS_IMAGE_MT);
+    img = check_image(L, 1);
   }
   
   lua_spritesheet_t *ss = (lua_spritesheet_t *)lua_newuserdatauv(L, sizeof(lua_spritesheet_t), 1);
   ss->image = img;
   ss->frame_count = 0;
+  ss->destroyed = false;
   if (img) anchor_set(L, -1, SPRITESHEET_UV_IMAGE, 1);
   
   luaL_setmetatable(L, GRAPHICS_SPRITESHEET_MT);
@@ -2811,7 +2839,7 @@ static int l_spritesheet_new(lua_State *L) {
 }
 
 static int l_spritesheet_newGrid(lua_State *L) {
-  lua_image_t *img = (lua_image_t *)luaL_checkudata(L, 1, GRAPHICS_IMAGE_MT);
+  lua_image_t *img = check_image(L, 1);
   int cols = lb_checkint(L, 2);
   int rows = lb_checkint(L, 3);
   int frame_w = lb_checkint(L, 4);
@@ -2820,6 +2848,7 @@ static int l_spritesheet_newGrid(lua_State *L) {
   lua_spritesheet_t *ss = (lua_spritesheet_t *)lua_newuserdatauv(L, sizeof(lua_spritesheet_t), 1);
   ss->image = img;
   ss->frame_count = 0;
+  ss->destroyed = false;
   anchor_set(L, -1, SPRITESHEET_UV_IMAGE, 1);
   
   int x = 0, y = 0;
@@ -2895,6 +2924,10 @@ static int l_spritesheet_drawFrame(lua_State *L) {
   
   if (!ss->image || frame_idx < 0 || frame_idx >= ss->frame_count)
     return 0;
+  // The image is anchored, but a finaliser that runs after the image's own
+  // can still get here with its pixels freed.
+  if (!ss->image->data)
+    return luaL_error(L, "attempt to use a freed image");
   
   bool flip = lua_toboolean(L, 5);
   
@@ -2923,7 +2956,7 @@ static const luaL_Reg l_spritesheet_lib[] = {
 
 // tilemap.new(image, tileWidth, tileHeight)
 static int l_tilemap_new(lua_State *L) {
-  lua_image_t *img = (lua_image_t *)luaL_checkudata(L, 1, GRAPHICS_IMAGE_MT);
+  lua_image_t *img = check_image(L, 1);
   int tw = lb_checkint(L, 2);
   int th = lb_checkint(L, 3);
 
@@ -2938,6 +2971,7 @@ static int l_tilemap_new(lua_State *L) {
   tm->map_w = 0;
   tm->map_h = 0;
   tm->tiles = NULL;
+  tm->destroyed = false;
 
   luaL_setmetatable(L, GRAPHICS_TILEMAP_MT);
   return 1;
@@ -3022,11 +3056,13 @@ static int l_tilemap_draw(lua_State *L) {
 }
 
 static int l_tilemap_gc(lua_State *L) {
-  lua_tilemap_t *tm = check_tilemap(L, 1);
+  lua_tilemap_t *tm = (lua_tilemap_t *)luaL_checkudata(L, 1, GRAPHICS_TILEMAP_MT);
   if (tm->tiles) {
     umm_free(tm->tiles);
     tm->tiles = NULL;
   }
+  tm->tileset = NULL;
+  tm->destroyed = true;
   return 0;
 }
 
@@ -3203,10 +3239,15 @@ typedef struct {
   uint32_t last_update_ms;
   bool looping;
   bool valid;
+  bool destroyed;  // set by __gc
 } lua_animation_loop_t;
 
 static lua_animation_loop_t *check_animation_loop(lua_State *L, int idx) {
-  return (lua_animation_loop_t *)luaL_checkudata(L, idx, GRAPHICS_ANIMATION_LOOP_MT);
+  lua_animation_loop_t *loop = (lua_animation_loop_t *)luaL_checkudata(
+      L, idx, GRAPHICS_ANIMATION_LOOP_MT);
+  if (loop->destroyed)
+    luaL_error(L, "attempt to use a destroyed animation loop");
+  return loop;
 }
 
 // User value 1 of a loop: a private table {[i] = image} holding the images
@@ -3225,6 +3266,8 @@ static void loop_set_frames(lua_State *L, lua_animation_loop_t *loop,
   for (int i = 0; i < n; i++) {
     lua_rawgeti(L, tbl_idx, i + 1);
     loop->frames[i] = (lua_image_t *)luaL_testudata(L, -1, GRAPHICS_IMAGE_MT);
+    if (loop->frames[i] && !loop->frames[i]->data)
+      loop->frames[i] = NULL;  // a freed image is an empty frame too
     if (loop->frames[i])
       lua_rawseti(L, -2, i + 1);
     else
@@ -3236,9 +3279,11 @@ static void loop_set_frames(lua_State *L, lua_animation_loop_t *loop,
 }
 
 static int l_animation_loop_gc(lua_State *L) {
-  lua_animation_loop_t *loop = check_animation_loop(L, 1);
+  lua_animation_loop_t *loop = (lua_animation_loop_t *)luaL_checkudata(
+      L, 1, GRAPHICS_ANIMATION_LOOP_MT);
   loop->frame_count = 0;
   loop->valid = false;
+  loop->destroyed = true;
   return 0;
 }
 
@@ -3257,6 +3302,7 @@ static int l_animation_loop_new(lua_State *L) {
   loop->last_update_ms = to_ms_since_boot(get_absolute_time());
   loop->looping = true;
   loop->valid = false;
+  loop->destroyed = false;
 
   if (top >= 1) {
     if (lua_isnumber(L, 1)) {
@@ -3284,7 +3330,11 @@ static int l_animation_loop_draw(lua_State *L) {
   if (!loop->valid || !loop->frames[loop->current_frame])
     return 0;
 
+  // A frame's image is anchored, but a finaliser that runs after the
+  // image's own can still get here with its pixels freed.
   lua_image_t *img = loop->frames[loop->current_frame];
+  if (!img->data)
+    return luaL_error(L, "attempt to use a freed image");
   display_draw_image_partial(x, y, img->w, img->h, img->data,
                             0, 0, img->w, img->h, flip, false, 0);
   return 0;
@@ -3457,15 +3507,20 @@ typedef struct {
   bool reverses;
   bool ended;
   easing_fn easing;
+  bool destroyed;  // set by __gc
 } lua_animator_t;
 
 static lua_animator_t *check_animator(lua_State *L, int idx) {
-  return (lua_animator_t *)luaL_checkudata(L, idx, GRAPHICS_ANIMATOR_MT);
+  lua_animator_t *a = (lua_animator_t *)luaL_checkudata(L, idx, GRAPHICS_ANIMATOR_MT);
+  if (a->destroyed)
+    luaL_error(L, "attempt to use a destroyed animator");
+  return a;
 }
 
 static int l_animator_gc(lua_State *L) {
-  lua_animator_t *a = check_animator(L, 1);
+  lua_animator_t *a = (lua_animator_t *)luaL_checkudata(L, 1, GRAPHICS_ANIMATOR_MT);
   a->ended = true;
+  a->destroyed = true;
   return 0;
 }
 
@@ -3482,6 +3537,7 @@ static int l_animator_new(lua_State *L) {
   a->reverses = false;
   a->ended = false;
   a->easing = easing_linear;
+  a->destroyed = false;
 
   if (lua_gettop(L) >= 4 && lua_isstring(L, 4)) {
     a->easing = get_easing_fn(luaL_checkstring(L, 4));
@@ -3641,13 +3697,18 @@ typedef struct {
   uint32_t start_time_ms;
   bool running;
   bool state;
+  bool destroyed;  // set by __gc; a dead blinker must never re-enter the list
 } lua_animation_blinker_t;
 
 static lua_animation_blinker_t *s_blinkers[MAX_BLINKERS];
 static int s_blinker_count = 0;
 
 static lua_animation_blinker_t *check_blinker(lua_State *L, int idx) {
-  return (lua_animation_blinker_t *)luaL_checkudata(L, idx, GRAPHICS_ANIMATION_BLINKER_MT);
+  lua_animation_blinker_t *b = (lua_animation_blinker_t *)luaL_checkudata(
+      L, idx, GRAPHICS_ANIMATION_BLINKER_MT);
+  if (b->destroyed)
+    luaL_error(L, "attempt to use a destroyed blinker");
+  return b;
 }
 
 // s_blinkers[] (the updateAll/stopAll list) holds blinkers weakly: a
@@ -3665,8 +3726,10 @@ static void blinker_list_remove(lua_animation_blinker_t *b) {
 }
 
 static int l_animation_blinker_gc(lua_State *L) {
-  lua_animation_blinker_t *b = check_blinker(L, 1);
+  lua_animation_blinker_t *b = (lua_animation_blinker_t *)luaL_checkudata(
+      L, 1, GRAPHICS_ANIMATION_BLINKER_MT);
   b->running = false;
+  b->destroyed = true;
   blinker_list_remove(b);
   return 0;
 }
@@ -3690,6 +3753,7 @@ static int l_animation_blinker_new(lua_State *L) {
   b->start_time_ms = to_ms_since_boot(get_absolute_time());
   b->running = false;
   b->state = true;
+  b->destroyed = false;
 
   if (top >= 1) b->on_duration_ms = lb_checkint(L, 1);
   if (top >= 2) b->off_duration_ms = lb_checkint(L, 2);
@@ -3868,6 +3932,7 @@ static int l_font_new(lua_State *L) {
   lua_font_t *f = (lua_font_t *)lua_newuserdata(L, sizeof(lua_font_t));
   f->font_id = font_id;
   f->owned = owned;
+  f->destroyed = false;
   strncpy(f->name, name, sizeof(f->name) - 1);
   f->name[sizeof(f->name) - 1] = '\0';
   luaL_setmetatable(L, GRAPHICS_FONT_MT);
@@ -3875,12 +3940,13 @@ static int l_font_new(lua_State *L) {
 }
 
 static int l_font_gc(lua_State *L) {
-  lua_font_t *f = check_font(L, 1);
+  lua_font_t *f = (lua_font_t *)luaL_checkudata(L, 1, GRAPHICS_FONT_MT);
   if (f->owned) {
     if (display_get_font() == f->font_id) display_set_font(0);
     font_registry_unload(f->font_id);
     f->owned = false;
   }
+  f->destroyed = true;
   return 0;
 }
 
