@@ -26,6 +26,11 @@ typedef struct {
     FILE *fp;
 } hal_sdfile_t;
 
+// At most HAL_SDCARD_MAX_OPEN handles are open at once (the firmware's
+// FF_FS_LOCK); hal_sdcard_open returns NULL beyond that until one is closed.
+#define HAL_SDCARD_MAX_OPEN 16
+int hal_sdcard_open_count(void);
+
 void* hal_sdcard_open(const char* path, const char* mode);
 FILE *hal_sdcard_stream(void* handle);
 void hal_sdcard_close(void* handle);

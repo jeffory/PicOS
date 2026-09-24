@@ -133,6 +133,58 @@ FS_EDGE = {
         local ok, n = pcall(fs.write, f, "x")
         T.ok(not ok or not n or n <= 0, "write on a closed handle succeeded")
     """,
+    "negative_read_rejected": """
+        local path = fs.appPath("neg.txt")
+        local w = T.ok(fs.open(path, "w"), "open w")
+        fs.write(w, "hello")
+        fs.close(w)
+        local f = T.ok(fs.open(path, "r"), "open r")
+        local ok = pcall(fs.read, f, -1)
+        T.ok(not ok, "read with a negative length was accepted")
+        -- An absurd length is clamped to what is left in the file rather
+        -- than allocated up front (it used to be umm_malloc(len)).
+        T.eq(fs.read(f, 0x7fffffff), "hello")
+        T.eq(fs.read(f, 10), nil)
+        fs.close(f)
+    """,
+    "foreign_userdata_rejected": """
+        -- A full userdata of another type is not a file handle.
+        local u = T.ok(picocalc.sys.qmiPsramAlloc(64), "qmi alloc")
+        T.ok(not pcall(fs.read, u, 10), "read accepted a qmi buffer")
+        T.ok(not pcall(fs.write, u, "x"), "write accepted a qmi buffer")
+        T.ok(not pcall(fs.close, u), "close accepted a qmi buffer")
+        T.eq(picocalc.sys.qmiPsramWrite(u, 0, "still mine"), 10)
+    """,
+    "gc_closes_dropped": """
+        -- FF_FS_LOCK = 16: 16 handles dropped without close must be closed
+        -- by the collector, or the next open fails.
+        for round = 1, 3 do
+            for i = 1, 16 do
+                T.ok(fs.open(fs.appPath("gc" .. i .. ".txt"), "w"),
+                     "round " .. round .. " open " .. i)
+            end
+            collectgarbage("collect")
+            collectgarbage("collect")
+        end
+    """,
+    "methods_and_close_var": """
+        local path = fs.appPath("meth.txt")
+        do
+            local w <close> = T.ok(fs.open(path, "w"), "open w")
+            T.eq(w:write("abc"), 3)
+            T.eq(w:tell(), 3)
+        end                                  -- __close closes it here
+        local f = T.ok(fs.open(path, "r"), "open r")
+        T.eq(f:read(2), "ab")
+        T.ok(f:seek(0), "seek")
+        T.eq(fs.read(f, 3), "abc")
+        f:close()
+        f:close()                            -- idempotent
+        T.ok(not pcall(f.read, f, 1), "read after f:close() succeeded")
+        T.ok(tostring(f):find("closed"), "tostring: " .. tostring(f))
+        T.eq(getmetatable(f), false)         -- metatable (and __gc) hidden
+        T.eq(f.__gc, nil)
+    """,
 }
 
 FS_EDGE_TAIL = """
@@ -172,6 +224,16 @@ FS_EDGE_MARKS = {
     "write_after_close": [known_bug(_fs_asan(
         "hal_sdcard_write <- l_fs_write (lua_bridge_fs.c) on the freed handle")),
         pytest.mark.asan_only],
+    # today: pcall(fs.read, f, -1) returns nil (umm_malloc(-1) fails) and an
+    # absurd length returns nil instead of the data
+    "negative_read_rejected": [known_bug(FS_HANDLE_BUG)],
+    # today: the qmi buffer is used as a FIL (garbage read, then a free of
+    # the buffer's memory as a file)
+    "foreign_userdata_rejected": [known_bug(FS_HANDLE_BUG)],
+    # today: lightuserdata has no __gc, so the 17th open fails
+    "gc_closes_dropped": [known_bug(FS_HANDLE_BUG)],
+    # today: lightuserdata has no methods
+    "methods_and_close_var": [known_bug(FS_HANDLE_BUG)],
 }
 
 
@@ -186,10 +248,13 @@ def test_fs_handle_misuse(simulator, name):
 LEAK_APP = """
 local fs = picocalc.fs
 local T = picocalc.sys.loadlib("picotest")
-T.case("open_50", function()
+T.case("open_20", function()
+    -- FF_FS_LOCK = 16 (the simulator models it): the first 16 must open;
+    -- 17..20 fail on hardware too. All are left open at exit.
     local handles = {}
-    for i = 1, 50 do
-        handles[i] = T.ok(fs.open(fs.appPath("leak" .. i .. ".txt"), "w"), "open " .. i)
+    for i = 1, 20 do
+        handles[i] = fs.open(fs.appPath("leak" .. i .. ".txt"), "w")
+        if i <= 16 then T.ok(handles[i], "open " .. i) end
     end
     _G.__leaked = handles   -- returned to the launcher without closing
 end)
@@ -197,10 +262,12 @@ T.done()
 """
 
 
+# today: nothing closes the leaked handles, so the second run gets none
+@known_bug(FS_HANDLE_BUG)
 def test_fs_handles_leaked_at_exit(simulator):
-    """An app that exits with 50 open files doesn't stop the next one from
-    opening 50 (in the sim each leak is a host FILE*)."""
+    """An app that exits with 20 open files (16 of them real: FF_FS_LOCK)
+    doesn't stop the next one from opening 16."""
     stage_lua_app(simulator.sd_card_path, "fsleak", LEAK_APP)
-    for i in range(2):
+    for i in range(3):
         run = run_lua_app(simulator, "fsleak", timeout=15)
-        run.assert_all_passed(["open_50"])
+        run.assert_all_passed(["open_20"])

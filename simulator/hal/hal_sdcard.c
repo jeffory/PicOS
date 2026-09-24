@@ -10,6 +10,7 @@
 #include <dirent.h>
 #include <unistd.h>
 #include <errno.h>
+#include <stdatomic.h>
 #include "os/sim_hooks.h"
 
 char g_base_path[512] = ".";
@@ -86,12 +87,31 @@ static bool build_path(char* out, size_t out_size, const char* path) {
     return hal_sdcard_resolve(path, out, out_size);
 }
 
+// FatFS parity: the firmware builds FatFS with FF_FS_LOCK = 16
+// (third_party/fatfs/ffconf.h), so at most 16 files can be open at once and
+// f_open fails (FR_TOO_MANY_OPEN_FILES) until one is closed. The host has no
+// such limit, which hid leaked handles in the simulator. Counts every open
+// handle, the OS's own included, as the firmware does. Atomic: Core 1 (a
+// thread here) opens files too.
+static atomic_int s_open_count = 0;
+
+int hal_sdcard_open_count(void) {
+    return atomic_load(&s_open_count);
+}
+
 // Simulate FatFS file operations
 void* hal_sdcard_open(const char* path, const char* mode) {
     if (!g_initialized) return NULL;
 
     char full_path[1024];
     if (!build_path(full_path, sizeof(full_path), path)) return NULL;
+
+    if (atomic_fetch_add(&s_open_count, 1) >= HAL_SDCARD_MAX_OPEN) {
+        atomic_fetch_sub(&s_open_count, 1);
+        fprintf(stderr, "[SIM] too many open files (FF_FS_LOCK=%d): %s\n",
+                HAL_SDCARD_MAX_OPEN, path);
+        return NULL;
+    }
 
     // FatFS parity: f_open() on a directory fails on hardware, but host
     // fopen(dir, "r") succeeds on Linux. Apps distinguish files from
@@ -102,13 +122,18 @@ void* hal_sdcard_open(const char* path, const char* mode) {
     // while loading all of them on hardware.
     struct stat st;
     if (stat(full_path, &st) == 0 && S_ISDIR(st.st_mode)) {
+        atomic_fetch_sub(&s_open_count, 1);
         return NULL;
     }
     FILE *fp = fopen(full_path, mode);
-    if (!fp) return NULL;
+    if (!fp) {
+        atomic_fetch_sub(&s_open_count, 1);
+        return NULL;
+    }
     hal_sdfile_t *h = malloc(sizeof(*h));
     if (!h) {
         fclose(fp);
+        atomic_fetch_sub(&s_open_count, 1);
         return NULL;
     }
     h->fp = fp;
@@ -123,6 +148,7 @@ void hal_sdcard_close(void* handle) {
     if (handle) {
         fclose(hal_sdcard_stream(handle));
         free(handle);
+        atomic_fetch_sub(&s_open_count, 1);
     }
 }
 

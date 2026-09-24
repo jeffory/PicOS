@@ -9,7 +9,9 @@
 
 #include <stdarg.h>
 #include <stdbool.h>
+#include <stdlib.h>
 #include <string.h>
+#include <unistd.h>
 
 extern char g_base_path[512];
 
@@ -52,7 +54,45 @@ static void test_resolve(void) {
   CHECK(resolve("/a/../../x", NULL));
 }
 
+// FF_FS_LOCK parity: the 17th concurrently open file is refused, and closing
+// one frees its slot. Failed opens (missing file, directory) take no slot.
+static void test_open_limit(void) {
+  char dir[] = "/tmp/picos_sdcard_XXXXXX";
+  CHECK(mkdtemp(dir) != NULL);
+  CHECK(hal_sdcard_init(dir));
+  void *h[HAL_SDCARD_MAX_OPEN];
+  char name[32];
+  CHECK(hal_sdcard_open("/missing/nope.txt", "r") == NULL);
+  CHECK(hal_sdcard_open("/apps", "r") == NULL);
+  CHECK(hal_sdcard_open_count() == 0);
+  for (int i = 0; i < HAL_SDCARD_MAX_OPEN; i++) {
+    snprintf(name, sizeof(name), "/data/f%d.txt", i);
+    h[i] = hal_sdcard_open(name, "w");
+    CHECK(h[i] != NULL);
+  }
+  CHECK(hal_sdcard_open_count() == HAL_SDCARD_MAX_OPEN);
+  CHECK(hal_sdcard_open("/data/extra.txt", "w") == NULL);
+  hal_sdcard_close(h[0]);
+  h[0] = hal_sdcard_open("/data/extra.txt", "w");
+  CHECK(h[0] != NULL);
+  for (int i = 0; i < HAL_SDCARD_MAX_OPEN; i++) {
+    hal_sdcard_close(h[i]);
+    snprintf(name, sizeof(name), "%s/data/f%d.txt", dir, i);
+    remove(name);
+  }
+  CHECK(hal_sdcard_open_count() == 0);
+  snprintf(name, sizeof(name), "%s/data/extra.txt", dir);
+  remove(name);
+  const char *sub[] = {"apps", "data", "system"};
+  for (int i = 0; i < 3; i++) {
+    snprintf(name, sizeof(name), "%s/%s", dir, sub[i]);
+    rmdir(name);
+  }
+  rmdir(dir);
+}
+
 int main(void) {
   test_resolve();
+  test_open_limit();
   return check_report("test_sim_sdcard");
 }
