@@ -85,6 +85,11 @@ static void http_ud_unref_all(lua_State *L, http_ud_t *ud);
 // ── HTTP callback dispatcher (called from menu_lua_hook)
 // ──────────────────────
 
+// True while http_lua_fire_pending runs (it is never re-entered).  Reset by
+// lua_bridge_network_init: an error unwinding out of a callback must not
+// leave it set for the next app.
+static bool s_firing = false;
+
 static void http_fire(lua_State *L, http_ud_t *ud, http_conn_t *c, int ref,
                       const char *what) {
   // A callback that ran before this one may have closed the connection.
@@ -92,6 +97,10 @@ static void http_fire(lua_State *L, http_ud_t *ud, http_conn_t *c, int ref,
     return;
   lua_rawgeti(L, LUA_REGISTRYINDEX, ref);
   if (lua_pcall(L, 0, 0, 0) != LUA_OK) {
+    if (lua_bridge_is_exit_sentinel(L, -1)) {
+      s_firing = false;  // the app is leaving: unwind to it
+      lua_error(L);
+    }
     printf("[HTTP-LUA] %s callback error: %s\n", what, lua_tostring(L, -1));
     lua_pop(L, 1);
   }
@@ -104,7 +113,6 @@ static void http_fire(lua_State *L, http_ud_t *ud, http_conn_t *c, int ref,
 // callback runs (and sleeps, or runs long enough for the hook to fire),
 // nested calls return at once and the events wait for the outer loop.
 void http_lua_fire_pending(lua_State *L) {
-  static bool s_firing = false;
   if (s_firing)
     return;
   s_firing = true;
@@ -641,6 +649,7 @@ static void on_http_slot_free(void *lua_ud) {
 }
 
 void lua_bridge_network_init(lua_State *L) {
+  s_firing = false;
 
   http_close_all(on_http_slot_free);
 

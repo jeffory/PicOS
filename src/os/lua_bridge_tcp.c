@@ -334,6 +334,11 @@ static bool push_tcp_obj(lua_State *L, tcp_ud_t *ud) {
     return false;
 }
 
+// True while tcp_lua_fire_pending runs (it is never re-entered).  Reset by
+// lua_bridge_tcp_init: an error unwinding out of a callback must not leave
+// it set for the next app.
+static bool s_firing = false;
+
 static void tcp_fire(lua_State *L, tcp_ud_t *ud, tcp_conn_t *c, int obj,
                      int ref, const char *what) {
     // A callback that ran before this one may have closed the socket.
@@ -342,6 +347,10 @@ static void tcp_fire(lua_State *L, tcp_ud_t *ud, tcp_conn_t *c, int obj,
     lua_rawgeti(L, LUA_REGISTRYINDEX, ref);
     lua_pushvalue(L, obj);
     if (lua_pcall(L, 1, 0, 0) != LUA_OK) {
+        if (lua_bridge_is_exit_sentinel(L, -1)) {
+            s_firing = false;  // the app is leaving: unwind to it
+            lua_error(L);
+        }
         printf("[TCP-LUA] %s callback error: %s\n", what, lua_tostring(L, -1));
         lua_pop(L, 1);
     }
@@ -353,7 +362,6 @@ static void tcp_fire(lua_State *L, tcp_ud_t *ud, tcp_conn_t *c, int obj,
 // leaves later events for the outer call).  Only the events that have a
 // callback are taken, so sock:getEvents() still sees the others.
 void tcp_lua_fire_pending(lua_State *L) {
-    static bool s_firing = false;
     if (s_firing)
         return;
     s_firing = true;
@@ -385,6 +393,7 @@ void tcp_lua_fire_pending(lua_State *L) {
 }
 
 void lua_bridge_tcp_init(lua_State *L) {
+    s_firing = false;
     // Sockets a previous app (Lua or native) left behind.
     tcp_close_all();
 
