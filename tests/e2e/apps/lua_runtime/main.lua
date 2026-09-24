@@ -1,5 +1,6 @@
 -- E2E fixture for the Lua VM configuration (LUA_32BITS, LUAI_MAXSTACK=1000,
--- coroutine/utf8 availability, text-only load). Every probe logs one
+-- LUAI_MAXCCALLS=60, coroutine/utf8 availability, text-only load). Every
+-- probe logs one
 -- "LR <NAME> <value>" line; the test asserts on the exact values.
 
 local log = picocalc.sys.log
@@ -95,5 +96,25 @@ local rok, rerr = pcall(recurse)
 log("LR RECURSE ok=" .. tostring(rok) .. " overflow="
     .. tostring(type(rerr) == "string" and rerr:find("stack overflow") ~= nil))
 log("LR DEPTH " .. depth)
+
+-- 6 ── Lua -> C -> Lua recursion (string.gsub callbacks) stops at
+--      LUAI_MAXCCALLS=60 with a clean "C stack overflow" error. On hardware
+--      each level costs ~870 bytes of C stack; the 64 KB Lua VM stack holds
+--      the full 60, so the count limit trips before the stack limit.
+local gdepth = 0
+local function grec(n)
+    gdepth = math.max(gdepth, n)
+    return (string.gsub("a", "a", function() return grec(n + 1) end))
+end
+local function gsub_to(n)
+    if n == 0 then return "x" end
+    return (string.gsub("a", "a", function() return gsub_to(n - 1) end))
+end
+probe("GSUB40", function() return gsub_to(40) end)
+local gok, gerr = pcall(grec, 1)
+log("LR GSUBDEEP ok=" .. tostring(gok) .. " cstack="
+    .. tostring(type(gerr) == "string" and gerr:find("C stack overflow") ~= nil))
+log("LR GSUBDEPTH " .. gdepth)
+log("LR GSUBERR " .. tostring(gerr))
 
 log("LR DONE")

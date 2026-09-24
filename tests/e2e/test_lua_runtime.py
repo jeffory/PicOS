@@ -71,3 +71,12 @@ def test_lua_runtime_config(simulator):
     # (a trivial frame costs ~1 slot, so the depth lands just under the cap)
     assert r["RECURSE"] == "ok=false overflow=true"
     assert 900 < int(r["DEPTH"]) < 1000
+
+    # LUAI_MAXCCALLS=60: Lua -> C -> Lua recursion (nested string.gsub
+    # callbacks, the pattern that overflowed the old 4 KB C stack on device)
+    # runs 40 deep and then stops with a catchable "C stack overflow" before
+    # the 64 KB Lua VM stack is exhausted. Upstream's 200 would let it run
+    # ~197 deep, about 170 KB of C stack on hardware.
+    assert r["GSUB40"] == "x"
+    assert r["GSUBDEEP"] == "ok=false cstack=true"
+    assert 40 < int(r["GSUBDEPTH"]) < 60
