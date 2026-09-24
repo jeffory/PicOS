@@ -6,6 +6,7 @@
 #include "sim_hooks.h"
 #include "lua_runner.h"
 #include "native_loader.h"
+#include "ota_update.h"
 #include "zip_archive.h"
 #include "../drivers/audio.h"
 #include "../drivers/display.h"
@@ -944,6 +945,14 @@ void launcher_run(void) {
       stdio_flush();
       sleep_ms(100);
       watchdog_reboot(0, 0, 0);
+    }
+    if (dev_commands_wants_reboot_ota()) {
+      // The host staged /system/update.bin + .sha256 (tools/ota_flash.py):
+      // set the one-shot OTA token and reboot. Does not return on success.
+      dev_commands_clear_reboot_ota();
+      const char *err = NULL;
+      if (!ota_trigger_update(OTA_BIN_PATH, &err))
+        printf("[DEV] reboot-ota failed: %s\n", err ? err : "unknown error");
     }
     if (dev_commands_wants_reboot_flash()) {
       printf("[DEV] Rebooting to BOOTSEL mode...\n");

@@ -24,6 +24,7 @@
 //     locked to CS0 during flash operations, making PSRAM on CS1 inaccessible)
 
 #include "ota_update.h"
+#include "crashlog.h"
 
 #include <stdio.h>
 #include <string.h>
@@ -381,6 +382,22 @@ fail:
     // Clear the OTA flag so we don't loop on failed updates
     watchdog_hw->scratch[OTA_SCRATCH_IDX] = 0;
     return false;
+}
+
+void ota_discard_unrequested(void) {
+    printf("[OTA] %s present without an update request: not flashing, "
+           "renaming to .stale\n", OTA_BIN_PATH);
+    crashlog_write("OTA IGNORED", "system",
+                   "firmware staged without an update request",
+                   OTA_BIN_PATH " renamed to update.bin.stale");
+    sdcard_delete(OTA_BIN_PATH ".stale");
+    if (!sdcard_rename(OTA_BIN_PATH, OTA_BIN_PATH ".stale"))
+        sdcard_delete(OTA_BIN_PATH);
+    if (sdcard_fsize(OTA_HASH_PATH) >= 0) {
+        sdcard_delete(OTA_HASH_PATH ".stale");
+        if (!sdcard_rename(OTA_HASH_PATH, OTA_HASH_PATH ".stale"))
+            sdcard_delete(OTA_HASH_PATH);
+    }
 }
 
 bool ota_prepare_update(const char *bin_path, const char **out_err) {

@@ -18,6 +18,11 @@ bool ota_check_pending(void);
 // On failure, it clears the flag and returns false.
 bool ota_apply_update(void);
 
+// Boot: /system/update.bin exists but no update was requested (no OTA
+// token).  Rename it (and its .sha256) to *.stale so it is never flashed
+// or retried, and log it to /system/error.log.
+void ota_discard_unrequested(void);
+
 // Validate an update without applying it: size, vector table, and the
 // mandatory OTA_HASH_PATH checksum file (its match is checked at boot).
 // Returns false with a message in out_err.

@@ -34,6 +34,10 @@ void dev_commands_clear_list(void);
 
 bool dev_commands_wants_reboot(void);
 
+// `reboot-ota`: apply the staged /system/update.bin (launcher context only).
+bool dev_commands_wants_reboot_ota(void);
+void dev_commands_clear_reboot_ota(void);
+
 bool dev_commands_wants_reboot_flash(void);
 
 const char* dev_commands_get_pending_launch(void);

@@ -2053,13 +2053,14 @@ int main(void) {
   watchdog_update();
 
   // Check for pending OTA firmware update (must be before Core 1 launch).
-  // Primary: watchdog scratch register set by ota_trigger_update().
-  // Fallback: /system/update.bin exists on SD (manually placed firmware).
+  // The ONLY trigger is the one-shot token in watchdog scratch that C sets
+  // after consent (ota_trigger_update: sys.applyUpdate's confirm, or the
+  // `reboot-ota` dev command).  A staged /system/update.bin without it —
+  // e.g. written by an app that then called sys.reboot() — is not flashed:
+  // it is renamed to update.bin.stale and logged.
   bool ota_pending = ota_check_pending();
-  if (!ota_pending && sdcard_fsize(OTA_BIN_PATH) > 0) {
-    printf("[OTA] Found %s on SD — filesystem fallback trigger\n", OTA_BIN_PATH);
-    ota_pending = true;
-  }
+  if (!ota_pending && sdcard_fsize(OTA_BIN_PATH) > 0)
+    ota_discard_unrequested();
   if (ota_pending) {
     ui_draw_splash("Applying firmware update...", "DO NOT POWER OFF!");
     watchdog_update();

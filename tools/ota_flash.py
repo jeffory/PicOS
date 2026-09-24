@@ -3,10 +3,14 @@
 
 Pushes a raw firmware image to a USB-connected device over the SD-staged
 OTA path: uploads /system/update.sha256 and /system/update.bin via the
-firmware's putb64 serial command, then reboots.  On boot the firmware
-verifies the hash, pre-reads the image into PSRAM, reflashes itself and
-resets (see src/os/ota_update.c).  On success the device renames the
-staged files to *.flashed, so a later boot does not re-apply them.
+firmware's putb64 serial command, then sends `reboot-ota`, which validates
+the staged image and sets the one-shot OTA token before rebooting.  On boot
+the firmware (token present) verifies the hash, pre-reads the image into
+PSRAM, reflashes itself and resets (see src/os/ota_update.c).  On success
+the device renames the staged files to *.flashed.  A staged image WITHOUT
+the token is never flashed: the boot renames it to *.stale.  Firmware older
+than `reboot-ota` answers "Unknown command"; the tool then falls back to a
+plain `reboot` (those builds flash any staged image at boot).
 
 Reuses the serial transfer helpers from picos_mcp.py (same directory) so
 chunk/ACK pacing, integrity checks and transfer retries live in one place.
@@ -88,6 +92,37 @@ def ensure_launcher(port: str) -> None:
     fail(f"app '{app}' did not exit within 15s; exit it on-device and retry")
 
 
+def request_ota_reboot(port: str) -> None:
+    """Send `reboot-ota` (sets the OTA token, then reboots).  Falls back to
+    `reboot` on firmware that predates the command."""
+    lines: list[str] = []
+    try:
+        ser = pm.open_serial(port, 1)
+        try:
+            ser.write(b"reboot-ota\n")
+            ser.flush()
+            deadline = time.monotonic() + 4
+            while time.monotonic() < deadline:
+                raw = ser.readline()
+                if not raw:
+                    continue
+                line = raw.decode("utf-8", errors="replace").rstrip("\r\n")
+                lines.append(line)
+                if "Unknown command" in line or "reboot-ota failed" in line \
+                        or "Triggering update" in line:
+                    break
+        finally:
+            ser.close()
+    except Exception:
+        pass  # the port vanishes as the device reboots
+    text = "\n".join(lines)
+    if "Unknown command" in text:
+        print("  (firmware predates reboot-ota — using plain reboot)")
+        pm.do_command_hardware("reboot", port, timeout=2)
+    elif "reboot-ota failed" in text:
+        fail("device refused the staged update:\n" + text)
+
+
 def wait_for_reflash(old_port: str, old_ver: str | None, timeout: float) -> None:
     """Wait for reboot, OTA apply and the second reboot into new firmware."""
     # Phase 1: the serial port disappears when the device reboots.
@@ -115,18 +150,21 @@ def wait_for_reflash(old_port: str, old_ver: str | None, timeout: float) -> None
         ver = get_ver(port)
         if not ver:
             continue
-        # Success signal: the staged image was consumed (renamed to
-        # *.flashed).  If update.bin is still present the device booted
-        # WITHOUT applying it (hash mismatch or validation failure).
-        try:
-            pm.do_get_file_b64(port, "/system/update.bin")
-            fail("device rebooted but /system/update.bin was not consumed — "
-                 "the update was rejected (check the device screen/serial "
-                 "log for the OTA error)")
-        except FileNotFoundError:
-            pass  # consumed — flashed OK
-        except Exception as e:
-            print(f"  (could not confirm staging cleanup: {e})")
+            # Success signal: the staged image was renamed to *.flashed (stale
+        # ones were deleted before staging).  update.bin still present, or
+        # renamed to *.stale, means the device booted WITHOUT applying it.
+        for leftover, why in (("/system/update.bin", "rejected (hash "
+                               "mismatch or validation failure)"),
+                              ("/system/update.bin.stale", "ignored: the "
+                               "boot saw no OTA request token")):
+            try:
+                pm.do_get_file_b64(port, leftover)
+                fail(f"device rebooted but the update was {why} — check the "
+                     "device screen, serial log and /system/error.log")
+            except FileNotFoundError:
+                pass
+            except Exception as e:
+                print(f"  (could not check {leftover}: {e})")
         print(f"\n✓ Device is back on {port}")
         if old_ver:
             print(f"  before: {old_ver}")
@@ -177,6 +215,14 @@ def main() -> None:
     if old_ver:
         print(f"Current:  {old_ver}")
 
+    # Clear leftovers so the post-reboot check means this run.
+    for old in ("/system/update.bin.flashed", "/system/update.sha256.flashed",
+                "/system/update.bin.stale", "/system/update.sha256.stale"):
+        try:
+            pm.do_command_hardware(f"rm {old}", port, timeout=2)
+        except Exception:
+            pass
+
     sha = hashlib.sha256(data).hexdigest()
     print(f"SHA-256:  {sha[:16]}…")
     pm.do_put_file_b64(port, (sha + "\n").encode(), "/system/update.sha256")
@@ -194,7 +240,7 @@ def main() -> None:
 
     print("Rebooting — the device verifies the SHA-256 and reflashes on "
           "boot. DO NOT power off.")
-    pm.do_command_hardware("reboot", port, timeout=2)
+    request_ota_reboot(port)
 
     if args.no_verify:
         print("Staged and rebooted (--no-verify: not waiting for the device).")

@@ -28,6 +28,7 @@ static bool s_cmd_exit = false;
 static bool s_cmd_usb = false;
 static bool s_cmd_reboot = false;
 static bool s_cmd_reboot_flash = false;
+static bool s_cmd_reboot_ota = false;
 static bool s_cmd_list = false;
 static const char* s_pending_launch = NULL;
 
@@ -135,6 +136,7 @@ void dev_commands_init(void) {
     s_cmd_usb = false;
     s_cmd_reboot = false;
     s_cmd_reboot_flash = false;
+    s_cmd_reboot_ota = false;
     s_cmd_list = false;
     s_pending_launch = NULL;
     s_file_recv_handle = NULL;
@@ -458,6 +460,11 @@ static void dev_command_run(void *arg) {
         s_cmd_reboot = true;
     } else if (strcmp(s_cmd_buf, "reboot-flash") == 0) {
         s_cmd_reboot_flash = true;
+    } else if (strcmp(s_cmd_buf, "reboot-ota") == 0) {
+        // Apply a staged /system/update.bin (+ .sha256): the launcher sets
+        // the OTA request token and reboots (ignored while an app runs).
+        s_cmd_reboot_ota = true;
+        printf("[DEV] reboot-ota requested\n");
     } else if (strncmp(s_cmd_buf, "launch ", 7) == 0) {
         s_pending_launch = s_cmd_buf + 7;
         s_cmd_exit = true;  // Exit current app first
@@ -677,6 +684,7 @@ static void dev_command_run(void *arg) {
         printf("[DEV]   usb            - Enable USB storage mode\n");
         printf("[DEV]   reboot         - Reboot device\n");
         printf("[DEV]   reboot-flash   - Reboot to BOOTSEL for flashing\n");
+        printf("[DEV]   reboot-ota     - Apply staged /system/update.bin (needs .sha256)\n");
         printf("[DEV]   launch <arg>   - Launch app by ID or name\n");
         printf("[DEV]   list           - List installed apps\n");
         printf("[DEV]   screenshot     - Capture screen\n");
@@ -744,6 +752,14 @@ bool dev_commands_wants_reboot(void) {
 
 bool dev_commands_wants_reboot_flash(void) {
     return s_cmd_reboot_flash;
+}
+
+bool dev_commands_wants_reboot_ota(void) {
+    return s_cmd_reboot_ota;
+}
+
+void dev_commands_clear_reboot_ota(void) {
+    s_cmd_reboot_ota = false;
 }
 
 bool dev_commands_wants_list(void) {

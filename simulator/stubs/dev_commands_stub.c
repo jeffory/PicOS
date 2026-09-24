@@ -243,6 +243,12 @@ bool dev_commands_wants_reboot_flash(void) {
     return s_cmd_reboot_flash;
 }
 
+bool dev_commands_wants_reboot_ota(void) {
+    return false;  // OTA flashing is firmware-only
+}
+
+void dev_commands_clear_reboot_ota(void) {}
+
 // Launch command
 const char* dev_commands_get_pending_launch(void) {
     return s_pending_launch;
