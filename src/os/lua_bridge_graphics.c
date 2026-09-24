@@ -965,6 +965,55 @@ static lua_sprite_t *check_sprite(lua_State *L, int idx) {
   return (lua_sprite_t *)luaL_checkudata(L, idx, GRAPHICS_SPRITE_MT);
 }
 
+// ── Display list ─────────────────────────────────────────────────────────────
+// s_sprites[] is the draw order. The registry table keyed by the address of
+// s_sprites maps lightuserdata(sprite) -> sprite userdata, so a listed sprite
+// is always reachable from Lua and is never collected while displayed; it is
+// also how enumeration (getAllSprites, query*, collisions) hands out the real
+// sprite objects. The two change together, only through these helpers:
+// add() anchors, remove()/removeSprites()/removeAll() release.
+static int sprite_list_find(const lua_sprite_t *s) {
+  for (int i = 0; i < s_sprite_count; i++)
+    if (s_sprites[i] == s) return i;
+  return -1;
+}
+
+// Add the sprite at idx (idempotent). False when the list is full.
+static bool sprite_list_add(lua_State *L, int idx) {
+  lua_sprite_t *s = check_sprite(L, idx);
+  if (sprite_list_find(s) >= 0) return true;
+  if (s_sprite_count >= MAX_SPRITES) return false;
+  idx = lua_absindex(L, idx);
+  lua_rawgetp(L, LUA_REGISTRYINDEX, s_sprites);
+  lua_pushvalue(L, idx);
+  lua_rawsetp(L, -2, s);  // anchor first: this may raise out-of-memory
+  lua_pop(L, 1);
+  s_sprites[s_sprite_count++] = s;
+  return true;
+}
+
+static void sprite_list_unlink(int i) {
+  for (int j = i; j < s_sprite_count - 1; j++)
+    s_sprites[j] = s_sprites[j + 1];
+  s_sprite_count--;
+}
+
+static void sprite_list_remove(lua_State *L, lua_sprite_t *s) {
+  int i = sprite_list_find(s);
+  if (i < 0) return;
+  sprite_list_unlink(i);
+  lua_rawgetp(L, LUA_REGISTRYINDEX, s_sprites);
+  lua_pushnil(L);
+  lua_rawsetp(L, -2, s);
+  lua_pop(L, 1);
+}
+
+static void sprite_list_clear(lua_State *L) {
+  s_sprite_count = 0;
+  lua_newtable(L);
+  lua_rawsetp(L, LUA_REGISTRYINDEX, s_sprites);
+}
+
 // Push a new, zeroed sprite userdata with its anchor slots (no metatable yet).
 static lua_sprite_t *new_sprite_ud(lua_State *L) {
   lua_sprite_t *s = (lua_sprite_t *)lua_newuserdatauv(L, sizeof(lua_sprite_t),
@@ -1069,6 +1118,10 @@ static int l_sprite_gc(lua_State *L) {
   // Guard against any undersized userdata as a safety net.
   if ((size_t)lua_rawlen(L, 1) < sizeof(lua_sprite_t)) return 0;
   lua_sprite_t *s = check_sprite(L, 1);
+  // A listed sprite is anchored, so this only happens at lua_close. Unlink
+  // it anyway: s_sprites[] must never hold a freed sprite.
+  int i = sprite_list_find(s);
+  if (i >= 0) sprite_list_unlink(i);
   if (s->frame_data) {
     umm_free(s->frame_data);
     s->frame_data = NULL;
@@ -1144,23 +1197,13 @@ static int l_sprite_new(lua_State *L) {
 }
 
 static int l_sprite_add(lua_State *L) {
-  lua_sprite_t *s = check_sprite(L, 1);
-  if (s_sprite_count >= MAX_SPRITES)
+  if (!sprite_list_add(L, 1))
     return luaL_error(L, "max sprites reached");
-  s_sprites[s_sprite_count++] = s;
   return 0;
 }
 
 static int l_sprite_remove(lua_State *L) {
-  lua_sprite_t *s = check_sprite(L, 1);
-  for (int i = 0; i < s_sprite_count; i++) {
-    if (s_sprites[i] == s) {
-      for (int j = i; j < s_sprite_count - 1; j++)
-        s_sprites[j] = s_sprites[j + 1];
-      s_sprite_count--;
-      break;
-    }
-  }
+  sprite_list_remove(L, check_sprite(L, 1));
   return 0;
 }
 
@@ -1772,8 +1815,7 @@ static int l_sprite_spriteCount(lua_State *L) {
 }
 
 static int l_sprite_removeAll(lua_State *L) {
-  (void)L;
-  s_sprite_count = 0;
+  sprite_list_clear(L);
   return 0;
 }
 
@@ -1783,17 +1825,9 @@ static int l_sprite_removeSprites(lua_State *L) {
   
   for (int r = 1; r <= remove_count; r++) {
     lua_rawgeti(L, 1, r);
-    lua_sprite_t *target = (lua_sprite_t *)luaL_checkudata(L, -1, GRAPHICS_SPRITE_MT);
+    lua_sprite_t *target = check_sprite(L, -1);
     lua_pop(L, 1);
-    
-    for (int i = 0; i < s_sprite_count; i++) {
-      if (s_sprites[i] == target) {
-        for (int j = i; j < s_sprite_count - 1; j++)
-          s_sprites[j] = s_sprites[j + 1];
-        s_sprite_count--;
-        break;
-      }
-    }
+    sprite_list_remove(L, target);
   }
   return 0;
 }
@@ -2745,8 +2779,7 @@ static int l_sprite_addEmptyCollisionSprite(lua_State *L) {
   s->opaque = true;
 
   luaL_setmetatable(L, GRAPHICS_SPRITE_MT);
-
-  s_sprites[s_sprite_count++] = s;
+  sprite_list_add(L, -1);  // room was checked above
 
   return 1;  // return the sprite userdata
 }
@@ -3107,7 +3140,7 @@ static int l_sprite_addWallSprites(lua_State *L) {
         ws->collides_with_mask = 0xFFFF;
         luaL_setmetatable(L, GRAPHICS_SPRITE_MT);
 
-        s_sprites[s_sprite_count++] = ws;
+        sprite_list_add(L, -1);  // room was checked above
         count++;
       }
     }
@@ -3651,9 +3684,24 @@ static lua_animation_blinker_t *check_blinker(lua_State *L, int idx) {
   return (lua_animation_blinker_t *)luaL_checkudata(L, idx, GRAPHICS_ANIMATION_BLINKER_MT);
 }
 
+// s_blinkers[] (the updateAll/stopAll list) holds blinkers weakly: a
+// blinker nobody references can't be observed, so it leaves the list when
+// it is collected rather than being kept alive by it.
+static void blinker_list_remove(lua_animation_blinker_t *b) {
+  for (int i = 0; i < s_blinker_count; i++) {
+    if (s_blinkers[i] == b) {
+      for (int j = i; j < s_blinker_count - 1; j++)
+        s_blinkers[j] = s_blinkers[j + 1];
+      s_blinker_count--;
+      return;
+    }
+  }
+}
+
 static int l_animation_blinker_gc(lua_State *L) {
   lua_animation_blinker_t *b = check_blinker(L, 1);
   b->running = false;
+  blinker_list_remove(b);
   return 0;
 }
 
@@ -3769,16 +3817,7 @@ static int l_animation_blinker_stop(lua_State *L) {
 static int l_animation_blinker_remove(lua_State *L) {
   lua_animation_blinker_t *b = check_blinker(L, 1);
   b->running = false;
-
-  for (int i = 0; i < s_blinker_count; i++) {
-    if (s_blinkers[i] == b) {
-      for (int j = i; j < s_blinker_count - 1; j++) {
-        s_blinkers[j] = s_blinkers[j + 1];
-      }
-      s_blinker_count--;
-      break;
-    }
-  }
+  blinker_list_remove(b);
   return 0;
 }
 
@@ -4068,7 +4107,7 @@ static const luaL_Reg l_font_lib[] = {
     {NULL, NULL}};
 
 void lua_bridge_graphics_init(lua_State *L) {
-  s_sprite_count = 0;  // reset on each app launch
+  sprite_list_clear(L);  // reset on each app launch (a fresh lua_State)
   s_blinker_count = 0;  // reset blinkers on each app launch
   s_has_global_stencil = false;
   memset(s_global_stencil, 0, sizeof(s_global_stencil));

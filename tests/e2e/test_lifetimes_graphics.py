@@ -23,8 +23,6 @@ CASES = lua_case_names(APP)
 # collected_blinker_leaves_updateAll is not listed: it passes in the release
 # simulator (the stale write lands in freed memory unseen) and only the ASan
 # simulator reports it (heap-use-after-free in l_animation_blinker_updateAll).
-LIST = ("review: Graphics Critical — the display list holds raw sprite "
-        "pointers, so an added sprite can be collected; Task 10 item 2")
 ENUM = ("review: Graphics Critical — performOnAllSprites/query* hand out "
         "4-byte proxies or light userdata, not the sprites; Task 10 item 3")
 WALLS = ("review: Graphics High — addWallSprites pushes up to 256 userdata "
@@ -32,9 +30,7 @@ WALLS = ("review: Graphics High — addWallSprites pushes up to 256 userdata "
 OVERSIZE = ("review: Graphics Medium — sprite width/height are used as the "
             "source stride; Task 10 item 5")
 KNOWN_BUGS = {
-    "added_local_sprite_survives": LIST,
-    "add_twice_remove_once": LIST,
-    "empty_collision_sprite_survives": LIST,
+    "empty_collision_sprite_survives": ENUM,
     "performOnAllSprites_moveBy_then_gc": ENUM,
     "performOnAllSprites_callback_may_remove": ENUM,
     "performOnAllSprites_propagates_errors": ENUM,
@@ -98,7 +94,7 @@ while true do
 end
 """
 
-RENDER_BUG = f"{LIST}; {OVERSIZE}"   # None once both are fixed
+RENDER_BUG = OVERSIZE   # None once it is fixed
 
 
 def _near(px, want, tol=32):

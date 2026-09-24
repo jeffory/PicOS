@@ -16,15 +16,12 @@ from helpers import case_params, lua_case_names, run_lua_app, stage_lua_app
 
 GC_CASES = lua_case_names("gc_test")
 
-SPRITE_LIST_BUG = ("review: Graphics Critical — the display list holds raw sprite "
-                   "pointers, so an added sprite can be collected; Task 10")
 PERFORM_BUG = ("review: Graphics Critical — performOnAllSprites passes 4-byte proxy "
                "userdata (and today never calls the callback); Task 10")
 SAMPLE_BUG = ("review: Audio High — a sampleplayer keeps no reference to its "
               "sample; Task 11")
 
 GC_KNOWN_BUGS = {
-    "added_sprite_survives_gc": SPRITE_LIST_BUG,
     "performOnAllSprites_visits_real_sprites": PERFORM_BUG,
     "sampleplayer_setSample_keeps_sample": SAMPLE_BUG,
     "sampleplayer_new_keeps_sample": SAMPLE_BUG,
@@ -71,7 +68,6 @@ def _gc_asan(bug, site):
 
 
 GC_ASAN_KNOWN_BUGS = {
-    "added_sprite_survives_gc": _gc_asan(SPRITE_LIST_BUG, "l_sprite_update"),
     "sampleplayer_setSample_keeps_sample": _gc_asan(
         SAMPLE_BUG, "sound_player_play (sim_audio.c) <- l_sound_sampleplayer_play"),
     "sampleplayer_new_keeps_sample": _gc_asan(
