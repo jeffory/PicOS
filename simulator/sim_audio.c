@@ -424,9 +424,26 @@ sound_sample_t *sound_sample_create(void) {
     return NULL;
 }
 
+static void sim_player_stop_locked(sound_player_t *player) {
+    player->playing = false;
+    player->paused = false;
+    player->position = 0;
+    player->repeat_count = 0;
+    player->repeats_played = 0;
+}
+
 void sound_sample_destroy(sound_sample_t *sample) {
     if (!sample) return;
     pthread_mutex_lock(&s_sound_mutex);
+    // Detach every player still reading this sample before its data goes
+    // (mirrors firmware sound.c): the Core 1 thread mixes under this mutex.
+    for (int p = 0; p < SOUND_MAX_SAMPLES; p++) {
+        sound_player_t *player = &s_sound_ctx.players[p];
+        if (player->sample == sample) {
+            sim_player_stop_locked(player);
+            player->sample = NULL;
+        }
+    }
     if (sample->data) free(sample->data);
     for (int i = 0; i < SOUND_MAX_SAMPLES; i++) {
         if (s_sound_ctx.samples[i] == sample) {
@@ -457,13 +474,29 @@ bool sound_sample_load(sound_sample_t *sample, const char *path) {
     int bytes_read = sdcard_fread(f, data, file_size);
     sdcard_fclose(f);
 
-    if (!sim_parse_wav_header(sample, data, bytes_read)) {
+    // Parse into a fresh sample and swap it in under the mixer mutex (mirrors
+    // firmware sound.c): the sample may be loaded and playing already.
+    sound_sample_t fresh = {0};
+    if (!sim_parse_wav_header(&fresh, data, bytes_read)) {
         free(data);
         printf("sound: failed to parse WAV %s\n", path);
         return false;
     }
-
     free(data);
+    pthread_mutex_lock(&s_sound_mutex);
+    uint8_t *old = sample->data;
+    sample->data = fresh.data;
+    sample->length = fresh.length;
+    sample->sample_rate = fresh.sample_rate;
+    sample->bits_per_sample = fresh.bits_per_sample;
+    sample->channels = fresh.channels;
+    sample->loaded = fresh.loaded;
+    for (int p = 0; p < SOUND_MAX_SAMPLES; p++) {
+        if (s_sound_ctx.players[p].sample == sample)
+            s_sound_ctx.players[p].position = 0;
+    }
+    pthread_mutex_unlock(&s_sound_mutex);
+    free(old);
     printf("sound: loaded %s (%u Hz, %u bit, %u ch)\n",
            path, sample->sample_rate, sample->bits_per_sample, sample->channels);
     return true;
@@ -484,12 +517,19 @@ sound_player_t *sound_player_create(void) {
     pthread_mutex_lock(&s_sound_mutex);
     for (int i = 0; i < SOUND_MAX_SAMPLES; i++) {
         sound_player_t *p = &s_sound_ctx.players[i];
-        if (!p->sample) {
+        if (!p->in_use) {
             p->volume = 100;
             p->rate = 1.0f;
             p->play_start = 0;
             p->play_end = 0;
-            p->owns_sample = false;
+            p->phase = 0;
+            p->finish_callback = NULL;
+            p->finish_callback_arg = NULL;
+            p->loop_callback = NULL;
+            p->loop_callback_arg = NULL;
+            p->finish_pending = false;
+            p->loop_pending = false;
+            p->in_use = true;
             pthread_mutex_unlock(&s_sound_mutex);
             return p;
         }
@@ -498,43 +538,50 @@ sound_player_t *sound_player_create(void) {
     return NULL;
 }
 
+// The player never owns its sample (the Lua bridge anchors it as a user
+// value); destroying a player only stops it and frees the slot.
 void sound_player_destroy(sound_player_t *player) {
     if (!player) return;
     pthread_mutex_lock(&s_sound_mutex);
-    sound_player_stop(player);
-    // Detach under the lock, destroy after unlocking — sound_sample_destroy
-    // takes s_sound_mutex itself and the mutex is non-recursive.
-    sound_sample_t *owned = (player->owns_sample) ? player->sample : NULL;
+    sim_player_stop_locked(player);
     player->sample = NULL;
-    player->owns_sample = false;
+    player->finish_callback = NULL;
+    player->finish_callback_arg = NULL;
+    player->loop_callback = NULL;
+    player->loop_callback_arg = NULL;
+    player->finish_pending = false;
+    player->loop_pending = false;
+    player->in_use = false;
     pthread_mutex_unlock(&s_sound_mutex);
-    if (owned)
-        sound_sample_destroy(owned);
 }
 
 bool sound_player_set_sample(sound_player_t *player, sound_sample_t *sample) {
     if (!player || !sample) return false;
+    pthread_mutex_lock(&s_sound_mutex);
     player->sample = sample;
     player->position = 0;
+    pthread_mutex_unlock(&s_sound_mutex);
     return true;
 }
 
 void sound_player_play(sound_player_t *player, uint8_t repeat_count) {
-    if (!player || !player->sample || !player->sample->loaded) return;
-    player->playing = true;
-    player->paused = false;
-    player->repeat_count = repeat_count;
-    player->repeats_played = 0;
-    player->position = 0;
+    if (!player) return;
+    pthread_mutex_lock(&s_sound_mutex);
+    if (player->sample && player->sample->loaded) {
+        player->paused = false;
+        player->repeat_count = repeat_count;
+        player->repeats_played = 0;
+        player->position = 0;
+        player->playing = true;
+    }
+    pthread_mutex_unlock(&s_sound_mutex);
 }
 
 void sound_player_stop(sound_player_t *player) {
     if (!player) return;
-    player->playing = false;
-    player->paused = false;
-    player->position = 0;
-    player->repeat_count = 0;
-    player->repeats_played = 0;
+    pthread_mutex_lock(&s_sound_mutex);
+    sim_player_stop_locked(player);
+    pthread_mutex_unlock(&s_sound_mutex);
 }
 
 void sound_player_set_volume(sound_player_t *player, uint8_t volume) {

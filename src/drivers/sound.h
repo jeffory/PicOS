@@ -17,7 +17,7 @@ typedef struct {
 
 typedef struct {
     sound_sample_t *sample;
-    bool owns_sample;   // path-constructed players free their sample on destroy
+    bool in_use;        // slot allocated: sound_player_create .. sound_player_destroy
     bool playing;
     bool paused;
     uint32_t position;
@@ -54,12 +54,17 @@ void sound_mixer_process(int32_t *out_l, int32_t *out_r, int frames);
 void sound_pump_callbacks(void);
 
 sound_sample_t *sound_sample_create(void);
+/* Frees the sample. Any player still pointing at it is stopped and detached
+ * first, under the mixer lock, so the mixer never reads freed data. */
 void sound_sample_destroy(sound_sample_t *sample);
 bool sound_sample_load(sound_sample_t *sample, const char *path);
 uint32_t sound_sample_get_length(const sound_sample_t *sample);
 uint32_t sound_sample_get_sample_rate(const sound_sample_t *sample);
 
 sound_player_t *sound_player_create(void);
+/* Stops the player and frees its slot. The player never owns its sample:
+ * whoever created the sample frees it (the Lua bridge keeps it alive as a
+ * uservalue of the player userdata). */
 void sound_player_destroy(sound_player_t *player);
 bool sound_player_set_sample(sound_player_t *player, sound_sample_t *sample);
 void sound_player_play(sound_player_t *player, uint8_t repeat_count);

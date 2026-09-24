@@ -453,7 +453,7 @@ typedef struct {
     // Load a sample from a file. Returns NULL on failure.
     pcsound_sample_t (*sampleLoad)(const char *path);
     // Free a loaded sample.
-    void  (*sampleFree)(pcsound_sample_t s);
+    void  (*sampleFree)(pcsound_sample_t s);   // stops + detaches any player using it
 
     // --- Sample player ---
     // Create a new player instance. Returns NULL on OOM.
@@ -465,7 +465,7 @@ typedef struct {
     uint8_t  (*playerGetVolume)(pcsound_player_t p);
     void     (*playerSetVolume)(pcsound_player_t p, uint8_t vol);   // 0–255
     void     (*playerSetLoop)(pcsound_player_t p, bool loop);
-    void     (*playerFree)(pcsound_player_t p);
+    void     (*playerFree)(pcsound_player_t p);   // never frees the player's sample
 
     // --- File player (streaming from SD card) ---
     pcfileplayer_t (*filePlayerNew)(void);

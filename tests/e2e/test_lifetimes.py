@@ -19,10 +19,7 @@ GC_CASES = lua_case_names("gc_test")
 SAMPLE_BUG = ("review: Audio High — a sampleplayer keeps no reference to its "
               "sample; Task 11")
 
-GC_KNOWN_BUGS = {
-    "sampleplayer_setSample_keeps_sample": SAMPLE_BUG,
-    "sampleplayer_new_keeps_sample": SAMPLE_BUG,
-}
+GC_KNOWN_BUGS = {}
 
 
 def _stress(sd):
@@ -64,12 +61,7 @@ def _gc_asan(bug, site):
     return f"{bug}; ASan: heap-use-after-free in {site} on the collected child"
 
 
-GC_ASAN_KNOWN_BUGS = {
-    "sampleplayer_setSample_keeps_sample": _gc_asan(
-        SAMPLE_BUG, "sound_player_play (sim_audio.c) <- l_sound_sampleplayer_play"),
-    "sampleplayer_new_keeps_sample": _gc_asan(
-        SAMPLE_BUG, "sound_player_play (sim_audio.c) <- l_sound_sampleplayer_play"),
-}
+GC_ASAN_KNOWN_BUGS = {}
 
 
 def _use_first(case):

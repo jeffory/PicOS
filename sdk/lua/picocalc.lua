@@ -809,6 +809,11 @@ function picocalc.sound.playingSources() end
 function picocalc.sound.sample(path_or_duration) end
 
 ---Create a SamplePlayer, optionally pre-loading a sample.
+---The player keeps its sample alive: dropping your own reference to the sample
+---is safe while the player plays it. A path loads a Sample that belongs to the
+---player (`getSample()` returns it); it is freed with the player, or once a
+---`setSample` replaces it. There are 8 sample slots and 8 player slots, freed
+---by the garbage collector.
 ---@param sample_or_path? PicOSSample|string
 ---@return PicOSSamplePlayer
 function picocalc.sound.sampleplayer(sample_or_path) end
@@ -862,12 +867,13 @@ function PicOSSample:playAt(when, vol, rightvol, rate) end
 
 -- ── PicOSSamplePlayer methods ────────────────────────────────────────────────
 
----Attach a sample to this player.
+---Attach a sample to this player. The player keeps it alive and lets go of
+---the previous one.
 ---@param sample PicOSSample
 ---@return boolean ok
 function PicOSSamplePlayer:setSample(sample) end
 
----Return the currently attached sample, or `nil`.
+---Return the currently attached sample (the same Sample object), or `nil`.
 ---@return PicOSSample?
 function PicOSSamplePlayer:getSample() end
 

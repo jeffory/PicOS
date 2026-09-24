@@ -12,14 +12,53 @@
 #define FILEPLAYER_USERDATA "fileplayer"
 #define MP3PLAYER_USERDATA "mp3player"
 
+// ── Sample / sampleplayer lifetimes ─────────────────────────────────────────
+// A sample userdata owns its sound_sample_t (its __gc frees it). A player
+// userdata keeps the sample it plays in user value PLAYER_UV_SAMPLE, so the
+// collector cannot free a sample a player still points at; a path-built
+// player (sampleplayer(path), sample:play()) gets a sample userdata of its
+// own there too. When a player and its sample die in the same cycle the
+// sample's finalizer may run first: sound_sample_destroy detaches the player
+// (under the mixer lock) before the data goes. Both userdata hold NULL once
+// freed and are rejected from then on.
+#define PLAYER_UV_SAMPLE 1
+
 static sound_sample_t *check_sample(lua_State *L, int idx) {
     sound_sample_t **ud = luaL_checkudata(L, idx, SAMPLE_USERDATA);
+    if (!*ud)
+        luaL_argerror(L, idx, "sample has been freed");
     return *ud;
 }
 
 static sound_player_t *check_player(lua_State *L, int idx) {
     sound_player_t **ud = luaL_checkudata(L, idx, PLAYER_USERDATA);
+    if (!*ud)
+        luaL_argerror(L, idx, "sampleplayer has been freed");
     return *ud;
+}
+
+// Pushes an empty sample userdata; the caller stores the sample in *ud, so a
+// failed load leaves nothing for __gc to free.
+static sound_sample_t **push_sample_ud(lua_State *L) {
+    sound_sample_t **ud = lua_newuserdatauv(L, sizeof(*ud), 0);
+    *ud = NULL;
+    luaL_setmetatable(L, SAMPLE_USERDATA);
+    return ud;
+}
+
+// Pushes an empty player userdata with its sample user value.
+static sound_player_t **push_player_ud(lua_State *L) {
+    sound_player_t **ud = lua_newuserdatauv(L, sizeof(*ud), 1);
+    *ud = NULL;
+    luaL_setmetatable(L, PLAYER_USERDATA);
+    return ud;
+}
+
+// Anchors the sample userdata at sample_idx on the player at player_idx.
+static void anchor_sample(lua_State *L, int player_idx, int sample_idx) {
+    player_idx = lua_absindex(L, player_idx);
+    lua_pushvalue(L, sample_idx);
+    lua_setiuservalue(L, player_idx, PLAYER_UV_SAMPLE);
 }
 
 static fileplayer_t *check_fileplayer(lua_State *L, int idx) {
@@ -54,16 +93,13 @@ static int l_sound_sample_new(lua_State *L) {
             lua_pop(L, 1);
         }
 
-        sound_sample_t *sample = sound_sample_new_blank(seconds, sample_rate, bits, channels);
-        if (!sample) {
+        sound_sample_t **ud = push_sample_ud(L);
+        *ud = sound_sample_new_blank(seconds, sample_rate, bits, channels);
+        if (!*ud) {
             lua_pushnil(L);
             lua_pushstring(L, "failed to allocate sample buffer");
             return 2;
         }
-
-        sound_sample_t **ud = lua_newuserdata(L, sizeof(sound_sample_t *));
-        *ud = sample;
-        luaL_setmetatable(L, SAMPLE_USERDATA);
         return 1;
     }
 
@@ -74,29 +110,24 @@ static int l_sound_sample_new(lua_State *L) {
             lua_pushstring(L, "access denied");
             return 2;
         }
-        sound_sample_t *sample = (sound_sample_t *)g_api.soundplayer->sampleLoad(path);
-        if (!sample) {
+        sound_sample_t **ud = push_sample_ud(L);
+        *ud = (sound_sample_t *)g_api.soundplayer->sampleLoad(path);
+        if (!*ud) {
             lua_pushnil(L);
             lua_pushstring(L, "failed to load sample");
             return 2;
         }
-        sound_sample_t **ud = lua_newuserdata(L, sizeof(sound_sample_t *));
-        *ud = sample;
-        luaL_setmetatable(L, SAMPLE_USERDATA);
         return 1;
     }
 
     // No path: create an empty (unloaded) sample
-    sound_sample_t *sample = sound_sample_create();
-    if (!sample) {
+    sound_sample_t **ud = push_sample_ud(L);
+    *ud = sound_sample_create();
+    if (!*ud) {
         lua_pushnil(L);
         lua_pushstring(L, "failed to create sample");
         return 2;
     }
-
-    sound_sample_t **ud = lua_newuserdata(L, sizeof(sound_sample_t *));
-    *ud = sample;
-    luaL_setmetatable(L, SAMPLE_USERDATA);
     return 1;
 }
 
@@ -153,16 +184,13 @@ static int l_sound_sample_getSubsample(lua_State *L) {
     uint32_t start = (uint32_t)lb_clamp_int(lb_checkint(L, 2), 0, LUA_MAXINTEGER);
     uint32_t end = (uint32_t)lb_clamp_int(lb_checkint(L, 3), 0, LUA_MAXINTEGER);
 
-    sound_sample_t *sub = sound_sample_get_subsample(sample, start, end);
-    if (!sub) {
+    sound_sample_t **ud = push_sample_ud(L);
+    *ud = sound_sample_get_subsample(sample, start, end);
+    if (!*ud) {
         lua_pushnil(L);
         lua_pushstring(L, "failed to create subsample");
         return 2;
     }
-
-    sound_sample_t **ud = lua_newuserdata(L, sizeof(sound_sample_t *));
-    *ud = sub;
-    luaL_setmetatable(L, SAMPLE_USERDATA);
     return 1;
 }
 
@@ -172,16 +200,15 @@ static int l_sound_sample_play(lua_State *L) {
     uint8_t repeat = (uint8_t)lb_clamp_int(lb_optint(L, 2, 1), 0, 255);
     float rate = (float)luaL_optnumber(L, 3, 1.0);
 
+    sound_player_t **ud = push_player_ud(L);
     sound_player_t *player = (sound_player_t *)g_api.soundplayer->playerNew();
     if (!player) return luaL_error(L, "failed to create player");
+    *ud = player;
+    anchor_sample(L, -1, 1);
 
     g_api.soundplayer->playerSetSample(player, sample);
     sound_player_set_rate(player, rate);
     g_api.soundplayer->playerPlay(player, repeat);
-
-    sound_player_t **ud = lua_newuserdata(L, sizeof(sound_player_t *));
-    *ud = player;
-    luaL_setmetatable(L, PLAYER_USERDATA);
     return 1;
 }
 
@@ -193,17 +220,16 @@ static int l_sound_sample_playAt(lua_State *L) {
     (void)lb_optint(L, 4, vol); // rightvol — mono PWM, use left
     float rate = (float)luaL_optnumber(L, 5, 1.0);
 
+    sound_player_t **ud = push_player_ud(L);
     sound_player_t *player = (sound_player_t *)g_api.soundplayer->playerNew();
     if (!player) return luaL_error(L, "failed to create player");
+    *ud = player;
+    anchor_sample(L, -1, 1);
 
     g_api.soundplayer->playerSetSample(player, sample);
     g_api.soundplayer->playerSetVolume(player, vol);
     sound_player_set_rate(player, rate);
     g_api.soundplayer->playerPlay(player, 1);
-
-    sound_player_t **ud = lua_newuserdata(L, sizeof(sound_player_t *));
-    *ud = player;
-    luaL_setmetatable(L, PLAYER_USERDATA);
     return 1;
 }
 
@@ -276,60 +302,62 @@ static int l_sound_sample_save(lua_State *L) {
 }
 
 static int l_sound_sample_gc(lua_State *L) {
-    sound_sample_t *sample = check_sample(L, 1);
-    g_api.soundplayer->sampleFree(sample);
+    sound_sample_t **ud = luaL_checkudata(L, 1, SAMPLE_USERDATA);
+    if (*ud) {
+        g_api.soundplayer->sampleFree(*ud);   // detaches any player still using it
+        *ud = NULL;
+    }
     return 0;
 }
 
 static int l_sound_sampleplayer_new(lua_State *L) {
     sound_sample_t *sample = NULL;
+    int sample_idx = 0;   // stack index of the sample userdata to anchor
 
     if (lua_isuserdata(L, 1)) {
         sample = check_sample(L, 1);
+        sample_idx = 1;
     } else if (lua_isstring(L, 1)) {
         if (!fs_sandbox_check(L, lua_tostring(L, 1), false)) {
             lua_pushnil(L);
             lua_pushstring(L, "access denied");
             return 2;
         }
-        sample = (sound_sample_t *)g_api.soundplayer->sampleLoad(lua_tostring(L, 1));
-        if (!sample) {
+        // The path-loaded sample is a sample userdata of its own, anchored on
+        // the player like any other: the collector frees it with (or after)
+        // the player, and a later setSample lets it go.
+        sound_sample_t **sud = push_sample_ud(L);
+        *sud = (sound_sample_t *)g_api.soundplayer->sampleLoad(lua_tostring(L, 1));
+        if (!*sud) {
             lua_pushnil(L);
             lua_pushstring(L, "failed to load sample");
             return 2;
         }
+        sample = *sud;
+        sample_idx = lua_gettop(L);
     }
 
-    sound_player_t *player = (sound_player_t *)g_api.soundplayer->playerNew();
-    if (!player) {
-        if (sample && lua_isstring(L, 1))
-            g_api.soundplayer->sampleFree(sample);
+    sound_player_t **ud = push_player_ud(L);
+    *ud = (sound_player_t *)g_api.soundplayer->playerNew();
+    if (!*ud) {
         lua_pushnil(L);
         lua_pushstring(L, "failed to create player");
         return 2;
     }
-
-    if (sample)
-        g_api.soundplayer->playerSetSample(player, sample);
-    if (sample && lua_isstring(L, 1))
-        ((sound_player_t *)player)->owns_sample = true;   // GC reclaims it (path-constructed only; userdata samples are owned by their userdata)
-
-    sound_player_t **ud = lua_newuserdata(L, sizeof(sound_player_t *));
-    *ud = player;
-    luaL_setmetatable(L, PLAYER_USERDATA);
+    if (sample) {
+        anchor_sample(L, -1, sample_idx);
+        g_api.soundplayer->playerSetSample(*ud, sample);
+    }
     return 1;
 }
 
 static int l_sound_sampleplayer_setSample(lua_State *L) {
     sound_player_t *player = check_player(L, 1);
     sound_sample_t *sample = check_sample(L, 2);
-    // API returns void, but player/sample are guaranteed non-NULL by
-    // check_player/check_sample, so the reseat always succeeds. Reseating
-    // means the player no longer owns any path-constructed sample it may
-    // have loaded (leaked-by-design until sound_init's backstop; freeing
-    // here would double-free if it was ever re-set).
+    // The previous sample (if any) loses its anchor here and is collected
+    // once nothing else refers to it.
+    anchor_sample(L, 1, 2);
     g_api.soundplayer->playerSetSample(player, sample);
-    ((sound_player_t *)player)->owns_sample = false;
     lua_pushboolean(L, true);
     return 1;
 }
@@ -412,13 +440,14 @@ static int l_sound_sampleplayer_getOffset(lua_State *L) {
     return 1;
 }
 
+// Returns the sample userdata the player plays (the anchored one), or nil.
 static int l_sound_sampleplayer_getSample(lua_State *L) {
     sound_player_t *player = check_player(L, 1);
-    if (player->sample) {
-        lua_pushlightuserdata(L, player->sample);
-    } else {
+    if (!player->sample) {
         lua_pushnil(L);
+        return 1;
     }
+    lua_getiuservalue(L, 1, PLAYER_UV_SAMPLE);
     return 1;
 }
 
@@ -444,8 +473,11 @@ static int l_sound_sampleplayer_getRate(lua_State *L) {
 }
 
 static int l_sound_sampleplayer_gc(lua_State *L) {
-    sound_player_t *player = check_player(L, 1);
-    g_api.soundplayer->playerFree(player);
+    sound_player_t **ud = luaL_checkudata(L, 1, PLAYER_USERDATA);
+    if (*ud) {
+        g_api.soundplayer->playerFree(*ud);
+        *ud = NULL;
+    }
     return 0;
 }
 

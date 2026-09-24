@@ -93,6 +93,11 @@ picos_unit_test(test_appconfig SOURCES ${SRC}/os/appconfig.c ${SD_FAKE}
 picos_unit_test(test_app_files SOURCES ${SRC}/os/app_identity.c
                 ${SRC}/os/app_manifest.c ${SRC}/os/appconfig.c ${SD_FAKE}
                 INCLUDES ${SD_INCLUDES})
+# The firmware sample mixer (sound.c): sample/player lifetimes and slots.
+picos_unit_test(test_sound SOURCES ${SRC}/drivers/sound.c ${SRC}/drivers/wav.c
+                ${SD_FAKE} INCLUDES ${SD_INCLUDES})
+# The pico/critical_section.h stub leaves a parameter unused.
+target_compile_options(test_sound PRIVATE -Wno-unused-parameter)
 
 # OTA image authentication (ECDSA P-256 + strict .sha256), against the same
 # mbedTLS the firmware links (host build, cmake/picos_host_mbedtls.cmake) and
