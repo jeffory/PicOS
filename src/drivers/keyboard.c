@@ -62,12 +62,9 @@ static uint32_t s_i2c_backoff_ms = 0; // when to next attempt recovery
 // a later fix held it for exactly one poll-to-poll cycle, but extra
 // kbd_poll() calls within that cycle — e.g. watchdog-feed pumps added since
 // — could still retire it early. See KBD_INJECT_HOLD_MS.)
-static uint32_t s_injected_pending = 0; // one-shot press awaiting publication
-static uint32_t s_injected_active = 0;  // one-shot published for this poll cycle
-static uint32_t s_injected_active_since_ms =
-    0; // wall-clock ms when s_injected_active was last published
-static uint32_t s_injected_held = 0;    // latched until kbd_release_buttons()
-static char s_injected_char = 0;        // character injected via kbd_inject_char()
+// The bookkeeping (pending / active / held / char) and its arithmetic are in
+// kbd_event_queue.h (kbd_inject_*), host-tested in test_kbd_event_queue.c.
+static kbd_inject_t s_inj;
 
 // ── Public API
 // ────────────────────────────────────────────────────────────────
@@ -286,30 +283,9 @@ static void kbd_poll_impl(bool bg) {
   // between publish and the app's actual getButtons()/read call used to eat
   // the press before the app ever saw it. A minimum wall-clock hold makes
   // delivery independent of how many times kbd_poll() happens to run.
-  bool injected_retired_this_poll = false;
-  if (!bg && s_injected_active &&
-      (now_ms - s_injected_active_since_ms >= KBD_INJECT_HOLD_MS)) {
-    uint32_t retired = s_injected_active & ~s_injected_held;
-    s_btn.curr &= ~s_injected_active;
-    s_injected_active = 0;
-    injected_retired_this_poll = true;
-    kbd_input_button_events(&s_in, retired, KBD_EV_UP, s_btn.curr);
-  }
-  // Publish a pending one-shot only when active is empty AND we didn't just
-  // retire it in this very call. The latter guarantees at least one full
-  // poll-to-poll cycle where the button reads as released before it (or the
-  // same button re-injected while it was still active, which was left
-  // sitting in s_injected_pending) can be republished — a real release edge,
-  // the same way a human can't press a key again without releasing it first.
-  if (!bg && !injected_retired_this_poll && !s_injected_active &&
-      s_injected_pending) {
-    s_injected_active = s_injected_pending;
-    s_injected_pending = 0;
-    s_injected_active_since_ms = now_ms;
-    kbd_input_button_events(&s_in, s_injected_active & ~s_btn.curr,
-                            KBD_EV_DOWN, s_btn.curr | s_injected_active);
-  }
-  s_btn.curr |= s_injected_active | s_injected_held;
+  // A one-shot is retired only after a full poll-to-poll cycle in which a
+  // re-injected key reads released (kbd_inject_poll).
+  kbd_inject_poll(&s_inj, &s_btn, &s_in, bg, now_ms, KBD_INJECT_HOLD_MS);
 
   // Poll REG_FIF (0x09) directly — up to 8 events per frame.
   // Each read returns 2 bytes: [state, keycode].
@@ -420,18 +396,14 @@ done_polling:;
       for (int i = 0; i < 8; i++)
         s_in.down.bits[i] &= down_before.bits[i];
       // A waking injected one-shot must be retired for good here, not just
-      // masked out of s_btn.curr for this one poll. s_injected_active is
-      // now held across multiple polls (KBD_INJECT_HOLD_MS), so if we left
-      // it set, the very next poll's `s_btn.curr |= s_injected_active |
-      // s_injected_held` line above would OR it straight back in — and with
-      // s_btn.prev now 0 (we just cleared it), that reads as a brand new
-      // rising edge, leaking the "swallowed" wake press to the app one poll
-      // late. Clearing s_injected_active/pending here matches the pre-hold
-      // behavior, where a swallowed wake press was gone for good.
-      s_btn.curr &= ~s_injected_active;
-      s_injected_active = 0;
-      s_injected_active_since_ms = 0;
-      s_injected_pending = 0;
+      // masked out of s_btn.curr for this one poll. The active one-shot is
+      // held across multiple polls (KBD_INJECT_HOLD_MS), so if we left it
+      // set, the very next poll's fold in kbd_inject_poll would OR it
+      // straight back in — and with s_btn.prev now 0 (we just cleared it),
+      // that reads as a brand new rising edge, leaking the "swallowed" wake
+      // press to the app one poll late. Dropping active/pending here matches
+      // the pre-hold behavior, where a swallowed wake press was gone for good.
+      kbd_inject_drop_oneshots(&s_inj, &s_btn);
     }
   }
   // One char per poll, oldest first: a second key in the same poll is kept
@@ -442,8 +414,8 @@ done_polling:;
 }
 
 char kbd_get_char(void) {
-  char c = s_last_char ? s_last_char : s_injected_char;
-  s_injected_char = 0; // consume injected char
+  char c = s_last_char ? s_last_char : s_inj.ch;
+  s_inj.ch = 0; // consume injected char
   return c;
 }
 
@@ -527,10 +499,9 @@ void kbd_discard_pending(void) {
     if (event[0] == KBD_FIFO_IDLE)
       break;
   }
-  s_injected_pending = 0;
-  s_injected_active = 0;
-  s_injected_char = 0;
-  kbd_clear_state();
+  kbd_inject_drop_oneshots(&s_inj, &s_btn);
+  s_inj.ch = 0;
+  kbd_clear_state();  // a keydown latch stays held, without an edge
 }
 
 void kbd_clear_state(void) {
@@ -538,6 +509,12 @@ void kbd_clear_state(void) {
   kbd_input_clear(&s_in);
   s_last_char = 0;
   s_last_raw_key = 0;
+  // An injected key still down (an active one-shot — typically the injected
+  // Enter that opened the modal calling this — or a keydown latch) stays
+  // held with no press edge, and its retire/keyup still releases it; a
+  // pending injection is published, with its edge, by the next poll; an
+  // unread injected char is dropped. See kbd_inject_after_clear.
+  kbd_inject_after_clear(&s_inj, &s_btn);
 }
 
 void kbd_inject_buttons(uint32_t buttons) {
@@ -552,38 +529,28 @@ void kbd_inject_buttons(uint32_t buttons) {
   }
   // NOTE: pending is a single bitmask, not a per-button queue — two DIFFERENT
   // buttons injected within the same KBD_INJECT_HOLD_MS window merge into a
-  // momentary chord (both alive in s_injected_active at once) instead of
+  // momentary chord (both alive in s_inj.active at once) instead of
   // arriving as two separate presses. The MCP `keypress` tool's default
   // 100ms inter-key delay is comfortably above KBD_INJECT_HOLD_MS (80ms), so
   // back-to-back sequence presses never actually overlap in practice.
-  s_injected_pending |= buttons;
+  s_inj.pending |= buttons;
 }
 
 void kbd_hold_buttons(uint32_t buttons) {
   // Latch buttons held until kbd_release_buttons() — enables modifier chords
   // (e.g. hold ctrl, type 's', release ctrl). MENU is click-only.
   buttons &= ~BTN_MENU;
-  kbd_input_button_events(&s_in, buttons & ~(s_btn.curr | s_injected_held),
-                          KBD_EV_DOWN, s_btn.curr | s_injected_held | buttons);
-  s_injected_held |= buttons;
+  kbd_inject_hold(&s_inj, &s_btn, &s_in, buttons);
 }
 
 void kbd_release_buttons(uint32_t buttons) {
-  s_injected_held &= ~buttons;
-  // Also clear from the one-shot active/pending state: without this, an
-  // explicit keyup targeting a button that's currently an active injected
-  // one-shot doesn't actually retire it, so the next poll's
-  // `s_btn.curr |= s_injected_active | s_injected_held` line resurrects
-  // the bit right after this call cleared it from s_btn.curr.
-  s_injected_active &= ~buttons;
-  s_injected_pending &= ~buttons;
-  // Up events only for keys that are down (kbd_input_button_events checks).
-  kbd_input_button_events(&s_in, buttons, KBD_EV_UP, s_btn.curr & ~buttons);
-  s_btn.curr &= ~buttons;
+  // Also retires active/pending one-shots of the same keys: otherwise the
+  // next poll's fold (kbd_inject_poll) would resurrect them.
+  kbd_inject_release(&s_inj, &s_btn, &s_in, buttons);
 }
 
 void kbd_inject_char(char c) {
-  s_injected_char = c;
+  s_inj.ch = c;
   // The event queue sees a tap of that key, as the simulator's does.
   uint8_t mods = kbd_mods_from_buttons(s_btn.curr);
   kbd_event_t e = {KBD_EV_DOWN, (uint8_t)c, 0, mods};

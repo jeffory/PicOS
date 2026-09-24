@@ -465,6 +465,93 @@ static void test_bg_wake_swallow_keeps_earlier_edges(void) {
   CHECK_EQ_U32(btn.curr, 0);               // the swallowed Up never appears
 }
 
+// ── Injected input across kbd_clear_state ────────────────────────────────────
+// keyboard.c's kbd_clear_state: zero the masks and the input state, then
+// kbd_inject_after_clear. The injection state itself survives.
+static kbd_inject_t inj;
+#define HOLD_MS 80
+
+static void clear_state(void) {
+  memset(&btn, 0, sizeof(btn));
+  kbd_input_clear(&in);
+  raw = 0;
+  kbd_inject_after_clear(&inj, &btn);
+}
+
+static void fg_poll(uint32_t now) {
+  poll_start(false);
+  kbd_inject_poll(&inj, &btn, &in, false, now, HOLD_MS);
+}
+
+// (a) An injected Enter opens a modal, which clears the keyboard while the
+// one-shot is still active: the modal's first poll sees Enter held with no
+// press edge, and its retire gives a release edge.
+static void test_inject_active_across_clear(void) {
+  reset();
+  memset(&inj, 0, sizeof(inj));
+  inj.pending |= BTN_ENTER;
+  fg_poll(1000);
+  CHECK_EQ_U32(pressed(), BTN_ENTER);      // the launcher/menu sees it
+  clear_state();                           // the modal opens
+  fg_poll(1010);
+  CHECK_EQ_U32(pressed(), 0);              // no fresh press to answer with
+  CHECK_EQ_U32(btn.curr, BTN_ENTER);       // still reads as held
+  fg_poll(1020);
+  CHECK_EQ_U32(pressed(), 0);
+  fg_poll(1000 + HOLD_MS);                 // hold time over: retired
+  CHECK_EQ_U32(released(), BTN_ENTER);
+  CHECK_EQ_U32(btn.curr, 0);
+  fg_poll(1200);
+  CHECK_EQ_U32(pressed(), 0);
+  CHECK_EQ_U32(released(), 0);
+}
+
+// A keydown latch across a clear: held without an edge, keyup releases it.
+static void test_inject_held_across_clear(void) {
+  reset();
+  memset(&inj, 0, sizeof(inj));
+  fg_poll(0);
+  kbd_inject_hold(&inj, &btn, &in, BTN_ENTER);
+  fg_poll(10);
+  CHECK_EQ_U32(pressed(), BTN_ENTER);
+  clear_state();
+  fg_poll(20);
+  CHECK_EQ_U32(pressed(), 0);
+  CHECK_EQ_U32(btn.curr, BTN_ENTER);
+  kbd_inject_release(&inj, &btn, &in, BTN_ENTER);  // takes effect at once
+  CHECK_EQ_U32(btn.curr, 0);
+  CHECK_EQ_U32(released(), BTN_ENTER);
+  fg_poll(30);
+  CHECK_EQ_U32(btn.curr, 0);                        // not resurrected
+  CHECK_EQ_U32(pressed(), 0);
+}
+
+// (b) An injection queued after the modal was requested (still pending at
+// the clear) is meant for the modal: its first poll publishes it with a
+// press edge.
+static void test_inject_pending_across_clear(void) {
+  reset();
+  memset(&inj, 0, sizeof(inj));
+  fg_poll(0);
+  inj.pending |= BTN_ENTER;
+  clear_state();
+  fg_poll(10);
+  CHECK_EQ_U32(pressed(), BTN_ENTER);
+  kbd_event_t e = pop();
+  CHECK_EQ_INT(e.type, KBD_EV_DOWN);
+  CHECK_EQ_INT(e.key, KEY_ENTER);
+}
+
+// (c) A char injected before the clear and not read yet is not typed into
+// whatever the clear is for.
+static void test_inject_char_dropped_by_clear(void) {
+  reset();
+  memset(&inj, 0, sizeof(inj));
+  inj.ch = 'x';
+  clear_state();
+  CHECK_EQ_INT(inj.ch, 0);
+}
+
 int main(void) {
   test_two_chars_in_one_poll();
   test_letter_key_down_and_up();
@@ -490,5 +577,9 @@ int main(void) {
   test_bg_two_keys_in_separate_polls();
   test_menu_after_bg_sees_no_earlier_edge();
   test_bg_wake_swallow_keeps_earlier_edges();
+  test_inject_active_across_clear();
+  test_inject_held_across_clear();
+  test_inject_pending_across_clear();
+  test_inject_char_dropped_by_clear();
   return check_report("test_kbd_event_queue");
 }

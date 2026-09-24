@@ -425,3 +425,85 @@ static inline uint8_t kbd_fifo_apply(kbd_input_t *in, kbd_buttons_t *b,
     return 0;
   }
 }
+
+// ── Injected input (dev commands) ────────────────────────────────────────────
+// The bookkeeping keyboard.c keeps for keypress/keydown/keyup injection, as
+// pure functions over the button masks so the host test runs the same code.
+//   pending  one-shot presses awaiting publication by the next kbd_poll
+//   active   one-shots published and held for at least hold_ms of wall time
+//   held     keys latched by keydown until kbd_release_buttons (keyup)
+//   ch       a char injected with kbd_inject_char, until getChar reads it
+typedef struct {
+  uint32_t pending;
+  uint32_t active;
+  uint32_t active_since_ms;
+  uint32_t held;
+  char ch;
+} kbd_inject_t;
+
+// Every kbd_poll, after kbd_poll_begin: retire the active one-shot once it
+// has been held for hold_ms (a release edge), publish a pending one (a press
+// edge) unless one was retired in this very poll (so a re-injected key reads
+// released for at least one poll), then fold injected keys into curr.
+// A background poll neither retires nor publishes.
+static inline void kbd_inject_poll(kbd_inject_t *j, kbd_buttons_t *b,
+                                   kbd_input_t *in, bool bg, uint32_t now_ms,
+                                   uint32_t hold_ms) {
+  bool retired_now = false;
+  if (!bg && j->active && (now_ms - j->active_since_ms >= hold_ms)) {
+    uint32_t retired = j->active & ~j->held;
+    b->curr &= ~j->active;
+    j->active = 0;
+    retired_now = true;
+    kbd_input_button_events(in, retired, KBD_EV_UP, b->curr);
+  }
+  if (!bg && !retired_now && !j->active && j->pending) {
+    j->active = j->pending;
+    j->pending = 0;
+    j->active_since_ms = now_ms;
+    kbd_input_button_events(in, j->active & ~b->curr, KBD_EV_DOWN,
+                            b->curr | j->active);
+  }
+  b->curr |= j->active | j->held;
+}
+
+// After kbd_clear_state has zeroed the masks: an injected key that is down
+// (an active one-shot, or a keydown latch) stays down WITHOUT a press edge,
+// as a physical key held across the clear does (the unseen-HOLD rule), and
+// its retire or keyup still gives a release edge. Without this, the next
+// poll ORs it back into curr with prev == 0 — a fresh press the modal that
+// the injection itself opened would answer. A pending injection is left to
+// be published (with its edge) by the next poll: it was queued for whatever
+// is about to be shown. A char not yet read is dropped.
+static inline void kbd_inject_after_clear(kbd_inject_t *j, kbd_buttons_t *b) {
+  b->curr = b->prev = j->active | j->held;
+  j->ch = 0;
+}
+
+// Drop the one-shots (pending and active) for good: the key that woke the
+// dimmed screen, or input discarded before a modal. The keydown latch stays.
+static inline void kbd_inject_drop_oneshots(kbd_inject_t *j, kbd_buttons_t *b) {
+  b->curr &= ~j->active;
+  j->active = 0;
+  j->active_since_ms = 0;
+  j->pending = 0;
+}
+
+// keydown: latch buttons held (a down event for those not already down).
+static inline void kbd_inject_hold(kbd_inject_t *j, kbd_buttons_t *b,
+                                   kbd_input_t *in, uint32_t buttons) {
+  kbd_input_button_events(in, buttons & ~(b->curr | j->held), KBD_EV_DOWN,
+                          b->curr | j->held | buttons);
+  j->held |= buttons;
+}
+
+// keyup: release latched buttons, and active/pending one-shots of the same
+// keys (else the next poll's fold would resurrect them).
+static inline void kbd_inject_release(kbd_inject_t *j, kbd_buttons_t *b,
+                                      kbd_input_t *in, uint32_t buttons) {
+  j->held &= ~buttons;
+  j->active &= ~buttons;
+  j->pending &= ~buttons;
+  kbd_input_button_events(in, buttons, KBD_EV_UP, b->curr & ~buttons);
+  b->curr &= ~buttons;
+}
