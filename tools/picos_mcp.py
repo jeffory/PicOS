@@ -1174,7 +1174,10 @@ async def exit_app(device: str | None = None) -> str:
     port = resolve_port(device)
     if port:
         try:
-            await asyncio.to_thread(do_command_hardware, "exit", port, timeout=2)
+            lines = await asyncio.to_thread(do_command_hardware, "exit", port, timeout=2)
+            # "Error: exit: no app running" at the launcher.
+            if any("no app running" in ln for ln in lines):
+                return "No app running (nothing to exit)."
             return "Exit signal sent."
         except Exception as e:
             return f"Error: {e}"
