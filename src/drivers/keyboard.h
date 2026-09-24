@@ -55,8 +55,10 @@ bool kbd_init(void);
 // Populates the internal key state used by all other functions.
 void kbd_poll(void);
 
-// Returns last ASCII char typed this frame (0 = none).
-// Also returns KEY_BKSPC (0x08) when backspace is pressed.
+// Returns the ASCII char typed this frame (0 = none). Also returns KEY_BKSPC
+// (0x08) when backspace is pressed. One char per kbd_poll(): when several keys
+// arrive in one poll the rest are kept (KBD_CHAR_BACKLOG) and returned by the
+// following polls, in order.
 char kbd_get_char(void);
 
 // Returns the raw keycode of the last key pressed this frame (0 = none).
@@ -92,8 +94,10 @@ bool kbd_consume_menu_press(void);
 // Brk is intercepted by the OS for screenshots and is never visible to apps.
 bool kbd_consume_screenshot_press(void);
 
-// Clear all keyboard state. Call this after an app exits to prevent
-// button presses in the launcher from being "inherited" by the next app.
+// Clear all keyboard state (buttons, chars, the event queue, the key-down
+// set). Call this after an app exits to prevent button presses in the
+// launcher from being "inherited" by the next app. A key still physically
+// held afterwards is picked up by its next HOLD report without a press edge.
 void kbd_clear_state(void);
 
 // Drop all queued input (the STM32 key FIFO, pending injected keys and
@@ -126,5 +130,42 @@ void kbd_hold_buttons(uint32_t buttons);
 void kbd_release_buttons(uint32_t buttons);
 
 // Inject a character. The character is stored in s_last_char and consumed on the
-// next call to kbd_get_char() (similar to real keyboard input).
+// next call to kbd_get_char() (similar to real keyboard input). It is also
+// queued as a down / char / up event triple for kbd_poll_event().
 void kbd_inject_char(char c);
+
+// ── Event queue (picocalc.input.pollEvent / isKeyDown) ───────────────────────
+// kbd_poll() decodes every STM32 FIFO item, in order, into a small queue
+// (KBD_EVENT_QUEUE_LEN in kbd_event_queue.h; the oldest event is dropped when
+// it is full). The queue is independent of kbd_get_char()/the button masks:
+// reading one does not consume the other.
+
+#define KBD_EV_DOWN 1
+#define KBD_EV_UP 2
+#define KBD_EV_CHAR 3
+
+// kbd_event_t.flags: modifiers held at the event, plus the repeat flag.
+#define KBD_MOD_SHIFT 0x01
+#define KBD_MOD_CTRL 0x02
+#define KBD_MOD_ALT 0x04
+#define KBD_MOD_FN 0x08
+#define KBD_EVF_REPEAT 0x80 // down/char produced by the STM32's HOLD report
+
+typedef struct kbd_event_s {
+  uint8_t type;  // KBD_EV_*
+  uint8_t key;   // STM32 keycode (ASCII for printable keys, KEY_* otherwise)
+  uint8_t ch;    // KBD_EV_CHAR: the char (as kbd_get_char would return it)
+  uint8_t flags; // KBD_MOD_* | KBD_EVF_REPEAT
+} kbd_event_t;
+
+// Pop the oldest queued event. Returns false when the queue is empty.
+bool kbd_poll_event(kbd_event_t *out);
+
+// True while the key is held (down seen, up not yet). Letters are
+// case-insensitive. Works for any keycode the STM32 reports press and release
+// for, letters included.
+bool kbd_is_key_down(uint8_t keycode);
+
+// Drop queued events only (held state is kept). Called when an app starts so
+// it does not receive the launcher's keys.
+void kbd_flush_events(void);
