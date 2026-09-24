@@ -198,11 +198,15 @@ static void __time_critical_func(audio_fill_dma_buffer)(uint32_t *buf, int count
       if (ml > 32767) ml = 32767; else if (ml < -32768) ml = -32768;
       if (mr > 32767) mr = 32767; else if (mr < -32768) mr = -32768;
 
-      // int16 -> PWM range [0,STREAM_PWM_WRAP] with master volume
+      // Master volume scales the signed mix, i.e. about mid-scale (scaling
+      // the unsigned PWM level pulled silence toward 0: a DC step, heard
+      // as a pop, on every volume change).
+      ml = ml * (int32_t)vol / 256;
+      mr = mr * (int32_t)vol / 256;
+
+      // int16 -> PWM range [0,STREAM_PWM_WRAP]
       uint32_t lv = ((uint32_t)(ml + 32768) * (STREAM_PWM_WRAP + 1)) >> 16;
       uint32_t rv = ((uint32_t)(mr + 32768) * (STREAM_PWM_WRAP + 1)) >> 16;
-      lv = (lv * vol) >> 8;
-      rv = (rv * vol) >> 8;
       if (lv > STREAM_PWM_WRAP) lv = STREAM_PWM_WRAP;
       if (rv > STREAM_PWM_WRAP) rv = STREAM_PWM_WRAP;
       buf[base_i + i] = (rv << 16) | lv;

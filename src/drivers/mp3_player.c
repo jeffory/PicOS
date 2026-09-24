@@ -40,11 +40,19 @@ typedef enum {
     FADE_NONE,
     FADE_IN,
     FADE_OUT,
+    FADE_SILENT,  // fade-out done: emit mid-scale until the DMA drains
 } fade_state_t;
 
+// Fade-out handshake (Core 0 stop/pause -> Core 1 DMA ISR): Core 0 sets
+// FADE_OUT and waits (fade_out_and_wait) for the ISR to clear s_dma_active.
+// The ISR renders the 64-sample ramp into the next buffer it fills, then
+// silence; a buffer filled at ISR k plays between ISR k+1 and k+2, so the
+// ISR stops the DMA at the second completion after the ramp ends - only
+// once the ramp has actually been played. (The old stop slept 3 ms and
+// aborted the DMA before the ramp ever reached the pin: a pop.)
 static volatile fade_state_t s_fade_state = FADE_NONE;
 static volatile int          s_fade_pos   = 0;
-static volatile bool         s_stop_after_fade = false;
+static volatile uint8_t      s_fade_silent_isrs = 0;
 
 static struct mad_stream *s_mad_stream = NULL;
 static struct mad_frame  *s_mad_frame  = NULL;
@@ -276,6 +284,13 @@ static void __time_critical_func(fill_dma_buffer)(uint32_t *buf, int count) {
     for (int i = 0; i < count; i++) {
         int32_t lv, rv;
 
+        if (s_fade_state == FADE_SILENT) {
+            // Faded out: hold mid-scale and leave the staged audio alone
+            // (a resume continues from it).
+            buf[i] = ((uint32_t)PWM_MID << 16) | (uint32_t)PWM_MID;
+            continue;
+        }
+
         if (avail < bytes_per_pair) {
             s_staging_underruns++;
             lv = PWM_MID;
@@ -303,13 +318,14 @@ static void __time_critical_func(fill_dma_buffer)(uint32_t *buf, int count) {
             else
                 right = left;
 
-            // 16-bit signed → PWM range (0–PWM_WRAP), then apply volume
-            lv = (int32_t)(((uint32_t)(left  + 32768) * (PWM_WRAP + 1)) >> 16);
-            rv = (int32_t)(((uint32_t)(right + 32768) * (PWM_WRAP + 1)) >> 16);
-            lv = (lv * vol_scale) >> 8;
-            rv = (rv * vol_scale) >> 8;
-            if (lv > PWM_WRAP) lv = PWM_WRAP;
-            if (rv > PWM_WRAP) rv = PWM_WRAP;
+            // Volume scales the signed sample, i.e. about mid-scale: scaling
+            // the unsigned PWM level (as before) pulled silence from
+            // PWM_MID toward 0, a DC step (pop) on every volume change.
+            int32_t l = ((int32_t)left * (int32_t)vol_scale) / 256;
+            int32_t r = ((int32_t)right * (int32_t)vol_scale) / 256;
+            // 16-bit signed → PWM range (0–PWM_WRAP)
+            lv = (int32_t)(((uint32_t)(l + 32768) * (PWM_WRAP + 1)) >> 16);
+            rv = (int32_t)(((uint32_t)(r + 32768) * (PWM_WRAP + 1)) >> 16);
         }
 
         // Apply fade envelope
@@ -325,9 +341,8 @@ static void __time_critical_func(fill_dma_buffer)(uint32_t *buf, int count) {
             lv = PWM_MID + (((lv - PWM_MID) * gain) >> 8);
             rv = PWM_MID + (((rv - PWM_MID) * gain) >> 8);
             if (++s_fade_pos >= FADE_SAMPLES) {
-                s_fade_state = FADE_NONE;
-                if (s_stop_after_fade)
-                    s_player.playing = false;
+                s_fade_state = FADE_SILENT;
+                s_fade_silent_isrs = 0;
             }
         }
 
@@ -343,8 +358,10 @@ static void __time_critical_func(fill_dma_buffer)(uint32_t *buf, int count) {
 static void dma_audio_irq_handler(void) {
     dma_hw->ints1 = 1u << s_dma_chan;          // clear IRQ (using DMA_IRQ_1)
 
-    if (!s_dma_active || !s_player.playing) {
-        // Stopped or paused: silence outputs, don't restart DMA
+    // Stopped, paused, or the fade-out ramp has finished playing (see
+    // s_fade_state): silence outputs, don't restart DMA.
+    if (!s_dma_active || !s_player.playing ||
+        (s_fade_state == FADE_SILENT && ++s_fade_silent_isrs >= 2)) {
         pwm_set_gpio_level(AUDIO_PIN_L, PWM_MID);
         pwm_set_gpio_level(AUDIO_PIN_R, PWM_MID);
         s_dma_active = false;
@@ -550,7 +567,20 @@ static void stop_playback(void) {
     pwm_set_gpio_level(AUDIO_PIN_L, PWM_MID);
     pwm_set_gpio_level(AUDIO_PIN_R, PWM_MID);
     s_fade_state = FADE_NONE;
-    s_stop_after_fade = false;
+}
+
+// Ramp to silence and let the ramp play out before the caller aborts the
+// DMA. Call WITHOUT s_mp3_mutex (Core 1's update keeps running). Returns
+// once the ISR has stopped itself, or after a timeout (the ISR stops within
+// three 256-sample buffers, ~17 ms).
+static void fade_out_and_wait(void) {
+    if (!s_dma_active)
+        return;
+    s_fade_pos = 0;
+    s_fade_state = FADE_OUT;
+    absolute_time_t deadline = make_timeout_time_ms(50);
+    while (s_dma_active && !time_reached(deadline))
+        sleep_us(250);
 }
 
 // ── Helper to skip ID3v2 tags ───────────────────────────────────────────────
@@ -811,9 +841,8 @@ static void setup_playback_hw(void) {
     dma_channel_set_irq1_enabled(s_dma_chan, true);
 
     // Fade in from silence to avoid pop
-    s_fade_state = FADE_IN;
     s_fade_pos = 0;
-    s_stop_after_fade = false;
+    s_fade_state = FADE_IN;
 
     // Pre-fill both DMA ping-pong buffers
     s_out_phase = 0;
@@ -860,19 +889,11 @@ void mp3_player_stop(mp3_player_t *player) {
         return;
     }
 
+    // Fade out (and let the fade play) before stopping, to avoid a pop
+    if (player->playing)
+        fade_out_and_wait();
+
     mutex_enter_blocking(&s_mp3_mutex);
-
-    // If DMA is active, fade out before stopping to avoid pop
-    if (s_dma_active && player->playing) {
-        s_fade_state = FADE_OUT;
-        s_fade_pos = 0;
-        s_stop_after_fade = true;
-
-        // Wait for fade to complete (~1.5ms at 44.1kHz)
-        mutex_exit(&s_mp3_mutex);
-        sleep_ms(3);
-        mutex_enter_blocking(&s_mp3_mutex);
-    }
 
     player->playing  = false;
     player->paused   = false;
@@ -893,6 +914,7 @@ void mp3_player_stop(mp3_player_t *player) {
 
 void mp3_player_pause(mp3_player_t *player) {
     if (!player || !player->playing) return;
+    fade_out_and_wait();
     mutex_enter_blocking(&s_mp3_mutex);
     player->paused = true;
     stop_playback();       // abort DMA + silence PWM — zero ISR overhead
@@ -1034,17 +1056,11 @@ uint32_t mp3_player_feed(const uint8_t *data, uint32_t len) {
 void mp3_player_stop_fed(void) {
     if (!s_fed_mode) return;
 
-    mutex_enter_blocking(&s_mp3_mutex);
+    // Fade out (and let the fade play) if playing
+    if (s_player.playing)
+        fade_out_and_wait();
 
-    // Fade out if playing
-    if (s_dma_active && s_player.playing) {
-        s_fade_state = FADE_OUT;
-        s_fade_pos = 0;
-        s_stop_after_fade = true;
-        mutex_exit(&s_mp3_mutex);
-        sleep_ms(3);
-        mutex_enter_blocking(&s_mp3_mutex);
-    }
+    mutex_enter_blocking(&s_mp3_mutex);
 
     stop_playback();
     s_player.playing = false;
