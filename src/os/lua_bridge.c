@@ -50,26 +50,50 @@ uint16_t l_checkcolor(lua_State *L, int idx) {
 // double arithmetic landed on 200, and luaL_checkinteger rejects it with
 // "number has no integer representation". Quantity parameters (coordinates,
 // sizes, durations, volumes, ...) use these instead:
-//   - integers (and integer-valued numeric strings) pass through unchanged;
+//   - integers pass through unchanged, including exact integers above 2^24;
 //   - floats round to nearest, ties toward +inf: floor(x + 0.5), computed as
 //     floor(x) plus a fraction test so no addition can round the input;
+//   - numeric strings convert through luaL_checknumber, i.e. to a float
+//     first, so they round like floats and an integer-valued string beyond
+//     2^24 ("20000000") is an error even though the integer itself is not;
 //   - NaN / +-inf raise "number is NaN or infinite";
 //   - floats beyond +-2^24 raise "number out of integer range": past that
 //     float32 no longer holds every integer, so there is nothing meaningful to
-//     round to, and rejecting them keeps casts from wrapping (1e9 would fit
-//     int32 but not the 16-bit fields most of these land in).
+//     round to. The bound does NOT make narrow casts safe: 256..2^24 still
+//     wraps a uint8_t, and any negative value wraps an unsigned sink, so
+//     such sinks clamp with lb_clamp_int.
 // Discrete identifiers (handles, enums, colours, masks, byte counts, ports)
 // keep luaL_checkinteger.
 #define LB_FLOAT_INT_LIMIT 16777216.0f  // 2^24
 
-lua_Integer lb_checkint(lua_State *L, int idx) {
+// Raises an argument error on `arg`; `what` (e.g. "field 'x'") prefixes the
+// message when the value came from a table rather than the argument itself.
+static int lb_argfail(lua_State *L, int arg, const char *what,
+                      const char *msg) {
+  if (what)
+    msg = lua_pushfstring(L, "%s: %s", what, msg);
+  return luaL_argerror(L, arg, msg);
+}
+
+// Converts the value at stack index idx; errors blame argument `arg`.
+static lua_Integer lb_toint(lua_State *L, int idx, int arg, const char *what) {
   if (lua_isinteger(L, idx))
     return lua_tointeger(L, idx);
-  lua_Number n = luaL_checknumber(L, idx);
+  lua_Number n;
+  if (!what) {
+    n = luaL_checknumber(L, idx);  // positional: the standard type error
+  } else {
+    int isnum;
+    n = lua_tonumberx(L, idx, &isnum);
+    if (!isnum)
+      lb_argfail(L, arg, what,
+                 lua_pushfstring(L, "number expected, got %s",
+                                 luaL_typename(L, idx)));
+  }
   if (isnan(n) || isinf(n))
-    luaL_argerror(L, idx, "number is NaN or infinite");
+    lb_argfail(L, arg, what, "number is NaN or infinite");
   if (n > LB_FLOAT_INT_LIMIT || n < -LB_FLOAT_INT_LIMIT)
-    luaL_argerror(L, idx, "number out of integer range");
+    lb_argfail(L, arg, what, "number out of integer range");
   lua_Number f = floorf(n);
   // The fraction test cannot misround: for |n| >= 0.5 the fraction is a
   // multiple of 2^-24 below 1, so exact; for n in (-0.5, 0) it is above 0.5
@@ -79,8 +103,21 @@ lua_Integer lb_checkint(lua_State *L, int idx) {
   return (lua_Integer)f;
 }
 
+lua_Integer lb_checkint(lua_State *L, int idx) {
+  return lb_toint(L, idx, idx, NULL);
+}
+
 lua_Integer lb_optint(lua_State *L, int idx, lua_Integer def) {
   return lua_isnoneornil(L, idx) ? def : lb_checkint(L, idx);
+}
+
+lua_Integer lb_checkint_at(lua_State *L, int idx, int arg, const char *what) {
+  return lb_toint(L, idx, arg, what);
+}
+
+lua_Integer lb_optint_at(lua_State *L, int idx, int arg, const char *what,
+                         lua_Integer def) {
+  return lua_isnoneornil(L, idx) ? def : lb_toint(L, idx, arg, what);
 }
 
 // ── Registration

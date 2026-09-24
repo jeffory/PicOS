@@ -144,16 +144,16 @@ static int l_graphics_image_draw(lua_State *L) {
   int sx = 0, sy = 0, sw = img->w, sh = img->h;
   if (lua_istable(L, 5)) {
     lua_getfield(L, 5, "x");
-    sx = lb_optint(L, -1, 0);
+    sx = lb_optint_at(L, -1, 5, "field 'x'", 0);
     lua_pop(L, 1);
     lua_getfield(L, 5, "y");
-    sy = lb_optint(L, -1, 0);
+    sy = lb_optint_at(L, -1, 5, "field 'y'", 0);
     lua_pop(L, 1);
     lua_getfield(L, 5, "w");
-    sw = lb_optint(L, -1, img->w);
+    sw = lb_optint_at(L, -1, 5, "field 'w'", img->w);
     lua_pop(L, 1);
     lua_getfield(L, 5, "h");
-    sh = lb_optint(L, -1, img->h);
+    sh = lb_optint_at(L, -1, 5, "field 'h'", img->h);
     lua_pop(L, 1);
   }
 
@@ -1442,10 +1442,10 @@ static int l_sprite_setBounds(lua_State *L) {
     lua_getfield(L, 2, "y");
     lua_getfield(L, 2, "w");
     lua_getfield(L, 2, "h");
-    s->bounds_x = lb_optint(L, -4, 0);
-    s->bounds_y = lb_optint(L, -3, 0);
-    s->bounds_w = lb_optint(L, -2, 0);
-    s->bounds_h = lb_optint(L, -1, 0);
+    s->bounds_x = lb_optint_at(L, -4, 2, "field 'x'", 0);
+    s->bounds_y = lb_optint_at(L, -3, 2, "field 'y'", 0);
+    s->bounds_w = lb_optint_at(L, -2, 2, "field 'w'", 0);
+    s->bounds_h = lb_optint_at(L, -1, 2, "field 'h'", 0);
     lua_pop(L, 4);
   } else {
     s->bounds_x = lb_checkint(L, 2);
@@ -1789,10 +1789,10 @@ static int l_sprite_setCollideRect(lua_State *L) {
     lua_getfield(L, 2, "y");
     lua_getfield(L, 2, "w");
     lua_getfield(L, 2, "h");
-    s->collide_x = lb_optint(L, -4, 0);
-    s->collide_y = lb_optint(L, -3, 0);
-    s->collide_w = lb_optint(L, -2, s->width);
-    s->collide_h = lb_optint(L, -1, s->height);
+    s->collide_x = lb_optint_at(L, -4, 2, "field 'x'", 0);
+    s->collide_y = lb_optint_at(L, -3, 2, "field 'y'", 0);
+    s->collide_w = lb_optint_at(L, -2, 2, "field 'w'", s->width);
+    s->collide_h = lb_optint_at(L, -1, 2, "field 'h'", s->height);
     lua_pop(L, 4);
   } else {
     s->collide_x = lb_checkint(L, 2);
@@ -1964,8 +1964,8 @@ static int l_sprite_checkCollisions(lua_State *L) {
   if (lua_istable(L, 2)) {
     lua_getfield(L, 2, "x");
     lua_getfield(L, 2, "y");
-    px = lb_optint(L, -2, 0);
-    py = lb_optint(L, -1, 0);
+    px = lb_optint_at(L, -2, 2, "field 'x'", 0);
+    py = lb_optint_at(L, -1, 2, "field 'y'", 0);
     lua_pop(L, 2);
   } else {
     px = lb_checkint(L, 2);
@@ -1987,8 +1987,8 @@ static int l_sprite_querySpritesAtPoint(lua_State *L) {
   if (lua_istable(L, 1)) {
     lua_getfield(L, 1, "x");
     lua_getfield(L, 1, "y");
-    px = lb_optint(L, -2, 0);
-    py = lb_optint(L, -1, 0);
+    px = lb_optint_at(L, -2, 1, "field 'x'", 0);
+    py = lb_optint_at(L, -1, 1, "field 'y'", 0);
     lua_pop(L, 2);
   } else {
     px = lb_checkint(L, 1);
@@ -2022,10 +2022,10 @@ static int l_sprite_querySpritesInRect(lua_State *L) {
     lua_getfield(L, 1, "y");
     lua_getfield(L, 1, "w");
     lua_getfield(L, 1, "h");
-    rx = lb_optint(L, -4, 0);
-    ry = lb_optint(L, -3, 0);
-    rw = lb_optint(L, -2, 320);
-    rh = lb_optint(L, -1, 320);
+    rx = lb_optint_at(L, -4, 1, "field 'x'", 0);
+    ry = lb_optint_at(L, -3, 1, "field 'y'", 0);
+    rw = lb_optint_at(L, -2, 1, "field 'w'", 320);
+    rh = lb_optint_at(L, -1, 1, "field 'h'", 320);
     lua_pop(L, 4);
   } else {
     rx = lb_checkint(L, 1);
@@ -2109,8 +2109,8 @@ static int l_sprite_moveWithCollisions(lua_State *L) {
   if (lua_istable(L, 2)) {
     lua_getfield(L, 2, "x");
     lua_getfield(L, 2, "y");
-    goalX = lb_optint(L, -2, s->x);
-    goalY = lb_optint(L, -1, s->y);
+    goalX = lb_optint_at(L, -2, 2, "field 'x'", s->x);
+    goalY = lb_optint_at(L, -1, 2, "field 'y'", s->y);
     lua_pop(L, 2);
   } else {
     goalX = lb_checkint(L, 2);
@@ -2258,10 +2258,10 @@ static int l_sprite_setClipRect(lua_State *L) {
     lua_getfield(L, 2, "y");
     lua_getfield(L, 2, "w");
     lua_getfield(L, 2, "h");
-    s->clip_x = lb_optint(L, -4, 0);
-    s->clip_y = lb_optint(L, -3, 0);
-    s->clip_w = lb_optint(L, -2, s->width);
-    s->clip_h = lb_optint(L, -1, s->height);
+    s->clip_x = lb_optint_at(L, -4, 2, "field 'x'", 0);
+    s->clip_y = lb_optint_at(L, -3, 2, "field 'y'", 0);
+    s->clip_w = lb_optint_at(L, -2, 2, "field 'w'", s->width);
+    s->clip_h = lb_optint_at(L, -1, 2, "field 'h'", s->height);
     lua_pop(L, 4);
     s->has_clip = true;
   } else if (lua_gettop(L) >= 5) {
@@ -2348,10 +2348,10 @@ static bool sprite_line_intersect(int x1, int y1, int x2, int y2,
 static int l_sprite_querySpritesAlongLine(lua_State *L) {
   int x1, y1, x2, y2;
   if (lua_istable(L, 1)) {
-    lua_getfield(L, 1, "x1"); x1 = lb_checkint(L, -1); lua_pop(L, 1);
-    lua_getfield(L, 1, "y1"); y1 = lb_checkint(L, -1); lua_pop(L, 1);
-    lua_getfield(L, 1, "x2"); x2 = lb_checkint(L, -1); lua_pop(L, 1);
-    lua_getfield(L, 1, "y2"); y2 = lb_checkint(L, -1); lua_pop(L, 1);
+    lua_getfield(L, 1, "x1"); x1 = lb_checkint_at(L, -1, 1, "field 'x1'"); lua_pop(L, 1);
+    lua_getfield(L, 1, "y1"); y1 = lb_checkint_at(L, -1, 1, "field 'y1'"); lua_pop(L, 1);
+    lua_getfield(L, 1, "x2"); x2 = lb_checkint_at(L, -1, 1, "field 'x2'"); lua_pop(L, 1);
+    lua_getfield(L, 1, "y2"); y2 = lb_checkint_at(L, -1, 1, "field 'y2'"); lua_pop(L, 1);
   } else {
     x1 = lb_checkint(L, 1);
     y1 = lb_checkint(L, 2);
@@ -2424,10 +2424,10 @@ static bool sprite_line_rect_intersection(int x1, int y1, int x2, int y2,
 static int l_sprite_querySpriteInfoAlongLine(lua_State *L) {
   int x1, y1, x2, y2;
   if (lua_istable(L, 1)) {
-    lua_getfield(L, 1, "x1"); x1 = lb_checkint(L, -1); lua_pop(L, 1);
-    lua_getfield(L, 1, "y1"); y1 = lb_checkint(L, -1); lua_pop(L, 1);
-    lua_getfield(L, 1, "x2"); x2 = lb_checkint(L, -1); lua_pop(L, 1);
-    lua_getfield(L, 1, "y2"); y2 = lb_checkint(L, -1); lua_pop(L, 1);
+    lua_getfield(L, 1, "x1"); x1 = lb_checkint_at(L, -1, 1, "field 'x1'"); lua_pop(L, 1);
+    lua_getfield(L, 1, "y1"); y1 = lb_checkint_at(L, -1, 1, "field 'y1'"); lua_pop(L, 1);
+    lua_getfield(L, 1, "x2"); x2 = lb_checkint_at(L, -1, 1, "field 'x2'"); lua_pop(L, 1);
+    lua_getfield(L, 1, "y2"); y2 = lb_checkint_at(L, -1, 1, "field 'y2'"); lua_pop(L, 1);
   } else {
     x1 = lb_checkint(L, 1);
     y1 = lb_checkint(L, 2);
@@ -2613,10 +2613,10 @@ static int l_sprite_setClipRectsInRange(lua_State *L) {
 
   if (lua_istable(L, 1)) {
     // Table variant: ({x, y, w, h}, startz, endz)
-    lua_getfield(L, 1, "x"); clip_x = lb_checkint(L, -1); lua_pop(L, 1);
-    lua_getfield(L, 1, "y"); clip_y = lb_checkint(L, -1); lua_pop(L, 1);
-    lua_getfield(L, 1, "w"); clip_w = lb_checkint(L, -1); lua_pop(L, 1);
-    lua_getfield(L, 1, "h"); clip_h = lb_checkint(L, -1); lua_pop(L, 1);
+    lua_getfield(L, 1, "x"); clip_x = lb_checkint_at(L, -1, 1, "field 'x'"); lua_pop(L, 1);
+    lua_getfield(L, 1, "y"); clip_y = lb_checkint_at(L, -1, 1, "field 'y'"); lua_pop(L, 1);
+    lua_getfield(L, 1, "w"); clip_w = lb_checkint_at(L, -1, 1, "field 'w'"); lua_pop(L, 1);
+    lua_getfield(L, 1, "h"); clip_h = lb_checkint_at(L, -1, 1, "field 'h'"); lua_pop(L, 1);
     startz = lb_checkint(L, 2);
     endz   = lb_checkint(L, 3);
   } else {
@@ -2661,10 +2661,10 @@ static int l_sprite_addEmptyCollisionSprite(lua_State *L) {
   int x, y, w, h;
 
   if (lua_istable(L, 1)) {
-    lua_getfield(L, 1, "x"); x = lb_checkint(L, -1); lua_pop(L, 1);
-    lua_getfield(L, 1, "y"); y = lb_checkint(L, -1); lua_pop(L, 1);
-    lua_getfield(L, 1, "w"); w = lb_checkint(L, -1); lua_pop(L, 1);
-    lua_getfield(L, 1, "h"); h = lb_checkint(L, -1); lua_pop(L, 1);
+    lua_getfield(L, 1, "x"); x = lb_checkint_at(L, -1, 1, "field 'x'"); lua_pop(L, 1);
+    lua_getfield(L, 1, "y"); y = lb_checkint_at(L, -1, 1, "field 'y'"); lua_pop(L, 1);
+    lua_getfield(L, 1, "w"); w = lb_checkint_at(L, -1, 1, "field 'w'"); lua_pop(L, 1);
+    lua_getfield(L, 1, "h"); h = lb_checkint_at(L, -1, 1, "field 'h'"); lua_pop(L, 1);
   } else {
     x = lb_checkint(L, 1);
     y = lb_checkint(L, 2);
@@ -3478,7 +3478,7 @@ static int l_animator_currentValue(lua_State *L) {
 
 static int l_animator_valueAtTime(lua_State *L) {
   lua_animator_t *a = check_animator(L, 1);
-  uint32_t time_ms = lb_checkint(L, 2);
+  uint32_t time_ms = (uint32_t)lb_clamp_int(lb_checkint(L, 2), 0, LUA_MAXINTEGER);
 
   float t = (float)time_ms / (float)a->duration_ms;
   if (t < 0.0f) t = 0.0f;

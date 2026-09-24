@@ -76,7 +76,7 @@ static int l_video_isPaused(lua_State *L) {
 
 static int l_video_seek(lua_State *L) {
     video_player_t *player = check_video(L, 1);
-    uint32_t frame = (uint32_t)lb_checkint(L, 2);
+    uint32_t frame = (uint32_t)lb_clamp_int(lb_checkint(L, 2), 0, LUA_MAXINTEGER);
     video_player_seek(player, frame);
     return 0;
 }
@@ -171,7 +171,7 @@ static int l_video_hasAudio(lua_State *L) {
 
 static int l_video_setVolume(lua_State *L) {
     video_player_t *player = check_video(L, 1);
-    uint8_t vol = (uint8_t)lb_checkint(L, 2);
+    uint8_t vol = (uint8_t)lb_clamp_int(lb_checkint(L, 2), 0, 100);
     video_player_set_audio_volume(player, vol);
     return 0;
 }

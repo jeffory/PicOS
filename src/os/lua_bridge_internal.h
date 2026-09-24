@@ -48,6 +48,19 @@ uint16_t l_checkcolor(lua_State *L, int idx);
 // NaN/inf and floats beyond +-2^24 raise an argument error. See lua_bridge.c.
 lua_Integer lb_checkint(lua_State *L, int idx);
 lua_Integer lb_optint(lua_State *L, int idx, lua_Integer def);
+// Same rules for a value already on the stack at idx (a table field or array
+// entry): errors name argument `arg` and start with `what` ("field 'x'"),
+// instead of reporting a meaningless negative index like "#-1".
+lua_Integer lb_checkint_at(lua_State *L, int idx, int arg, const char *what);
+lua_Integer lb_optint_at(lua_State *L, int idx, int arg, const char *what,
+                         lua_Integer def);
+// Clamps v to [lo, hi]. The +-2^24 bound above does not protect sinks
+// narrower than that: uint8_t volumes/colour channels and unsigned
+// positions clamp instead of wrapping.
+static inline lua_Integer lb_clamp_int(lua_Integer v, lua_Integer lo,
+                                       lua_Integer hi) {
+  return v < lo ? lo : (v > hi ? hi : v);
+}
 bool fs_sandbox_check(lua_State *L, const char *path, bool write);
 void http_lua_fire_pending(lua_State *L);
 void tcp_lua_fire_pending(lua_State *L);
