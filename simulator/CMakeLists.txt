@@ -120,33 +120,25 @@ set(JPEGDEC_DIR ${PICOS_ROOT}/third_party/JPEGDEC)
 set(PNGDEC_DIR ${PICOS_ROOT}/third_party/PNGdec)
 set(GIF_DIR ${PICOS_ROOT}/third_party/AnimatedGIF)
 
+# PNGdec's zlib with its unaligned word copies made alignment-safe (patched
+# copies in the build tree; the submodule stays pristine). Shared with the
+# firmware build — see the module for why.
+include(${PICOS_ROOT}/cmake/picos_pngdec.cmake)
+picos_pngdec_sources(PICOS_PNGDEC_SOURCES ${PNGDEC_DIR}/src)
+
 add_library(image_decoders_sim STATIC
     ${TGX_DIR}/src/Color.cpp
     ${TGX_DIR}/src/Fonts.cpp
     ${TGX_DIR}/src/Renderer3D.cpp
     ${JPEGDEC_DIR}/src/JPEGDEC.cpp
-    ${PNGDEC_DIR}/src/PNGdec.cpp
-    ${PNGDEC_DIR}/src/adler32.c
-    ${PNGDEC_DIR}/src/crc32.c
-    ${PNGDEC_DIR}/src/infback.c
-    ${PNGDEC_DIR}/src/inffast.c
-    ${PNGDEC_DIR}/src/inflate.c
-    ${PNGDEC_DIR}/src/inftrees.c
-    ${PNGDEC_DIR}/src/zutil.c
+    ${PICOS_PNGDEC_SOURCES}
     ${GIF_DIR}/src/AnimatedGIF.cpp
 )
 
 # PNGdec bundles its own zlib, whose crc32() clashes with Unicorn's crc32c.c.
 # Rename it on every PNGdec source so the two never meet at link time.
 set_source_files_properties(
-    ${PNGDEC_DIR}/src/PNGdec.cpp
-    ${PNGDEC_DIR}/src/adler32.c
-    ${PNGDEC_DIR}/src/crc32.c
-    ${PNGDEC_DIR}/src/infback.c
-    ${PNGDEC_DIR}/src/inffast.c
-    ${PNGDEC_DIR}/src/inflate.c
-    ${PNGDEC_DIR}/src/inftrees.c
-    ${PNGDEC_DIR}/src/zutil.c
+    ${PICOS_PNGDEC_SOURCES}
     PROPERTIES COMPILE_DEFINITIONS "crc32=pngdec_crc32"
 )
 

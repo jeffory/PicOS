@@ -15,6 +15,21 @@ extern "C" {
 #define RGB565(r, g, b) ((uint16_t)(((r) & 0xF8) << 8) | (((g) & 0xFC) << 3) | (((b) & 0xF8) >> 3))
 #endif
 
+// Decoded images are capped at 2048x2048 (as BMP and image.new already are)
+// and their byte size is computed in size_t: a crafted header's w*h*2 done
+// in int wraps to a tiny allocation that the decoder then overruns.
+#define IMAGE_MAX_DIM 2048
+
+static bool image_dims_ok(int w, int h, size_t *out_bytes) {
+  if (w <= 0 || h <= 0 || w > IMAGE_MAX_DIM || h > IMAGE_MAX_DIM) {
+    printf("[TGX] Image dimensions %dx%d rejected (limit %d)\n", w, h,
+           IMAGE_MAX_DIM);
+    return false;
+  }
+  *out_bytes = (size_t)w * (size_t)h * sizeof(uint16_t);
+  return true;
+}
+
 // --- FatFS Proxy Callbacks for decoders ---
 
 static void *my_file_open(const char *szFilename, int32_t *pFileSize) {
@@ -134,7 +149,12 @@ bool decode_jpeg_buffer(const uint8_t *data, size_t len,
   if (jpeg->openRAM((uint8_t *)data, (int)len, my_JPEGDraw)) {
     int w = jpeg->getWidth();
     int h = jpeg->getHeight();
-    size_t req_mem = w * h * sizeof(uint16_t);
+    size_t req_mem;
+    if (!image_dims_ok(w, h, &req_mem)) {
+      jpeg->close();
+      umm_free(jpeg);
+      return false;
+    }
     printf("[TGX] JPEG openRAM success. Dimensions: %dx%d. Requesting %zu "
            "bytes from PSRAM.\n",
            w, h, req_mem);
@@ -174,9 +194,15 @@ bool decode_png_buffer(const uint8_t *data, size_t len,
   if (png->openRAM((uint8_t *)data, (int)len, my_PNGDraw) == PNG_SUCCESS) {
     int w = png->getWidth();
     int h = png->getHeight();
+    size_t req_mem;
+    if (!image_dims_ok(w, h, &req_mem)) {
+      png->close();
+      umm_free(png);
+      return false;
+    }
     result->w = w;
     result->h = h;
-    result->data = (uint16_t *)umm_malloc(w * h * sizeof(uint16_t));
+    result->data = (uint16_t *)umm_malloc(req_mem);
 
     if (result->data) {
       tgx::Image<tgx::RGB565> im(result->data, w, h);
@@ -204,9 +230,15 @@ bool decode_gif_buffer(const uint8_t *data, size_t len,
   if (gif->open((uint8_t *)data, (int)len, my_GIFDraw)) {
     int w = gif->getCanvasWidth();
     int h = gif->getCanvasHeight();
+    size_t req_mem;
+    if (!image_dims_ok(w, h, &req_mem)) {
+      gif->close();
+      umm_free(gif);
+      return false;
+    }
     result->w = w;
     result->h = h;
-    result->data = (uint16_t *)umm_malloc(w * h * sizeof(uint16_t));
+    result->data = (uint16_t *)umm_malloc(req_mem);
 
     if (result->data) {
       tgx::Image<tgx::RGB565> im(result->data, w, h);
@@ -331,9 +363,16 @@ bool decode_jpeg_file(const char *path, image_decode_result_t *result) {
       }
     }
 
+    // The cap applies to the decoded (downscaled) size: a 4000x3000 photo is
+    // fine because JPEG_SCALE_EIGHTH brings it well under 2048.
     int out_w = w / scale_div;
     int out_h = h / scale_div;
-    size_t req_mem = out_w * out_h * sizeof(uint16_t);
+    size_t req_mem;
+    if (!image_dims_ok(out_w, out_h, &req_mem)) {
+      jpeg->close();
+      umm_free(jpeg);
+      return false;
+    }
 
     printf("[TGX] JPEG open success. Original: %dx%d. Downscaled 1/%d: %dx%d. "
            "Requesting %zu bytes.\n",
@@ -375,9 +414,9 @@ bool decode_png_file(const char *path, image_decode_result_t *result) {
                 my_PNGDraw) == PNG_SUCCESS) {
     int w = png->getWidth();
     int h = png->getHeight();
-    size_t req_mem = w * h * sizeof(uint16_t);
+    size_t req_mem = 0;
 
-    if (req_mem > 4000000) {
+    if (!image_dims_ok(w, h, &req_mem) || req_mem > 4000000) {
       png->close();
       umm_free(png);
       return false;
@@ -415,9 +454,9 @@ bool decode_gif_file(const char *path, image_decode_result_t *result) {
                 my_GIFDraw)) {
     int w = gif->getCanvasWidth();
     int h = gif->getCanvasHeight();
-    size_t req_mem = w * h * sizeof(uint16_t);
+    size_t req_mem = 0;
 
-    if (req_mem > 4000000) {
+    if (!image_dims_ok(w, h, &req_mem) || req_mem > 4000000) {
       printf("[TGX] Image too large! GIF cannot be hardware downscaled: %zu "
              "bytes\n",
              req_mem);

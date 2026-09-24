@@ -4101,6 +4101,10 @@ static uint16_t *render_text_image(lua_State *L, const char *text, int w, int h,
   // longjmps on a wrong-type font argument, and anything allocated before
   // that point would be orphaned (up to 200KB of PSRAM).
   const pc_font_t *f = font_for_arg(L, font_idx);
+  // Same 2048 cap as image.new and the decoders: w/h come straight from Lua,
+  // and w=h=-1 made (size_t)w*h*2 wrap to a 2-byte allocation.
+  if (w <= 0 || h <= 0 || w > 2048 || h > 2048)
+    luaL_error(L, "text image size %dx%d out of range (1..2048)", w, h);
   uint16_t *pixels = (uint16_t *)umm_malloc((size_t)w * h * sizeof(uint16_t));
   if (!pixels) return NULL;
   for (int i = 0; i < w * h; i++) pixels[i] = bg;

@@ -141,6 +141,11 @@ set(JPEGDEC_DIR ${CMAKE_SOURCE_DIR}/third_party/JPEGDEC)
 set(PNGDEC_DIR ${CMAKE_SOURCE_DIR}/third_party/PNGdec)
 set(GIF_DIR ${CMAKE_SOURCE_DIR}/third_party/AnimatedGIF)
 
+# PNGdec's zlib with its unaligned word copies made alignment-safe (patched
+# copies in the build tree; the submodule stays pristine). See the module.
+include(${CMAKE_SOURCE_DIR}/cmake/picos_pngdec.cmake)
+picos_pngdec_sources(PICOS_PNGDEC_SOURCES ${PNGDEC_DIR}/src)
+
 # JPEGDEC as separate lib with -O2 for faster decode loops (IDCT, Huffman VLC,
 # pixel conversion).  Code grows from ~17KB (-Os) to ~24KB (-O2), but it already
 # exceeded the 16KB XIP cache at -Os, so the extra size doesn't meaningfully
@@ -154,14 +159,7 @@ add_library(image_decoders STATIC
     ${TGX_DIR}/src/Color.cpp
     ${TGX_DIR}/src/Fonts.cpp
     ${TGX_DIR}/src/Renderer3D.cpp
-    ${PNGDEC_DIR}/src/PNGdec.cpp
-    ${PNGDEC_DIR}/src/adler32.c
-    ${PNGDEC_DIR}/src/crc32.c
-    ${PNGDEC_DIR}/src/infback.c
-    ${PNGDEC_DIR}/src/inffast.c
-    ${PNGDEC_DIR}/src/inflate.c
-    ${PNGDEC_DIR}/src/inftrees.c
-    ${PNGDEC_DIR}/src/zutil.c
+    ${PICOS_PNGDEC_SOURCES}
     ${GIF_DIR}/src/AnimatedGIF.cpp
 )
 
@@ -275,6 +273,7 @@ add_executable(picocalc_os
     src/os/lua_bridge_game_scene.c
     src/os/lua_bridge_game_save.c
     src/os/lua_psram_alloc.c
+    src/os/small_alloc.c
     src/os/core1_alloc.c
     src/os/system_menu.c
     src/os/idle_dim.c
