@@ -515,6 +515,20 @@ case_fw("http_server_closes_released_slot", function()
     s:close()
 end)
 
+-- system/lib/download.lua end to end: 1 MiB to the app's data dir, with
+-- the large (256 KB) ring it now asks for; size and checksum on disk.
+case_fw("download_lib_big", function()
+    local dl = pc.sys.loadlib("download")
+    local dest = "/data/" .. APP_ID .. "/big.bin"
+    local ok, err = dl.toFile("http://" .. HOST .. ":" .. cfg.http .. "/big",
+                              dest, { timeoutMs = 20000 })
+    T.ok(ok, "download failed: " .. tostring(err))
+    local data = pc.fs.readFile(dest)
+    T.eq(data and #data, 1048576, "file size")
+    T.eq(adler(data), cfg.big_sum, "file checksum")
+    pc.fs.delete(dest)
+end)
+
 -- A close-delimited body larger than the ring, not read until the server
 -- has closed: what did not fit is kept (spilled), so the whole body is
 -- still readable after COMPLETE.

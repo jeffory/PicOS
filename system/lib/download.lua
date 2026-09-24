@@ -72,7 +72,12 @@ local function fetch_leg(url, dest, opts, deadline)
 
     conn:setConnectTimeout(30)
     conn:setReadTimeout(60)
-    conn:setReadBufferSize(32 * 1024)
+    -- A large ring (PSRAM): on the device nothing slows the sender, and the
+    -- transfer fails once it is ~32 KB beyond what the ring holds while the
+    -- SD write lags.  Fall back to 32 KB if the heap cannot spare it.
+    if not conn:setReadBufferSize(256 * 1024) then
+        conn:setReadBufferSize(32 * 1024)
+    end
 
     local state = {
         done = false, err = nil, redirect = nil,

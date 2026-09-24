@@ -398,7 +398,11 @@ local function fetch_catalog()
 
     conn:setConnectTimeout(15)
     conn:setReadTimeout(30)
-    conn:setReadBufferSize(32 * 1024)
+    -- Large ring (PSRAM): nothing slows the sender on the device; 32 KB
+    -- if the heap cannot spare it.
+    if not conn:setReadBufferSize(256 * 1024) then
+        conn:setReadBufferSize(32 * 1024)
+    end
     current_conn = conn
 
     local body = ""
@@ -495,7 +499,11 @@ local function download_file_with_redirects(url, dest_path, redirect_count, on_c
 
     conn:setConnectTimeout(30)
     conn:setReadTimeout(60)
-    conn:setReadBufferSize(32 * 1024)
+    -- Large ring (PSRAM): nothing slows the sender on the device; 32 KB
+    -- if the heap cannot spare it.
+    if not conn:setReadBufferSize(256 * 1024) then
+        conn:setReadBufferSize(32 * 1024)
+    end
     current_conn = conn
     download_complete = false
 

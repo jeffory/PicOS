@@ -408,7 +408,10 @@ local function download_fallback(host, port, ssl, path)
 
     conn:setConnectTimeout(30)
     conn:setReadTimeout(60)
-    if not conn:setReadBufferSize(32 * 1024) then
+    -- Large ring (PSRAM): nothing slows the sender on the device; 32 KB
+    -- if the heap cannot spare it.
+    if not conn:setReadBufferSize(256 * 1024) and
+       not conn:setReadBufferSize(32 * 1024) then
         error_msg = "Failed to allocate download buffer"
         ui.toast(error_msg, ui.TOAST_ERROR)
         current_screen = SCR_MAIN
