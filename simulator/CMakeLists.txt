@@ -488,6 +488,14 @@ if(PICOS_SIM_SANITIZE)
     foreach(_t picos_simulator sim_hal sim_network lua_sim libmad_sim image_decoders_sim)
         target_compile_options(${_t} PRIVATE ${_picos_san_flags})
     endforeach()
+    if("undefined" IN_LIST PICOS_SIM_SANITIZE)
+        # libmad's polyphase synthesis reads a row of D[17][32] through a
+        # pointer offset back from the row start (synth.c synth_full: ptr =
+        # *Dptr - po; ptr[31 - n]): inside D, outside the row that
+        # -fsanitize=bounds checks. Decoding any MP3 tripped it.
+        set_source_files_properties(${LIBMAD_DIR}/synth.c PROPERTIES
+            COMPILE_OPTIONS -fno-sanitize=bounds)
+    endif()
     target_link_options(picos_simulator PRIVATE -fsanitize=${_picos_san})
     message(STATUS "  - Sanitizers: ${_picos_san}")
 endif()
