@@ -288,7 +288,7 @@ static void enc_table(lua_State *L, json_enc_t *e, int idx, int depth) {
   // Each level keeps a key and a value on the stack; a C function is only
   // guaranteed LUA_MINSTACK slots, so grow it (writes past the end corrupt
   // the heap).
-  luaL_checkstack(L, 4, "json.encode: nesting too deep");
+  luaL_checkstack(L, 6, "json.encode: nesting too deep");
   if (depth >= JSON_MAX_DEPTH)
     luaL_error(L, "json.encode: nesting deeper than %d (cycle?)", JSON_MAX_DEPTH);
 
