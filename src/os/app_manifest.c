@@ -181,6 +181,19 @@ bool app_requirements_has(const char *list, const char *name) {
     return false;
 }
 
+// "local.<dir>" with every byte outside [A-Za-z0-9._-] (and the second dot
+// of a "..") replaced by '_', then folded: always a valid id.
+static void default_id(const char *dir_name, char *out, size_t out_len) {
+    int n = snprintf(out, out_len, "local.%s", dir_name ? dir_name : "");
+    if (n < 0)
+        out[0] = '\0';
+    for (size_t i = 6; out[i]; i++) {
+        if (!id_char_ok(out[i]) || (out[i] == '.' && out[i - 1] == '.'))
+            out[i] = '_';
+    }
+    fold_lower(out);
+}
+
 static size_t bounded_len(const char *s, size_t max) {
     size_t n = 0;
     while (n < max && s[n])
@@ -197,7 +210,8 @@ void app_manifest_parse(const char *json, size_t len, const char *dir_name,
     const char *end = json ? json + bounded_len(json, len) : json;
 
     if (!json || !json_get_string(json, end, "id", app->id, sizeof(app->id)))
-        snprintf(app->id, sizeof(app->id), "local.%s", dir_name);
+        default_id(dir_name, app->id, sizeof(app->id));
+    fold_lower(app->id);  // FatFS is case-insensitive: one spelling per app
     if (!json || !json_get_string(json, end, "name", app->name, sizeof(app->name)))
         copy_str(app->name, sizeof(app->name), dir_name);
     if (!json || !json_get_string(json, end, "description", app->description,
@@ -228,7 +242,7 @@ void app_manifest_parse(const char *json, size_t len, const char *dir_name,
 }
 
 void app_manifest_defaults(const char *dir_name, app_entry_t *app) {
-    snprintf(app->id, sizeof(app->id), "local.%s", dir_name);
+    default_id(dir_name, app->id, sizeof(app->id));
     app->requirements[0] = '\0';
     copy_str(app->name, sizeof(app->name), dir_name);
     app->description[0] = '\0';

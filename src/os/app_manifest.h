@@ -19,12 +19,16 @@
 // and category, no requirements.  Stops at len or a NUL, whichever is first.
 // String values decode JSON escapes (\" \\ \/ \b \f \n \r \t \uXXXX;
 // non-ASCII \u escapes become '?').  Does not touch path, type or icon.
-// requirements holds the folded names from the "requirements" array,
-// space-separated.
+// The id is folded to lower case (FatFS is case-insensitive, so /data/<id>
+// must have one spelling); it is NOT validated here — the launcher refuses
+// an app whose id fails app_manifest_id_valid().  Default ids are sanitised
+// from the directory name and always valid.  requirements holds the folded
+// names from the "requirements" array, space-separated.
 void app_manifest_parse(const char *json, size_t len, const char *dir_name,
                         app_entry_t *app);
 
-// The same fields when there is no readable app.json: id "local.<dir>",
+// The same fields when there is no readable app.json: id "local.<dir>"
+// (sanitised, folded),
 // name <dir>, version "?".
 void app_manifest_defaults(const char *dir_name, app_entry_t *app);
 

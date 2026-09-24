@@ -551,6 +551,36 @@ void launcher_apply_clock(uint32_t khz) {
 static volatile const char *s_running_app_name = NULL;
 static volatile uint32_t s_app_launch_time_ms = 0;
 
+// Refuse a launch: error.log entry, test-channel outcome, and a screen with
+// the reason held for 3 s (skipped in --test-mode).
+static void launcher_refuse(const app_entry_t *app, const char *title,
+                            const char *reason, const char *detail,
+                            const char *heap, const char *hint) {
+  crashlog_write("APP FAILED", app->name, reason, detail);
+  sim_log_err("[LAUNCHER] %s: %s: %s", app->name, reason, detail);
+#ifdef PICOS_SIMULATOR
+  {
+    char outcome[160];
+    snprintf(outcome, sizeof(outcome), "%s: %s", reason, detail);
+    sim_app_outcome_set(SIM_APP_RESULT_LOAD_FAILED, outcome);
+  }
+#endif
+  display_clear(COLOR_BLACK);
+  display_draw_text(8, 8, title, COLOR_RED, COLOR_BLACK);
+  display_draw_text(8, 20, app->name, COLOR_WHITE, COLOR_BLACK);
+  display_draw_text(8, 36, reason, COLOR_WHITE, COLOR_BLACK);
+  display_draw_text(8, 48, detail, COLOR_WHITE, COLOR_BLACK);
+  display_draw_text(8, 64, heap, COLOR_GRAY, COLOR_BLACK);
+  display_draw_text(8, 88, hint, COLOR_GRAY, COLOR_BLACK);
+  display_flush();
+  for (int i = 0; i < 30 && !sim_test_mode(); i++) {
+    watchdog_update();
+    sleep_ms(100);
+  }
+  s_running_app_name = NULL;
+  s_app_launch_time_ms = 0;
+}
+
 static bool run_app(int idx) {
   if (idx < 0 || idx >= s_app_count)
     return false;
@@ -570,6 +600,15 @@ static bool run_app(int idx) {
   printf("[LAUNCHER] Starting app %d '%s' (type=%s), PSRAM %s\n",
          idx, app->name, type_str, heap);
 
+  // An id is used as a path component (/data/<id>/...): refuse one that could
+  // escape it ("../evil", "a/b") instead of sandboxing the app into someone
+  // else's directory.
+  if (!app_manifest_id_valid(app->id)) {
+    launcher_refuse(app, "Cannot launch app:", "invalid app id in app.json",
+                    app->id, heap, "Use only A-Z a-z 0-9 . _ - in \"id\".");
+    return false;
+  }
+
   // Refuse up front when the app declares a contiguous-PSRAM requirement the
   // heap cannot meet.  Total free bytes are not the test: a native image or
   // a big asset arena needs ONE block, and a fragmented heap fails that with
@@ -582,26 +621,9 @@ static bool run_app(int idx) {
       snprintf(detail, sizeof(detail),
                "needs %luK contiguous, largest block %luK",
                (unsigned long)app->min_psram_kb, (unsigned long)largest_kb);
-      crashlog_write("APP FAILED", app->name, "not enough PSRAM to launch",
-                     detail);
-      sim_log_err("[LAUNCHER] %s: not enough PSRAM to launch: %s", app->name,
-                  detail);
-      sim_app_outcome_set(SIM_APP_RESULT_LOAD_FAILED, detail);
-      display_clear(COLOR_BLACK);
-      display_draw_text(8, 8, "Not enough memory to launch:", COLOR_RED,
-                        COLOR_BLACK);
-      display_draw_text(8, 20, app->name, COLOR_WHITE, COLOR_BLACK);
-      display_draw_text(8, 36, detail, COLOR_WHITE, COLOR_BLACK);
-      display_draw_text(8, 52, heap, COLOR_GRAY, COLOR_BLACK);
-      display_draw_text(8, 76, "Reboot to defragment the heap.", COLOR_GRAY,
-                        COLOR_BLACK);
-      display_flush();
-      for (int i = 0; i < 30 && !sim_test_mode(); i++) {
-        watchdog_update();
-        sleep_ms(100);
-      }
-      s_running_app_name = NULL;
-      s_app_launch_time_ms = 0;
+      launcher_refuse(app, "Not enough memory to launch:",
+                      "not enough PSRAM to launch", detail, heap,
+                      "Reboot to defragment the heap.");
       return false;
     }
   }

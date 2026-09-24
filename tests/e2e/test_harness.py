@@ -153,6 +153,47 @@ def test_min_psram_refusal_is_load_failed_and_logged(harness_sim):
     assert "H:BIGMEM_RAN" not in _texts(sim.get_log_lines(0))
 
 
+def _stage_app(sd, dirname, app_id, body):
+    app = sd / "apps" / dirname
+    app.mkdir()
+    (app / "app.json").write_text(json.dumps({"id": app_id, "name": dirname}))
+    (app / "main.lua").write_text(body)
+
+
+@pytest.mark.parametrize("bad_id", ["../evil", "a/b", "..", "has space", ""])
+def test_invalid_app_id_is_refused_and_logged(harness_sim, test_sd_card, bad_id):
+    """An app.json id is a path component (/data/<id>): the launcher refuses
+    one that could escape it, with an on-screen reason, a load_failed outcome
+    and an /system/error.log entry — the min_psram_kb refusal path."""
+    sim = harness_sim
+    _stage_app(test_sd_card, "evil_id", bad_id,
+               'picocalc.sys.log("H:EVIL_RAN")\n')
+    out = _run(sim, "evil_id")
+    assert out["found"] is True and out["result"] == "load_failed", out
+    assert "invalid app id" in out["error"], out
+    errs = _texts(sim.get_log_lines(0), "err")
+    assert any("invalid app id" in t for t in errs), errs
+    assert "H:EVIL_RAN" not in _texts(sim.get_log_lines(0))
+    log = (test_sd_card / "system" / "error.log").read_text()
+    assert "invalid app id" in log and "evil_id" in log, log
+    # Nothing was created outside /data for the bad id.
+    assert not (test_sd_card / "evil").exists()
+
+
+def test_app_id_is_folded_to_lower_case(harness_sim, test_sd_card):
+    """FatFS is case-insensitive, so /data/<id> gets one spelling: an id with
+    capitals is folded, and the app's store lands in the lower-case dir."""
+    _stage_app(test_sd_card, "upper_id", "Com.Test.Upper",
+               'local p = picocalc.fs.appPath("x")\n'
+               'local f = picocalc.fs.open(p, "w")\n'
+               'picocalc.fs.write(f, "ok") picocalc.fs.close(f)\n'
+               'picocalc.sys.log("H:UPPER " .. p)\n')
+    out = _run(harness_sim, "upper_id")
+    assert out["result"] == "returned", out
+    assert "H:UPPER /data/com.test.upper/x" in _texts(harness_sim.get_log_lines(0))
+    assert (test_sd_card / "data" / "com.test.upper" / "x").read_text() == "ok"
+
+
 # ── Launching ───────────────────────────────────────────────────────────────
 
 

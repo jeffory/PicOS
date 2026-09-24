@@ -52,6 +52,17 @@ static const case_t k_cases[] = {
     {"/system/lib/download.lua", true, true, true},
     {"/../etc/passwd", false, true, false},  // ".." refused even with root
     {"relative", false, true, false},
+    // FatFS is case-insensitive: another spelling of an allowed tree is the
+    // same tree, and another spelling of a denied one is still denied.
+    {"/DATA/COM.TEST.SANDBOX/x", true, false, true},
+    {"/Data/Com.Test.Sandbox", true, false, true},
+    {"/Apps/Sandbox_Test/main.lua", false, false, true},
+    {"/APPS/SANDBOX_TEST/main.lua", true, false, false},
+    {"/SYSTEM/LIB/download.lua", false, false, true},
+    {"/System/Lib/download.lua", true, false, false},
+    {"/DATA/COM.TEST.SANDBOXEVIL/x", true, false, false},
+    {"/DATA/COM.OTHER/x", false, false, false},
+    {"/SYSTEM/config.json", false, false, false},
 };
 
 static void test_table(void) {
@@ -76,8 +87,19 @@ static void test_missing_identity(void) {
   CHECK(fs_path_allowed("/system/lib/x.lua", false, NULL, NULL, false));
 }
 
+// The identity's own spelling does not matter either (ids are folded to lower
+// case by the manifest reader, app dirs keep the SD's spelling).
+static void test_identity_case(void) {
+  CHECK(fs_path_allowed("/data/com.a/x", true, "/apps/A", "/data/COM.A", false));
+  CHECK(fs_path_allowed("/apps/a/main.lua", false, "/apps/A", "/data/com.a",
+                        false));
+  CHECK(!fs_path_allowed("/apps/ab/main.lua", false, "/apps/A", "/data/com.a",
+                         false));
+}
+
 int main(void) {
   test_table();
   test_missing_identity();
+  test_identity_case();
   return check_report("test_fs_path");
 }

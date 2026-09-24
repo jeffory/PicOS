@@ -1,13 +1,18 @@
 #include "fs_path.h"
 
 #include <string.h>
+#include <strings.h>
+
+// FatFS names are case-insensitive, so every prefix test is too: "/DATA/X"
+// is the same directory as "/data/x", and an allow-list compared
+// case-sensitively would only refuse legitimate spellings.
 
 // path is dir itself or lies beneath it.
 static bool path_under(const char *path, const char *dir) {
     if (!dir || !dir[0])
         return false;
     size_t n = strlen(dir);
-    return strncmp(path, dir, n) == 0 && (path[n] == '\0' || path[n] == '/');
+    return strncasecmp(path, dir, n) == 0 && (path[n] == '\0' || path[n] == '/');
 }
 
 bool fs_path_allowed(const char *path, bool write, const char *app_dir,
@@ -18,7 +23,7 @@ bool fs_path_allowed(const char *path, bool write, const char *app_dir,
         return false;  // reject traversal
 
     // Read-only shared libraries for every app.
-    if (!write && strncmp(path, "/system/lib/", 12) == 0)
+    if (!write && strncasecmp(path, "/system/lib/", 12) == 0)
         return true;
 
     if (root_fs)

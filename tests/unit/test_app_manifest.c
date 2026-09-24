@@ -130,6 +130,26 @@ static void test_requirement_list(void) {
   { app_entry_t t5 = parse("{\"requirements\": \"http\"}"); CHECK_STR(t5.requirements, ""); }
 }
 
+// FatFS is case-insensitive: ids are folded to lower case so "/data/<id>"
+// has one spelling per app.  Invalid ids are kept (folded) for the launcher
+// to refuse.
+static void test_id_folding(void) {
+  { app_entry_t t6 = parse("{\"id\": \"Com.Example.App\"}"); CHECK_STR(t6.id, "com.example.app"); }
+  { app_entry_t t7 = parse("{\"id\": \"../Evil\"}"); CHECK_STR(t7.id, "../evil"); }
+  CHECK(!app_manifest_id_valid(parse("{\"id\": \"../Evil\"}").id));
+  // Default ids come from the directory name and are always valid.
+  app_entry_t a;
+  app_manifest_parse("{}", 2, "My Game", &a);
+  CHECK_STR(a.id, "local.my_game");
+  CHECK(app_manifest_id_valid(a.id));
+  app_manifest_defaults("a..b", &a);
+  CHECK_STR(a.id, "local.a._b");
+  CHECK(app_manifest_id_valid(a.id));
+  app_manifest_defaults("Caf\xc3\xa9", &a);
+  CHECK_STR(a.id, "local.caf__");
+  CHECK(app_manifest_id_valid(a.id));
+}
+
 static void test_ints(void) {
   CHECK_EQ_U32(parse("{\"min_psram_kb\":12}").min_psram_kb, 12);
   CHECK_EQ_U32(parse("{\"min_psram_kb\": \"12\"}").min_psram_kb, 0);  // atoi("\"12\"")
@@ -244,6 +264,7 @@ int main(void) {
   test_key_inside_value();
   test_requirements();
   test_requirement_list();
+  test_id_folding();
   test_ints();
   test_truncation_and_bounds();
   test_id_valid();

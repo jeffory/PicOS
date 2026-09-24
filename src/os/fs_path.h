@@ -13,6 +13,7 @@
 //   - app_dir ("/apps/<dir>") and everything under it: read only.
 // A directory matches only at a component boundary, so "/data/com.a" does
 // not grant "/data/com.abc".  NULL or empty app_dir / data_dir grant nothing.
+// Prefixes compare case-insensitively, as FatFS resolves names.
 
 #include <stdbool.h>
 

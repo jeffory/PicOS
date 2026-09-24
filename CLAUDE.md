@@ -294,6 +294,8 @@ Without `"root-filesystem"`, the sandbox (`fs_sandbox_check` → `fs_path_allowe
 
 When `"http"` is granted, WiFi will remain connected after initial time sync (for power saving) so the app can make HTTP requests.
 
+The `id` is a path component (`/data/<id>`), so it must be 1-79 characters of `[A-Za-z0-9._-]` with no `..`; it is folded to lower case (FatFS is case-insensitive, so each app has one data directory), and the sandbox compares paths case-insensitively. The launcher refuses an app with an invalid id (on-screen reason + `/system/error.log` entry, the same path as the `min_psram_kb` refusal). A missing `id` defaults to `local.<dir>` with any other character replaced by `_`.
+
 SD card auto-creates `/data/` and `/system/` on first mount.
 
 Optional `"min_psram_kb": N` in `app.json` makes the launcher refuse to start the app (with an on-screen reason and an error.log entry) unless the PSRAM heap has a single free block of at least N KB. Use it for apps that need one large contiguous allocation; total free bytes are not the test, the largest block is.
