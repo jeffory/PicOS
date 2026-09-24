@@ -17,6 +17,7 @@
 #include "os/os.h"
 #include "sim_wifi.h"
 #include "os/terminal.h"
+#include "dev_ops.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -353,12 +354,47 @@ static char *h_rescan_apps(const char *params) {
 
 static char *h_exit_app(const char *params) {
     (void)params;
-    extern void dev_commands_set_exit(void);
-    dev_commands_set_exit();
+    // Same semantics as the dev `exit` command (dev_ops.c): with no app
+    // running it is an error reply, and the launcher drops the flag.
+    char reply[DEV_OP_REPLY_MAX];
+    bool ok = dev_op_exit(reply, sizeof(reply));
     // Also inject ESC key so native apps with input-based exit loops
     // (checking getButtonsPressed/getChar instead of shouldExit) will exit.
-    kbd_inject_buttons(BTN_ESC);
-    return strdup("{\"jsonrpc\":\"2.0\",\"result\":{\"ok\":true}}");
+    if (ok) kbd_inject_buttons(BTN_ESC);
+    char esc[2 * DEV_OP_REPLY_MAX];
+    json_escape(reply, esc, sizeof(esc));
+    size_t n = strlen(esc) + 96;
+    char *buf = malloc(n);
+    if (buf)
+        snprintf(buf, n,
+                 "{\"jsonrpc\":\"2.0\",\"result\":{\"ok\":%s,\"message\":\"%s\"}}",
+                 ok ? "true" : "false", esc);
+    return buf;
+}
+
+// Run one dev-command line on Core 0 (see dev_commands_stub.c): the
+// launcher loop or a running app's Lua pump executes it, like a line on the
+// firmware's serial console. params: {"cmd": "...", "timeout_ms": N}.
+static char *h_dev_command(const char *params) {
+    char cmd[300] = {0};
+    if (!json_get_str(params, "cmd", cmd, sizeof(cmd)) || !cmd[0])
+        return strdup("{\"jsonrpc\":\"2.0\",\"error\":{\"code\":-32602,\"message\":\"cmd required\"}}");
+    int timeout_ms = 15000;
+    json_get_int(params, "timeout_ms", &timeout_ms);
+    extern bool dev_commands_sim_run(const char *cmd, int timeout_ms,
+                                     char *reply, size_t reply_len, bool *ok);
+    char reply[DEV_OP_REPLY_MAX];
+    bool ok = false;
+    dev_commands_sim_run(cmd, timeout_ms, reply, sizeof(reply), &ok);
+    char esc[2 * DEV_OP_REPLY_MAX];
+    json_escape(reply, esc, sizeof(esc));
+    size_t n = strlen(esc) + 96;
+    char *buf = malloc(n);
+    if (buf)
+        snprintf(buf, n,
+                 "{\"jsonrpc\":\"2.0\",\"result\":{\"ok\":%s,\"output\":\"%s\"}}",
+                 ok ? "true" : "false", esc);
+    return buf;
 }
 
 static char *h_get_running_app(const char *params) {
@@ -1199,6 +1235,7 @@ static struct {
     { "ping",                h_ping },
     { "launch_app",         h_launch_app },
     { "exit_app",           h_exit_app },
+    { "dev_command",        h_dev_command },
     { "get_running_app",    h_get_running_app },
     { "inject_button",      h_inject_button },
     { "inject_char",        h_inject_char },
