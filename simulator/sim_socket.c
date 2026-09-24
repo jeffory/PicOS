@@ -17,7 +17,7 @@
 #include <poll.h>
 
 #define MAX_CLIENTS 8
-// Per-client write buffer. Responses stream through it (queue_response waits
+// Per-client write buffer. Responses stream through it (send_response waits
 // for the client to drain it); notifications must fit whole or are dropped.
 #define WRITE_BUF_SIZE (512 * 1024)
 #define READ_BUF_INIT 4096
@@ -33,6 +33,7 @@ typedef struct {
     int read_buf_used;
     int read_buf_cap;
     bool sub_logs;      // subscribed to `log` notifications
+    bool mid_response;  // a response is partly in write_buf (see send_response)
 } client_t;
 
 static client_t s_clients[MAX_CLIENTS];
@@ -72,6 +73,7 @@ static int add_client(int fd) {
             s_clients[i].read_buf_used = 0;
             s_clients[i].read_buf_cap = READ_BUF_INIT;
             s_clients[i].sub_logs = false;
+            s_clients[i].mid_response = false;
             s_clients[i].read_buf = malloc(READ_BUF_INIT);
             if (!s_clients[i].read_buf) {
                 close(fd);
@@ -118,38 +120,52 @@ static int flush_write_buf(client_t *c) {
     return 0;
 }
 
-// Caller holds s_clients_mutex. Copies the whole message or nothing.
-// may_block (RPC responses, socket thread): stream through the buffer,
-// waiting up to RESPONSE_FLUSH_TIMEOUT_MS for the client to drain it.
-// !may_block (notifications, other threads): one flush attempt; if the
-// message still does not fit it is dropped, never truncated.
-static int queue_response(client_t *c, const char *json, size_t len, bool may_block) {
-    if (c->fd <= 0) return -1;
-    if (len == 0) len = strlen(json);
-    if (!may_block) {
-        size_t avail = WRITE_BUF_SIZE - 1 - c->write_buf_used;
-        if (avail < len) {
-            if (flush_write_buf(c) < 0) return -1;
-            avail = WRITE_BUF_SIZE - 1 - c->write_buf_used;
-            if (avail < len) return -1;
-        }
-        memcpy(c->write_buf + c->write_buf_used, json, len);
-        c->write_buf_used += (int)len;
-        return 0;
+// Caller holds s_clients_mutex. Notification path (main / Core-1 threads):
+// one non-blocking flush attempt, then the message is copied whole or
+// dropped — never truncated, never waited for. Dropped `log` notifications
+// are recoverable: clients backfill from get_log_buffer by seq.
+static int queue_notification_locked(client_t *c, const char *json, size_t len) {
+    if (c->fd <= 0 || c->mid_response) return -1;
+    size_t avail = WRITE_BUF_SIZE - 1 - c->write_buf_used;
+    if (avail < len) {
+        if (flush_write_buf(c) < 0) return -1;
+        avail = WRITE_BUF_SIZE - 1 - c->write_buf_used;
+        if (avail < len) return -1;
     }
+    memcpy(c->write_buf + c->write_buf_used, json, len);
+    c->write_buf_used += (int)len;
+    // Push it out now (non-blocking): the socket thread may be busy waiting
+    // on another, slow client, and subscribers should not wait for that.
+    flush_write_buf(c);
+    return 0;
+}
+
+// Socket thread only. Streams an RPC response through the client's write
+// buffer. The lock is held only while copying/flushing, never across the
+// wait for a slow client, so sys.log on other threads is not stalled.
+// While part of a response sits in the buffer, c->mid_response keeps
+// notifications out so they cannot land inside it. Returns -1 when the
+// client did not drain within RESPONSE_FLUSH_TIMEOUT_MS or the send failed;
+// the caller must then disconnect it (a partial line is in its stream).
+static int send_response(client_t *c, const char *json, size_t len) {
     int waited_ms = 0;
+    pthread_mutex_lock(&s_clients_mutex);
+    c->mid_response = true;
     while (len > 0) {
         size_t avail = WRITE_BUF_SIZE - 1 - c->write_buf_used;
         if (avail == 0) {
-            if (flush_write_buf(c) < 0) return -1;
+            if (flush_write_buf(c) < 0) break;
             avail = WRITE_BUF_SIZE - 1 - c->write_buf_used;
-            if (avail == 0) {
-                if (waited_ms >= RESPONSE_FLUSH_TIMEOUT_MS) return -1;
-                struct pollfd pfd = { .fd = c->fd, .events = POLLOUT };
-                poll(&pfd, 1, 10);
-                waited_ms += 10;
-                continue;
-            }
+        }
+        if (avail == 0) {
+            if (waited_ms >= RESPONSE_FLUSH_TIMEOUT_MS) break;
+            int fd = c->fd;
+            pthread_mutex_unlock(&s_clients_mutex);
+            struct pollfd pfd = { .fd = fd, .events = POLLOUT };
+            poll(&pfd, 1, 10);
+            waited_ms += 10;
+            pthread_mutex_lock(&s_clients_mutex);
+            continue;
         }
         size_t chunk = len < avail ? len : avail;
         memcpy(c->write_buf + c->write_buf_used, json, chunk);
@@ -157,14 +173,16 @@ static int queue_response(client_t *c, const char *json, size_t len, bool may_bl
         json += chunk;
         len -= chunk;
     }
-    return 0;
+    c->mid_response = false;
+    pthread_mutex_unlock(&s_clients_mutex);
+    return len == 0 ? 0 : -1;
 }
 
 static void queue_notification(const char *json, size_t len, bool logs_only) {
     pthread_mutex_lock(&s_clients_mutex);
     for (int i = 0; i < MAX_CLIENTS; i++) {
         if (s_clients[i].fd > 0 && (!logs_only || s_clients[i].sub_logs)) {
-            queue_response(&s_clients[i], json, len, false);
+            queue_notification_locked(&s_clients[i], json, len);
         }
     }
     pthread_mutex_unlock(&s_clients_mutex);
@@ -215,16 +233,26 @@ static void process_requests(client_t *c) {
         c->read_buf_used -= (int)(msg_len + 1);
         memmove(c->read_buf, newline + 1, c->read_buf_used);
         if (resp) {
-            pthread_mutex_lock(&s_clients_mutex);
+            // The protocol is newline-delimited; some error paths return an
+            // unterminated line, which a client would wait on forever.
             size_t rlen = strlen(resp);
-            int rc = queue_response(c, resp, rlen, true);
-            // Some error paths return an unterminated line; the protocol is
-            // newline-delimited, so a client would otherwise wait forever.
-            if (rc == 0 && rlen > 0 && resp[rlen - 1] != '\n')
-                rc = queue_response(c, "\n", 1, true);
-            pthread_mutex_unlock(&s_clients_mutex);
+            int rc;
+            if (rlen > 0 && resp[rlen - 1] != '\n') {
+                char *term = realloc(resp, rlen + 2);
+                if (term) {
+                    resp = term;
+                    resp[rlen++] = '\n';
+                    resp[rlen] = '\0';
+                }
+            }
+            rc = send_response(c, resp, rlen);
             free(resp);
-            if (rc < 0) return;
+            if (rc < 0) {
+                // Slow or dead client: part of the line is already queued,
+                // so the stream is unusable. Drop the connection.
+                remove_client((int)(c - s_clients));
+                return;
+            }
         }
     }
 }

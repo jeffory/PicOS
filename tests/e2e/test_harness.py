@@ -11,6 +11,7 @@ Covers the RPCs and notifications the harness synchronises on:
 """
 
 import json
+import socket
 import time
 
 import pytest
@@ -252,3 +253,62 @@ def test_sd_escape_is_refused(harness_sim, test_sd_card):
     # A '..' that stays inside the root still resolves.
     assert "H:INSIDE true" in _texts(entries)
     assert (test_sd_card / "saves" / "inside_probe.json").exists()
+
+
+# ── Slow clients ────────────────────────────────────────────────────────────
+
+
+def _raw_client(port):
+    s = socket.create_connection(("127.0.0.1", port))
+    s.setsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF, 4096)
+    return s
+
+
+def test_stalled_client_is_disconnected_without_stalling_sys_log(harness_sim):
+    sim = harness_sim
+    sim.subscribe_logs(True)
+    sim.launch_app("harness_ticker")
+    sim.wait_for_log(r"^H:TICK 1$", timeout=5.0)
+
+    # A second client asks for ~16 MB of screenshots and never reads.
+    stalled = _raw_client(sim.tcp_port)
+    reqs = "".join(json.dumps({"jsonrpc": "2.0", "id": i, "method": "screenshot",
+                               "params": {"format": "raw"}}) + "\n"
+                   for i in range(60))
+    stalled.sendall(reqs.encode())
+
+    # While the socket thread is stuck on it, ticks keep reaching client 1.
+    arrivals = {}
+    t_end = time.time() + 6.5
+    while time.time() < t_end:
+        with sim._notif_cond:
+            for e in sim._log_events:
+                if e.get("text", "").startswith("H:TICK ") and e["seq"] not in arrivals:
+                    arrivals[e["seq"]] = time.time()
+        time.sleep(0.02)
+    times = sorted(arrivals.values())
+    assert len(times) > 100, f"only {len(times)} ticks arrived during the stall"
+    worst = max(b - a for a, b in zip(times, times[1:]))
+    assert worst < 1.0, f"log delivery to client 1 stalled for {worst:.2f}s"
+
+    # The stalled client is dropped (after the 5 s drain timeout): draining
+    # its socket ends in EOF rather than an endless stream.
+    stalled.settimeout(10.0)
+    got_eof = False
+    deadline = time.time() + 20.0
+    while time.time() < deadline:
+        try:
+            chunk = stalled.recv(1 << 20)
+        except ConnectionResetError:  # closed with our requests unread
+            chunk = b""
+        if not chunk:
+            got_eof = True
+            break
+    stalled.close()
+    assert got_eof, "stalled client was never disconnected"
+
+    # sys.log itself never blocked: server-side tick timestamps stay dense.
+    ticks = [e for e in sim.get_log_lines(0) if e["text"].startswith("H:TICK ")]
+    t_ms = [e["t_ms"] for e in ticks]
+    assert max(b - a for a, b in zip(t_ms, t_ms[1:])) < 500, "sys.log stalled"
+    sim.wait_for_exit(timeout=15.0)
