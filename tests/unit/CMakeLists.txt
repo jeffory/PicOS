@@ -63,6 +63,7 @@ picos_unit_test(test_fs_path SOURCES ${SRC}/os/fs_path.c)
 picos_unit_test(test_app_manifest SOURCES ${SRC}/os/app_manifest.c)
 picos_unit_test(test_wav SOURCES ${SRC}/drivers/wav.c INCLUDES ${SRC}/drivers)
 picos_unit_test(test_audio_ring INCLUDES ${SRC}/drivers)
+picos_unit_test(test_kbd_event_queue INCLUDES ${SRC}/drivers)
 picos_unit_test(test_pio_psram_range INCLUDES ${SRC}/drivers)
 picos_unit_test(test_pio_psram_xip INCLUDES ${SRC}/drivers)
 picos_unit_test(test_zip_name SOURCES ${SRC}/os/zip_name.c)
@@ -130,6 +131,8 @@ target_link_libraries(test_ota_verify PRIVATE picos_host_mbedtls)
 picos_unit_test(test_ca_bundle SOURCES ${SRC}/drivers/ca_bundle.c
                 INCLUDES ${SRC}/drivers)
 target_link_libraries(test_ca_bundle PRIVATE picos_host_mbedtls)
+
+picos_unit_test(test_small_alloc SOURCES ${SRC}/os/small_alloc.c)
 
 if(PICOS_FUZZ)
     add_subdirectory(${PICOS_ROOT}/tests/fuzz ${CMAKE_CURRENT_BINARY_DIR}/fuzz)
