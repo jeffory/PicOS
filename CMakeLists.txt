@@ -219,6 +219,7 @@ add_executable(picocalc_os
     src/os/app_stack.c
     src/os/native_loader.c
     src/os/elf_plan.c
+    src/os/fs_path.c
     src/os/lua_bridge.c
     src/os/lua_bridge_display.c
     src/os/lua_bridge_input.c
