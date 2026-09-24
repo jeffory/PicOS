@@ -12,6 +12,7 @@ Covers the RPCs and notifications the harness synchronises on:
 
 import json
 import socket
+import threading
 import time
 
 import pytest
@@ -256,6 +257,56 @@ def test_sd_escape_is_refused(harness_sim, test_sd_card):
 
 
 # ── Slow clients ────────────────────────────────────────────────────────────
+
+
+def test_wait_for_log_backfills_dropped_notifications(harness_sim):
+    """A client that falls behind loses `log` notifications (the server drops
+    them whole once its 512 KB buffer is full); wait_for_log must still find
+    a marker whose notification was dropped, by backfilling from the ring."""
+    sim = harness_sim
+    sim.subscribe_logs(True)
+    sim.launch_app("harness_bigflood")
+    sim.wait_for_log(r"^H:BIGFLOOD_READY$", timeout=5.0)
+
+    # Start waiting before the marker exists, so only the notification path
+    # (or a backfill) can find it.
+    result = {}
+
+    def waiter():
+        try:
+            result["text"] = sim.wait_for_log(r"^H:BIGFLOOD_DONE$", timeout=20.0)
+        except Exception as e:  # reported below
+            result["error"] = e
+
+    t = threading.Thread(target=waiter)
+    t.start()
+    time.sleep(0.5)  # past wait_for_log's initial read of the ring
+
+    # Stop reading, trigger ~18 MB of logs (more than the kernel buffers a
+    # few MB plus the server's 512 KB), and stay paused until it is done.
+    sim._reader_pause.set()
+    try:
+        # Raw send: call() would wait for a reply the paused reader can't see.
+        sim._sock.sendall((json.dumps({"jsonrpc": "2.0", "id": 999999,
+                                       "method": "inject_char",
+                                       "params": {"char": "g"}}) + "\n").encode())
+        # stdout is block-buffered, so the last lines may not show there:
+        # wait for the flood's tail, then give it time to finish.
+        deadline = time.time() + 20.0
+        while "H:BIGFLOOD 1999" not in sim.get_output()["stdout"]:
+            assert time.time() < deadline, "flood did not run"
+            time.sleep(0.05)
+        time.sleep(0.5)
+    finally:
+        sim._reader_pause.clear()
+
+    t.join(timeout=25.0)
+    assert result.get("text") == "H:BIGFLOOD_DONE", result
+    # Prove the notification path really dropped entries.
+    with sim._notif_cond:
+        seqs = [e["seq"] for e in sim._log_events
+                if e.get("text", "").startswith("H:BIGFLOOD ")]
+    assert len(seqs) < 20000, "no notifications were dropped; test proves nothing"
 
 
 def _raw_client(port):

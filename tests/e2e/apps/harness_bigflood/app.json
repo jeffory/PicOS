@@ -1,0 +1,7 @@
+{
+    "id": "com.picos.harness_bigflood",
+    "name": "Harness Bigflood",
+    "description": "Harness fixture: floods far more log bytes than a socket buffers",
+    "version": "1.0",
+    "author": "PicOS E2E"
+}

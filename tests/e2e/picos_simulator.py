@@ -67,6 +67,9 @@ class PicosSimulator:
         self._launch_rx = 0
         self._log_events: deque = deque(maxlen=50000)
         self._logs_subscribed = False
+        # Test hook: while set, the reader thread stops reading the socket
+        # (simulates a client that falls behind).
+        self._reader_pause = threading.Event()
         self._pending: dict[int, dict] = {}
         self._pending_lock = threading.Lock()
         self._id_counter = 0
@@ -265,6 +268,9 @@ class PicosSimulator:
         while not self._reader_done.is_set():
             if not self._sock:
                 break
+            if self._reader_pause.is_set():
+                time.sleep(0.01)
+                continue
             try:
                 self._sock.settimeout(0.2)
                 chunk = self._sock.recv(65536)
@@ -550,23 +556,52 @@ class PicosSimulator:
         if not self._logs_subscribed:
             self.subscribe_logs(True)
         deadline = time.time() + (timeout or self.timeout)
-        # Held entries first; everything later arrives as a notification
-        # (the subscription is already active, so nothing falls in between).
+        # Held entries first; later ones arrive as notifications (the
+        # subscription is already active, so nothing falls in between).
         held, cursor = self._read_log(since_seq)
         for entry in held:
             if match(entry):
                 return entry.get("text", "")
-        with self._notif_cond:
-            while True:
-                for entry in list(self._log_events):
-                    if entry.get("seq", 0) >= cursor:
-                        cursor = entry["seq"] + 1
-                        if match(entry):
-                            return entry.get("text", "")
-                remaining = deadline - time.time()
-                if remaining <= 0:
-                    raise TimeoutError(f"Log pattern '{pattern}' not found within timeout")
-                self._notif_cond.wait(remaining)
+
+        while True:
+            timed_out = False
+            with self._notif_cond:
+                fresh = self._log_events_since(cursor)
+                if not fresh:
+                    remaining = deadline - time.time()
+                    if remaining <= 0:
+                        timed_out = True
+                    else:
+                        self._notif_cond.wait(remaining)
+                        fresh = self._log_events_since(cursor)
+            # The server drops `log` notifications whole when this client's
+            # write buffer is full, so a seq gap means entries were missed:
+            # backfill them from the ring (outside the lock — the RPC reply
+            # is delivered by the reader thread). Also backfill once before
+            # giving up, in case the matching line's notification was lost.
+            seqs = [e.get("seq", 0) for e in fresh]
+            gap = bool(fresh) and (seqs[0] != cursor or
+                                   any(b - a != 1 for a, b in zip(seqs, seqs[1:])))
+            if gap or timed_out:
+                fresh, cursor = self._read_log(cursor)
+            elif fresh:
+                cursor = seqs[-1] + 1
+            for entry in fresh:
+                if match(entry):
+                    return entry.get("text", "")
+            if timed_out:
+                raise TimeoutError(f"Log pattern '{pattern}' not found within timeout")
+
+    def _log_events_since(self, cursor: int) -> list[dict]:
+        """Pushed log entries with seq >= cursor, oldest first. Scans from the
+        newest end only as far as needed. Caller holds _notif_cond."""
+        out = []
+        for entry in reversed(self._log_events):
+            if entry.get("seq", 0) < cursor:
+                break
+            out.append(entry)
+        out.reverse()
+        return out
 
     def get_terminal_buffer(self) -> dict:
         """Get the active terminal's text buffer."""
