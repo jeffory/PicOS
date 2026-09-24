@@ -415,6 +415,14 @@ static bool menu_loop(lua_State *L, int context) {
   // The darkened backdrop may show ring-rotated for such apps — cosmetic.
   display_set_scroll_offset(0);
 
+  // Start from a clean keyboard: an edge from before the menu opened (a key
+  // typed during a sys.sleep whose background polls also saw the Sym press,
+  // or the app's own last poll) must not select or activate an item. This
+  // also ends any background-poll run, so the first kbd_poll below starts a
+  // normal poll. The app loses those edges; closing the menu clears the
+  // state again anyway (as it always has).
+  kbd_clear_state();
+
   int sel = 0;
   uint8_t entry_brightness = s_brightness;
   bool running = true;

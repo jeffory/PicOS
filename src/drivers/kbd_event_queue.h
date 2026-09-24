@@ -320,6 +320,27 @@ static inline bool kbd_poll_begin(kbd_buttons_t *b, bool bg, uint8_t *raw_key) {
   return bg;
 }
 
+// Drop the fresh press edges of this poll (the key that woke the dimmed
+// screen). curr_before/prev_before are the masks right after kbd_poll_begin.
+// Outside a background run: every fresh press of this poll goes (curr is cut
+// back to prev, pending releases dropped), as before. Inside one (a
+// background poll, or the foreground poll that ends a run), prev is the curr
+// the app last saw, so cutting back to it would also drop what the run's
+// earlier polls gathered: only this poll's additions go. A key that became
+// held quietly in this poll (HOLD of an unseen key sets curr and prev) stays.
+static inline void kbd_buttons_swallow(kbd_buttons_t *b, bool bg_run,
+                                       uint32_t curr_before,
+                                       uint32_t prev_before) {
+  if (!bg_run) {
+    b->curr &= b->prev;
+    b->deferred = 0;
+    return;
+  }
+  b->curr &= curr_before | (b->prev & ~prev_before);
+  b->deferred &= curr_before;
+  b->tapped &= curr_before;
+}
+
 // ── STM32 FIFO decoder ───────────────────────────────────────────────────────
 
 // Apply one FIFO item (state, keycode) in order. Updates the button masks,

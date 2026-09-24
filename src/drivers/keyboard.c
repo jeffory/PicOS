@@ -261,7 +261,10 @@ void kbd_poll(void) { kbd_poll_impl(false); }
 void kbd_poll_background(void) { kbd_poll_impl(true); }
 
 static void kbd_poll_impl(bool bg) {
+  bool bg_run = bg || s_btn.in_bg;  // this poll is part of a background run
   kbd_poll_begin(&s_btn, bg, &s_last_raw_key);
+  uint32_t curr_before = s_btn.curr, prev_before = s_btn.prev;
+  uint8_t raw_before = s_last_raw_key;
   if (!bg)
     s_last_char = 0;
   bool new_key = false;  // a press/repeat or char decoded in THIS poll
@@ -403,9 +406,10 @@ done_polling:;
                         s_last_raw_key);
   if (activity) {
     if (idle_dim_note_activity()) {
-      s_btn.curr &= s_btn.prev; // drop fresh press edges
-      s_btn.deferred = 0;
-      s_last_raw_key = 0;
+      // Drop this poll's fresh press edges (in a background run, only this
+      // poll's: earlier polls of the run stay for the app).
+      kbd_buttons_swallow(&s_btn, bg_run, curr_before, prev_before);
+      s_last_raw_key = bg_run ? raw_before : 0;
       // ...and this poll's queued presses and chars. Releases of keys that
       // were down before this poll stay, so a key the app saw go down still
       // comes up; ups of keys pressed in this poll go with their downs. Keys

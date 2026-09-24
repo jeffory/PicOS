@@ -383,6 +383,85 @@ static void test_tap_before_sleep_released(void) {
   CHECK_EQ_U32(pressed(), 0);
 }
 
+// A key held through the whole sleep (STM32 HOLD reports meanwhile): no new
+// press edge and no release edge afterwards; it is still held.
+static void test_bg_key_held_through_sleep(void) {
+  reset();
+  raw = 0;
+  poll_start(false);
+  apply(KBD_FIFO_PRESSED, KEY_RIGHT);
+  poll_start(false);
+  poll_start(true);
+  apply(KBD_FIFO_HOLD, KEY_RIGHT);
+  poll_start(true);
+  apply(KBD_FIFO_HOLD, KEY_RIGHT);
+  poll_start(false);
+  CHECK_EQ_U32(pressed(), 0);
+  CHECK_EQ_U32(released(), 0);
+  CHECK_EQ_U32(btn.curr, BTN_RIGHT);
+}
+
+// Two different keys in separate background polls: both press edges.
+static void test_bg_two_keys_in_separate_polls(void) {
+  reset();
+  raw = 0;
+  poll_start(false);
+  poll_start(true);
+  apply(KBD_FIFO_PRESSED, KEY_UP);
+  apply(KBD_FIFO_RELEASED, KEY_UP);
+  poll_start(true);
+  apply(KBD_FIFO_PRESSED, KEY_ENTER);
+  poll_start(true);
+  poll_start(false);
+  CHECK_EQ_U32(pressed(), BTN_UP | BTN_ENTER);
+  CHECK_EQ_INT(raw, KEY_ENTER);
+  poll_start(false);
+  CHECK_EQ_U32(released(), BTN_UP);
+  CHECK_EQ_U32(btn.curr, BTN_ENTER);
+}
+
+// Enter tapped, then Sym, in one sleep: the system menu clears the keyboard
+// state on entry (system_menu.c menu_loop), which also ends the background
+// run, so its first poll sees no Enter edge to activate an item with.
+static void test_menu_after_bg_sees_no_earlier_edge(void) {
+  reset();
+  raw = 0;
+  poll_start(false);
+  poll_start(true);
+  apply(KBD_FIFO_PRESSED, KEY_ENTER);
+  apply(KBD_FIFO_RELEASED, KEY_ENTER);
+  poll_start(true);
+  // menu_loop entry: kbd_clear_state()
+  kbd_input_clear(&in);
+  memset(&btn, 0, sizeof(btn));
+  raw = 0;
+  CHECK(!btn.in_bg);
+  poll_start(false);                       // the menu's first kbd_poll
+  CHECK_EQ_U32(pressed(), 0);
+  CHECK_EQ_U32(released(), 0);
+  CHECK_EQ_INT(raw, 0);
+}
+
+// A key that wakes the dimmed screen inside a background run is swallowed,
+// but a key gathered by an earlier poll of the run still reaches the app.
+static void test_bg_wake_swallow_keeps_earlier_edges(void) {
+  reset();
+  raw = 0;
+  poll_start(false);
+  poll_start(true);
+  apply(KBD_FIFO_PRESSED, KEY_ENTER);      // earlier poll of the run
+  apply(KBD_FIFO_RELEASED, KEY_ENTER);
+  poll_start(true);
+  uint32_t cb = btn.curr, pb = btn.prev;
+  apply(KBD_FIFO_PRESSED, KEY_UP);         // this poll's key wakes the screen
+  kbd_buttons_swallow(&btn, true, cb, pb);
+  poll_start(false);
+  CHECK_EQ_U32(pressed(), BTN_ENTER);
+  poll_start(false);
+  CHECK_EQ_U32(released(), BTN_ENTER);
+  CHECK_EQ_U32(btn.curr, 0);               // the swallowed Up never appears
+}
+
 int main(void) {
   test_two_chars_in_one_poll();
   test_letter_key_down_and_up();
@@ -404,5 +483,9 @@ int main(void) {
   test_bg_press_still_held();
   test_bg_release_of_key_held_before();
   test_tap_before_sleep_released();
+  test_bg_key_held_through_sleep();
+  test_bg_two_keys_in_separate_polls();
+  test_menu_after_bg_sees_no_earlier_edge();
+  test_bg_wake_swallow_keeps_earlier_edges();
   return check_report("test_kbd_event_queue");
 }
