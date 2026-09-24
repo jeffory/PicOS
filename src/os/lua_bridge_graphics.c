@@ -1027,9 +1027,12 @@ static void sprite_list_remove(lua_State *L, lua_sprite_t *s) {
 }
 
 static void sprite_list_clear(lua_State *L) {
-  s_sprite_count = 0;
+  // The new anchor table first: if it raises (out of memory) the list and
+  // its anchors are both left as they were, never an empty list over a
+  // table that still pins every old sprite.
   lua_newtable(L);
   lua_rawsetp(L, LUA_REGISTRYINDEX, s_sprites);
+  s_sprite_count = 0;
 }
 
 // Push the userdata of a listed sprite (nil if it is not in the list).
