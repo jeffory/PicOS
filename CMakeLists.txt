@@ -81,6 +81,7 @@ target_include_directories(lua PUBLIC ${LUA_DIR})
 include(${CMAKE_SOURCE_DIR}/cmake/picos_lua.cmake)
 picos_patch_luaconf(${LUA_DIR})
 target_compile_definitions(lua PUBLIC ${PICOS_LUA_DEFINITIONS})
+target_sources(lua PRIVATE ${PICOS_LUA_SOURCES})  # picos_lua_sprintf (float formatting)
 # No signals, no OS-level stuff
 target_compile_options(lua PRIVATE -Os)
 

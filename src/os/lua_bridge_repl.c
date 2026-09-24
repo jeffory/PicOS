@@ -198,7 +198,9 @@ static int l_repl_print(lua_State *L) {
                 if (lua_isinteger(L, i)) {
                     pos += snprintf(buf + pos, sizeof(buf) - pos, "%lld", (long long)lua_tointeger(L, i));
                 } else {
-                    pos += snprintf(buf + pos, sizeof(buf) - pos, LUA_NUMBER_FMT, (LUAI_UACNUMBER)lua_tonumber(L, i));
+                    // l_sprintf, not snprintf: float formatting must not
+                    // depend on the C library (see src/os/lua_numfmt.h)
+                    pos += lua_number2str(buf + pos, sizeof(buf) - pos, lua_tonumber(L, i));
                 }
                 break;
             case LUA_TSTRING: {

@@ -80,3 +80,64 @@ def test_lua_runtime_config(simulator):
     assert r["GSUB40"] == "x"
     assert r["GSUBDEEP"] == "ok=false cstack=true"
     assert 40 < int(r["GSUBDEPTH"]) < 60
+
+
+# Number formatting must not depend on the C library: the firmware links the
+# Pico SDK's pico_printf, whose %g keeps trailing zeros (tostring(51.0) was
+# "51.00000" on device), whose %f loses digits past precision 9 or 1e9, and
+# which has no %a at all; the simulator uses glibc. Lua's l_sprintf now routes
+# float conversions through src/os/lua_numfmt.c on both targets. Expected
+# values are glibc's output for the same float32 values, except that NaN
+# prints as "nan" whatever its sign bit (x86 makes 0/0 negative, ARM does
+# not, and glibc shows the sign). One known hardware difference remains and
+# is outside the formatter: subnormals (TSMIN) print "0.0" on the device,
+# because the RP2350 flushes them to zero when a float is promoted to double
+# for C varargs (see the fixture).
+FORMAT_EXPECT = {
+    "TS51": "51.0",
+    "TS01": "0.1",
+    "TS1EM5": "1e-05",
+    "TS123456": "123456.7",
+    "TSTHIRD": "0.3333333",
+    "TS1E6": "1000000.0",
+    "TS1E7": "1e+07",
+    "TS2P30": "1.073742e+09",
+    "TSNEG": "-2.5",
+    "TSNEGZ": "-0.0",
+    "TSINF": "inf -inf",
+    "TSNAN": "nan",
+    "TSMIN": "9.999999e-39 1.401298e-45",
+    "TSMAX": "3.402823e+38",
+    "CONCAT": "v=2.5,7.0",
+    "SFG": "2.5",
+    "SF3F": "0.333",
+    "SF51F": "  2.2",
+    "SFF": "1.500000",
+    "SFE": "1.234568e+04",
+    "SF12F": "0.100000001490",
+    "SFBIGF": "10000000000.0",
+    "SFG3": "1.23e+04",
+    "SFGHASH": "1.00000",
+    "SFGRANGE": "0.0001 1e-05 100000 1e+06 0",
+    "SFE0": "2e+01 4e+01",
+    "SFF0": "0 2 2 -0",
+    "SFFLAGS": "3.14    |-0002.50| 1.0e+02|000.000123|+5.0E+00 |",
+    "SFG99": "0.10000000149011611938",
+    "SFINF": "inf -inf nan   inf -inf  |",
+    "SFA": "0x1p+0 0X1.99999AP-4 0x1.55p-2",
+    "SFQ": "0x1.99999ap-4",
+    "SFINT": "  007|0xff|+3|2   |A|10",
+    "JSON": "[51,100,1e-07,2.5,0.33333334]",
+}
+
+
+def test_number_formatting(simulator):
+    r = _run_fixture(simulator)
+    got = {}
+    for name in FORMAT_EXPECT:
+        raw = r.get("F_" + name, "<missing>")
+        got[name] = raw[1:-1] if raw.startswith("|") and raw.endswith("|") else raw
+    wrong = {n: (got[n], want) for n, want in FORMAT_EXPECT.items()
+             if got[n] != want}
+    assert not wrong, "got != want:\n" + "\n".join(
+        "  %-9s %r != %r" % (n, g, w) for n, (g, w) in wrong.items())

@@ -72,6 +72,7 @@ target_include_directories(lua_sim PUBLIC ${LUA_DIR})
 include(${PICOS_ROOT}/cmake/picos_lua.cmake)
 picos_patch_luaconf(${LUA_DIR})
 target_compile_definitions(lua_sim PUBLIC ${PICOS_LUA_DEFINITIONS})
+target_sources(lua_sim PRIVATE ${PICOS_LUA_SOURCES})  # picos_lua_sprintf (float formatting)
 target_compile_definitions(lua_sim PRIVATE PICOS_SIMULATOR=1)
 target_compile_options(lua_sim PRIVATE -O2 -Wall)
 

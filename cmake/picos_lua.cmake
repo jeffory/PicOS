@@ -13,8 +13,17 @@
 #     luaconf.h has already chosen the number types). This wraps each of those
 #     definitions in #if !defined(...) so the values above take effect.
 #     (LUAI_MAXCCALLS needs no patch: llimits.h already guards it.)
-#     Idempotent: a marker comment records that the file is already patched.
+#     It also routes l_sprintf (every float Lua prints: tostring,
+#     string.format %a/%e/%f/%g, lua_pushfstring %f) to picos_lua_sprintf
+#     when PICOS_LUA_SPRINTF is defined, so number formatting does not depend
+#     on the C library: the firmware's pico_printf %g keeps trailing zeros
+#     ("51.00000") and has no %a, while the simulator uses glibc.
+#     Idempotent: each edit is skipped if already applied (a checkout patched
+#     by an older version of this file picks up only the new edits).
 #     Fails the build if the upstream text is not found (version drift).
+#
+#  3. PICOS_LUA_SOURCES: PicOS sources that belong in the Lua library itself
+#     (the formatter behind picos_lua_sprintf).
 #
 # Script mode, for places that extract the tarball outside CMake (Makefile
 # download-lua, CI workflows):
@@ -27,12 +36,20 @@ set(PICOS_LUA_DEFINITIONS
     LUAI_MAXCCALLS=60      # nested C calls + parser levels (upstream: 200);
                            # sized with the 64 KB Lua VM stack (lua_runner.c)
     LUA_IDSIZE=60          # Size of source ids in error messages
+    PICOS_LUA_SPRINTF=1    # l_sprintf -> picos_lua_sprintf (src/os/lua_numfmt.c)
 )
+
+set(PICOS_LUA_SOURCES "${CMAKE_CURRENT_LIST_DIR}/../src/os/lua_numfmt.c")
 
 set(_PICOS_LUACONF_MARKER "/* PicOS: luaconf.h patched by cmake/picos_lua.cmake */")
 
-# Replace exactly one occurrence of _from with _to in the variable named _var.
+# Replace _from with _to in the variable named _var, unless _to is already
+# there (applied by an earlier run).
 function(_picos_luaconf_replace _var _from _to _what)
+    string(FIND "${${_var}}" "${_to}" _done)
+    if(NOT _done EQUAL -1)
+        return()
+    endif()
     string(FIND "${${_var}}" "${_from}" _pos)
     if(_pos EQUAL -1)
         message(FATAL_ERROR
@@ -49,11 +66,7 @@ function(picos_patch_luaconf _lua_src_dir)
         message(FATAL_ERROR "picos_patch_luaconf: ${_file} not found (run `make setup`)")
     endif()
     file(READ "${_file}" _text)
-
-    string(FIND "${_text}" "${_PICOS_LUACONF_MARKER}" _marker_pos)
-    if(NOT _marker_pos EQUAL -1)
-        return()  # already patched
-    endif()
+    set(_orig "${_text}")
 
     _picos_luaconf_replace(_text
         "#define LUA_32BITS\t0\n"
@@ -67,8 +80,19 @@ function(picos_patch_luaconf _lua_src_dir)
         "#define LUA_IDSIZE\t60\n"
         "#if !defined(LUA_IDSIZE)\n#define LUA_IDSIZE\t60\n#endif\n"
         "LUA_IDSIZE")
+    _picos_luaconf_replace(_text
+        "#if !defined(LUA_USE_C89)\n#define l_sprintf(s,sz,f,i)\tsnprintf(s,sz,f,i)\n"
+        "#if defined(PICOS_LUA_SPRINTF)\n/* PicOS: floats bypass the C library's printf (src/os/lua_numfmt.c) */\nint picos_lua_sprintf(char *s, size_t sz, const char *fmt, ...);\n#define l_sprintf(s,sz,f,i)\tpicos_lua_sprintf(s,sz,f,i)\n#elif !defined(LUA_USE_C89)\n#define l_sprintf(s,sz,f,i)\tsnprintf(s,sz,f,i)\n"
+        "l_sprintf")
 
-    file(WRITE "${_file}" "${_PICOS_LUACONF_MARKER}\n${_text}")
+    if(_text STREQUAL _orig)
+        return()  # already patched
+    endif()
+    string(FIND "${_text}" "${_PICOS_LUACONF_MARKER}" _marker_pos)
+    if(_marker_pos EQUAL -1)
+        set(_text "${_PICOS_LUACONF_MARKER}\n${_text}")
+    endif()
+    file(WRITE "${_file}" "${_text}")
     message(STATUS "Patched ${_file} to honour PICOS_LUA_DEFINITIONS")
 endfunction()
 
