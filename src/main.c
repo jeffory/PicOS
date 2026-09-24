@@ -2176,6 +2176,13 @@ int main(void) {
   // Hand off to the launcher — this never returns
   launcher_run();
 
-  // Unreachable
-  return 0;
+  // Only a failed launcher allocation gets here. Returning from main() would
+  // run newlib's exit() -> _exit(), a breakpoint loop that HardFaults with
+  // no debugger attached: record why and reboot instead.
+  printf("[MAIN] launcher_run returned, rebooting\n");
+  crashlog_write("OS ERROR", "OS", "launcher", "launcher_run returned");
+  stdio_flush();
+  watchdog_reboot(0, 0, 0);
+  while (true)
+    tight_loop_contents();
 }

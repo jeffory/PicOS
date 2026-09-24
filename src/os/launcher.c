@@ -863,16 +863,24 @@ void launcher_run(void) {
 
 #ifdef PICOS_SIMULATOR
     {
+      // Simulator shutdown (window close, SIGINT, the shutdown RPC) is the
+      // only way out of the launcher. It used to ride the dev exit flag, so
+      // an `exit` at the launcher also quit the simulator.
       extern volatile int g_running;
-      if (!g_running) dev_commands_set_exit();
+      if (!g_running) {
+        printf("[LAUNCHER] Simulator shutting down\n");
+        fflush(stdout);
+        break;
+      }
     }
 #endif
-    if (dev_commands_wants_exit()) {
-      printf("[LAUNCHER] Exit requested, shutting down...\n");
-      fflush(stdout);
+    // A dev `exit` with no app running (already answered "no app running"
+    // by the command), or one left over after a modal or an app already
+    // closed, has nothing to exit: drop it. launcher_run must never return
+    // on hardware — main() would fall into newlib's _exit, whose breakpoint
+    // HardFaults and reboots the device.
+    if (dev_commands_wants_exit())
       dev_commands_clear_exit();
-      break;
-    }
 
     if (dev_commands_wants_list()) {
       launcher_list_apps();

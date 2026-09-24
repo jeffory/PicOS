@@ -1,4 +1,5 @@
 #include "dev_commands.h"
+#include "dev_ops.h"
 #include "drivers/display.h"
 #include "drivers/keyboard.h"
 #include "drivers/mp3_player.h"
@@ -8,7 +9,6 @@
 #include "os/launcher.h"
 #include "os/app_stack.h"
 #include "os/os.h"
-#include "os/zip_util.h"
 #include "tusb.h"
 #include "pico/stdlib.h"
 #include "hardware/watchdog.h"
@@ -23,18 +23,6 @@
 static char s_cmd_buf[CMD_BUF_SIZE];
 static size_t s_cmd_len = 0;
 static bool s_cmd_ready = false;
-
-// Progress for the "unzip" command: periodic status lines for the host tool
-// and a watchdog feed — extraction of a big archive easily outlasts the 10s
-// window and nothing else runs on Core 0 while we're in here.
-static bool dev_unzip_progress(int done, int total, const char *name,
-                               void *user) {
-    (void)name; (void)user;
-    watchdog_update();
-    if (done % 25 == 0 || done == total)
-        printf("[DEV] UNZIP %d/%d\n", done, total);
-    return true;
-}
 
 static bool s_cmd_exit = false;
 static bool s_cmd_usb = false;
@@ -460,7 +448,9 @@ static void dev_command_run(void *arg) {
                sdcard_is_mounted() ? "mounted" : "absent",
                kbd_get_battery_percent());
     } else if (strcmp(s_cmd_buf, "exit") == 0) {
-        s_cmd_exit = true;
+        char reply[DEV_OP_REPLY_MAX];
+        dev_op_exit(reply, sizeof(reply));
+        printf("[DEV] %s\n", reply);
     } else if (strcmp(s_cmd_buf, "usb") == 0) {
         s_cmd_usb = true;
         printf("[DEV] USB MSC mode starting (USB re-enumerates; serial drops until exit)\n");
@@ -670,48 +660,20 @@ static void dev_command_run(void *arg) {
         int count = sdcard_list_dir(path, dev_ls_callback, NULL);
         printf("[DEV] %d items in %s\n", count < 0 ? 0 : count, path);
     } else if (strncmp(s_cmd_buf, "unzip ", 6) == 0) {
-        // unzip <zip> <dest> — extract an archive on-device.  Blocks Core 0
-        // for the duration (same contract as putb64: audio decoded on Core 1
-        // will starve).  The engine validates entry names and feeds the
-        // watchdog through the progress callback below.
-        char *zip_path = s_cmd_buf + 6;
-        char *dest = strchr(zip_path, ' ');
-        if (!dest || zip_path[0] != '/' || dest[1] != '/') {
-            printf("[DEV] Usage: unzip /path/to.zip /dest/dir\n");
-        } else {
-            *dest++ = '\0';
-            zip_reader_t zr;
-            char err[ZIP_ERR_MAX];
-            if (!zip_reader_open(&zr, zip_path, err)) {
-                printf("[DEV] Error: unzip failed: %s\n", err);
-            } else {
-                zip_extract_result_t result;
-                bool ok = zip_reader_extract_all(&zr, dest, NULL,
-                                                 dev_unzip_progress, NULL,
-                                                 &result, err);
-                zip_reader_close(&zr);
-                if (ok)
-                    printf("[DEV] Unzipped %d files (%d skipped)\n",
-                           result.files_done, result.skipped_names);
-                else
-                    printf("[DEV] Error: unzip failed: %s\n", err);
-            }
-        }
+        // unzip <zip> <dest> — extract an archive on-device (push_app).
+        char reply[DEV_OP_REPLY_MAX];
+        dev_op_unzip(s_cmd_buf + 6, reply, sizeof(reply));
+        printf("[DEV] %s\n", reply);
     } else if (strncmp(s_cmd_buf, "rm ", 3) == 0) {
-        const char *path = s_cmd_buf + 3;
-        if (path[0] != '/' || strcmp(path, "/") == 0) {
-            printf("[DEV] Usage: rm /absolute/path (file or directory)\n");
-        } else if (sdcard_delete(path) || sdcard_delete_recursive(path)) {
-            printf("[DEV] Deleted: %s\n", path);
-        } else {
-            printf("[DEV] Error: rm failed: %s\n", path);
-        }
+        char reply[DEV_OP_REPLY_MAX];
+        dev_op_rm(s_cmd_buf + 3, reply, sizeof(reply));
+        printf("[DEV] %s\n", reply);
     } else if (strcmp(s_cmd_buf, "help") == 0) {
         printf("[DEV] Available commands:\n");
         printf("[DEV]   ping           - Check device is responding\n");
         printf("[DEV]   ver            - Show firmware build date/time\n");
         printf("[DEV]   stack          - Main, app and OS-command stack peak use\n");
-        printf("[DEV]   exit           - Signal current app to exit\n");
+        printf("[DEV]   exit           - Signal current app to exit (error if none)\n");
         printf("[DEV]   usb            - Enable USB storage mode\n");
         printf("[DEV]   reboot         - Reboot device\n");
         printf("[DEV]   reboot-flash   - Reboot to BOOTSEL for flashing\n");

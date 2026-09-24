@@ -214,6 +214,7 @@ pico_generate_pio_header(pio_psram_lib ${PIO_PSRAM_DIR}/psram_spi.pio)
 add_executable(picocalc_os
     src/main.c
     src/dev_commands.c
+    src/dev_ops.c
     src/os/launcher.c
     src/os/lua_runner.c
     src/os/app_stack.c
