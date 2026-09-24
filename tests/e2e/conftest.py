@@ -21,6 +21,7 @@ from pathlib import Path
 
 import pytest
 
+import hw_target
 from helpers import (DEFAULT_SD_SOURCE, E2E_DIR, build_sd_card, new_simulator,
                      run_lua_app, stop_and_check)
 from picos_simulator import (PicosSimulator, binary_firmware_net,
@@ -57,6 +58,7 @@ def pytest_addoption(parser):
         help="Write per-failure diagnostics (stdout/stderr, log, error.log, "
              "screenshot) under this directory",
     )
+    hw_target.add_target_option(parser)  # --target sim | hw:<port>
 
 
 def sim_sanitizers(config):
@@ -84,6 +86,7 @@ def pytest_configure(config):
     so a failed probe can't turn an ASan leg into a release run whose
     asan_only tests all skip. PICOS_SIM_EXPECT_FIRMWARE_NET=1 does the same
     for the firmware_net tests (make simulator-net)."""
+    hw_target.configure_target(config)  # a bad --target fails here
     if os.environ.get("PICOS_SIM_EXPECT_FIRMWARE_NET") == "1":
         # The firmware-net CI legs: a failed probe or a default build must
         # not quietly skip every firmware_net test.
@@ -123,6 +126,7 @@ def pytest_collection_modifyitems(config, items):
     (PICOS_SIM_BINARY=build_sim_asan/picos_simulator); otherwise they skip.
     firmware_net tests need a SIM_FIRMWARE_NET build
     (PICOS_SIM_BINARY=build_sim_net/picos_simulator); otherwise they skip."""
+    hw_target.apply_target_rules(config, items)  # hardware / both markers
     if any("firmware_net" in item.keywords for item in items):
         if not sim_firmware_net(config)[1]:
             skip_net = pytest.mark.skip(
@@ -273,6 +277,16 @@ def lua_suite(request, simulator_binary, tmp_path_factory):
         return result
 
     return run
+
+
+@pytest.fixture
+def target(request):
+    """Where the test runs: a hw_target.SimTarget over this test's
+    simulator, or the session's HwTarget on --target hw:<port>. Tests marked
+    `both` or `hardware` use this instead of the simulator fixtures."""
+    if hw_target.target_spec(request.config)[0] == "hw":
+        return hw_target.session_target(request.config)
+    return hw_target.SimTarget(request.getfixturevalue("simulator"))
 
 
 @pytest.fixture

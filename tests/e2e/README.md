@@ -72,7 +72,58 @@ strict xfails there. The whole E2E suite also passes against this build.
 
 Paths are absolute, so any working directory inside the repo works. The config
 is the repo-level `pytest.ini`: 60 s per-test timeout (`pytest-timeout`), strict
-xfail, and markers `slow`, `hardware`, `native`, `asan_only`, `flaky`, `sd`.
+xfail, and markers `slow`, `hardware`, `both`, `native`, `asan_only`, `flaky`,
+`sd`.
+
+### On a PicoCalc (`--target hw`)
+
+```bash
+ls /dev/serial/by-id/                       # usb-Raspberry_Pi_PicOS_Device_<serial>-if00
+PORT=/dev/serial/by-id/usb-Raspberry_Pi_PicOS_Device_<serial>-if00
+pytest tests/e2e --target hw:$PORT -v       # every hardware + both test, serially
+pytest tests/e2e/test_hw_device.py --target hw:$PORT -v
+PICOS_HW_HOST_IP=192.168.1.20 pytest tests/e2e/test_hw_http_close.py --target hw:$PORT -v
+```
+
+`--target hw:<port>` (or `PICOS_E2E_TARGET`) runs only tests marked
+`@pytest.mark.hardware` or `@pytest.mark.both`, one at a time (no `-n`); every
+other test is deselected. On the simulator (`--target sim`, the default)
+`hardware` tests skip, allow-listed, and `both` tests run. A `both` test must
+use the `target` fixture only: it gets `hw_target.SimTarget` over its
+simulator, or the session's `hw_target.HwTarget`. Both offer `launch_app`,
+`wait_for_exit`, `exit_app`, `keypress(_sequence)`, `screenshot`,
+`read_file`/`write_file`/`delete_file`, `push_app`/`stage_lua_app`,
+`run_lua_app`, `wait_for_results`, `status` and log reading. Hardware-only
+fixture apps live in `hw_apps/` (pushed by the test, never staged on
+simulator SD cards).
+
+`HwTarget` drives the device through `tools/picos_mcp.py`'s serial helpers
+and builds the device's traps in:
+
+- **Results come from files.** The serial capture drops `[APP]` lines, so a
+  Lua app's verdict is its picotest `/data/<APP_ID>/test_results.json`, read
+  back with `getb64`; the outcome of a launch is `status` polling plus
+  `/system/error.log` growth (`returned`, `error`, `exit_sentinel`,
+  `load_failed`, `device_rebooted` when uptime goes back). Log lines
+  (`get_log_lines`, `wait_for_log`) are advisory.
+- **The launcher caches `app.json` at boot.** `push_app` reboots when the
+  pushed manifest (id, name, requirements, `min_psram_kb`) differs from the
+  card's, or `list` does not show the app.
+- **Flash and reboot are ignored while an app runs.** `reboot()` exits the
+  app first (or refuses), `flash()` refuses. A reboot is proven by uptime
+  going back, never by `ver` (its timestamp lies after incremental builds).
+- **One reader per port.** Before opening the port the run refuses one that
+  another process holds (stop the MCP server's `stop_log_capture` first), a
+  path that is not a serial tty, and a device that does not answer `ping`
+  within 5 s: `--target hw:/dev/null` fails at once with the reason.
+- Every wait is bounded; hardware tests carry a 300 s timeout because the
+  first push reboots the device.
+
+Pre-release checklist (not in CI): flash the release candidate
+(`make flash-ota`), reboot so the heap is unfragmented, stop any serial log
+capture, then run `pytest tests/e2e --target hw:$PORT -v` with WiFi
+configured and `PICOS_HW_HOST_IP` set. All hardware and both tests must
+pass; a skip needs a reason (no WiFi) that is fixed before the release.
 
 ## Layout
 
@@ -81,6 +132,8 @@ tests/e2e/
 ├── conftest.py          fixtures and hooks (simulator, SD card, health check, skip allow-list)
 ├── helpers.py           SD staging, the Lua test-kit runner, golden compare, heap-metric check
 ├── picos_simulator.py   JSON-RPC client and process wrapper
+├── hw_target.py         --target sim|hw: SimTarget / HwTarget (serial device backend)
+├── hw_apps/<name>/      hardware-only fixture apps, pushed to the device by the test
 ├── lib/picotest.lua     Lua test kit, staged to /system/lib/picotest.lua
 ├── apps/<name>/         fixture apps (app.json + main.lua), staged onto every SD card
 ├── native/              source + Makefile of the native fixture (apps/native_api_probe/main.elf)

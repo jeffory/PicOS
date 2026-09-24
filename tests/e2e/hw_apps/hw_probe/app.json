@@ -1,0 +1,8 @@
+{
+    "id": "com.test.hw_probe",
+    "name": "HW Probe",
+    "description": "Hardware-only E2E probes (tests/e2e/test_hw_device.py)",
+    "version": "1.0",
+    "author": "PicOS E2E",
+    "requirements": ["audio"]
+}
