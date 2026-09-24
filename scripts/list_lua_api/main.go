@@ -36,24 +36,29 @@ var (
 )
 
 var docFileMapping = map[string]string{
-	"display":  "API-Display-and-Graphics.md",
-	"input":    "API-Input.md",
-	"sys":      "API-System-and-Config.md",
-	"config":   "API-System-and-Config.md",
-	"fs":       "API-Filesystem.md",
-	"wifi":     "API-Network-and-WiFi.md",
-	"network":  "API-Network-and-WiFi.md",
-	"ui":       "API-UI.md",
-	"audio":    "API-Audio-and-Sound.md",
-	"sound":    "API-Audio-and-Sound.md",
-	"perf":     "API-Performance.md",
-	"graphics": "API-Display-and-Graphics.md",
+	"display":   "API-Display-and-Graphics.md",
+	"input":     "API-Input.md",
+	"sys":       "API-System-and-Config.md",
+	"config":    "API-System-and-Config.md",
+	"fs":        "API-Filesystem.md",
+	"wifi":      "API-Network-and-WiFi.md",
+	"network":   "API-Network-and-WiFi.md",
+	"ui":        "API-UI.md",
+	"audio":     "API-Audio-and-Sound.md",
+	"sound":     "API-Audio-and-Sound.md",
+	"perf":      "API-Performance.md",
+	"graphics":  "API-Display-and-Graphics.md",
 	"video":     "API-Video.md",
 	"repl":      "API-Repl.md",
 	"terminal":  "API-Terminal.md",
 	"crypto":    "API-Crypto.md",
 	"modplayer": "API-Modplayer.md",
 	"sysconfig": "API-Sysconfig.md",
+	"appconfig": "API-System-and-Config.md",
+	"game":      "API-Game.md",
+	"json":      "API-JSON.md",
+	"tcp":       "API-TCP.md",
+	"zip":       "API-Zip.md",
 }
 
 func main() {
@@ -110,10 +115,27 @@ func parseLuaBridgeFile(path string, modules map[string]*Module) {
 	moduleReg := regexp.MustCompile(`register_subtable\s*\(\s*L\s*,\s*"(\w+)"`)
 	matches := moduleReg.FindAllStringSubmatch(contentStr, -1)
 
+	// Modules built by hand and attached with lua_setfield(L, -2, "<name>")
+	// (sys, graphics, network, game, tcp, zip) instead of register_subtable.
+	// Only a name matching the file's own module (lua_bridge_<name>.c) or a
+	// known module counts, so result-table fields ("name", "size") are skipped.
+	fileModule := strings.TrimSuffix(strings.TrimPrefix(filepath.Base(path), "lua_bridge_"), ".c")
+	setfieldReg := regexp.MustCompile(`lua_setfield\s*\(\s*L\s*,\s*-2\s*,\s*"(\w+)"\s*\)`)
+	for _, match := range setfieldReg.FindAllStringSubmatch(contentStr, -1) {
+		if _, known := docFileMapping[match[1]]; match[1] == fileModule || known {
+			matches = append(matches, match)
+		}
+	}
+
 	moduleNames := []string{}
+	seenModules := map[string]bool{}
 	for _, match := range matches {
 		if len(match) > 1 {
 			moduleName := match[1]
+			if seenModules[moduleName] {
+				continue
+			}
+			seenModules[moduleName] = true
 			moduleNames = append(moduleNames, moduleName)
 			if _, ok := modules[moduleName]; !ok {
 				modules[moduleName] = &Module{
@@ -269,7 +291,7 @@ func checkDocumentation(module *Module, docContents map[string]string) {
 		searchPatterns := []string{
 			fmt.Sprintf("picocalc.%s.%s(", module.Name, fname),
 			fmt.Sprintf("`picocalc.%s.%s(", module.Name, fname),
-			fmt.Sprintf(":%s(", fname),  // method syntax e.g. player:load(
+			fmt.Sprintf(":%s(", fname), // method syntax e.g. player:load(
 		}
 		found := false
 		for _, pattern := range searchPatterns {
