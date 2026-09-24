@@ -41,6 +41,7 @@ class PicosSimulator:
         headless: bool = True,
         tcp_port: int = 0,
         timeout: float = 10.0,
+        test_mode: bool = False,
     ):
         self.binary_path = binary_path or str(self.DEFAULT_BINARY)
         self.sd_card_path = sd_card_path or str(self.DEFAULT_SD_CARD)
@@ -48,13 +49,24 @@ class PicosSimulator:
         self.requested_port = tcp_port
         self.tcp_port: Optional[int] = None  # actual port after start
         self.timeout = timeout
+        # --test-mode: Lua error screens and launch refusals return at once
+        # (their text goes to the log's "err" source) and idle dim is off.
+        self.test_mode = test_mode
         self.process: Optional[subprocess.Popen] = None
         self._sock: Optional[socket.socket] = None
         self._lock = threading.Lock()
         self._reader_thread: Optional[threading.Thread] = None
         self._reader_done = threading.Event()
+        # Notifications other than `log`, in arrival order, each tagged with
+        # a receive index ("_rx") so waits can ignore ones that predate a
+        # launch. `log` notifications go to _log_events.
         self._notifications: list[dict] = []
         self._notif_lock = threading.Lock()
+        self._notif_cond = threading.Condition(self._notif_lock)
+        self._rx_counter = 0
+        self._launch_rx = 0
+        self._log_events: deque = deque(maxlen=50000)
+        self._logs_subscribed = False
         self._pending: dict[int, dict] = {}
         self._pending_lock = threading.Lock()
         self._id_counter = 0
@@ -86,6 +98,8 @@ class PicosSimulator:
             "--sd-card", self.sd_card_path,
             "--port", str(self.requested_port),
         ]
+        if self.test_mode:
+            cmd.append("--test-mode")
 
         env = os.environ.copy()
         if self.headless:
@@ -273,8 +287,14 @@ class PicosSimulator:
                                 entry["result"] = msg
                                 entry["event"].set()
                     else:
-                        with self._notif_lock:
-                            self._notifications.append(msg)
+                        with self._notif_cond:
+                            self._rx_counter += 1
+                            msg["_rx"] = self._rx_counter
+                            if msg.get("method") == "log":
+                                self._log_events.append(msg.get("params", {}))
+                            else:
+                                self._notifications.append(msg)
+                            self._notif_cond.notify_all()
             except socket.timeout:
                 continue
             except OSError:
@@ -333,17 +353,20 @@ class PicosSimulator:
             self._notifications.clear()
         return notifs
 
-    def wait_for_notification(self, method: str, timeout: Optional[float] = None) -> dict:
-        """Wait until a notification with the given method arrives."""
+    def wait_for_notification(self, method: str, timeout: Optional[float] = None,
+                              after_rx: int = 0) -> dict:
+        """Wait for (and consume) the first `method` notification received
+        after receive index `after_rx`."""
         deadline = time.time() + (timeout or self.timeout)
-        while time.time() < deadline:
-            with self._notif_lock:
+        with self._notif_cond:
+            while True:
                 for i, n in enumerate(self._notifications):
-                    if n.get("method") == method:
-                        self._notifications.pop(i)
-                        return n
-            time.sleep(0.05)
-        raise TimeoutError(f"Notification '{method}' not received within timeout")
+                    if n.get("method") == method and n.get("_rx", 0) > after_rx:
+                        return self._notifications.pop(i)
+                remaining = deadline - time.time()
+                if remaining <= 0:
+                    raise TimeoutError(f"Notification '{method}' not received within timeout")
+                self._notif_cond.wait(remaining)
 
     # ── High-Level Helpers ────────────────────────────────────────────────────
 
@@ -370,16 +393,34 @@ class PicosSimulator:
         return [e["name"] for e in entries if e.get("is_dir")]
 
     def launch_app(self, name: str) -> dict:
-        """Launch an app by name. Returns result dict."""
+        """Queue an app launch. Returns {"queued": True, "busy": bool}.
+
+        The launch runs when the launcher loop next runs (after any running
+        app exits). An app staged after boot is found by the sim's rescan-on-
+        miss. Use wait_for_exit() for the outcome.
+        """
+        with self._notif_cond:
+            self._launch_rx = self._rx_counter
         return self.call("launch_app", {"name": name})
+
+    def rescan_apps(self) -> dict:
+        """Ask the launcher to rescan /apps (e.g. after changing an app.json)."""
+        return self.call("rescan_apps")
 
     def exit_app(self) -> dict:
         """Exit the currently running app."""
         return self.call("exit_app")
 
     def wait_for_exit(self, timeout: Optional[float] = None) -> dict:
-        """Wait for the current app to exit."""
-        return self.call("wait_for_exit", timeout=timeout or 30.0)
+        """Wait for the app from the last launch_app() to finish.
+
+        Returns the app.exited params:
+        {name, id, found, result, error, runtime_ms} where result is
+        "returned" | "error" | "exit_sentinel" | "load_failed".
+        """
+        notif = self.wait_for_notification(
+            "app.exited", timeout=timeout or 30.0, after_rx=self._launch_rx)
+        return notif.get("params", {})
 
     # Named buttons recognized by inject_button
     _BUTTONS = {
@@ -402,6 +443,40 @@ class PicosSimulator:
         else:
             return self.call("inject_button", {"button": key, "action": "click"})
 
+    def get_input_state(self) -> dict:
+        """{issued_seq, consumed_seq}: every injection with seq <= consumed_seq
+        has been read by the OS input layer."""
+        return self.call("get_input_state")
+
+    def wait_input_consumed(self, seq: int, timeout: Optional[float] = None) -> dict:
+        """Wait until the injection with `seq` (the input_seq returned by
+        keypress/inject_*) has been read by the OS."""
+        deadline = time.time() + (timeout or self.timeout)
+        while True:
+            state = self.get_input_state()
+            if state.get("consumed_seq", 0) >= seq:
+                return state
+            if time.time() >= deadline:
+                raise TimeoutError(f"input seq {seq} not consumed: {state}")
+            time.sleep(0.01)
+
+    def present_count(self) -> int:
+        """Frames presented to the (simulated) panel since boot."""
+        return self.call("display_stats").get("present_count", 0)
+
+    def wait_frames(self, n: int = 1, timeout: Optional[float] = None) -> int:
+        """Wait until `n` more frames have been presented. Returns the new
+        present_count."""
+        target = self.present_count() + n
+        deadline = time.time() + (timeout or self.timeout)
+        while True:
+            count = self.present_count()
+            if count >= target:
+                return count
+            if time.time() >= deadline:
+                raise TimeoutError(f"only {count - target + n} of {n} frames presented")
+            time.sleep(0.01)
+
     def keypress_sequence(self, keys: list[str], delay_ms: int = 100):
         """Send a sequence of keypresses with delays."""
         for key in keys:
@@ -420,32 +495,78 @@ class PicosSimulator:
         png_data = self.screenshot()
         return Image.open(io.BytesIO(png_data))
 
-    def get_log_buffer(self, since_seq: int = 0) -> dict:
-        """Get the simulator log buffer. Returns {lines: [...], next_seq: int}."""
-        return self.call("get_log_buffer", {"since_seq": since_seq})
+    def get_log_buffer(self, since_seq: int = 0, tail: int = 0) -> dict:
+        """Log entries with seq >= since_seq (0 = everything still held).
+
+        Returns {lines: [{seq, t_ms, src, text}], next_seq, dropped, more}.
+        src is "lua" | "native" | "os" | "err". Pass next_seq back as
+        since_seq to read only newer entries; "more" means the response was
+        paged. tail > 0 returns only the newest `tail` entries.
+        """
+        params = {"since_seq": since_seq}
+        if tail:
+            params["tail"] = tail
+        return self.call("get_log_buffer", params)
+
+    def get_log_lines(self, since_seq: int = 0) -> list[dict]:
+        """Every held entry with seq >= since_seq, following pages."""
+        return self._read_log(since_seq)[0]
+
+    def _read_log(self, since_seq: int) -> tuple[list[dict], int]:
+        out: list[dict] = []
+        seq = since_seq
+        while True:
+            page = self.get_log_buffer(since_seq=seq)
+            out.extend(page.get("lines", []))
+            seq = page.get("next_seq", seq)
+            if not page.get("more"):
+                return out, seq
 
     def clear_log(self) -> dict:
-        """Clear the simulator log buffer."""
+        """Clear the simulator log buffer (sequence numbers keep counting)."""
         return self.call("clear_log_buffer")
 
-    def wait_for_log(self, pattern: str, timeout: Optional[float] = None,
-                     since_seq: int = 0) -> str:
-        """Wait until a log line matching the regex pattern appears.
+    def subscribe_logs(self, on: bool = True) -> dict:
+        """Receive every new log entry as a `log` notification."""
+        result = self.call("subscribe", {"logs": on})
+        self._logs_subscribed = on
+        return result
 
-        Returns the matching log line.
+    def wait_for_log(self, pattern: str, timeout: Optional[float] = None,
+                     since_seq: int = 0, src: Optional[str] = None) -> str:
+        """Wait until a log entry matching the regex appears (optionally only
+        from source `src`) and return its text.
+
+        Event-driven: subscribes to log notifications, then checks the entries
+        already held from since_seq on (0 = all), then waits for new ones.
         """
         regex = re.compile(pattern)
+
+        def match(entry: dict) -> bool:
+            if src is not None and entry.get("src") != src:
+                return False
+            return bool(regex.search(entry.get("text", "")))
+
+        if not self._logs_subscribed:
+            self.subscribe_logs(True)
         deadline = time.time() + (timeout or self.timeout)
-        seq = since_seq
-        while time.time() < deadline:
-            result = self.get_log_buffer(since_seq=seq)
-            for line in result.get("lines", []):
-                text = line if isinstance(line, str) else line.get("text", "")
-                if regex.search(text):
-                    return text
-            seq = result.get("next_seq", seq)
-            time.sleep(0.1)
-        raise TimeoutError(f"Log pattern '{pattern}' not found within timeout")
+        # Held entries first; everything later arrives as a notification
+        # (the subscription is already active, so nothing falls in between).
+        held, cursor = self._read_log(since_seq)
+        for entry in held:
+            if match(entry):
+                return entry.get("text", "")
+        with self._notif_cond:
+            while True:
+                for entry in list(self._log_events):
+                    if entry.get("seq", 0) >= cursor:
+                        cursor = entry["seq"] + 1
+                        if match(entry):
+                            return entry.get("text", "")
+                remaining = deadline - time.time()
+                if remaining <= 0:
+                    raise TimeoutError(f"Log pattern '{pattern}' not found within timeout")
+                self._notif_cond.wait(remaining)
 
     def get_terminal_buffer(self) -> dict:
         """Get the active terminal's text buffer."""
@@ -456,7 +577,9 @@ class PicosSimulator:
         return self.call("get_heap_info")
 
     def set_time_multiplier(self, multiplier: float) -> dict:
-        """Set time multiplier for simulation speed."""
+        """Scale hal_sleep_ms() delays only. It does NOT change the clock Lua
+        sees (sys.sleep, getTimeMs use real wall time), so it cannot speed up
+        or slow down app timing."""
         return self.call("set_time_multiplier", {"multiplier": multiplier})
 
     # ── Build Helper ──────────────────────────────────────────────────────────

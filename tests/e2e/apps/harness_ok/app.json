@@ -1,0 +1,7 @@
+{
+    "id": "com.picos.harness_ok",
+    "name": "Harness OK",
+    "description": "Harness fixture: logs markers and returns",
+    "version": "1.0",
+    "author": "PicOS E2E"
+}

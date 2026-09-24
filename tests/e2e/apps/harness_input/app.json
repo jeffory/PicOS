@@ -1,0 +1,7 @@
+{
+    "id": "com.picos.harness_input",
+    "name": "Harness Input",
+    "description": "Harness fixture: echoes input, flushes every frame",
+    "version": "1.0",
+    "author": "PicOS E2E"
+}

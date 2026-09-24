@@ -1,0 +1,7 @@
+{
+    "id": "com.picos.harness_flood",
+    "name": "Harness Flood",
+    "description": "Harness fixture: overflows the log ring",
+    "version": "1.0",
+    "author": "PicOS E2E"
+}
