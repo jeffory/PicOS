@@ -40,12 +40,13 @@ extern uint32_t __StackOneBottom; // Core 1 MSP lower bound (SCRATCH_X)
 // the implementation (PICO_RUNTIME_NO_INIT_PER_CORE_INSTALL_STACK_GUARD=1) to
 // add a tiny margin: 32 bytes = one 8-word basic exception frame, and a
 // multiple of 8 (the MSPLIM granule). A limit hit taken during exception-entry
-// stacking clamps SP at the limit, so that frame still lands inside the real
-// stack rather than in whatever lies below it. The margin is deliberately not
-// sized for the handler: isr_hardfault clears MSPLIM and, when MSP is near
-// the bottom, moves it to the top of this core's (now dead) stack before
-// hardfault_c runs. Keeping the margin small preserves almost the full 4 KB
-// of usable stack on both cores.
+// stacking clamps SP at the limit, so whatever that stacking writes still
+// lands inside the real stack rather than in whatever lies below it (the
+// frame's contents are UNKNOWN then, see isr_hardfault). The margin is
+// deliberately not sized for the handler: isr_hardfault clears MSPLIM and,
+// when MSP is near the bottom, moves it to the top of this core's (now dead)
+// stack before hardfault_c runs. Keeping the margin small preserves almost
+// the full 4 KB of usable stack on both cores.
 // Runs before runtime init completes: no printf, no asserts.
 #define STACK_LIMIT_MARGIN 32u
 void runtime_init_per_core_install_stack_guard(void *stack_bottom) {
@@ -388,12 +389,18 @@ void __attribute__((naked)) isr_hardfault(void) {
     "ite  eq         \n"
     "mrseq r0, msp   \n" // frame on MSP (normal for thread mode without RTOS)
     "mrsne r0, psp   \n" // frame on PSP (if PSP was active thread stack)
-    // If MSP is within 1KB of this core's stack bottom (a stack-limit fault,
-    // or just very deep), hardfault_c and its printf path (~1KB) would run
-    // below the bottom: Core 0 into Core 1's live stack, which then faults and
-    // overwrites the crash record; Core 1 into the heap end. This core's stack
-    // is dead anyway (the handler reboots), so move MSP to its top: the frame
-    // r0 points at sits near the bottom, well clear of the handler's usage.
+    // If MSP is within 2KB of this core's stack bottom (a stack-limit fault,
+    // or just very deep), hardfault_c and its printf/TinyUSB/display path
+    // (estimated ~1KB, never measured) would run below the bottom: Core 0
+    // into Core 1's live stack, which then faults and overwrites the crash
+    // record; Core 1 into the heap end. This core's stack is dead anyway (the
+    // handler reboots), so move MSP to its top. 2KB is half of the 4KB
+    // stack, which maximises the room the handler is guaranteed either way:
+    // re-homed, it has >= 2KB above the old MSP (and the frame below it);
+    // not re-homed, it has >= 2KB below MSP. That is about twice the
+    // estimate. r0 is not moved. After a STKOF taken while stacking, the
+    // ARMv8-M frame contents are UNKNOWN: hardfault_c still reads a PC/LR
+    // from it, but they may be garbage (the crashlog marks them unreliable).
     "movs r2, #0            \n"
     "movt r2, #0xd000       \n" // SIO base: CPUID at offset 0
     "ldr  r2, [r2]          \n"
@@ -409,7 +416,7 @@ void __attribute__((naked)) isr_hardfault(void) {
     "movw r3, #:lower16:__StackOneTop    \n"
     "movt r3, #:upper16:__StackOneTop    \n"
     "2:                     \n"
-    "add  r2, r2, #1024     \n"
+    "add  r2, r2, #2048     \n"
     "mrs  r12, msp          \n"
     "cmp  r12, r2           \n"
     "it   lo                \n"
