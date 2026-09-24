@@ -19,6 +19,12 @@
 
 #include "../os/image_decoders.h"
 #include "../fonts/font_registry.h"
+// The image blitters build at -O2 (the firmware is -Os): these loops are where
+// sprite/tilemap frame time goes, and -O2 unswitches and unrolls the
+// specialised loops in display_clip.h. Only these: display.c as a whole at
+// -O2 grows by ~8 KB of flash, all of it competing with the Lua VM for the
+// 16 KB XIP cache.
+#define DISP_HOT __attribute__((optimize("O2")))
 #include "display_clip.h"
 
 // ── Framebuffer ──────────────────────────────────────────────────────────────
@@ -614,7 +620,7 @@ void display_draw_image(int x, int y, int w, int h, const uint16_t *data) {
 // is clipped once, then one of four specialised loops runs (opaque/keyed x
 // flipped/not; display_clip.h). transparent_color 0 means "use the global
 // key"; a key of 0 draws opaque (black cannot be a colour key).
-void display_draw_image_partial(int x, int y, int img_w, int img_h,
+DISP_HOT void display_draw_image_partial(int x, int y, int img_w, int img_h,
                                 const uint16_t *data, int sx, int sy, int sw,
                                 int sh, bool flip_x, bool flip_y,
                                 uint16_t transparent_color) {
@@ -712,7 +718,7 @@ void display_draw_image_scaled(int x, int y, int img_w, int img_h,
 // (display_clip.h). Negative offsets that are not a multiple of scale start
 // mid-block; they used to be rounded to a block boundary and wrote rows above
 // the framebuffer.
-void display_draw_image_nn(int x, int y, const uint16_t *data,
+DISP_HOT void display_draw_image_nn(int x, int y, const uint16_t *data,
                            int src_w, int src_h, int scale) {
   disp_clip_t c = cur_clip();
   disp_blit_nn(s_framebuffer, FB_WIDTH, &c, x, y, data, src_w, src_h, scale,
@@ -753,7 +759,7 @@ void display_blit_be(int x, int y, const uint16_t *data, int w, int h) {
 // Nearest-neighbour scale to dst_w x dst_h, clipped once. Source pixel
 // (dx*src_w/dst_w, dy*src_h/dst_h) exactly — the old 16.16 ratio truncated
 // 65536/3 and so sampled the wrong column at every multiple of 3 for scale 3.
-void display_draw_image_scaled_nn(int x, int y, const uint16_t *data,
+DISP_HOT void display_draw_image_scaled_nn(int x, int y, const uint16_t *data,
                                    int src_w, int src_h, int dst_w, int dst_h,
                                    uint16_t transparent_color) {
   if (transparent_color == 0)

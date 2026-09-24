@@ -26,6 +26,12 @@
 #include <stdint.h>
 #include <string.h>
 
+// Extra attributes for the image blitters' loops. The firmware (built -Os)
+// defines it as optimize("O2") before including this header; elsewhere empty.
+#ifndef DISP_HOT
+#define DISP_HOT
+#endif
+
 // Inclusive clip rect. Empty when x1 < x0 or y1 < y0.
 typedef struct {
   int x0, y0, x1, y1;
@@ -305,7 +311,7 @@ static inline void disp_fill_triangle(uint16_t *fb, int stride,
 // mid-block (the first visible row/column repeats only scale - skip % scale
 // times) instead of being rounded to a block boundary, which used to write
 // rows above the framebuffer (y = -3, scale 2 wrote row -1).
-static inline void disp_blit_nn(uint16_t *fb, int stride, const disp_clip_t *c,
+DISP_HOT static inline void disp_blit_nn(uint16_t *fb, int stride, const disp_clip_t *c,
                                 int x, int y, const uint16_t *data, int src_w,
                                 int src_h, int scale, bool swap) {
   if (!data || src_w <= 0 || src_h <= 0 || scale <= 0) return;
@@ -343,7 +349,7 @@ static inline void disp_blit_nn(uint16_t *fb, int stride, const disp_clip_t *c,
 
 // Copy n pixels converting byte order. With swap, two pixels at a time where
 // source and destination share word alignment (one REV16-style op per pair).
-static inline void disp_copy_row(uint16_t *d, const uint16_t *src, int n,
+DISP_HOT static inline void disp_copy_row(uint16_t *d, const uint16_t *src, int n,
                                  bool swap) {
   if (!swap) {
     memcpy(d, src, (size_t)n * sizeof(uint16_t));
@@ -371,7 +377,7 @@ static inline void disp_copy_row(uint16_t *d, const uint16_t *src, int n,
 // rect is clipped once and one of four inner loops runs — opaque/keyed x
 // flipped/not — with no per-pixel bounds tests. Opaque unflipped rows are a
 // memcpy (swap = false) or a paired byte swap (swap = true).
-static inline void disp_blit(uint16_t *fb, int stride, const disp_clip_t *c,
+DISP_HOT static inline void disp_blit(uint16_t *fb, int stride, const disp_clip_t *c,
                              int x, int y, const uint16_t *data, int img_w,
                              int img_h, int sx, int sy, int sw, int sh,
                              bool flip_x, bool flip_y, uint16_t key,
@@ -417,7 +423,7 @@ static inline void disp_blit(uint16_t *fb, int stride, const disp_clip_t *c,
 // (x, y), skipping `key` pixels (0 = opaque). Destination pixel (dx, dy) of
 // the unclipped rect samples source (dx*src_w/dst_w, dy*src_h/dst_h) — exact
 // integer division, stepped with a remainder DDA across each row.
-static inline void disp_blit_scaled(uint16_t *fb, int stride,
+DISP_HOT static inline void disp_blit_scaled(uint16_t *fb, int stride,
                                     const disp_clip_t *c, int x, int y,
                                     const uint16_t *data, int src_w, int src_h,
                                     int dst_w, int dst_h, uint16_t key,
