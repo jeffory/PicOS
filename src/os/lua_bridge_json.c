@@ -247,6 +247,10 @@ static void enc_number(lua_State *L, json_enc_t *e, int idx) {
       if ((lua_Number)strtod(tmp, NULL) == v)
         break;
     }
+    // A whole float ("2" from 2.0) would decode as an integer; keep it a
+    // float so math.type survives the round trip.
+    if (!strpbrk(tmp, ".eEn"))
+      strcat(tmp, ".0");
   }
   enc_addstring(e, tmp);
 }

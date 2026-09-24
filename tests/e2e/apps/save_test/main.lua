@@ -31,6 +31,7 @@ T.case("nested_roundtrip", function()
         neg = -2147483647,
         pi = 3.14159,
         half = 0.5,
+        whole = 2.0,
         yes = true,
         no = false,
         nested = { deep = { deeper = "kept" }, list = { 1, 2, 3 } },
@@ -46,6 +47,8 @@ T.case("nested_roundtrip", function()
     T.eq(b.pi, src.pi, "float")
     T.eq(math.type(b.pi), "float", "pi stays a float")
     T.eq(b.half, 0.5, "half")
+    T.eq(b.whole, 2.0, "whole")
+    T.eq(math.type(b.whole), "float", "2.0 stays a float")
     T.eq(b.yes, true, "true")
     T.eq(b.no, false, "false")
     T.eq(b.nested.deep.deeper, "kept", "nested.deep.deeper")

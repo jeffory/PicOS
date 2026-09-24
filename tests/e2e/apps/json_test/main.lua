@@ -55,6 +55,11 @@ local n = json.decode("42")
 case_ok("dec_int_is_integer", math.type(n) == "integer", tostring(math.type(n)))
 local f = json.decode("42.5")
 case_ok("dec_float_is_float", math.type(f) == "float", tostring(math.type(f)))
+-- ...and whole floats must stay floats: 2.0 must not come back as 2.
+case_ok("enc_whole_float", json.encode(2.0) == "2.0", json.encode(2.0))
+local wf = json.decode(json.encode(-150.0))
+case_ok("whole_float_roundtrip", math.type(wf) == "float" and wf == -150.0,
+        tostring(wf))
 
 -- ── nesting: the case game.save silently destroyed ───────────────────────────
 
