@@ -189,6 +189,61 @@ static void test_brightness_parse(void) {
   CHECK_EQ_INT(config_parse_brightness("junk"), 16);
 }
 
+// Saves go through config.json.tmp and a rename, so a power loss or a failed
+// step never leaves a truncated /system/config.json.
+static void test_atomic_save(void) {
+  reset();
+  config_set("wifi_ssid", "home");
+  CHECK(config_save());
+  CHECK_STR(sdfake_get(PATH, NULL), "{\"wifi_ssid\":\"home\"}");
+  CHECK(sdfake_get(PATH ".tmp", NULL) == NULL);
+  CHECK(sdfake_get(PATH ".bak", NULL) == NULL);
+  // Second save replaces an existing file (FatFS will not rename over it).
+  config_set("wifi_ssid", "work");
+  CHECK(config_save());
+  CHECK_STR(sdfake_get(PATH, NULL), "{\"wifi_ssid\":\"work\"}");
+  CHECK(sdfake_get(PATH ".tmp", NULL) == NULL);
+  CHECK(sdfake_get(PATH ".bak", NULL) == NULL);
+}
+
+static void test_atomic_save_failures_keep_old_file(void) {
+  const char *old = "{\"wifi_ssid\":\"work\"}";
+  // Truncated write: the target is untouched, the partial .tmp removed.
+  reset();
+  sdfake_put(PATH, old, strlen(old));
+  config_set("wifi_ssid", "new");
+  sdfake_limit_writes(3);
+  CHECK(!config_save());
+  sdfake_limit_writes(-1);
+  CHECK_STR(sdfake_get(PATH, NULL), old);
+  CHECK(sdfake_get(PATH ".tmp", NULL) == NULL);
+  // Every rename of the sequence failing in turn: false, old contents kept.
+  for (int n = 0; n < 3; n++) {
+    reset();
+    sdfake_put(PATH, old, strlen(old));
+    config_set("wifi_ssid", "new");
+    sdfake_fail_rename_after(n);
+    bool ok = config_save();
+    sdfake_fail_rename_after(-1);
+    if (n < 2) {                      // moving old aside, or the new file in
+      CHECK(!ok);
+      CHECK_STR(sdfake_get(PATH, NULL), old);
+      CHECK(sdfake_get(PATH ".tmp", NULL) == NULL);
+    } else {                          // only the restore rename left: unused
+      CHECK(ok);
+      CHECK_STR(sdfake_get(PATH, NULL), "{\"wifi_ssid\":\"new\"}");
+    }
+  }
+  // Power lost between moving the old file aside and moving the new one in:
+  // the next load recovers the old file.
+  reset();
+  sdfake_put(PATH ".bak", old, strlen(old));
+  sdfake_put(PATH ".tmp", "{\"x\"", 5);
+  CHECK(config_load());
+  CHECK_STR(config_get("wifi_ssid"), "work");
+  CHECK_STR(sdfake_get(PATH, NULL), old);
+}
+
 int main(void) {
   test_set_get_delete();
   test_entry_limit();
@@ -200,6 +255,8 @@ int main(void) {
   test_load_tolerates();
   test_save_failures();
   test_brightness_parse();
+  test_atomic_save();
+  test_atomic_save_failures_keep_old_file();
   sdfake_reset();
   return check_report("test_config");
 }

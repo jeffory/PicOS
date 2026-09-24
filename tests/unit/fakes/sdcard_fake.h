@@ -16,3 +16,7 @@ void        sdfake_limit_writes(int limit);
 // the SD card) and counts the attempt.
 void        sdfake_set_busy(bool busy);
 int         sdfake_try_reads(void);   // sdcard_try_fread_at calls since reset
+// The sdcard_rename call after `n_ok` more successful ones fails, once
+// (-1 = never). Renames follow FatFS: refused when dst already exists.
+void        sdfake_fail_rename_after(int n_ok);
+int         sdfake_renames(void);     // successful sdcard_rename calls since reset

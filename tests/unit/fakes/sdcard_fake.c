@@ -27,6 +27,8 @@ static char        s_dirs[FAKE_DIRS][160];
 static int         s_write_limit = -1;
 static bool        s_busy;
 static int         s_try_reads;
+static int         s_rename_ok_left = -1;
+static int         s_renames;
 
 static fake_file_t *lookup(const char *path) {
     for (int i = 0; i < FAKE_FILES; i++)
@@ -60,7 +62,12 @@ void sdfake_reset(void) {
     s_write_limit = -1;
     s_busy = false;
     s_try_reads = 0;
+    s_rename_ok_left = -1;
+    s_renames = 0;
 }
+
+void sdfake_fail_rename_after(int n_ok) { s_rename_ok_left = n_ok; }
+int sdfake_renames(void) { return s_renames; }
 
 void sdfake_put(const char *path, const char *data, size_t len) {
     fake_file_t *f = create(path);
@@ -199,5 +206,22 @@ bool sdcard_delete(const char *path) {
         return false;
     free(f->data);
     memset(f, 0, sizeof(*f));
+    return true;
+}
+
+// FatFS f_rename: FR_EXIST when dst exists, FR_NO_FILE when src is missing.
+bool sdcard_rename(const char *src, const char *dst) {
+    fake_file_t *f = lookup(src);
+    if (!f || lookup(dst))
+        return false;
+    if (s_rename_ok_left == 0) {
+        s_rename_ok_left = -1;  // one failure, then renames work again
+        return false;
+    }
+    if (s_rename_ok_left > 0)
+        s_rename_ok_left--;
+    memset(f->path, 0, sizeof(f->path));
+    strncpy(f->path, dst, sizeof(f->path) - 1);
+    s_renames++;
     return true;
 }

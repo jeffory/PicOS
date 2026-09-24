@@ -2,6 +2,7 @@
 #include "../drivers/sdcard.h"
 #include "umm_malloc.h"
 #include "flat_json.h"
+#include "sd_atomic.h"
 
 #include <string.h>
 #include <stdio.h>
@@ -25,6 +26,7 @@ static int            s_count = 0;
 bool config_load(void) {
     s_count = 0;
 
+    sd_atomic_recover(CONFIG_PATH);
     int len = 0;
     char *json = sdcard_read_file(CONFIG_PATH, &len);
     if (!json) {
@@ -111,18 +113,12 @@ bool config_save(void) {
     buf[pos++] = '}';
     buf[pos]   = '\0';
 
-    sdfile_t f = sdcard_fopen(CONFIG_PATH, "w");
-    if (!f) {
-        printf("Config: failed to open %s for writing\n", CONFIG_PATH);
-        umm_free(buf);
-        return false;
-    }
-    int written = sdcard_fwrite(f, buf, pos);
-    sdcard_fclose(f);
+    // Through config.json.tmp and a rename: a power cut or a failed write
+    // never leaves a truncated config (and lost WiFi credentials).
+    bool ok = sd_atomic_write(CONFIG_PATH, buf, pos);
     umm_free(buf);
-
-    if (written != pos) {
-        printf("Config: write truncated (%d/%d)\n", written, pos);
+    if (!ok) {
+        printf("Config: save to %s failed; previous file kept\n", CONFIG_PATH);
         return false;
     }
     printf("Config: saved %d entries to %s\n", s_count, CONFIG_PATH);

@@ -145,6 +145,29 @@ static void test_save_failure(void) {
   sdfake_limit_writes(-1);
 }
 
+static void test_atomic_save(void) {
+  const char *P = "/data/com.test.a/config.json";
+  sdfake_reset();
+  appconfig_load("com.test.a");
+  appconfig_set("k", "1");
+  CHECK(appconfig_save());
+  appconfig_set("k", "2");
+  CHECK(appconfig_save());
+  CHECK_STR(sdfake_get(P, NULL), "{\"k\":\"2\"}");
+  CHECK(sdfake_get("/data/com.test.a/config.json.tmp", NULL) == NULL);
+  CHECK(sdfake_get("/data/com.test.a/config.json.bak", NULL) == NULL);
+  appconfig_set("k", "3");
+  sdfake_fail_rename_after(1);            // moving the new file in fails
+  CHECK(!appconfig_save());
+  sdfake_fail_rename_after(-1);
+  CHECK_STR(sdfake_get(P, NULL), "{\"k\":\"2\"}");
+  appconfig_set("k", "4");
+  sdfake_limit_writes(2);
+  CHECK(!appconfig_save());
+  sdfake_limit_writes(-1);
+  CHECK_STR(sdfake_get(P, NULL), "{\"k\":\"2\"}");
+}
+
 int main(void) {
   // No app loaded yet: save/reset refuse.
   CHECK(appconfig_get_app_id() == NULL);
@@ -159,6 +182,7 @@ int main(void) {
   test_reset();
   test_unbind();
   test_save_failure();
+  test_atomic_save();
   sdfake_reset();
   return check_report("test_appconfig");
 }

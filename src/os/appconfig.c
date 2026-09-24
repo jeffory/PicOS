@@ -2,6 +2,7 @@
 #include "../drivers/sdcard.h"
 #include "umm_malloc.h"
 #include "flat_json.h"
+#include "sd_atomic.h"
 
 #include <stdio.h>
 #include <string.h>
@@ -58,6 +59,7 @@ bool appconfig_load(const char *app_id) {
     char path[APPCONFIG_PATH_LEN];
     config_path(path, sizeof(path));
     
+    sd_atomic_recover(path);
     int len = 0;
     char *json = sdcard_read_file(path, &len);
     if (!json) {
@@ -144,18 +146,10 @@ bool appconfig_save(void) {
     
     char path[APPCONFIG_PATH_LEN];
     config_path(path, sizeof(path));
-    sdfile_t f = sdcard_fopen(path, "w");
-    if (!f) {
-        printf("[APPCONFIG] ERROR: Failed to open %s for writing\n", path);
-        umm_free(buf);
-        return false;
-    }
-    int written = sdcard_fwrite(f, buf, pos);
-    sdcard_fclose(f);
+    bool ok = sd_atomic_write(path, buf, pos);  // .tmp + rename
     umm_free(buf);
-    
-    if (written != pos) {
-        printf("[APPCONFIG] ERROR: Write truncated (%d/%d)\n", written, pos);
+    if (!ok) {
+        printf("[APPCONFIG] ERROR: save to %s failed; previous file kept\n", path);
         return false;
     }
     printf("[APPCONFIG] Saved %d entries to %s\n", s_count, path);
@@ -225,6 +219,11 @@ bool appconfig_reset(void) {
         sdcard_delete(path);
         printf("[APPCONFIG] Deleted config file: %s\n", path);
     }
+    // A .bak left by an interrupted save would otherwise come back as the
+    // config at the next load (sd_atomic_recover).
+    char tmp[SD_ATOMIC_PATH_MAX], bak[SD_ATOMIC_PATH_MAX];
+    if (sd_atomic_names(path, tmp, bak) && sdcard_fexists(bak))
+        sdcard_delete(bak);
     
     s_count = 0;
     return true;
