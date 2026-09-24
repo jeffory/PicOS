@@ -188,7 +188,9 @@ static bool s_exit_requested = false;
 // Longest gap between two full service passes while the hook fires.
 #define LUA_SERVICE_PERIOD_US 5000u
 
-static int s_hook_count = LUA_HOOK_COUNT;  // the adaptive count (Core 0)
+// Wall time of the last hook call, any thread (Core 0). The count itself is
+// per thread (lua_newthread copies it; lua_sethook sets only the running
+// thread's), so the hook reads it back with lua_gethookcount.
 static uint32_t s_last_hook_us = 0;
 
 static void menu_lua_hook(lua_State *L, lua_Debug *ar);
@@ -227,7 +229,6 @@ void lua_bridge_exit_reset(lua_State *L) {
   dev_commands_clear_exit();
   if (L)
     lua_bridge_install_hook(L, LUA_HOOK_COUNT);
-  s_hook_count = LUA_HOOK_COUNT;
 }
 
 // ── Service pass (see lua_bridge.h) ─────────────────────────────────────────
@@ -343,14 +344,14 @@ static void menu_lua_hook(lua_State *L, lua_Debug *ar) {
     uint32_t dt = now - s_last_hook_us;
     s_last_hook_us = now;
     if (dt < LUA_HOOK_TARGET_US / 2 || dt > LUA_HOOK_TARGET_US * 2) {
-      uint64_t want = (uint64_t)s_hook_count * LUA_HOOK_TARGET_US / (dt ? dt : 1);
+      int cur = lua_gethookcount(L);  // this thread's count
+      uint64_t want = (uint64_t)(cur > 0 ? cur : 1) * LUA_HOOK_TARGET_US /
+                      (dt ? dt : 1);
       int count = want < LUA_HOOK_COUNT_MIN   ? LUA_HOOK_COUNT_MIN
                   : want > LUA_HOOK_COUNT_MAX ? LUA_HOOK_COUNT_MAX
                                               : (int)want;
-      if (count != s_hook_count) {
-        s_hook_count = count;
+      if (count != cur)
         lua_bridge_install_hook(L, count);
-      }
     }
   }
   lua_service(L, false);
@@ -502,7 +503,6 @@ void lua_bridge_register(lua_State *L) {
   // Install instruction-count hook for menu button interception.
   // Fires every LUA_HOOK_COUNT Lua opcodes to catch menu button presses
   // even during tight loops, without requiring apps to poll input.
-  s_hook_count = LUA_HOOK_COUNT;
   lua_bridge_install_hook(L, LUA_HOOK_COUNT);
   printf("[LUA] lua_bridge_register complete\n");
 }
