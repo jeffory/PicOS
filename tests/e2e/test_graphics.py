@@ -1,4 +1,4 @@
-"""E2E tests for picocalc.graphics (tilemap drawing).
+"""E2E tests for picocalc.graphics (tilemap drawing, blinker arguments).
 
 Drives the graphics_test fixture and asserts on its "GT" log markers plus
 get_pixel probes of the drawn tilemap.
@@ -43,3 +43,10 @@ def test_tilemap_draws_every_tile_from_its_source_rect(graphics_app):
         _assert_near(graphics_app.call("get_pixel", {"x": x, "y": y}),
                      colour, label)
 
+
+def test_blinker_start_reads_durations_after_self(graphics_app):
+    """blinker:start(on, off) takes on/off from arguments 2 and 3; 200ms
+    into a 50ms-on/5000ms-off cycle the blinker must be off."""
+    joined = "\n".join(_lines(graphics_app))
+    assert "GT BLINKER_ERR" not in joined, joined
+    assert "GT BLINKER_OK state=false" in joined, joined

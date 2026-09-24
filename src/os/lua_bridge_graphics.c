@@ -3677,12 +3677,13 @@ static int l_animation_blinker_update(lua_State *L) {
 static int l_animation_blinker_start(lua_State *L) {
   lua_animation_blinker_t *b = check_blinker(L, 1);
 
+  // Argument 1 is self; the optional durations/flags start at 2.
   int top = lua_gettop(L);
-  if (top >= 1) b->on_duration_ms = luaL_checkinteger(L, 1);
-  if (top >= 2) b->off_duration_ms = luaL_checkinteger(L, 2);
-  if (top >= 3) b->loop = lua_toboolean(L, 3);
-  if (top >= 4) b->cycles = luaL_checkinteger(L, 4);
-  if (top >= 5) b->state = !lua_toboolean(L, 5);
+  if (top >= 2) b->on_duration_ms = luaL_checkinteger(L, 2);
+  if (top >= 3) b->off_duration_ms = luaL_checkinteger(L, 3);
+  if (top >= 4) b->loop = lua_toboolean(L, 4);
+  if (top >= 5) b->cycles = luaL_checkinteger(L, 5);
+  if (top >= 6) b->state = !lua_toboolean(L, 6);
 
   b->start_time_ms = to_ms_since_boot(get_absolute_time());
   b->current_cycle = 0;
