@@ -319,6 +319,24 @@ static void drain_requests(void) {
             snprintf(tc->err, sizeof(tc->err), "mg_connect failed");
             break;
           }
+          // A tls:// URL only sets nc->is_tls; without mg_tls_init no
+          // handshake runs. Same init as the HTTPS path above.
+          if (tc->use_ssl) {
+            struct mg_tls_opts opts = {0};
+            opts.name = mg_str(tc->host);
+            mg_tls_init(nc, &opts);
+            if (!nc->is_tls_hs) {
+              printf("[TCP] TLS init failed\n");
+              nc->fn_data = NULL;  // keep MG_EV_CLOSE from marking it CLOSED
+              mg_close_conn(nc);
+              snprintf(tc->err, sizeof(tc->err), "TLS init failed");
+              uint32_t save = spin_lock_blocking(tc->spinlock);
+              tc->state = TCP_STATE_FAILED;
+              tc->pending |= TCP_CB_FAILED;
+              spin_unlock(tc->spinlock, save);
+              break;
+            }
+          }
           tc->pcb = (void *)nc;
         }
         break;
