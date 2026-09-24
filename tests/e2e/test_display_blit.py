@@ -25,7 +25,7 @@ APP = "blit_test"
 APP_DIR = os.path.join(os.path.dirname(__file__), "apps", APP)
 
 PHASES = ["png", "keyed_flip", "nn_negative", "line_huge", "circle_huge",
-          "tri_huge", "cube_behind"]
+          "tri_huge", "cube_behind", "perf"]
 
 
 def rgb565(r, g, b):
@@ -209,3 +209,14 @@ def test_3d_vertex_behind_camera(simulator):
     got = region(simulator, 104, 93, 16, 1)
     assert got == [INK] * 16, f"cube front edge missing: {got}"
     assert _ms(simulator, "cube_behind") < PROMPT_MS
+
+
+def test_blit_throughput_reported(simulator):
+    """Measurement, not a speed gate: the simulator says nothing about device
+    speed. Asserts the perf phase ran every workload to completion (each one
+    exercises a clipped path on every call) and prints the timings."""
+    _goto(simulator, "perf")
+    times = {n: _ms(simulator, n) for n in
+             ("perf_opaque", "perf_keyed_flip", "perf_scaled", "perf_text")}
+    print("blit timings (sim, ms):", times)
+    assert all(t >= 0 for t in times.values())

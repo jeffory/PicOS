@@ -45,7 +45,7 @@ static bool same(const char *what) {
 static uint32_t s_rng = 12345;
 static int rnd(int lo, int hi) {  // inclusive
   s_rng = s_rng * 1103515245u + 12345u;
-  return lo + (int)((s_rng >> 8) % (uint32_t)(hi - lo + 1));
+  return (int)(lo + (int64_t)((s_rng >> 8) % (uint64_t)((int64_t)hi - lo + 1)));
 }
 
 static disp_clip_t random_clip(void) {
@@ -327,6 +327,113 @@ static void test_blit_nn(void) {
   CHECK(same("drawImageNN at (-3,-3) scale 2"));
 }
 
+// The drivers' original per-pixel partial blit.
+static void ref_blit(uint16_t *fb, const disp_clip_t *cl, int x, int y,
+                     const uint16_t *data, int img_w, int img_h, int sx,
+                     int sy, int sw, int sh, bool flip_x, bool flip_y,
+                     uint16_t key, bool swap) {
+  if (sx < 0) { sw += sx; sx = 0; }
+  if (sy < 0) { sh += sy; sy = 0; }
+  if (sx + sw > img_w) sw = img_w - sx;
+  if (sy + sh > img_h) sh = img_h - sy;
+  if (sw <= 0 || sh <= 0 || !data) return;
+  for (int row = 0; row < sh; row++) {
+    int src_row = flip_y ? (sy + sh - 1 - row) : (sy + row);
+    for (int col = 0; col < sw; col++) {
+      int src_col = flip_x ? (sx + sw - 1 - col) : (sx + col);
+      uint16_t c = data[src_row * img_w + src_col];
+      if (key != 0 && c == key) continue;
+      ref_plot(fb, cl, x + col, y + row, disp_px(c, swap));
+    }
+  }
+}
+
+static void test_blit_partial(void) {
+  uint16_t img[12 * 10];
+  int bad = 0;
+  for (int i = 0; i < 40000; i++) {
+    disp_clip_t c = random_clip();
+    int w = rnd(1, 12), h = rnd(1, 10);
+    uint16_t key = rnd(0, 1) ? 0 : 0x0102;
+    for (int k = 0; k < w * h; k++)
+      img[k] = (rnd(0, 3) == 0) ? 0x0102 : (uint16_t)(0x2000 + k * 13 + i);
+    int sx = rnd(-4, w + 2), sy = rnd(-4, h + 2);
+    int sw = rnd(-2, w + 4), sh = rnd(-2, h + 4);
+    int x = rnd(-16, SW + 4), y = rnd(-16, SH + 4);
+    bool fx = rnd(0, 1), fy = rnd(0, 1), swap = rnd(0, 1);
+    reset(0x5555);
+    disp_blit(screen(s_got), CW, &c, x, y, img, w, h, sx, sy, sw, sh, fx, fy,
+              key, swap);
+    ref_blit(screen(s_want), &c, x, y, img, w, h, sx, sy, sw, sh, fx, fy, key,
+             swap);
+    if (!same("blit") && bad++ < 5)
+      printf("  blit %dx%d src %d,%d %dx%d at (%d,%d) flip %d%d key %04x\n",
+             w, h, sx, sy, sw, sh, x, y, fx, fy, key);
+  }
+  CHECK_EQ_INT(bad, 0);
+  // Huge source rect / offsets: clamped, no overflow, nothing outside.
+  disp_clip_t c = {0, 0, SW - 1, SH - 1};
+  reset(0);
+  disp_blit(screen(s_got), CW, &c, INT_MIN, INT_MAX, img, 4, 4, 0, 0,
+            INT_MAX, INT_MAX, true, true, 0, true);
+  disp_blit(screen(s_got), CW, &c, 2, 2, img, 4, 4, 1, 1, INT_MAX, INT_MAX,
+            false, false, 0, true);
+  reset(0);
+  disp_blit(screen(s_want), CW, &c, 2, 2, img, 4, 4, 1, 1, 3, 3, false, false,
+            0, true);
+  disp_blit(screen(s_got), CW, &c, 2, 2, img, 4, 4, 1, 1, INT_MAX, INT_MAX,
+            false, false, 0, true);
+  CHECK(same("huge source rect clamps to the image"));
+}
+
+static void test_copy_row_alignments(void) {
+  uint16_t src[40], dst[40], want[40];
+  for (int i = 0; i < 40; i++) src[i] = (uint16_t)(0x1234 + i * 0x0101);
+  for (int so = 0; so < 2; so++)
+    for (int d0 = 0; d0 < 2; d0++)
+      for (int n = 0; n <= 30; n++) {
+        memset(dst, 0, sizeof dst);
+        memset(want, 0, sizeof want);
+        disp_copy_row(dst + d0, src + so, n, true);
+        for (int i = 0; i < n; i++) want[d0 + i] = disp_px(src[so + i], true);
+        CHECK(memcmp(dst, want, sizeof dst) == 0);
+      }
+}
+
+// The simulator's scaled NN: dest (dx, dy) samples (dx*sw/dw, dy*sh/dh).
+static void ref_scaled(uint16_t *fb, const disp_clip_t *cl, int x, int y,
+                       const uint16_t *data, int sw, int sh, int dw, int dh,
+                       uint16_t key, bool swap) {
+  for (int dy = 0; dy < dh; dy++)
+    for (int dx = 0; dx < dw; dx++) {
+      uint16_t v = data[(dy * sh / dh) * sw + dx * sw / dw];
+      if (key && v == key) continue;
+      ref_plot(fb, cl, x + dx, y + dy, disp_px(v, swap));
+    }
+}
+
+static void test_blit_scaled(void) {
+  uint16_t img[9 * 9];
+  int bad = 0;
+  for (int i = 0; i < 30000; i++) {
+    disp_clip_t c = random_clip();
+    int sw = rnd(1, 9), sh = rnd(1, 9), dw = rnd(1, 60), dh = rnd(1, 50);
+    for (int k = 0; k < sw * sh; k++)
+      img[k] = (rnd(0, 3) == 0) ? 0x0303 : (uint16_t)(0x4000 + k * 31 + i);
+    uint16_t key = rnd(0, 1) ? 0 : 0x0303;
+    int x = rnd(-60, SW + 4), y = rnd(-50, SH + 4);
+    bool swap = rnd(0, 1);
+    reset(0x7777);
+    disp_blit_scaled(screen(s_got), CW, &c, x, y, img, sw, sh, dw, dh, key,
+                     swap);
+    ref_scaled(screen(s_want), &c, x, y, img, sw, sh, dw, dh, key, swap);
+    if (!same("scaled") && bad++ < 5)
+      printf("  scaled %dx%d -> %dx%d at (%d,%d) key %04x\n", sw, sh, dw, dh,
+             x, y, key);
+  }
+  CHECK_EQ_INT(bad, 0);
+}
+
 int main(void) {
   test_clip_rect();
   test_lines_match_reference();
@@ -336,5 +443,8 @@ int main(void) {
   test_fill_circle_rows();
   test_huge_circles();
   test_blit_nn();
+  test_blit_partial();
+  test_copy_row_alignments();
+  test_blit_scaled();
   return check_report("test_display_clip");
 }

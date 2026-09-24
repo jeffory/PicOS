@@ -455,15 +455,12 @@ uint16_t* display_get_screen_buffer(void) {
     return s_screen_out;
 }
 
-void display_draw_image(int x, int y, const uint16_t* data, int w, int h) {
-    uint16_t* fb = display_get_back_buffer();
-    for (int dy = 0; dy < h && y + dy <= s_clip_y1; dy++) {
-        for (int dx = 0; dx < w && x + dx <= s_clip_x1; dx++) {
-            if (x + dx >= s_clip_x0 && y + dy >= s_clip_y0) {
-                fb[(y + dy) * 320 + (x + dx)] = data[dy * w + dx];
-            }
-        }
-    }
+// Same signature as the firmware (x, y, w, h, data): this stub used to take
+// (x, y, data, w, h), so src/os/ui.c's call passed w as the pixel pointer.
+void display_draw_image(int x, int y, int w, int h, const uint16_t* data) {
+    disp_clip_t c = cur_clip();
+    disp_blit(display_get_back_buffer(), 320, &c, x, y, data, w, h, 0, 0, w, h,
+              false, false, 0, false);
 }
 
 // Twin of the firmware's native drawImageNN (the Unicorn trampoline calls it):
@@ -479,48 +476,18 @@ void display_draw_image_partial(int x, int y, int img_w, int img_h,
                                 const uint16_t *data, int sx, int sy, int sw,
                                 int sh, bool flip_x, bool flip_y,
                                 uint16_t transparent_color) {
-    if (!data || sw <= 0 || sh <= 0) return;
-    // Clip source rect to image bounds
-    if (sx < 0) { sw += sx; sx = 0; }
-    if (sy < 0) { sh += sy; sy = 0; }
-    if (sx + sw > img_w) sw = img_w - sx;
-    if (sy + sh > img_h) sh = img_h - sy;
-    if (sw <= 0 || sh <= 0) return;
-
-    uint16_t* fb = display_get_back_buffer();
-    for (int row = 0; row < sh; row++) {
-        int py = y + row;
-        if (py < s_clip_y0 || py > s_clip_y1) continue;
-        int src_row = flip_y ? (sy + sh - 1 - row) : (sy + row);
-        for (int col = 0; col < sw; col++) {
-            int px = x + col;
-            if (px < s_clip_x0 || px > s_clip_x1) continue;
-            int src_col = flip_x ? (sx + sw - 1 - col) : (sx + col);
-            uint16_t c = data[src_row * img_w + src_col];
-            if (transparent_color != 0 && c == transparent_color) continue;
-            fb[py * 320 + px] = c;
-        }
-    }
+    // Clip once, specialised loops (shared with the firmware, no swap).
+    disp_clip_t c = cur_clip();
+    disp_blit(display_get_back_buffer(), 320, &c, x, y, data, img_w, img_h, sx,
+              sy, sw, sh, flip_x, flip_y, transparent_color, false);
 }
 
 void display_draw_image_scaled_nn(int x, int y, const uint16_t *data,
                                   int src_w, int src_h, int dst_w, int dst_h,
                                   uint16_t transparent_color) {
-    if (!data || dst_w <= 0 || dst_h <= 0 || src_w <= 0 || src_h <= 0) return;
-    uint16_t* fb = display_get_back_buffer();
-    for (int dy = 0; dy < dst_h && y + dy <= s_clip_y1; dy++) {
-        for (int dx = 0; dx < dst_w && x + dx <= s_clip_x1; dx++) {
-            if (x + dx >= s_clip_x0 && y + dy >= s_clip_y0) {
-                int sx = dx * src_w / dst_w;
-                int sy = dy * src_h / dst_h;
-                if (sx < src_w && sy < src_h) {
-                    uint16_t c = data[sy * src_w + sx];
-                    if (transparent_color != 0 && c == transparent_color) continue;
-                    fb[(y + dy) * 320 + (x + dx)] = c;
-                }
-            }
-        }
-    }
+    disp_clip_t c = cur_clip();
+    disp_blit_scaled(display_get_back_buffer(), 320, &c, x, y, data, src_w,
+                     src_h, dst_w, dst_h, transparent_color, false);
 }
 
 void display_draw_image_scaled(int x, int y, int img_w, int img_h,

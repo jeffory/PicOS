@@ -341,4 +341,112 @@ static inline void disp_blit_nn(uint16_t *fb, int stride, const disp_clip_t *c,
   }
 }
 
+// Copy n pixels converting byte order. With swap, two pixels at a time where
+// source and destination share word alignment (one REV16-style op per pair).
+static inline void disp_copy_row(uint16_t *d, const uint16_t *src, int n,
+                                 bool swap) {
+  if (!swap) {
+    memcpy(d, src, (size_t)n * sizeof(uint16_t));
+    return;
+  }
+  if (n >= 4 && (((uintptr_t)d ^ (uintptr_t)src) & 2) == 0) {
+    if ((uintptr_t)d & 2) {
+      *d++ = disp_px(*src++, true);
+      n--;
+    }
+    for (; n >= 2; n -= 2, d += 2, src += 2) {
+      uint32_t v;
+      memcpy(&v, src, 4);
+      v = ((v & 0x00FF00FFu) << 8) | ((v >> 8) & 0x00FF00FFu);
+      memcpy(d, &v, 4);
+    }
+  }
+  while (n-- > 0) *d++ = disp_px(*src++, true);
+}
+
+// Partial image blit: source rect (sx, sy, sw, sh) of an img_w x img_h image
+// drawn with its top-left at (x, y), optionally flipped, skipping pixels equal
+// to `key` (0 = opaque). The source rect is first clamped to the image (the
+// destination origin stays at x, y, as it always has); then the destination
+// rect is clipped once and one of four inner loops runs — opaque/keyed x
+// flipped/not — with no per-pixel bounds tests. Opaque unflipped rows are a
+// memcpy (swap = false) or a paired byte swap (swap = true).
+static inline void disp_blit(uint16_t *fb, int stride, const disp_clip_t *c,
+                             int x, int y, const uint16_t *data, int img_w,
+                             int img_h, int sx, int sy, int sw, int sh,
+                             bool flip_x, bool flip_y, uint16_t key,
+                             bool swap) {
+  if (!data || img_w <= 0 || img_h <= 0) return;
+  int64_t sx_ = sx, sy_ = sy, sw_ = sw, sh_ = sh;
+  if (sx_ < 0) { sw_ += sx_; sx_ = 0; }
+  if (sy_ < 0) { sh_ += sy_; sy_ = 0; }
+  if (sx_ + sw_ > img_w) sw_ = img_w - sx_;
+  if (sy_ + sh_ > img_h) sh_ = img_h - sy_;
+  if (sw_ <= 0 || sh_ <= 0) return;
+  disp_span_t s;
+  if (!disp_clip_rect(c, x, y, sw_, sh_, &s)) return;
+
+  uint16_t *row = fb + (size_t)s.y * stride + s.x;
+  // First visible source column, and the step through the source row.
+  const int64_t col0 = flip_x ? sx_ + sw_ - 1 - s.skip_x : sx_ + s.skip_x;
+  for (int r = 0; r < s.h; r++, row += stride) {
+    const int64_t R = s.skip_y + r;
+    const int64_t src_row = flip_y ? sy_ + sh_ - 1 - R : sy_ + R;
+    const uint16_t *sp = data + (size_t)src_row * img_w + (size_t)col0;
+    if (!key) {
+      if (!flip_x) {
+        disp_copy_row(row, sp, s.w, swap);
+      } else {
+        for (int i = 0; i < s.w; i++) row[i] = disp_px(sp[-i], swap);
+      }
+    } else if (!flip_x) {
+      for (int i = 0; i < s.w; i++) {
+        uint16_t v = sp[i];
+        if (v != key) row[i] = disp_px(v, swap);
+      }
+    } else {
+      for (int i = 0; i < s.w; i++) {
+        uint16_t v = sp[-i];
+        if (v != key) row[i] = disp_px(v, swap);
+      }
+    }
+  }
+}
+
+// Nearest-neighbour scale of a whole src_w x src_h image to dst_w x dst_h at
+// (x, y), skipping `key` pixels (0 = opaque). Destination pixel (dx, dy) of
+// the unclipped rect samples source (dx*src_w/dst_w, dy*src_h/dst_h) — exact
+// integer division, stepped with a remainder DDA across each row.
+static inline void disp_blit_scaled(uint16_t *fb, int stride,
+                                    const disp_clip_t *c, int x, int y,
+                                    const uint16_t *data, int src_w, int src_h,
+                                    int dst_w, int dst_h, uint16_t key,
+                                    bool swap) {
+  if (!data || src_w <= 0 || src_h <= 0 || dst_w <= 0 || dst_h <= 0) return;
+  disp_span_t s;
+  if (!disp_clip_rect(c, x, y, dst_w, dst_h, &s)) return;
+  const int64_t q = src_w / dst_w, rm = src_w % dst_w;
+  const int64_t col_start = s.skip_x * src_w / dst_w;
+  const int64_t acc_start = s.skip_x * src_w % dst_w;
+  uint16_t *row = fb + (size_t)s.y * stride + s.x;
+  int64_t prev = -1;
+  for (int r = 0; r < s.h; r++, row += stride) {
+    const int64_t src_row = (s.skip_y + r) * src_h / dst_h;
+    if (!key && src_row == prev) {  // opaque: an upscaled row repeats
+      memcpy(row, row - stride, (size_t)s.w * sizeof(uint16_t));
+      continue;
+    }
+    prev = src_row;
+    const uint16_t *sp = data + (size_t)src_row * src_w;
+    int64_t col = col_start, acc = acc_start;
+    for (int i = 0; i < s.w; i++) {
+      uint16_t v = sp[col];
+      if (!key || v != key) row[i] = disp_px(v, swap);
+      col += q;
+      acc += rm;
+      if (acc >= dst_w) { acc -= dst_w; col++; }
+    }
+  }
+}
+
 #endif  // DISPLAY_CLIP_H

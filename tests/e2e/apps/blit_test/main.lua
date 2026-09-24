@@ -102,6 +102,26 @@ local phases = {
             draw3DWireframeEx(v, e, 0, 0, 0, 160, 160, 100, INK, INK, 2, 3, f)
         end)
     end },
+
+    -- Blit throughput (measurement only; the simulator is not representative
+    -- of device speed). Logged as BT:MS perf_<name> <ms>.
+    { name = "perf", draw = function()
+        disp.clear(BG)
+        timed("perf_opaque", function()
+            for i = 1, 20000 do pattern:draw((i * 7) % 300 - 20, (i * 13) % 300 - 20) end
+        end)
+        timed("perf_keyed_flip", function()
+            for i = 1, 200000 do
+                sprite:draw((i * 7) % 330 - 5, (i * 11) % 330 - 5, i % 2 == 0)
+            end
+        end)
+        timed("perf_scaled", function()
+            for i = 1, 20000 do sprite:drawScaledNN((i * 3) % 300 - 10, (i * 5) % 300 - 10, 3) end
+        end)
+        timed("perf_text", function()
+            for i = 1, 20000 do disp.drawText((i * 3) % 300 - 30, (i * 7) % 330 - 5, "Hello, blitter!", INK, BG) end
+        end)
+    end },
 }
 
 local idx = 1

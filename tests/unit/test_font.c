@@ -72,6 +72,19 @@ static void test_render_mono_and_clip(void) {
   adv = font_render(&m, buf, 8, 0, 0, 7, 3, -2, 0, "A", 0xFFFF, 0x0000, false);
   CHECK(adv == 4);
   CHECK(buf[0] == 0xFFFF && buf[1] == 0xFFFF && buf[2] == 0x4444);
+  // Wholly off-clip lines and pens past the right edge draw nothing but still
+  // return the full advance (the renderer clips once and stops early).
+  memset(buf, 0x55, sizeof buf);
+  CHECK(font_render(&m, buf, 8, 0, 0, 7, 3, 0, 4, "AB", 0xFFFF, 0, false) == 8);
+  CHECK(font_render(&m, buf, 8, 0, 0, 7, 3, 0, -3, "AB", 0xFFFF, 0, false) == 8);
+  CHECK(font_render(&m, buf, 8, 0, 0, 7, 3, 8, 0, "ABA", 0xFFFF, 0, false) == 12);
+  CHECK(font_render(&m, buf, 8, 0, 0, 7, 3, 2147483640, 0, "AAAA", 0xFFFF, 0,
+                    false) == 16);  // pen past INT_MAX: no overflow
+  for (int i = 0; i < 8 * 4; i++) CHECK(buf[i] == 0x5555);
+  // Right of the clip after the first glyph: the first is drawn, rest measured.
+  adv = font_render(&m, buf, 8, 0, 0, 3, 3, 0, 0, "ABAB", 0xFFFF, 0, false);
+  CHECK(adv == 16);
+  CHECK(buf[0] == 0xFFFF && buf[4] == 0x5555);
 }
 
 static void test_render_proportional_and_fallback(void) {
