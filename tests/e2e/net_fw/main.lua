@@ -510,6 +510,20 @@ case_fw("http_close_delimited_small_ring", function()
     conn:close()
 end)
 
+-- The link going down fails what is in flight at once (wifi_poll used to
+-- stop polling and stop enforcing timeouts: the request hung forever), and
+-- isHwDisconnected turns true once the link is really down.
+case_fw("http_fails_on_link_down", function()
+    local r = request("/drip")
+    T.ok(wait(function() return #r.chunks >= 1 end, 3000), "no drip data")
+    pc.wifi.disconnect()
+    T.ok(wait(function() return r.closed end, 2000),
+         "request still running 2 s after the link went down")
+    T.ok(r.err and r.err:find("network down"), "error " .. tostring(r.err))
+    T.ok(wait(function() return net.isHwDisconnected() end, 2000),
+         "isHwDisconnected never turned true")
+end)
+
 -- TCP callbacks fire, with the socket as their argument (they used to be
 -- dropped: tcp_lua_fire_pending took the events and discarded them).
 case_fw("tcp_callbacks_fire", function()

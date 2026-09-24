@@ -29,7 +29,17 @@ static _Atomic wifi_status_t s_status = WIFI_STATUS_DISCONNECTED;
 static char s_ssid[64] = {0};
 static char s_pass[64] = {0};
 static char s_ip[20] = {0};
-static _Atomic bool s_hw_disconnected = true; // true once mg_wifi_disconnect() has completed
+// True once a requested disconnect has really taken the link down (the
+// MG_TCPIP_STATE_DOWN event), not merely once mg_wifi_disconnect() returned:
+// callers change sysclk after it, which must not race the CYW43 (Core 1).
+static _Atomic bool s_hw_disconnected = true;
+// Core 1: nonzero while a requested disconnect waits for the link-down
+// event; past it the radio is assumed idle (see c1_disconnect_watch).
+static uint32_t s_disc_deadline_ms = 0;
+#define WIFI_DISC_WAIT_MS 1500
+// Mirror of s_ifp.state == MG_TCPIP_STATE_READY for Core 0: the interface
+// state itself belongs to Core 1 (Mongoose and the CYW43 driver write it).
+static _Atomic bool s_link_ready = false;
 static bool s_http_required = false;
 static volatile bool s_disconnect_pending = false; // deferred disconnect from SNTP callback
 static bool s_auto_connected = false;    // true only for boot auto-connect
@@ -210,6 +220,8 @@ static void start_sntp(void) {
 static void tcpip_cb(struct mg_tcpip_if *ifp, int ev, void *ev_data) {
   if (ev == MG_TCPIP_EV_ST_CHG) {
     uint8_t state = *(uint8_t *)ev_data;
+    atomic_store_explicit(&s_link_ready, state == MG_TCPIP_STATE_READY,
+                          memory_order_release);
     if (state == MG_TCPIP_STATE_READY) {
       s_status = WIFI_STATUS_CONNECTED;
       s_connect_start_ms = 0;
@@ -224,6 +236,14 @@ static void tcpip_cb(struct mg_tcpip_if *ifp, int ev, void *ev_data) {
       printf("WiFi: connected  IP=%s\n", s_ip);
       start_sntp();
     } else if (state == MG_TCPIP_STATE_DOWN) {
+      // Nothing in flight can complete now: fail it instead of letting it
+      // wait for its timeout (or forever, before timeouts always ran).
+      http_c1_fail_all("network down");
+      tcp_c1_fail_all("network down");
+      if (s_disc_deadline_ms) {  // the disconnect we asked for is done
+        s_disc_deadline_ms = 0;
+        atomic_store_explicit(&s_hw_disconnected, true, memory_order_release);
+      }
       if (s_status == WIFI_STATUS_CONNECTED) {
         s_status = WIFI_STATUS_DISCONNECTED;
         { uint32_t save = spin_lock_blocking(s_state_lock);
@@ -241,6 +261,29 @@ static void tcpip_cb(struct mg_tcpip_if *ifp, int ev, void *ev_data) {
     s_connect_start_ms = 0;
     printf("WiFi: connect failed (err=%d)\n", *(int *)ev_data);
   }
+}
+
+// A requested disconnect (Core 1).  s_hw_disconnected turns true when the
+// link-down event arrives (tcpip_cb), at once if the link is already down,
+// or after WIFI_DISC_WAIT_MS without one (c1_disconnect_watch).
+static void c1_disconnect(void) {
+  atomic_store_explicit(&s_hw_disconnected, false, memory_order_release);
+  s_disc_deadline_ms = to_ms_since_boot(get_absolute_time()) + WIFI_DISC_WAIT_MS;
+  if (s_disc_deadline_ms == 0) s_disc_deadline_ms = 1;
+  mg_wifi_disconnect();
+  if (s_disc_deadline_ms && s_ifp.state == MG_TCPIP_STATE_DOWN) {
+    s_disc_deadline_ms = 0;  // already down (or went down synchronously)
+    atomic_store_explicit(&s_hw_disconnected, true, memory_order_release);
+  }
+}
+
+static void c1_disconnect_watch(void) {
+  if (!s_disc_deadline_ms) return;
+  uint32_t now = to_ms_since_boot(get_absolute_time());
+  if ((int32_t)(now - s_disc_deadline_ms) < 0) return;
+  s_disc_deadline_ms = 0;
+  printf("WiFi: no link-down event %d ms after disconnect\n", WIFI_DISC_WAIT_MS);
+  atomic_store_explicit(&s_hw_disconnected, true, memory_order_release);
 }
 
 // ── TLS
@@ -493,8 +536,7 @@ static void drain_requests(void) {
         break;
 
       case CONN_REQ_WIFI_DISCONNECT:
-        mg_wifi_disconnect();
-        atomic_store_explicit(&s_hw_disconnected, true, memory_order_release);
+        c1_disconnect();
         break;
     }
   }
@@ -610,13 +652,14 @@ void wifi_disconnect(void) {
 }
 
 wifi_status_t wifi_get_status(void) {
-  if (s_ifp.state == MG_TCPIP_STATE_READY)
+  if (atomic_load_explicit(&s_link_ready, memory_order_acquire))
     return s_internet_ok ? WIFI_STATUS_ONLINE : WIFI_STATUS_CONNECTED;
   return s_status;
 }
 
 bool wifi_has_internet(void) {
-  return s_internet_ok && s_ifp.state == MG_TCPIP_STATE_READY;
+  return s_internet_ok &&
+         atomic_load_explicit(&s_link_ready, memory_order_acquire);
 }
 
 bool wifi_hw_disconnected(void) {
@@ -665,27 +708,33 @@ void wifi_poll(void) {
   // disconnected/failed, otherwise queued WIFI_CONNECT never executes.
   drain_requests();
 
-  // Skip Mongoose polling when disconnected to save power
+  // Skip Mongoose polling when disconnected to save power — except while a
+  // requested disconnect waits for its link-down event.
   wifi_status_t st = wifi_get_status();
-  if (st != WIFI_STATUS_CONNECTED && st != WIFI_STATUS_CONNECTING &&
-      st != WIFI_STATUS_ONLINE) {
-    return;
-  }
-
-  // Associated but idle (no sockets, not mid-connect): poll at
-  // WIFI_IDLE_POLL_MS instead of every tick.
-  if (st != WIFI_STATUS_CONNECTING && !mgr_has_user_conns()) {
+  bool link = st == WIFI_STATUS_CONNECTED || st == WIFI_STATUS_CONNECTING ||
+              st == WIFI_STATUS_ONLINE;
+  bool polled = false;
+  if (link || s_disc_deadline_ms) {
+    // Associated but idle (no sockets, not mid-connect): poll at
+    // WIFI_IDLE_POLL_MS instead of every tick.
+    bool idle = st != WIFI_STATUS_CONNECTING && !s_disc_deadline_ms &&
+                !mgr_has_user_conns();
     uint32_t now_ms = to_ms_since_boot(get_absolute_time());
-    if (now_ms - s_last_idle_poll_ms < WIFI_IDLE_POLL_MS)
-      return;
-    s_last_idle_poll_ms = now_ms;
+    if (!idle || now_ms - s_last_idle_poll_ms >= WIFI_IDLE_POLL_MS) {
+      if (idle) s_last_idle_poll_ms = now_ms;
+      mg_mgr_poll(&s_mgr, 0);
+      polled = true;
+    }
   }
 
-  mg_mgr_poll(&s_mgr, 0);
-
-  // Enforce HTTP and TCP connection/read timeouts
+  // Enforce HTTP and TCP connection/read timeouts on every tick, link or
+  // not: a request in flight must never hang.
   http_check_timeouts();
   tcp_check_timeouts();
+  c1_disconnect_watch();
+
+  if (!link || !polled)
+    return;
 
   // Connect timeout: if stuck in CONNECTING, retry or give up
   if (s_status == WIFI_STATUS_CONNECTING && s_connect_start_ms > 0) {
@@ -750,7 +799,7 @@ void wifi_poll(void) {
   // We're already on Core 1 here, so call mg_wifi_disconnect() directly.
   if (s_disconnect_pending) {
     s_disconnect_pending = false;
-    mg_wifi_disconnect();
+    c1_disconnect();
     s_status = WIFI_STATUS_DISCONNECTED;
     { uint32_t save = spin_lock_blocking(s_state_lock);
       s_ssid[0] = '\0';
