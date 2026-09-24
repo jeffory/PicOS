@@ -132,15 +132,17 @@ T.case("sampleplayer_load_other_app", function()
          "sound.sampleplayer loaded another app's file")
 end)
 
--- ── appconfig: the store path comes from APP_ID ───────────────────────────
--- Must run last: appconfig keeps the first APP_ID it sees for the rest of
--- the app (and, today, for the next app too).
+-- ── appconfig: the store path must not come from APP_ID ────────────────────
 
 T.case("appconfig_app_id_traversal", function()
     APP_ID = "../system"
     pc.config.set("pwned", "1")
-    local saved = pc.config.save()
-    T.ok(not saved, "config.save() with APP_ID=../system rewrote /system/config.json")
+    T.ok(pc.config.save(), "config.save() failed")
+    -- The save landed in this app's own store (the host checks that
+    -- /system/config.json is untouched).
+    local own = fs.readFile(OWN .. "/config.json")
+    T.ok(own and own:find('"pwned"', 1, true),
+         "config.save() did not write /data/com.test.sandbox/config.json")
 end)
 
 T.done()

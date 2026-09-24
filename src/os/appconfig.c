@@ -230,6 +230,11 @@ bool appconfig_reset(void) {
     return true;
 }
 
+void appconfig_unbind(void) {
+    s_app_id[0] = '\0';
+    s_count = 0;
+}
+
 const char *appconfig_get_app_id(void) {
     return s_app_id[0] ? s_app_id : NULL;
 }

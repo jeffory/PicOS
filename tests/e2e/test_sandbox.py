@@ -20,14 +20,11 @@ ROOT_CASES = lua_case_names("sandbox_root_test")
 
 SOUND_BUG = ("review/audit §3.1 — sound sample load/save and sampleplayer "
              "loads skip fs_sandbox_check")
-APPCONFIG_BUG = ("review: Core Low / Lua Critical — appconfig builds its path "
-                 "from the writable APP_ID global; Task 5")
 
 KNOWN_BUGS = {
     "sample_save_outside_sandbox": SOUND_BUG,
     "sample_load_other_app": SOUND_BUG,
     "sampleplayer_load_other_app": SOUND_BUG,
-    "appconfig_app_id_traversal": APPCONFIG_BUG,
 }
 
 SYSTEM_CONFIG = {"sentinel": "keep"}
@@ -77,7 +74,6 @@ def test_sandbox_host_side(sandbox_run, case):
     assert not written, f"{case}: written outside the sandbox: {written}"
 
 
-@pytest.mark.xfail(strict=True, reason=APPCONFIG_BUG)
 def test_system_config_untouched(sandbox_run):
     """No case may rewrite /system/config.json (appconfig with
     APP_ID=../system did)."""

@@ -30,10 +30,10 @@ typedef struct {
 
 // Install *app as the running app.  Refuses (returns false, nothing
 // installed) an id that fails app_manifest_id_valid() or when PSRAM is
-// exhausted.
+// exhausted.  Resets the per-app config store.
 bool app_identity_begin(const app_entry_t *app);
 
-// Clear the running app.
+// Clear the running app (and the per-app config store binding).
 void app_identity_end(void);
 
 // The running app, or NULL between apps.

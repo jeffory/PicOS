@@ -1,6 +1,7 @@
 #include "app_identity.h"
 
 #include "app_manifest.h"
+#include "appconfig.h"
 #include "umm_malloc.h"
 
 #include <stdio.h>
@@ -37,6 +38,7 @@ bool app_identity_begin(const app_entry_t *app) {
 }
 
 void app_identity_end(void) {
+    appconfig_unbind();
     if (s_identity) {
         umm_free(s_identity);
         s_identity = NULL;

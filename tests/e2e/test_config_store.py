@@ -11,15 +11,13 @@ from pathlib import Path
 
 import pytest
 
-from helpers import case_params, known_bug, lua_case_names, run_lua_app
+from helpers import case_params, lua_case_names, run_lua_app
 
 LIMIT_CASES = lua_case_names("config_limits_test")
 
 CAP_BUG = ("review: Core Medium — config stores have a fixed entry cap and drop "
            "extra keys silently (appconfig 4 entries, sysconfig 8)")
 TRUNC_BUG = ("audit §3.9 — sysconfig truncates values at 127 chars silently")
-APPCONFIG_ID_BUG = ("review: Lua High — appconfig keeps the previous app's ID, so "
-                    "app B reads and saves app A's config; Task 5")
 
 LIMIT_KNOWN_BUGS = {
     "appconfig_five_keys": CAP_BUG,
@@ -65,13 +63,11 @@ def bleed(simulator):
     return simulator, b
 
 
-@known_bug(APPCONFIG_ID_BUG)
 def test_second_app_does_not_see_first_apps_config(bleed):
     _, b = bleed
     b.check_case("b_does_not_see_a")
 
 
-@known_bug(APPCONFIG_ID_BUG)
 def test_second_app_saves_to_its_own_file(bleed):
     sim, b = bleed
     b.check_case("b_sets_and_saves")

@@ -123,6 +123,19 @@ static void test_reset(void) {
   CHECK(appconfig_get("k", NULL) == NULL);
 }
 
+// Between apps the store forgets its app: the next app's first get/set must
+// not see (or save over) the previous app's entries, even unsaved ones.
+static void test_unbind(void) {
+  sdfake_reset();
+  appconfig_load("com.test.u");
+  appconfig_set("k", "unsaved");
+  appconfig_unbind();
+  CHECK(appconfig_get_app_id() == NULL);
+  CHECK(appconfig_get("k", NULL) == NULL);
+  CHECK(!appconfig_save());
+  CHECK(sdfake_get("/data/com.test.u/config.json", NULL) == NULL);
+}
+
 static void test_save_failure(void) {
   sdfake_reset();
   appconfig_load("com.test.f");
@@ -144,6 +157,7 @@ int main(void) {
   test_overlong_file_entries();
   test_no_app_id();
   test_reset();
+  test_unbind();
   test_save_failure();
   sdfake_reset();
   return check_report("test_appconfig");
