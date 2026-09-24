@@ -23,12 +23,9 @@ CASES = lua_case_names(APP)
 # collected_blinker_leaves_updateAll is not listed: it passes in the release
 # simulator (the stale write lands in freed memory unseen) and only the ASan
 # simulator reports it (heap-use-after-free in l_animation_blinker_updateAll).
-WALLS = ("review: Graphics High — addWallSprites pushes up to 256 userdata "
-         "with no lua_checkstack; Task 10 item 4")
 OVERSIZE = ("review: Graphics Medium — sprite width/height are used as the "
             "source stride; Task 10 item 5")
 KNOWN_BUGS = {
-    "addWallSprites_200": WALLS,
     "oversize_sprite_reads_only_its_image": OVERSIZE,
 }
 

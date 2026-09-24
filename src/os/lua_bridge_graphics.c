@@ -3130,7 +3130,10 @@ static int l_sprite_addWallSprites(lua_State *L) {
         ws->collides_with_mask = 0xFFFF;
         luaL_setmetatable(L, GRAPHICS_SPRITE_MT);
 
+        // Anchor in the display list, then pop: up to MAX_SPRITES walls,
+        // and a C function is only guaranteed LUA_MINSTACK (20) slots.
         sprite_list_add(L, -1);  // room was checked above
+        lua_pop(L, 1);
         count++;
       }
     }
