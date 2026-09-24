@@ -14,13 +14,13 @@ static int l_graphics_draw3DWireframeEx(lua_State *L) {
     float aX  = (float)luaL_checknumber(L, 3);
     float aY  = (float)luaL_checknumber(L, 4);
     float aZ  = (float)luaL_checknumber(L, 5);
-    int   scx = (int)luaL_checkinteger(L, 6);
-    int   scy = (int)luaL_checkinteger(L, 7);
+    int   scx = (int)lb_checkint(L, 6);
+    int   scy = (int)lb_checkint(L, 7);
     float fov = (float)luaL_checknumber(L, 8);
     uint16_t edge_color = (uint16_t)luaL_checkinteger(L, 9);
     uint16_t fill_color = (uint16_t)luaL_optinteger(L, 10, 0);
     int fill_mode = (int)luaL_optinteger(L, 11, 0);
-    int vert_size = (int)luaL_optinteger(L, 12, 3);
+    int vert_size = (int)lb_optint(L, 12, 3);
     // Arg 13: faces table (optional, flat array of vertex index triples)
     int has_faces = lua_istable(L, 13);
 

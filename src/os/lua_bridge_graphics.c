@@ -58,8 +58,8 @@ static int l_graphics_clear(lua_State *L) {
 }
 
 static int l_graphics_image_new(lua_State *L) {
-  int w = luaL_checkinteger(L, 1);
-  int h = luaL_checkinteger(L, 2);
+  int w = lb_checkint(L, 1);
+  int h = lb_checkint(L, 2);
 
   pc_image_t *loaded = image_new_blank(w, h);
   if (!loaded)
@@ -125,8 +125,8 @@ static int l_graphics_image_copy(lua_State *L) {
 
 static int l_graphics_image_draw(lua_State *L) {
   lua_image_t *img = check_image(L, 1);
-  int x = luaL_checkinteger(L, 2);
-  int y = luaL_checkinteger(L, 3);
+  int x = lb_checkint(L, 2);
+  int y = lb_checkint(L, 3);
 
   bool flip_x = false;
   bool flip_y = false;
@@ -144,16 +144,16 @@ static int l_graphics_image_draw(lua_State *L) {
   int sx = 0, sy = 0, sw = img->w, sh = img->h;
   if (lua_istable(L, 5)) {
     lua_getfield(L, 5, "x");
-    sx = luaL_optinteger(L, -1, 0);
+    sx = lb_optint(L, -1, 0);
     lua_pop(L, 1);
     lua_getfield(L, 5, "y");
-    sy = luaL_optinteger(L, -1, 0);
+    sy = lb_optint(L, -1, 0);
     lua_pop(L, 1);
     lua_getfield(L, 5, "w");
-    sw = luaL_optinteger(L, -1, img->w);
+    sw = lb_optint(L, -1, img->w);
     lua_pop(L, 1);
     lua_getfield(L, 5, "h");
-    sh = luaL_optinteger(L, -1, img->h);
+    sh = lb_optint(L, -1, img->h);
     lua_pop(L, 1);
   }
 
@@ -164,8 +164,8 @@ static int l_graphics_image_draw(lua_State *L) {
 
 static int l_graphics_image_drawAnchored(lua_State *L) {
   lua_image_t *img = check_image(L, 1);
-  int x = luaL_checkinteger(L, 2);
-  int y = luaL_checkinteger(L, 3);
+  int x = lb_checkint(L, 2);
+  int y = lb_checkint(L, 3);
   double ax = luaL_checknumber(L, 4);
   double ay = luaL_checknumber(L, 5);
 
@@ -179,10 +179,10 @@ static int l_graphics_image_drawAnchored(lua_State *L) {
 
 static int l_graphics_image_drawTiled(lua_State *L) {
   lua_image_t *img = check_image(L, 1);
-  int x = luaL_checkinteger(L, 2);
-  int y = luaL_checkinteger(L, 3);
-  int rect_w = luaL_checkinteger(L, 4);
-  int rect_h = luaL_checkinteger(L, 5);
+  int x = lb_checkint(L, 2);
+  int y = lb_checkint(L, 3);
+  int rect_w = lb_checkint(L, 4);
+  int rect_h = lb_checkint(L, 5);
 
   for (int ty = 0; ty < rect_h; ty += img->h) {
     for (int tx = 0; tx < rect_w; tx += img->w) {
@@ -215,8 +215,8 @@ static int l_graphics_image_getMetadata(lua_State *L) {
 
 static int l_graphics_image_drawScaled(lua_State *L) {
   lua_image_t *img = check_image(L, 1);
-  int x = luaL_checkinteger(L, 2);
-  int y = luaL_checkinteger(L, 3);
+  int x = lb_checkint(L, 2);
+  int y = lb_checkint(L, 3);
   float scale = luaL_checknumber(L, 4);
   float angle = luaL_optnumber(L, 5, 0.0);
 
@@ -227,9 +227,9 @@ static int l_graphics_image_drawScaled(lua_State *L) {
 
 static int l_graphics_image_drawScaledNN(lua_State *L) {
   lua_image_t *img = check_image(L, 1);
-  int x = luaL_checkinteger(L, 2);
-  int y = luaL_checkinteger(L, 3);
-  int scale = luaL_checkinteger(L, 4);
+  int x = lb_checkint(L, 2);
+  int y = lb_checkint(L, 3);
+  int scale = lb_checkint(L, 4);
 
   if (scale <= 0)
     return luaL_error(L, "scale must be positive integer");
@@ -353,10 +353,10 @@ static int l_graphics_image_getInfo(lua_State *L) {
 // sub-rectangle (clamped to the image bounds).
 static int l_graphics_image_loadRegion(lua_State *L) {
   const char *path = luaL_checkstring(L, 1);
-  int rx = luaL_checkinteger(L, 2);
-  int ry = luaL_checkinteger(L, 3);
-  int rw = luaL_checkinteger(L, 4);
-  int rh = luaL_checkinteger(L, 5);
+  int rx = lb_checkint(L, 2);
+  int ry = lb_checkint(L, 3);
+  int rw = lb_checkint(L, 4);
+  int rh = lb_checkint(L, 5);
 
   if (!fs_sandbox_check(L, path, false))
     return luaL_error(L, "access denied");
@@ -397,8 +397,8 @@ static int l_graphics_image_loadRegion(lua_State *L) {
 // loadScaled(path, w, h) — load an image and resample it to w×h (bilinear).
 static int l_graphics_image_loadScaled(lua_State *L) {
   const char *path = luaL_checkstring(L, 1);
-  int dw = luaL_checkinteger(L, 2);
-  int dh = luaL_checkinteger(L, 3);
+  int dw = lb_checkint(L, 2);
+  int dh = lb_checkint(L, 3);
 
   if (!fs_sandbox_check(L, path, false))
     return luaL_error(L, "access denied");
@@ -527,12 +527,12 @@ static const luaL_Reg l_graphics_image_lib[] = {
 // Draws a grid of cols×rows cells in a single C call.
 // Replaces cols*rows individual drawRect calls from Lua.
 static int l_graphics_drawGrid(lua_State *L) {
-  int x      = luaL_checkinteger(L, 1);
-  int y      = luaL_checkinteger(L, 2);
-  int cell_w = luaL_checkinteger(L, 3);
-  int cell_h = luaL_checkinteger(L, 4);
-  int cols   = luaL_checkinteger(L, 5);
-  int rows   = luaL_checkinteger(L, 6);
+  int x      = lb_checkint(L, 1);
+  int y      = lb_checkint(L, 2);
+  int cell_w = lb_checkint(L, 3);
+  int cell_h = lb_checkint(L, 4);
+  int cols   = lb_checkint(L, 5);
+  int rows   = lb_checkint(L, 6);
   uint16_t color = l_checkcolor(L, 7);
   int total_w = cols * cell_w;
   int total_h = rows * cell_h;
@@ -547,10 +547,10 @@ static int l_graphics_drawGrid(lua_State *L) {
 // Fills a rectangle then draws a 1-pixel border over it in one C call.
 // Replaces a fillRect + drawRect pair from Lua.
 static int l_graphics_fillBorderedRect(lua_State *L) {
-  int x = luaL_checkinteger(L, 1);
-  int y = luaL_checkinteger(L, 2);
-  int w = luaL_checkinteger(L, 3);
-  int h = luaL_checkinteger(L, 4);
+  int x = lb_checkint(L, 1);
+  int y = lb_checkint(L, 2);
+  int w = lb_checkint(L, 3);
+  int h = lb_checkint(L, 4);
   uint16_t fill   = l_checkcolor(L, 5);
   uint16_t border = l_checkcolor(L, 6);
   display_fill_rect(x, y, w, h, fill);
@@ -576,11 +576,11 @@ static int l_graphics_fillBorderedRect(lua_State *L) {
 // per frame (one fillBorderedRect per filled cell) plus the drawGrid call.
 static int l_graphics_drawPlayfield(lua_State *L) {
   luaL_checktype(L, 1, LUA_TTABLE);
-  int      ox         = luaL_checkinteger(L, 2);
-  int      oy         = luaL_checkinteger(L, 3);
-  int      block_size = luaL_checkinteger(L, 4);
-  int      cols       = luaL_checkinteger(L, 5);
-  int      rows       = luaL_checkinteger(L, 6);
+  int      ox         = lb_checkint(L, 2);
+  int      oy         = lb_checkint(L, 3);
+  int      block_size = lb_checkint(L, 4);
+  int      cols       = lb_checkint(L, 5);
+  int      rows       = lb_checkint(L, 6);
   uint16_t grid_color = l_checkcolor(L, 7);
 
   if (rows <= 0 || cols <= 0) return 0;
@@ -692,12 +692,12 @@ static int l_graphics_draw3DWireframe(lua_State *L) {
   float aX  = (float)luaL_checknumber(L, 3);
   float aY  = (float)luaL_checknumber(L, 4);
   float aZ  = (float)luaL_checknumber(L, 5);
-  int   scx = luaL_checkinteger(L, 6);
-  int   scy = luaL_checkinteger(L, 7);
+  int   scx = lb_checkint(L, 6);
+  int   scy = lb_checkint(L, 7);
   float fov = (float)luaL_checknumber(L, 8);
   uint16_t edge_color = l_checkcolor(L, 9);
   uint16_t vert_color = (lua_gettop(L) >= 10) ? l_checkcolor(L, 10) : 0;
-  int vert_size       = (lua_gettop(L) >= 11) ? (int)luaL_checkinteger(L, 11) : 3;
+  int vert_size       = (lua_gettop(L) >= 11) ? (int)lb_checkint(L, 11) : 3;
 
   // Build combined rotation matrix M = Rz(aZ) * Ry(aY) * Rx(aX).
   // Applying M*v is equivalent to rotateX then rotateY then rotateZ.
@@ -1194,15 +1194,15 @@ static int l_sprite_getImage(lua_State *L) {
 
 static int l_sprite_moveTo(lua_State *L) {
   lua_sprite_t *s = check_sprite(L, 1);
-  s->x = luaL_checkinteger(L, 2);
-  s->y = luaL_checkinteger(L, 3);
+  s->x = lb_checkint(L, 2);
+  s->y = lb_checkint(L, 3);
   return 0;
 }
 
 static int l_sprite_moveBy(lua_State *L) {
   lua_sprite_t *s = check_sprite(L, 1);
-  s->x += luaL_checkinteger(L, 2);
-  s->y += luaL_checkinteger(L, 3);
+  s->x += lb_checkint(L, 2);
+  s->y += lb_checkint(L, 3);
   return 0;
 }
 
@@ -1215,7 +1215,7 @@ static int l_sprite_getPosition(lua_State *L) {
 
 static int l_sprite_setZIndex(lua_State *L) {
   lua_sprite_t *s = check_sprite(L, 1);
-  s->z_index = luaL_checkinteger(L, 2);
+  s->z_index = lb_checkint(L, 2);
   return 0;
 }
 
@@ -1239,8 +1239,8 @@ static int l_sprite_isVisible(lua_State *L) {
 
 static int l_sprite_setCenter(lua_State *L) {
   lua_sprite_t *s = check_sprite(L, 1);
-  s->center_x = luaL_checkinteger(L, 2);
-  s->center_y = luaL_checkinteger(L, 3);
+  s->center_x = lb_checkint(L, 2);
+  s->center_y = lb_checkint(L, 3);
   return 0;
 }
 
@@ -1263,8 +1263,8 @@ static int l_sprite_getCenterPoint(lua_State *L) {
 
 static int l_sprite_setSize(lua_State *L) {
   lua_sprite_t *s = check_sprite(L, 1);
-  s->width = luaL_checkinteger(L, 2);
-  s->height = luaL_checkinteger(L, 3);
+  s->width = lb_checkint(L, 2);
+  s->height = lb_checkint(L, 3);
   return 0;
 }
 
@@ -1307,7 +1307,7 @@ static int l_sprite_getRotation(lua_State *L) {
 
 static int l_sprite_setScaleNN(lua_State *L) {
   lua_sprite_t *s = check_sprite(L, 1);
-  int scale = luaL_checkinteger(L, 2);
+  int scale = lb_checkint(L, 2);
   if (scale <= 0)
     return luaL_error(L, "scale must be positive integer");
   
@@ -1345,10 +1345,10 @@ static int l_sprite_copy(lua_State *L) {
 
 static int l_sprite_setSourceRect(lua_State *L) {
   lua_sprite_t *s = check_sprite(L, 1);
-  int sx = luaL_checkinteger(L, 2);
-  int sy = luaL_checkinteger(L, 3);
-  int sw = luaL_checkinteger(L, 4);
-  int sh = luaL_checkinteger(L, 5);
+  int sx = lb_checkint(L, 2);
+  int sy = lb_checkint(L, 3);
+  int sw = lb_checkint(L, 4);
+  int sh = lb_checkint(L, 5);
 
   if (!s->image) return 0;
 
@@ -1442,16 +1442,16 @@ static int l_sprite_setBounds(lua_State *L) {
     lua_getfield(L, 2, "y");
     lua_getfield(L, 2, "w");
     lua_getfield(L, 2, "h");
-    s->bounds_x = luaL_optinteger(L, -4, 0);
-    s->bounds_y = luaL_optinteger(L, -3, 0);
-    s->bounds_w = luaL_optinteger(L, -2, 0);
-    s->bounds_h = luaL_optinteger(L, -1, 0);
+    s->bounds_x = lb_optint(L, -4, 0);
+    s->bounds_y = lb_optint(L, -3, 0);
+    s->bounds_w = lb_optint(L, -2, 0);
+    s->bounds_h = lb_optint(L, -1, 0);
     lua_pop(L, 4);
   } else {
-    s->bounds_x = luaL_checkinteger(L, 2);
-    s->bounds_y = luaL_checkinteger(L, 3);
-    s->bounds_w = luaL_checkinteger(L, 4);
-    s->bounds_h = luaL_checkinteger(L, 5);
+    s->bounds_x = lb_checkint(L, 2);
+    s->bounds_y = lb_checkint(L, 3);
+    s->bounds_w = lb_checkint(L, 4);
+    s->bounds_h = lb_checkint(L, 5);
   }
   return 0;
 }
@@ -1493,8 +1493,8 @@ static int l_sprite_isOpaque(lua_State *L) {
 
 static int l_sprite_draw(lua_State *L) {
   lua_sprite_t *s = check_sprite(L, 1);
-  int x = luaL_optinteger(L, 2, s->x);
-  int y = luaL_optinteger(L, 3, s->y);
+  int x = lb_optint(L, 2, s->x);
+  int y = lb_optint(L, 3, s->y);
   
   if (!s->visible || !s->image)
     return 0;
@@ -1596,15 +1596,15 @@ static int l_sprite_newindex(lua_State *L) {
   const char *key = luaL_checkstring(L, 2);
 
   if (!strcmp(key, "x")) {
-    s->x = luaL_checkinteger(L, 3);
+    s->x = lb_checkint(L, 3);
   } else if (!strcmp(key, "y")) {
-    s->y = luaL_checkinteger(L, 3);
+    s->y = lb_checkint(L, 3);
   } else if (!strcmp(key, "width")) {
-    s->width = luaL_checkinteger(L, 3);
+    s->width = lb_checkint(L, 3);
   } else if (!strcmp(key, "height")) {
-    s->height = luaL_checkinteger(L, 3);
+    s->height = lb_checkint(L, 3);
   } else if (!strcmp(key, "z")) {
-    s->z_index = luaL_checkinteger(L, 3);
+    s->z_index = lb_checkint(L, 3);
   } else if (!strcmp(key, "visible")) {
     s->visible = lua_toboolean(L, 3);
   } else if (!strcmp(key, "scale")) {
@@ -1789,16 +1789,16 @@ static int l_sprite_setCollideRect(lua_State *L) {
     lua_getfield(L, 2, "y");
     lua_getfield(L, 2, "w");
     lua_getfield(L, 2, "h");
-    s->collide_x = luaL_optinteger(L, -4, 0);
-    s->collide_y = luaL_optinteger(L, -3, 0);
-    s->collide_w = luaL_optinteger(L, -2, s->width);
-    s->collide_h = luaL_optinteger(L, -1, s->height);
+    s->collide_x = lb_optint(L, -4, 0);
+    s->collide_y = lb_optint(L, -3, 0);
+    s->collide_w = lb_optint(L, -2, s->width);
+    s->collide_h = lb_optint(L, -1, s->height);
     lua_pop(L, 4);
   } else {
-    s->collide_x = luaL_checkinteger(L, 2);
-    s->collide_y = luaL_checkinteger(L, 3);
-    s->collide_w = luaL_checkinteger(L, 4);
-    s->collide_h = luaL_checkinteger(L, 5);
+    s->collide_x = lb_checkint(L, 2);
+    s->collide_y = lb_checkint(L, 3);
+    s->collide_w = lb_checkint(L, 4);
+    s->collide_h = lb_checkint(L, 5);
   }
   return 0;
 }
@@ -1964,12 +1964,12 @@ static int l_sprite_checkCollisions(lua_State *L) {
   if (lua_istable(L, 2)) {
     lua_getfield(L, 2, "x");
     lua_getfield(L, 2, "y");
-    px = luaL_optinteger(L, -2, 0);
-    py = luaL_optinteger(L, -1, 0);
+    px = lb_optint(L, -2, 0);
+    py = lb_optint(L, -1, 0);
     lua_pop(L, 2);
   } else {
-    px = luaL_checkinteger(L, 2);
-    py = luaL_checkinteger(L, 3);
+    px = lb_checkint(L, 2);
+    py = lb_checkint(L, 3);
   }
   
   int sx = s->x + s->collide_x;
@@ -1987,12 +1987,12 @@ static int l_sprite_querySpritesAtPoint(lua_State *L) {
   if (lua_istable(L, 1)) {
     lua_getfield(L, 1, "x");
     lua_getfield(L, 1, "y");
-    px = luaL_optinteger(L, -2, 0);
-    py = luaL_optinteger(L, -1, 0);
+    px = lb_optint(L, -2, 0);
+    py = lb_optint(L, -1, 0);
     lua_pop(L, 2);
   } else {
-    px = luaL_checkinteger(L, 1);
-    py = luaL_checkinteger(L, 2);
+    px = lb_checkint(L, 1);
+    py = lb_checkint(L, 2);
   }
   
   lua_createtable(L, 0, 0);
@@ -2022,16 +2022,16 @@ static int l_sprite_querySpritesInRect(lua_State *L) {
     lua_getfield(L, 1, "y");
     lua_getfield(L, 1, "w");
     lua_getfield(L, 1, "h");
-    rx = luaL_optinteger(L, -4, 0);
-    ry = luaL_optinteger(L, -3, 0);
-    rw = luaL_optinteger(L, -2, 320);
-    rh = luaL_optinteger(L, -1, 320);
+    rx = lb_optint(L, -4, 0);
+    ry = lb_optint(L, -3, 0);
+    rw = lb_optint(L, -2, 320);
+    rh = lb_optint(L, -1, 320);
     lua_pop(L, 4);
   } else {
-    rx = luaL_checkinteger(L, 1);
-    ry = luaL_checkinteger(L, 2);
-    rw = luaL_checkinteger(L, 3);
-    rh = luaL_checkinteger(L, 4);
+    rx = lb_checkint(L, 1);
+    ry = lb_checkint(L, 2);
+    rw = lb_checkint(L, 3);
+    rh = lb_checkint(L, 4);
   }
   
   lua_createtable(L, 0, 0);
@@ -2109,12 +2109,12 @@ static int l_sprite_moveWithCollisions(lua_State *L) {
   if (lua_istable(L, 2)) {
     lua_getfield(L, 2, "x");
     lua_getfield(L, 2, "y");
-    goalX = luaL_optinteger(L, -2, s->x);
-    goalY = luaL_optinteger(L, -1, s->y);
+    goalX = lb_optint(L, -2, s->x);
+    goalY = lb_optint(L, -1, s->y);
     lua_pop(L, 2);
   } else {
-    goalX = luaL_checkinteger(L, 2);
-    goalY = luaL_checkinteger(L, 3);
+    goalX = lb_checkint(L, 2);
+    goalY = lb_checkint(L, 3);
   }
 
   if (!s->collisions_enabled) {
@@ -2258,17 +2258,17 @@ static int l_sprite_setClipRect(lua_State *L) {
     lua_getfield(L, 2, "y");
     lua_getfield(L, 2, "w");
     lua_getfield(L, 2, "h");
-    s->clip_x = luaL_optinteger(L, -4, 0);
-    s->clip_y = luaL_optinteger(L, -3, 0);
-    s->clip_w = luaL_optinteger(L, -2, s->width);
-    s->clip_h = luaL_optinteger(L, -1, s->height);
+    s->clip_x = lb_optint(L, -4, 0);
+    s->clip_y = lb_optint(L, -3, 0);
+    s->clip_w = lb_optint(L, -2, s->width);
+    s->clip_h = lb_optint(L, -1, s->height);
     lua_pop(L, 4);
     s->has_clip = true;
   } else if (lua_gettop(L) >= 5) {
-    s->clip_x = luaL_checkinteger(L, 2);
-    s->clip_y = luaL_checkinteger(L, 3);
-    s->clip_w = luaL_checkinteger(L, 4);
-    s->clip_h = luaL_checkinteger(L, 5);
+    s->clip_x = lb_checkint(L, 2);
+    s->clip_y = lb_checkint(L, 3);
+    s->clip_w = lb_checkint(L, 4);
+    s->clip_h = lb_checkint(L, 5);
     s->has_clip = true;
   } else {
     s->has_clip = false;
@@ -2348,15 +2348,15 @@ static bool sprite_line_intersect(int x1, int y1, int x2, int y2,
 static int l_sprite_querySpritesAlongLine(lua_State *L) {
   int x1, y1, x2, y2;
   if (lua_istable(L, 1)) {
-    lua_getfield(L, 1, "x1"); x1 = luaL_checkinteger(L, -1); lua_pop(L, 1);
-    lua_getfield(L, 1, "y1"); y1 = luaL_checkinteger(L, -1); lua_pop(L, 1);
-    lua_getfield(L, 1, "x2"); x2 = luaL_checkinteger(L, -1); lua_pop(L, 1);
-    lua_getfield(L, 1, "y2"); y2 = luaL_checkinteger(L, -1); lua_pop(L, 1);
+    lua_getfield(L, 1, "x1"); x1 = lb_checkint(L, -1); lua_pop(L, 1);
+    lua_getfield(L, 1, "y1"); y1 = lb_checkint(L, -1); lua_pop(L, 1);
+    lua_getfield(L, 1, "x2"); x2 = lb_checkint(L, -1); lua_pop(L, 1);
+    lua_getfield(L, 1, "y2"); y2 = lb_checkint(L, -1); lua_pop(L, 1);
   } else {
-    x1 = luaL_checkinteger(L, 1);
-    y1 = luaL_checkinteger(L, 2);
-    x2 = luaL_checkinteger(L, 3);
-    y2 = luaL_checkinteger(L, 4);
+    x1 = lb_checkint(L, 1);
+    y1 = lb_checkint(L, 2);
+    x2 = lb_checkint(L, 3);
+    y2 = lb_checkint(L, 4);
   }
   
   lua_createtable(L, 0, 0);
@@ -2424,15 +2424,15 @@ static bool sprite_line_rect_intersection(int x1, int y1, int x2, int y2,
 static int l_sprite_querySpriteInfoAlongLine(lua_State *L) {
   int x1, y1, x2, y2;
   if (lua_istable(L, 1)) {
-    lua_getfield(L, 1, "x1"); x1 = luaL_checkinteger(L, -1); lua_pop(L, 1);
-    lua_getfield(L, 1, "y1"); y1 = luaL_checkinteger(L, -1); lua_pop(L, 1);
-    lua_getfield(L, 1, "x2"); x2 = luaL_checkinteger(L, -1); lua_pop(L, 1);
-    lua_getfield(L, 1, "y2"); y2 = luaL_checkinteger(L, -1); lua_pop(L, 1);
+    lua_getfield(L, 1, "x1"); x1 = lb_checkint(L, -1); lua_pop(L, 1);
+    lua_getfield(L, 1, "y1"); y1 = lb_checkint(L, -1); lua_pop(L, 1);
+    lua_getfield(L, 1, "x2"); x2 = lb_checkint(L, -1); lua_pop(L, 1);
+    lua_getfield(L, 1, "y2"); y2 = lb_checkint(L, -1); lua_pop(L, 1);
   } else {
-    x1 = luaL_checkinteger(L, 1);
-    y1 = luaL_checkinteger(L, 2);
-    x2 = luaL_checkinteger(L, 3);
-    y2 = luaL_checkinteger(L, 4);
+    x1 = lb_checkint(L, 1);
+    y1 = lb_checkint(L, 2);
+    x2 = lb_checkint(L, 3);
+    y2 = lb_checkint(L, 4);
   }
   
   lua_createtable(L, 0, 0);
@@ -2613,20 +2613,20 @@ static int l_sprite_setClipRectsInRange(lua_State *L) {
 
   if (lua_istable(L, 1)) {
     // Table variant: ({x, y, w, h}, startz, endz)
-    lua_getfield(L, 1, "x"); clip_x = luaL_checkinteger(L, -1); lua_pop(L, 1);
-    lua_getfield(L, 1, "y"); clip_y = luaL_checkinteger(L, -1); lua_pop(L, 1);
-    lua_getfield(L, 1, "w"); clip_w = luaL_checkinteger(L, -1); lua_pop(L, 1);
-    lua_getfield(L, 1, "h"); clip_h = luaL_checkinteger(L, -1); lua_pop(L, 1);
-    startz = luaL_checkinteger(L, 2);
-    endz   = luaL_checkinteger(L, 3);
+    lua_getfield(L, 1, "x"); clip_x = lb_checkint(L, -1); lua_pop(L, 1);
+    lua_getfield(L, 1, "y"); clip_y = lb_checkint(L, -1); lua_pop(L, 1);
+    lua_getfield(L, 1, "w"); clip_w = lb_checkint(L, -1); lua_pop(L, 1);
+    lua_getfield(L, 1, "h"); clip_h = lb_checkint(L, -1); lua_pop(L, 1);
+    startz = lb_checkint(L, 2);
+    endz   = lb_checkint(L, 3);
   } else {
     // Numeric variant: (x, y, w, h, startz, endz)
-    clip_x = luaL_checkinteger(L, 1);
-    clip_y = luaL_checkinteger(L, 2);
-    clip_w = luaL_checkinteger(L, 3);
-    clip_h = luaL_checkinteger(L, 4);
-    startz = luaL_checkinteger(L, 5);
-    endz   = luaL_checkinteger(L, 6);
+    clip_x = lb_checkint(L, 1);
+    clip_y = lb_checkint(L, 2);
+    clip_w = lb_checkint(L, 3);
+    clip_h = lb_checkint(L, 4);
+    startz = lb_checkint(L, 5);
+    endz   = lb_checkint(L, 6);
   }
 
   for (int i = 0; i < s_sprite_count; i++) {
@@ -2643,8 +2643,8 @@ static int l_sprite_setClipRectsInRange(lua_State *L) {
 }
 
 static int l_sprite_clearClipRectsInRange(lua_State *L) {
-  int startz = luaL_checkinteger(L, 1);
-  int endz   = luaL_checkinteger(L, 2);
+  int startz = lb_checkint(L, 1);
+  int endz   = lb_checkint(L, 2);
 
   for (int i = 0; i < s_sprite_count; i++) {
     lua_sprite_t *s = s_sprites[i];
@@ -2661,15 +2661,15 @@ static int l_sprite_addEmptyCollisionSprite(lua_State *L) {
   int x, y, w, h;
 
   if (lua_istable(L, 1)) {
-    lua_getfield(L, 1, "x"); x = luaL_checkinteger(L, -1); lua_pop(L, 1);
-    lua_getfield(L, 1, "y"); y = luaL_checkinteger(L, -1); lua_pop(L, 1);
-    lua_getfield(L, 1, "w"); w = luaL_checkinteger(L, -1); lua_pop(L, 1);
-    lua_getfield(L, 1, "h"); h = luaL_checkinteger(L, -1); lua_pop(L, 1);
+    lua_getfield(L, 1, "x"); x = lb_checkint(L, -1); lua_pop(L, 1);
+    lua_getfield(L, 1, "y"); y = lb_checkint(L, -1); lua_pop(L, 1);
+    lua_getfield(L, 1, "w"); w = lb_checkint(L, -1); lua_pop(L, 1);
+    lua_getfield(L, 1, "h"); h = lb_checkint(L, -1); lua_pop(L, 1);
   } else {
-    x = luaL_checkinteger(L, 1);
-    y = luaL_checkinteger(L, 2);
-    w = luaL_checkinteger(L, 3);
-    h = luaL_checkinteger(L, 4);
+    x = lb_checkint(L, 1);
+    y = lb_checkint(L, 2);
+    w = lb_checkint(L, 3);
+    h = lb_checkint(L, 4);
   }
 
   if (s_sprite_count >= MAX_SPRITES)
@@ -2762,10 +2762,10 @@ static int l_spritesheet_new(lua_State *L) {
 
 static int l_spritesheet_newGrid(lua_State *L) {
   lua_image_t *img = (lua_image_t *)luaL_checkudata(L, 1, GRAPHICS_IMAGE_MT);
-  int cols = luaL_checkinteger(L, 2);
-  int rows = luaL_checkinteger(L, 3);
-  int frame_w = luaL_checkinteger(L, 4);
-  int frame_h = luaL_checkinteger(L, 5);
+  int cols = lb_checkint(L, 2);
+  int rows = lb_checkint(L, 3);
+  int frame_w = lb_checkint(L, 4);
+  int frame_h = lb_checkint(L, 5);
   
   lua_spritesheet_t *ss = (lua_spritesheet_t *)lua_newuserdata(L, sizeof(lua_spritesheet_t));
   ss->image = img;
@@ -2795,10 +2795,10 @@ static int l_spritesheet_addFrame(lua_State *L) {
     return luaL_error(L, "max frames reached");
   
   int idx = ss->frame_count;
-  ss->frame_x[idx] = luaL_checkinteger(L, 2);
-  ss->frame_y[idx] = luaL_checkinteger(L, 3);
-  ss->frame_w[idx] = luaL_checkinteger(L, 4);
-  ss->frame_h[idx] = luaL_checkinteger(L, 5);
+  ss->frame_x[idx] = lb_checkint(L, 2);
+  ss->frame_y[idx] = lb_checkint(L, 3);
+  ss->frame_w[idx] = lb_checkint(L, 4);
+  ss->frame_h[idx] = lb_checkint(L, 5);
   ss->frame_count++;
   
   lua_pushinteger(L, idx);
@@ -2813,7 +2813,7 @@ static int l_spritesheet_getFrameCount(lua_State *L) {
 
 static int l_spritesheet_getFrame(lua_State *L) {
   lua_spritesheet_t *ss = check_spritesheet(L, 1);
-  int idx = luaL_checkinteger(L, 2);
+  int idx = lb_checkint(L, 2);
   if (idx < 0 || idx >= ss->frame_count)
     return 0;
   
@@ -2838,9 +2838,9 @@ static int l_spritesheet_getImage(lua_State *L) {
 
 static int l_spritesheet_drawFrame(lua_State *L) {
   lua_spritesheet_t *ss = check_spritesheet(L, 1);
-  int frame_idx = luaL_checkinteger(L, 2);
-  int x = luaL_checkinteger(L, 3);
-  int y = luaL_checkinteger(L, 4);
+  int frame_idx = lb_checkint(L, 2);
+  int x = lb_checkint(L, 3);
+  int y = lb_checkint(L, 4);
   
   if (!ss->image || frame_idx < 0 || frame_idx >= ss->frame_count)
     return 0;
@@ -2873,8 +2873,8 @@ static const luaL_Reg l_spritesheet_lib[] = {
 // tilemap.new(image, tileWidth, tileHeight)
 static int l_tilemap_new(lua_State *L) {
   lua_image_t *img = (lua_image_t *)luaL_checkudata(L, 1, GRAPHICS_IMAGE_MT);
-  int tw = luaL_checkinteger(L, 2);
-  int th = luaL_checkinteger(L, 3);
+  int tw = lb_checkint(L, 2);
+  int th = lb_checkint(L, 3);
 
   if (tw <= 0 || th <= 0) return luaL_error(L, "tile size must be positive");
 
@@ -2894,8 +2894,8 @@ static int l_tilemap_new(lua_State *L) {
 // tilemap:setSize(width, height) — allocate the tile grid
 static int l_tilemap_setSize(lua_State *L) {
   lua_tilemap_t *tm = check_tilemap(L, 1);
-  int w = luaL_checkinteger(L, 2);
-  int h = luaL_checkinteger(L, 3);
+  int w = lb_checkint(L, 2);
+  int h = lb_checkint(L, 3);
   if (w <= 0 || h <= 0 || w > TILEMAP_MAX_WIDTH || h > TILEMAP_MAX_HEIGHT)
     return luaL_error(L, "tilemap size out of range (max %dx%d)", TILEMAP_MAX_WIDTH, TILEMAP_MAX_HEIGHT);
 
@@ -2912,8 +2912,8 @@ static int l_tilemap_setSize(lua_State *L) {
 // tilemap:setTileAtPosition(x, y, tileIndex) — 1-based tile index, 0=empty
 static int l_tilemap_setTile(lua_State *L) {
   lua_tilemap_t *tm = check_tilemap(L, 1);
-  int x = luaL_checkinteger(L, 2);
-  int y = luaL_checkinteger(L, 3);
+  int x = lb_checkint(L, 2);
+  int y = lb_checkint(L, 3);
   int tile = luaL_checkinteger(L, 4);
 
   if (!tm->tiles || x < 0 || x >= tm->map_w || y < 0 || y >= tm->map_h)
@@ -2925,8 +2925,8 @@ static int l_tilemap_setTile(lua_State *L) {
 // tilemap:getTileAtPosition(x, y) → tileIndex
 static int l_tilemap_getTile(lua_State *L) {
   lua_tilemap_t *tm = check_tilemap(L, 1);
-  int x = luaL_checkinteger(L, 2);
-  int y = luaL_checkinteger(L, 3);
+  int x = lb_checkint(L, 2);
+  int y = lb_checkint(L, 3);
 
   if (!tm->tiles || x < 0 || x >= tm->map_w || y < 0 || y >= tm->map_h) {
     lua_pushinteger(L, 0);
@@ -2963,8 +2963,8 @@ static int l_tilemap_getPixelSize(lua_State *L) {
 // tilemap:draw(scrollX, scrollY)
 static int l_tilemap_draw(lua_State *L) {
   lua_tilemap_t *tm = check_tilemap(L, 1);
-  int sx = luaL_optinteger(L, 2, 0);
-  int sy = luaL_optinteger(L, 3, 0);
+  int sx = lb_optint(L, 2, 0);
+  int sy = lb_optint(L, 3, 0);
   tilemap_draw(tm, sx, sy);
   return 0;
 }
@@ -3012,8 +3012,8 @@ static int l_sprite_setTilemap(lua_State *L) {
 static int l_sprite_addWallSprites(lua_State *L) {
   lua_tilemap_t *tm = check_tilemap(L, 1);
   luaL_checktype(L, 2, LUA_TTABLE);
-  int x_off = (int)luaL_optinteger(L, 3, 0);
-  int y_off = (int)luaL_optinteger(L, 4, 0);
+  int x_off = (int)lb_optint(L, 3, 0);
+  int y_off = (int)lb_optint(L, 4, 0);
 
   if (!tm->tiles) return 0;
 
@@ -3069,8 +3069,8 @@ static uint16_t *render_text_image(lua_State *L, const char *text, int w, int h,
 // sprite.spriteWithText(text, maxWidth, maxHeight, [bgColor], [font])
 static int l_sprite_spriteWithText(lua_State *L) {
   const char *text = luaL_checkstring(L, 1);
-  int max_w = luaL_checkinteger(L, 2);
-  int max_h = luaL_checkinteger(L, 3);
+  int max_w = lb_checkint(L, 2);
+  int max_h = lb_checkint(L, 3);
   uint16_t bg = (lua_gettop(L) >= 4 && !lua_isnil(L, 4))
                     ? l_checkcolor(L, 4)
                     : s_graphics_bg_color;
@@ -3177,7 +3177,7 @@ static int l_animation_loop_new(lua_State *L) {
 
   if (top >= 1) {
     if (lua_isnumber(L, 1)) {
-      loop->interval_ms = luaL_checkinteger(L, 1);
+      loop->interval_ms = lb_checkint(L, 1);
     }
   }
 
@@ -3210,8 +3210,8 @@ static int l_animation_loop_new(lua_State *L) {
 
 static int l_animation_loop_draw(lua_State *L) {
   lua_animation_loop_t *loop = check_animation_loop(L, 1);
-  int x = luaL_checkinteger(L, 2);
-  int y = luaL_checkinteger(L, 3);
+  int x = lb_checkint(L, 2);
+  int y = lb_checkint(L, 3);
   bool flip = lua_toboolean(L, 4);
 
   if (!loop->valid || !loop->frames[loop->current_frame])
@@ -3293,7 +3293,7 @@ static int l_animation_loop_setImageTable(lua_State *L) {
 
 static int l_animation_loop_setInterval(lua_State *L) {
   lua_animation_loop_t *loop = check_animation_loop(L, 1);
-  loop->interval_ms = luaL_checkinteger(L, 2);
+  loop->interval_ms = lb_checkint(L, 2);
   return 0;
 }
 
@@ -3414,7 +3414,7 @@ static int l_animator_gc(lua_State *L) {
 
 static int l_animator_new(lua_State *L) {
   lua_animator_t *a = (lua_animator_t *)lua_newuserdata(L, sizeof(lua_animator_t));
-  a->duration_ms = luaL_checkinteger(L, 1);
+  a->duration_ms = lb_checkint(L, 1);
   a->start_value = (float)luaL_checknumber(L, 2);
   a->end_value = (float)luaL_checknumber(L, 3);
   a->start_time_ms = to_ms_since_boot(get_absolute_time());
@@ -3431,7 +3431,7 @@ static int l_animator_new(lua_State *L) {
   }
 
   if (lua_gettop(L) >= 5) {
-    a->start_time_ms += luaL_checkinteger(L, 5);
+    a->start_time_ms += lb_checkint(L, 5);
   }
 
   luaL_setmetatable(L, GRAPHICS_ANIMATOR_MT);
@@ -3478,7 +3478,7 @@ static int l_animator_currentValue(lua_State *L) {
 
 static int l_animator_valueAtTime(lua_State *L) {
   lua_animator_t *a = check_animator(L, 1);
-  uint32_t time_ms = luaL_checkinteger(L, 2);
+  uint32_t time_ms = lb_checkint(L, 2);
 
   float t = (float)time_ms / (float)a->duration_ms;
   if (t < 0.0f) t = 0.0f;
@@ -3512,7 +3512,7 @@ static int l_animator_reset(lua_State *L) {
   a->current_repeat = 0;
 
   if (lua_isnumber(L, 2)) {
-    a->duration_ms = luaL_checkinteger(L, 2);
+    a->duration_ms = lb_checkint(L, 2);
   }
   return 0;
 }
@@ -3552,7 +3552,7 @@ static int l_animator_newindex(lua_State *L) {
   } else if (!strcmp(key, "easingPeriod")) {
     a->easing_period = (float)luaL_checknumber(L, 3);
   } else if (!strcmp(key, "repeatCount")) {
-    a->repeat_count = luaL_checkinteger(L, 3);
+    a->repeat_count = lb_checkint(L, 3);
   } else if (!strcmp(key, "reverses")) {
     a->reverses = lua_toboolean(L, 3);
   }
@@ -3620,10 +3620,10 @@ static int l_animation_blinker_new(lua_State *L) {
   b->running = false;
   b->state = true;
 
-  if (top >= 1) b->on_duration_ms = luaL_checkinteger(L, 1);
-  if (top >= 2) b->off_duration_ms = luaL_checkinteger(L, 2);
+  if (top >= 1) b->on_duration_ms = lb_checkint(L, 1);
+  if (top >= 2) b->off_duration_ms = lb_checkint(L, 2);
   if (top >= 3) b->loop = lua_toboolean(L, 3);
-  if (top >= 4) b->cycles = luaL_checkinteger(L, 4);
+  if (top >= 4) b->cycles = lb_checkint(L, 4);
   if (top >= 5) b->state = !lua_toboolean(L, 5);
 
   if (s_blinker_count < MAX_BLINKERS) {
@@ -3679,10 +3679,10 @@ static int l_animation_blinker_start(lua_State *L) {
 
   // Argument 1 is self; the optional durations/flags start at 2.
   int top = lua_gettop(L);
-  if (top >= 2) b->on_duration_ms = luaL_checkinteger(L, 2);
-  if (top >= 3) b->off_duration_ms = luaL_checkinteger(L, 3);
+  if (top >= 2) b->on_duration_ms = lb_checkint(L, 2);
+  if (top >= 3) b->off_duration_ms = lb_checkint(L, 3);
   if (top >= 4) b->loop = lua_toboolean(L, 4);
-  if (top >= 5) b->cycles = luaL_checkinteger(L, 5);
+  if (top >= 5) b->cycles = lb_checkint(L, 5);
   if (top >= 6) b->state = !lua_toboolean(L, 6);
 
   b->start_time_ms = to_ms_since_boot(get_absolute_time());
@@ -3823,8 +3823,8 @@ static int l_font_gc(lua_State *L) {
 }
 
 static int l_font_drawText(lua_State *L) {
-  int x = luaL_checkinteger(L, 2);
-  int y = luaL_checkinteger(L, 3);
+  int x = lb_checkint(L, 2);
+  int y = lb_checkint(L, 3);
   const char *text = luaL_checkstring(L, 4);
   uint16_t fg = l_checkcolor(L, 5);
   uint16_t bg = (lua_gettop(L) >= 6) ? l_checkcolor(L, 6) : COLOR_BLACK;
@@ -3858,8 +3858,8 @@ static int l_font_getName(lua_State *L) {
 // font:drawTextAligned(x, y, text, alignment, fg, [bg])
 // alignment: 0=left, 1=center, 2=right
 static int l_font_drawTextAligned(lua_State *L) {
-  int x = luaL_checkinteger(L, 2);
-  int y = luaL_checkinteger(L, 3);
+  int x = lb_checkint(L, 2);
+  int y = lb_checkint(L, 3);
   const char *text = luaL_checkstring(L, 4);
   int alignment = luaL_checkinteger(L, 5);
   uint16_t fg = l_checkcolor(L, 6);
@@ -3874,10 +3874,10 @@ static int l_font_drawTextAligned(lua_State *L) {
 // font:drawTextInRect(x, y, w, h, text, [alignment], [fg], [bg])
 // Word-wraps text within a bounding rect.
 static int l_font_drawTextInRect(lua_State *L) {
-  int rx = luaL_checkinteger(L, 2);
-  int ry = luaL_checkinteger(L, 3);
-  int rw = luaL_checkinteger(L, 4);
-  int rh = luaL_checkinteger(L, 5);
+  int rx = lb_checkint(L, 2);
+  int ry = lb_checkint(L, 3);
+  int rw = lb_checkint(L, 4);
+  int rh = lb_checkint(L, 5);
   const char *text = luaL_checkstring(L, 6);
   int alignment = (int)luaL_optinteger(L, 7, 0);
   emit_fb_t e = {
@@ -3893,8 +3893,8 @@ static int l_font_drawTextInRect(lua_State *L) {
 // graphics.drawText(text, x, y, [font])
 static int l_graphics_drawText(lua_State *L) {
   const char *text = luaL_checkstring(L, 1);
-  int x = luaL_checkinteger(L, 2);
-  int y = luaL_checkinteger(L, 3);
+  int x = lb_checkint(L, 2);
+  int y = lb_checkint(L, 3);
   int width = 0;
   WITH_FONT_ARG(L, 4, width = display_draw_text(x, y, text, s_graphics_color, s_graphics_bg_color));
   lua_pushinteger(L, width);
@@ -3904,8 +3904,8 @@ static int l_graphics_drawText(lua_State *L) {
 // graphics.drawTextAligned(text, x, y, alignment, [font])
 static int l_graphics_drawTextAligned(lua_State *L) {
   const char *text = luaL_checkstring(L, 1);
-  int x = luaL_checkinteger(L, 2);
-  int y = luaL_checkinteger(L, 3);
+  int x = lb_checkint(L, 2);
+  int y = lb_checkint(L, 3);
   int alignment = luaL_checkinteger(L, 4);
   int tw = font_text_width(font_for_arg(L, 5), text);
   if (alignment == 1) x -= tw / 2;
@@ -3917,10 +3917,10 @@ static int l_graphics_drawTextAligned(lua_State *L) {
 // graphics.drawTextInRect(text, x, y, w, h, [alignment], [font])
 static int l_graphics_drawTextInRect(lua_State *L) {
   const char *text = luaL_checkstring(L, 1);
-  int rx = luaL_checkinteger(L, 2);
-  int ry = luaL_checkinteger(L, 3);
-  int rw = luaL_checkinteger(L, 4);
-  int rh = luaL_checkinteger(L, 5);
+  int rx = lb_checkint(L, 2);
+  int ry = lb_checkint(L, 3);
+  int rw = lb_checkint(L, 4);
+  int rh = lb_checkint(L, 5);
   int alignment = (int)luaL_optinteger(L, 6, 0);
   emit_fb_t e = { s_graphics_color, s_graphics_bg_color };
   const pc_font_t *f = font_for_arg(L, 7);
@@ -3948,7 +3948,7 @@ static void emit_measure(int x, int y, const char *line, void *user) {
 // graphics.getTextSizeForMaxWidth(text, maxWidth, [font]) -> width, height
 static int l_graphics_getTextSizeForMaxWidth(lua_State *L) {
   const char *text = luaL_checkstring(L, 1);
-  int max_width = luaL_checkinteger(L, 2);
+  int max_width = lb_checkint(L, 2);
   const pc_font_t *f = font_for_arg(L, 3);
   emit_measure_t e = { f, 0 };
   int lines = 0;
@@ -3978,8 +3978,8 @@ static uint16_t *render_text_image(lua_State *L, const char *text, int w, int h,
 // Returns a graphics.image with the text rendered into it
 static int l_graphics_imageWithText(lua_State *L) {
   const char *text = luaL_checkstring(L, 1);
-  int img_w = luaL_checkinteger(L, 2);
-  int img_h = luaL_checkinteger(L, 3);
+  int img_w = lb_checkint(L, 2);
+  int img_h = lb_checkint(L, 3);
   uint16_t bg = (lua_gettop(L) >= 4 && !lua_isnil(L, 4)) ? l_checkcolor(L, 4) : s_graphics_bg_color;
   uint16_t *pixels = render_text_image(L, text, img_w, img_h, bg, 5);
   if (!pixels) {
