@@ -219,8 +219,12 @@ static int l_fs_browse(lua_State *L) {
     root_path = me->data_dir;
   }
 
+  // The start directory is listed, so it needs read access: a sandboxed
+  // app asking for /system or another app's /data starts at its own root.
   const char *start_path =
       lua_isnoneornil(L, 1) ? root_path : luaL_checkstring(L, 1);
+  if (start_path != root_path && !fs_sandbox_check(L, start_path, false))
+    start_path = root_path;
 
   char selected[192];
   if (file_browser_show(start_path, root_path, selected, sizeof(selected))) {

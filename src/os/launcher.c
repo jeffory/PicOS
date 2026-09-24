@@ -116,6 +116,22 @@ static int compare_app_name(const void *a, const void *b) {
                     ((const app_entry_t *)b)->name);
 }
 
+// Ids are folded, so two apps whose ids differ only in case (or were
+// copied) share /data/<id> and the per-app config store.  Say so at scan
+// time; the launcher does not guess which one is the impostor.
+static void warn_shared_ids(void) {
+  for (int i = 0; i < s_app_count; i++) {
+    for (int j = i + 1; j < s_app_count; j++) {
+      if (strcmp(s_apps[i].id, s_apps[j].id) != 0)
+        continue;
+      printf("[LAUNCHER] WARNING: %s and %s share id %s (one /data dir)\n",
+             s_apps[i].path, s_apps[j].path, s_apps[i].id);
+      sim_log_os("[LAUNCHER] WARNING: %s and %s share id %s (one /data dir)",
+                 s_apps[i].path, s_apps[j].path, s_apps[i].id);
+    }
+  }
+}
+
 static void scan_apps(void) {
   // Free previously loaded icons before rescan
   for (int i = 0; i < s_app_count; i++) {
@@ -132,6 +148,7 @@ static void scan_apps(void) {
   sdcard_list_dir("/apps", on_app_dir, NULL);
   if (s_app_count > 1)
     qsort(s_apps, s_app_count, sizeof(app_entry_t), compare_app_name);
+  warn_shared_ids();
   printf("[LAUNCHER] Found %d apps\n", s_app_count);
   fflush(stdout);
 }
@@ -556,6 +573,9 @@ static volatile uint32_t s_app_launch_time_ms = 0;
 static void launcher_refuse(const app_entry_t *app, const char *title,
                             const char *reason, const char *detail,
                             const char *heap, const char *hint) {
+  // The app never started: a dev `exit` during the hold must not name it.
+  s_running_app_name = NULL;
+  s_app_launch_time_ms = 0;
   crashlog_write("APP FAILED", app->name, reason, detail);
   sim_log_err("[LAUNCHER] %s: %s: %s", app->name, reason, detail);
 #ifdef PICOS_SIMULATOR
@@ -575,14 +595,16 @@ static void launcher_refuse(const app_entry_t *app, const char *title,
   display_flush();
   // Hold the reason on screen; keep serving dev commands meanwhile (still
   // launcher context, no app running) so a screenshot can capture it.
+  // A dev `exit` or `launch` ends the hold early; the launcher loop then
+  // clears the exit and runs any pending launch.
   for (int i = 0; i < 30 && !sim_test_mode(); i++) {
     watchdog_update();
     dev_commands_poll();
     dev_commands_process();
+    if (dev_commands_wants_exit())
+      break;
     sleep_ms(100);
   }
-  s_running_app_name = NULL;
-  s_app_launch_time_ms = 0;
 }
 
 static bool run_app(int idx) {
@@ -877,14 +899,19 @@ void launcher_run(void) {
 
     bool dirty = sim_launched;
     if (dev_commands_get_pending_launch()) {
+      // Take the request before running it: the name points into the dev
+      // command buffer, and a `launch` that arrives while this one runs (or
+      // during a refusal's hold) must stay pending, not be cleared after.
+      char name[64];
+      snprintf(name, sizeof(name), "%s", dev_commands_get_pending_launch());
+      dev_commands_clear_pending_launch();
       dev_commands_clear_exit();
-      if (launcher_launch_by_name(dev_commands_get_pending_launch())) {
+      if (launcher_launch_by_name(name)) {
         kbd_clear_state();
         scan_apps();
         build_category_indices();
         dirty = true;
       }
-      dev_commands_clear_pending_launch();
     }
 
 #ifdef PICOS_SIMULATOR

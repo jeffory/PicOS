@@ -191,6 +191,10 @@ static void default_id(const char *dir_name, char *out, size_t out_len) {
         if (!id_char_ok(out[i]) || (out[i] == '.' && out[i - 1] == '.'))
             out[i] = '_';
     }
+    // FatFS strips a trailing dot (see app_manifest_id_valid).
+    size_t len = strlen(out);
+    if (len > 6 && out[len - 1] == '.')
+        out[len - 1] = '_';
     fold_lower(out);
 }
 
@@ -266,6 +270,10 @@ bool app_manifest_id_valid(const char *id) {
             return false;
     }
     if (strcmp(id, ".") == 0 || strstr(id, ".."))
+        return false;
+    // FatFS strips trailing dots from a path component, so "com.victim."
+    // would name /data/com.victim — another app's data.
+    if (id[n - 1] == '.')
         return false;
     return true;
 }

@@ -160,12 +160,21 @@ def _stage_app(sd, dirname, app_id, body):
     (app / "main.lua").write_text(body)
 
 
-@pytest.mark.parametrize("bad_id", ["../evil", "a/b", "..", "has space", ""])
+def _tree(root):
+    return sorted(str(p.relative_to(root)) for p in root.rglob("*")) \
+        if root.exists() else []
+
+
+# "com.victim." — FatFS strips trailing dots, so it would alias
+# /data/com.victim (another app's data).
+@pytest.mark.parametrize("bad_id", ["../evil", "a/b", "..", "has space", "",
+                                    "com.victim.", "trailing."])
 def test_invalid_app_id_is_refused_and_logged(harness_sim, test_sd_card, bad_id):
     """An app.json id is a path component (/data/<id>): the launcher refuses
     one that could escape it, with an on-screen reason, a load_failed outcome
     and an /system/error.log entry — the min_psram_kb refusal path."""
     sim = harness_sim
+    data_before = _tree(test_sd_card / "data")
     _stage_app(test_sd_card, "evil_id", bad_id,
                'picocalc.sys.log("H:EVIL_RAN")\n')
     out = _run(sim, "evil_id")
@@ -176,8 +185,22 @@ def test_invalid_app_id_is_refused_and_logged(harness_sim, test_sd_card, bad_id)
     assert "H:EVIL_RAN" not in _texts(sim.get_log_lines(0))
     log = (test_sd_card / "system" / "error.log").read_text()
     assert "invalid app id" in log and "evil_id" in log, log
-    # Nothing was created outside /data for the bad id.
+    # Nothing was created outside /data for the bad id, nor under /data.
     assert not (test_sd_card / "evil").exists()
+    assert _tree(test_sd_card / "data") == data_before
+
+
+def test_apps_folding_to_one_id_are_warned_at_scan(harness_sim, test_sd_card):
+    """Two apps whose ids fold to the same /data/<id> share a data dir and a
+    config store: the scan logs a warning naming both."""
+    sim = harness_sim
+    _stage_app(test_sd_card, "dup_a", "com.test.dup", 'return\n')
+    _stage_app(test_sd_card, "dup_b", "Com.Test.DUP", 'return\n')
+    seq = sim.get_log_buffer(tail=1).get("next_seq", 0)
+    sim.rescan_apps()
+    line = sim.wait_for_log(r"share id com\.test\.dup", timeout=10,
+                            since_seq=seq)
+    assert "dup_a" in line and "dup_b" in line, line
 
 
 def test_app_id_is_folded_to_lower_case(harness_sim, test_sd_card):

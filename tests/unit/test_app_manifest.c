@@ -148,6 +148,18 @@ static void test_id_folding(void) {
   app_manifest_defaults("Caf\xc3\xa9", &a);
   CHECK_STR(a.id, "local.caf__");
   CHECK(app_manifest_id_valid(a.id));
+  // A trailing dot (host filesystems keep one) becomes '_'.
+  app_manifest_defaults("game.", &a);
+  CHECK_STR(a.id, "local.game_");
+  CHECK(app_manifest_id_valid(a.id));
+  // ...also when truncation to 79 chars leaves a dot last.
+  char dir[100];
+  memset(dir, 'b', sizeof(dir));
+  dir[72] = '.';  // "local." (6) + 73 chars = 79: the dot is the last kept
+  dir[99] = '\0';
+  app_manifest_defaults(dir, &a);
+  CHECK(strlen(a.id) == 79);
+  CHECK(app_manifest_id_valid(a.id));
 }
 
 static void test_ints(void) {
@@ -225,6 +237,10 @@ static void test_id_valid(void) {
   CHECK(!app_manifest_id_valid("tab\t"));
   CHECK(!app_manifest_id_valid("caf\xc3\xa9"));
   CHECK(!app_manifest_id_valid("a:b"));
+  // FatFS strips trailing dots: "com.victim." would alias /data/com.victim.
+  CHECK(!app_manifest_id_valid("com.victim."));
+  CHECK(!app_manifest_id_valid("a."));
+  CHECK(app_manifest_id_valid(".hidden"));
   char longid[100];
   memset(longid, 'a', sizeof(longid));
   longid[79] = '\0';  // 79 chars: fits app_entry_t.id[80]

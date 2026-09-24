@@ -212,3 +212,47 @@ def test_apply_update_asks_before_flashing(sim):
     assert res["done"], res
     for name in ("applyUpdate_present", "applyUpdate_asks_first"):
         assert cases[name]["status"] == "PASS", cases[name]
+
+
+# ── fs.browse start path (sandbox residual a) ───────────────────────────────
+
+BROWSE_APP = """
+picocalc.sys.log("T7:BROWSING")
+local p = picocalc.fs.browse(START)
+picocalc.sys.log("T7:BROWSE " .. tostring(p))
+"""
+
+
+def _browse(sim, name, start, requirements=()):
+    app_id = f"com.test.{name}"
+    data = Path(sim.sd_card_path) / "data" / app_id
+    data.mkdir(parents=True, exist_ok=True)
+    (data / "mine.txt").write_text("mine")
+    stage_lua_app(sim.sd_card_path, name,
+                  BROWSE_APP.replace("START", json.dumps(start)),
+                  requirements=requirements)
+    seq = sim.get_log_buffer(tail=1).get("next_seq", 0)
+    sim.launch_app(name)
+    sim.wait_for_log("T7:BROWSING", timeout=15, since_seq=seq)
+    # Enter walks into directories until it selects a file.
+    out = _press_until_exit(sim, "enter")
+    assert out.get("result") == "returned", out
+    texts = [e["text"] for e in sim.get_log_lines(seq)]
+    hit = [t for t in texts if t.startswith("T7:BROWSE ")]
+    assert hit, texts
+    return hit[0][len("T7:BROWSE "):], app_id
+
+
+@pytest.mark.parametrize("start", ["/system", "/data/com.other", "/apps/.."])
+def test_browse_cannot_start_outside_the_sandbox(sim, start):
+    (Path(sim.sd_card_path) / "data" / "com.other").mkdir(parents=True, exist_ok=True)
+    (Path(sim.sd_card_path) / "data" / "com.other" / "secret.txt").write_text("s")
+    name = "browse_" + "".join(c for c in start if c.isalnum())
+    picked, app_id = _browse(sim, name, start)
+    assert picked.startswith(f"/data/{app_id}/"), picked
+
+
+def test_browse_root_filesystem_app_may_start_anywhere(sim):
+    picked, _ = _browse(sim, "browse_root", "/system",
+                        requirements=["root-filesystem"])
+    assert picked.startswith("/system/"), picked

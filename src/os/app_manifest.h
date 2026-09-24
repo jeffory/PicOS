@@ -34,7 +34,7 @@ void app_manifest_defaults(const char *dir_name, app_entry_t *app);
 
 // An app id safe to use as a path component (/data/<id>/...):
 // non-empty, shorter than app_entry_t.id, only [A-Za-z0-9._-], and neither
-// "." nor containing "..".
+// "." nor containing "..", and not ending in "." (FatFS strips it).
 bool app_manifest_id_valid(const char *id);
 
 // Is `name` one of the space-separated names in `list` (app_entry_t
