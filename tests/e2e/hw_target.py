@@ -28,8 +28,14 @@ device's known traps (see the task-27 report and CLAUDE.md "Debug"):
   - The launcher caches app.json at boot: push_app reboots when the pushed
     manifest (id, name, requirements, min_psram_kb) differs from the one on
     the card, or when `list` does not show the app.
-  - Flash and reboot are ignored while an app runs: reboot() exits the app
-    first (or refuses), flash() refuses.
+  - Dev commands while an app runs (src/os/lua_bridge.c lua_bridge_service,
+    src/main.c sys_poll, src/os/launcher.c): `reboot` and `reboot-flash`
+    are HONOURED mid-app (Lua hook / sys.sleep pass, native sys->poll; a
+    native app that never polls leaves them latched for the launcher);
+    `reboot-ota` is DROPPED ("reboot-ota ignored"), so an OTA flash staged
+    mid-app never applies; `usb` is DEFERRED until the launcher. Rebooting
+    mid-app kills the app with no teardown, so reboot() exits to the
+    launcher first (or refuses) and flash() refuses while an app runs.
   - `ver`'s timestamp comes from main.c and lies after incremental builds:
     nothing here trusts it; a reboot is proven by uptime going back.
   - Two readers split the device's output: preflight refuses a port another
@@ -325,9 +331,39 @@ class SimTarget(Target):
         wifi = self.sim.call("get_wifi_state")
         return {"app": app.get("name") or "launcher", "wifi": wifi.get("status")}
 
-    def launch_app(self, name: str) -> dict:
+    def _ensure_launcher(self, timeout: float = 15.0):
+        """Like HwTarget.ensure_launcher: exit a running app and wait."""
+        if not self.sim.call("get_running_app").get("running"):
+            return
+        self.sim.exit_app()
+        deadline = time.monotonic() + timeout
+        while self.sim.call("get_running_app").get("running"):
+            if time.monotonic() >= deadline:
+                raise HwTargetError(f"app did not exit within {timeout}s")
+            time.sleep(self.poll_interval)
+
+    def launch_app(self, name: str, timeout: float = 10.0) -> dict:
+        """Launch from the launcher (a running app is exited first, as on
+        the device). {"launched": False} when the simulator cannot find the
+        app: its outcome for this launch says found=false. {"launched":
+        True} once the app runs, or has already finished having been found."""
+        self._ensure_launcher()
         r = self.sim.launch_app(name)
-        return {"launched": True, "line": f"queued {r}"}
+        want = r.get("launch_id", 0)
+        deadline = time.monotonic() + timeout
+        while True:
+            last = self.sim.get_last_outcome()
+            if want and last.get("launch_id", 0) >= want:
+                found = bool(last.get("found", True))
+                return {"launched": found,
+                        "line": f"launch {want}: found={found} "
+                                f"result={last.get('result')}"}
+            if self.sim.call("get_running_app").get("running"):
+                return {"launched": True, "line": f"launch {want}: running"}
+            if time.monotonic() >= deadline:
+                raise TimeoutError(f"launch {name!r} (id {want}) neither "
+                                   f"started nor finished within {timeout}s")
+            time.sleep(0.02)
 
     def wait_for_exit(self, timeout: float = 30.0) -> dict:
         return self.sim.wait_for_exit(timeout=timeout)
@@ -792,14 +828,17 @@ class HwTarget(Target):
     # -- reboot / flash --
 
     def reboot(self, exit_running: bool = True):
-        """Reboot and wait for the launcher. The firmware ignores `reboot`
-        while an app runs: exit it first (exit_running) or refuse."""
+        """Reboot and wait for the launcher. The firmware honours `reboot`
+        mid-app (the app dies without teardown), so the backend exits it
+        first (exit_running) or refuses: every reboot starts at the
+        launcher."""
         st = self.status()
         if st["app"] != "launcher":
             if not exit_running:
                 raise HwTargetError(
-                    f"refusing to reboot: app {st['app']!r} is running and the "
-                    "firmware ignores reboot then; exit to the launcher first")
+                    f"refusing to reboot: app {st['app']!r} is running (a "
+                    "mid-app reboot skips its teardown); exit to the launcher "
+                    "first")
             self.ensure_launcher()
             st = self.status()
         before = st["uptime_ms"]
@@ -835,15 +874,16 @@ class HwTarget(Target):
 
     def flash(self, firmware, timeout: float = 300.0):
         """Flash `firmware` (build/picocalc_os.bin) with tools/ota_flash.py.
-        Refused while an app runs (the firmware drops flash/reboot then).
+        Refused while an app runs: the firmware drops the `reboot-ota`
+        that applies the image ("reboot-ota ignored: an app is running").
         Proof of the new build is the OTA tool's .flashed check plus the
         caller's behaviour check, never `ver` (its timestamp lies)."""
         st = self.status()
         if st["app"] != "launcher":
             raise HwTargetError(
-                f"refusing to flash: app {st['app']!r} is running (flash and "
-                "reboot are ignored while an app runs); exit to the launcher "
-                "first")
+                f"refusing to flash: app {st['app']!r} is running (the "
+                "firmware drops reboot-ota while an app runs); exit to the "
+                "launcher first")
         self._stop_monitor()
         cmd = [sys.executable, str(TOOLS_DIR / "ota_flash.py"), str(firmware),
                "--device", self.port, "--timeout", str(int(timeout))]

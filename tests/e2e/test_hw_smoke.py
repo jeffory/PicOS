@@ -63,3 +63,30 @@ def test_target_roundtrip(target):
     r = target.exit_app()
     assert r == {"ok": False, "message": "Error: exit: no app running"}, r
     assert target.status()["app"] == "launcher"
+
+
+def check_launch_reports_presence(target, known: str):
+    """launch_app()["launched"] means the same on both targets: False for a
+    name the launcher cannot find (then wait_for_exit says load_failed,
+    found False), True for an installed app. Shared with the fake-port
+    protocol test so both backends are held to one contract."""
+    r = target.launch_app("no_such_app_t27")
+    assert r["launched"] is False, r
+    out = target.wait_for_exit(timeout=15)
+    assert out["found"] is False and out["result"] == "load_failed", out
+
+    r = target.launch_app(known)
+    assert r["launched"] is True, r
+    target.exit_app()
+    out = target.wait_for_exit(timeout=15)
+    assert out["found"] is True, out
+
+
+def test_launch_reports_presence(target):
+    target.stage_lua_app("hw_hold", HOLD_APP, id="com.test.hw_hold")
+    check_launch_reports_presence(target, "hw_hold")
+
+
+HOLD_APP = """
+for _ = 1, 600 do picocalc.sys.sleep(50) end
+"""

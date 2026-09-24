@@ -109,9 +109,15 @@ and builds the device's traps in:
 - **The launcher caches `app.json` at boot.** `push_app` reboots when the
   pushed manifest (id, name, requirements, `min_psram_kb`) differs from the
   card's, or `list` does not show the app.
-- **Flash and reboot are ignored while an app runs.** `reboot()` exits the
-  app first (or refuses), `flash()` refuses. A reboot is proven by uptime
-  going back, never by `ver` (its timestamp lies after incremental builds).
+- **Dev commands while an app runs.** `reboot` and `reboot-flash` are
+  honoured mid-app (a Lua app's instruction hook / `sys.sleep`, a native
+  app's `sys->poll`; a native app that never polls leaves them latched for
+  the launcher) and kill the app without teardown. `reboot-ota`, which
+  applies an OTA flash, is dropped (`reboot-ota ignored: an app is
+  running`). `usb` waits for the launcher. So `reboot()` exits the app first
+  (or refuses) and `flash()` refuses while an app runs. A reboot is proven
+  by uptime going back, never by `ver` (its timestamp lies after
+  incremental builds).
 - **One reader per port.** Before opening the port the run refuses one that
   another process holds (stop the MCP server's `stop_log_capture` first), a
   path that is not a serial tty, and a device that does not answer `ping`

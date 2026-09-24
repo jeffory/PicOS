@@ -227,9 +227,13 @@ class FakeDevice:
             self.emit("[DEV] Stack: msp_peak=3012 msp_size=4096 core1_peak=900 "
                       "core1_size=4096 app=lua app_peak=21000 app_size=65536 "
                       "os_cmd_peak=5100 os_cmd_size=32768")
+        elif cmd == "reboot-ota":
+            if self.running:  # dropped mid-app (lua_bridge_service, sys_poll)
+                self.emit("[DEV] reboot-ota ignored: an app is running "
+                          "(exit it first)")
         elif cmd == "reboot":
-            if self.running:
-                return  # ignored while an app runs (like the firmware)
+            # Honoured mid-app too (the app dies without teardown).
+            self.running = None
             self.emit("[DEV] Rebooting...")
             self.present = False
             # The launcher rescans /apps at boot.
@@ -417,6 +421,14 @@ def test_launch_unknown_app_is_load_failed(hw):
     assert out["result"] == "load_failed" and "not found" in out["error"]
 
 
+def test_launch_presence_contract_matches_the_sim(hw, dev):
+    """The same check test_hw_smoke.py::test_launch_reports_presence runs
+    on the simulator (SimTarget): both backends agree on `launched`."""
+    from test_hw_smoke import check_launch_reports_presence
+    dev.install(FakeApp("hw_hold", "hw_hold", "com.test.hw_hold", hold=True))
+    check_launch_reports_presence(hw, "hw_hold")
+
+
 def test_error_log_growth_is_an_error_outcome(hw, dev):
     dev.files["/system/error.log"] = b"old entry\n"
     dev.install(FakeApp("bad", "Bad", "com.test.bad", run_polls=1,
@@ -597,7 +609,7 @@ def test_reboot_is_refused_while_an_app_runs(hw, dev):
     hw.launch_app("spin")
     with pytest.raises(HwTargetError, match="exit to the launcher"):
         hw.reboot(exit_running=False)
-    assert dev.boots == 1
+    assert dev.boots == 1 and "reboot" not in dev.commands
 
 
 def test_flash_is_refused_while_an_app_runs(hw, dev, tmp_path):
