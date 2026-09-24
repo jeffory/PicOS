@@ -10,6 +10,8 @@ sentinel, asks it to exit, and requires the "exit_sentinel" outcome within a
 few seconds (the old behaviour: the app never exits, wait_for_exit times out).
 """
 
+import time
+
 import pytest
 
 from helpers import stage_lua_app
@@ -151,3 +153,41 @@ picocalc.sys.log("STILL_RUNNING")
     simulator.launch_app("exit_http")
     simulator.wait_for_log(r"^CALLBACK_EXIT$", timeout=15, since_seq=seq)
     _assert_exited(simulator.wait_for_exit(timeout=EXIT_TIMEOUT))
+
+
+# ── sys.sleep shares the hook's service pass (review: Lua Low "Three service
+# loops have drifted: sleep ignores the menu and exit") ──────────────────────
+
+def _pixel_changes(sim, x, y, before, timeout):
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        px = sim.call("get_pixel", {"x": x, "y": y})
+        if px["rgb565"] != before["rgb565"]:
+            return px
+        time.sleep(0.02)
+    return None
+
+
+def test_menu_opens_during_long_sleep(simulator):
+    """A Sym press during a long sys.sleep opens the system menu at once
+    (it used to wait for the sleep to end); its Exit App ends the app."""
+    code = """
+local d = picocalc.display
+d.clear(d.WHITE)
+d.flush()
+picocalc.sys.log("EXIT_READY")
+picocalc.sys.sleep(30000)
+picocalc.sys.log("SLEEP_RETURNED")
+"""
+    _run_until_ready(simulator, "sleep_menu", code)
+    deadline = time.time() + 3
+    before = simulator.call("get_pixel", {"x": 6, "y": 40})
+    while before["rgb565"] != 0xFFFF and time.time() < deadline:
+        time.sleep(0.02)
+        before = simulator.call("get_pixel", {"x": 6, "y": 40})
+    assert before["rgb565"] == 0xFFFF, before
+    simulator.keypress("menu")
+    after = _pixel_changes(simulator, 6, 40, before, timeout=3.0)
+    assert after is not None, "system menu did not open during sys.sleep(30000)"
+    simulator.keypress("esc")
+    _assert_exited(_exit_and_wait(simulator))

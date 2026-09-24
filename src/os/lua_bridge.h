@@ -54,6 +54,16 @@ static inline bool lua_bridge_is_exit_sentinel(lua_State *L, int idx) {
          lua_touserdata(L, idx) == &lua_bridge_exit_tag;
 }
 
+// One service pass, shared by the count hook, sys.sleep and the terminal's
+// blocking waits so they cannot drift apart: feeds the watchdog, raises a
+// pending exit, fires HTTP/TCP/sound callbacks, runs dev commands (and their
+// reboot/exit flags), opens the system menu on a pending Sym press, latches
+// screenshot requests, and collects garbage when the PSRAM heap runs low.
+// It does not poll the keyboard (that would steal the app's key edges); a
+// menu press is seen once the app's own input polling has read it. May
+// raise (exit) and may run Lua callbacks.
+void lua_bridge_service(lua_State *L);
+
 // Frees the REPL scrollback (allocated on first repl.* use). The runner calls
 // it when the app exits.
 void lua_bridge_repl_release(void);

@@ -46,32 +46,19 @@ static int l_sys_log(lua_State *L) {
 
 static int l_sys_sleep(lua_State *L) {
   int ms = (int)lb_checkint(L, 1);
-  // Do NOT call kbd_poll() here — it would drain the STM32 FIFO and consume
-  // character/button events that the app expects to read via input.update().
-  // The Lua instruction hook (fires every 256 opcodes) handles menu detection
-  // immediately after sleep returns.
-  uint32_t end_ms =
-      (uint32_t)to_ms_since_boot(get_absolute_time()) + (uint32_t)ms;
+  // Every 10 ms the same service pass as the instruction hook: callbacks,
+  // dev commands, a pending menu press, and the exit request (raised from
+  // here, so an exit or the system menu's Exit App ends a long sleep at
+  // once). It does NOT call kbd_poll(): that would drain the STM32 FIFO and
+  // consume key edges the app expects to read via input.update().
+  uint32_t start_ms = (uint32_t)to_ms_since_boot(get_absolute_time());
+  uint32_t span = ms > 0 ? (uint32_t)ms : 0;
   while (true) {
-    uint32_t now = to_ms_since_boot(get_absolute_time());
-    if (now >= end_ms)
+    lua_bridge_service(L);
+    uint32_t elapsed = (uint32_t)to_ms_since_boot(get_absolute_time()) - start_ms;
+    if (elapsed >= span)
       break;
-
-    // Fire HTTP/TCP callbacks while sleeping so async requests can progress.
-    // WiFi is driven by Core 1; no poll needed here.
-    http_lua_fire_pending(L);
-    tcp_lua_fire_pending(L);
-
-    // Process dev commands (keypress, etc.) while sleeping.
-    dev_commands_poll();
-    dev_commands_process();
-
-    // Break out early if exit was requested (e.g. via RPC exit_app)
-    // so the Lua debug hook can raise the exit sentinel promptly.
-    if (dev_commands_wants_exit())
-      break;
-
-    uint32_t remaining = end_ms - now;
+    uint32_t remaining = span - elapsed;
     sleep_ms(remaining < 10 ? remaining : 10);
   }
   return 0;

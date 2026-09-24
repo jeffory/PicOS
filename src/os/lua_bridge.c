@@ -212,11 +212,9 @@ void lua_bridge_exit_reset(lua_State *L) {
     lua_bridge_install_hook(L, LUA_HOOK_COUNT);
 }
 
-// Instruction-count hook: fires every LUA_HOOK_COUNT Lua opcodes (every
-// opcode once an exit was requested).
-// WiFi is now driven by Core 1 (wifi_poll every 5 ms) — no call needed here.
-static void menu_lua_hook(lua_State *L, lua_Debug *ar) {
-  (void)ar;
+// One service pass (see lua_bridge.h). WiFi is driven by Core 1 (wifi_poll
+// every 5 ms), so nothing here polls it.
+void lua_bridge_service(lua_State *L) {
   watchdog_update(); // kick watchdog
   if (s_exit_requested)
     lua_bridge_raise_exit(L);  // an earlier exit was swallowed: raise again
@@ -266,7 +264,7 @@ static void menu_lua_hook(lua_State *L, lua_Debug *ar) {
 
   // Low-memory GC trigger: when the PSRAM heap drops below PSRAM_LOW_WATERMARK,
   // force a full GC cycle to reclaim dead Lua objects before allocations start
-  // failing.  s_gc_triggered prevents hammering GC every 256 opcodes while
+  // failing.  s_gc_triggered prevents hammering GC on every pass while
   // memory stays low; it resets once the heap recovers above the watermark.
   static bool s_gc_triggered = false;
   if (lua_psram_alloc_is_low()) {
@@ -281,6 +279,13 @@ static void menu_lua_hook(lua_State *L, lua_Debug *ar) {
   } else {
     s_gc_triggered = false;
   }
+}
+
+// Instruction-count hook: fires every LUA_HOOK_COUNT Lua opcodes (every
+// opcode once an exit was requested).
+static void menu_lua_hook(lua_State *L, lua_Debug *ar) {
+  (void)ar;
+  lua_bridge_service(L);
 }
 
 

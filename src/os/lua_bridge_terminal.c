@@ -266,23 +266,10 @@ static int l_terminal_setScrollbackOffset(lua_State* L) {
     return 0;
 }
 
-// Service system hooks while waiting in a blocking C loop.
-// This mirrors what menu_lua_hook does so the system stays responsive
-// (system menu, screenshots, HTTP callbacks, dev commands, watchdog).
+// Service the system while waiting in a blocking C loop: the instruction
+// hook's own pass (lua_bridge_service), so the waits cannot drift from it.
 static void terminal_service_hooks(lua_State* L) {
-    watchdog_update();
-    http_lua_fire_pending(L);
-    tcp_lua_fire_pending(L);
-    dev_commands_poll();
-    dev_commands_process();
-    if (dev_commands_wants_exit()) {
-        dev_commands_clear_exit();
-        lua_bridge_raise_exit(L);
-    }
-    if (kbd_consume_menu_press())
-        system_menu_show(L);
-    if (kbd_consume_screenshot_press())
-        s_screenshot_pending = true;
+    lua_bridge_service(L);
 }
 
 // Resolve a key name string to a BTN_* mask. Returns 0 on unknown key.
