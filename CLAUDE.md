@@ -112,6 +112,8 @@ The Lua bridge is split into ~20 module files, coordinated by `lua_bridge.c`:
 - `lua_bridge_fs.c` — filesystem operations
 - `lua_bridge_game.c` + `lua_bridge_game_camera.c` + `lua_bridge_game_save.c` + `lua_bridge_game_scene.c` — `picocalc.game` (camera, scene manager, save files)
 - `lua_bridge_graphics.c` — image loading, sprites, spritesheets, tilemap, animations
+  - **Object lifetimes:** every C pointer from one graphics object to another is anchored in a user value (`anchor_set`): a sprite keeps its image, stencil and tilemap, a spritesheet its image, a tilemap its tileset, an animation loop its frames. The display list (`s_sprites[]`) is mirrored by a registry table, so a sprite that has been `add()`ed is never collected while displayed; `remove()`/`removeSprites()`/`removeAll()` release it. `add()` is idempotent. Enumeration (`getAllSprites`, `performOnAllSprites`, `query*`, `overlappingSprites`, `moveWithCollisions`) and `getImage()` return the real objects. Blinkers are held weakly by `updateAll`. Sprite `width`/`height` are bounds only; drawing and `alphaCollision` use the image's (or source rect's) own size.
+  - Only documented types are accepted: `image.loadFromBuffer` takes a string or a `qmibuf` handle (length checked against its size); `sprite.new` takes an image or nothing. Check userdata with `luaL_checkudata`/`luaL_testudata`, never `lua_touserdata`.
 - `lua_bridge_input.c` — buttons, keyboard, key repeat
 - `lua_bridge_json.c` — `picocalc.json` encode/decode
 - `lua_bridge_mod.c` — `picocalc.modplayer` MOD music

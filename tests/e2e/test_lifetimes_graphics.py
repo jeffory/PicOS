@@ -19,15 +19,11 @@ from helpers import case_params, lua_case_names, stage_lua_app
 APP = "gfx_lifetimes"
 CASES = lua_case_names(APP)
 
-# Known bugs still open, {case: reason}. Each fix removes its entries.
-# collected_blinker_leaves_updateAll is not listed: it passes in the release
-# simulator (the stale write lands in freed memory unseen) and only the ASan
-# simulator reports it (heap-use-after-free in l_animation_blinker_updateAll).
-OVERSIZE = ("review: Graphics Medium — sprite width/height are used as the "
-            "source stride; Task 10 item 5")
-KNOWN_BUGS = {
-    "oversize_sprite_reads_only_its_image": OVERSIZE,
-}
+# Known bugs still open, {case: reason} (strict xfails). All Task 10 fixes
+# have landed. collected_blinker_leaves_updateAll only ever failed under ASan
+# (heap-use-after-free in l_animation_blinker_updateAll): in the release
+# simulator the stale write lands in freed memory unseen.
+KNOWN_BUGS = {}
 
 
 def _setup(case, mode):
@@ -84,17 +80,12 @@ while true do
 end
 """
 
-RENDER_BUG = OVERSIZE   # None once it is fixed
-
 
 def _near(px, want, tol=32):
     return all(abs(a - b) <= tol for a, b in zip((px["r"], px["g"], px["b"]), want))
 
 
-@pytest.mark.parametrize("_", [pytest.param(
-    0, id="render", marks=[pytest.mark.xfail(strict=True, reason=RENDER_BUG)]
-    if RENDER_BUG else [])])
-def test_dropped_sprite_renders_at_image_size(simulator, _):
+def test_dropped_sprite_renders_at_image_size(simulator):
     stage_lua_app(simulator.sd_card_path, "gfx_render", RENDER_APP)
     simulator.clear_log()
     simulator.launch_app("gfx_render")

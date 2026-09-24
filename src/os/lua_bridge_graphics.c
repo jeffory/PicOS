@@ -1137,6 +1137,42 @@ static int l_sprite_gc(lua_State *L) {
   return 0;
 }
 
+// The pixels a sprite draws and their real dimensions: the extracted frame
+// if there is one, else the image. Sprite width/height are bounds only
+// (setSize and sprite.width accept anything) and are never a source stride:
+// a sprite sized past its image used to read past the image's pixels.
+static const uint16_t *sprite_pixels(const lua_sprite_t *s, int *w, int *h) {
+  if (s->frame_data) {
+    *w = s->frame_w;
+    *h = s->frame_h;
+    return s->frame_data;
+  }
+  if (s->image && s->image->data) {
+    *w = s->image->w;
+    *h = s->image->h;
+    return s->image->data;
+  }
+  *w = *h = 0;
+  return NULL;
+}
+
+// Draw a sprite's pixels at (x, y) with its scale/rotation/flip settings.
+static void sprite_draw_at(const lua_sprite_t *s, int x, int y) {
+  int src_w, src_h;
+  const uint16_t *data = sprite_pixels(s, &src_w, &src_h);
+  if (!data || src_w <= 0 || src_h <= 0) return;
+  if (s->use_nn_scaling && s->scale_nn > 1) {
+    display_draw_image_scaled_nn(x, y, data, src_w, src_h, src_w * s->scale_nn,
+                                 src_h * s->scale_nn, s->transparent_color);
+  } else if (s->rotation != 0.0f || s->scale != 1.0f || s->scale_y != 1.0f) {
+    display_draw_image_scaled(x, y, src_w, src_h, data, s->scale, s->rotation,
+                              s->transparent_color);
+  } else {
+    display_draw_image_partial(x, y, src_w, src_h, data, 0, 0, src_w, src_h,
+                               s->flip_x, s->flip_y, s->transparent_color);
+  }
+}
+
 static int l_sprite_new(lua_State *L) {
   // Resolve the argument BEFORE pushing the sprite: with no argument, index 1
   // would otherwise be the new userdata itself.
@@ -1221,29 +1257,8 @@ static int l_sprite_update(lua_State *L) {
       tilemap_draw(tm, -s->x, -s->y);
       continue;
     }
-    if (s->updates_enabled && s->visible && s->image) {
-      int draw_x = s->x;
-      int draw_y = s->y;
-      // Use extracted frame if available, otherwise the full image
-      const uint16_t *data = s->frame_data ? s->frame_data : s->image->data;
-      int src_w = s->frame_data ? s->frame_w : s->width;
-      int src_h = s->frame_data ? s->frame_h : s->height;
-      
-      // Handle NN scaling
-      if (s->use_nn_scaling && s->scale_nn > 1) {
-        int dst_w = src_w * s->scale_nn;
-        int dst_h = src_h * s->scale_nn;
-        display_draw_image_scaled_nn(draw_x, draw_y, data, src_w, src_h, dst_w, dst_h, s->transparent_color);
-      } else if (s->rotation != 0.0f || s->scale != 1.0f || s->scale_y != 1.0f) {
-        display_draw_image_scaled(draw_x, draw_y, src_w, src_h,
-                                  data, s->scale, s->rotation,
-                                  s->transparent_color);
-      } else {
-        display_draw_image_partial(draw_x, draw_y, src_w, src_h,
-                                   data, 0, 0, src_w, src_h,
-                                   s->flip_x, s->flip_y, s->transparent_color);
-      }
-    }
+    if (s->updates_enabled && s->visible && s->image)
+      sprite_draw_at(s, s->x, s->y);
   }
   return 0;
 }
@@ -1596,54 +1611,14 @@ static int l_sprite_draw(lua_State *L) {
   
   if (!s->visible || !s->image)
     return 0;
-    
-  // Use extracted frame if available
-  const uint16_t *data = s->frame_data ? s->frame_data : s->image->data;
-  int src_w = s->frame_data ? s->frame_w : s->width;
-  int src_h = s->frame_data ? s->frame_h : s->height;
-  
-  // Handle NN scaling
-  if (s->use_nn_scaling && s->scale_nn > 1) {
-    int dst_w = src_w * s->scale_nn;
-    int dst_h = src_h * s->scale_nn;
-    display_draw_image_scaled_nn(x, y, data, src_w, src_h, dst_w, dst_h, s->transparent_color);
-  } else if (s->rotation != 0.0f || s->scale != 1.0f || s->scale_y != 1.0f) {
-    display_draw_image_scaled(x, y, src_w, src_h,
-                              data, s->scale,
-                              s->rotation, s->transparent_color);
-  } else {
-    display_draw_image_partial(x, y, src_w, src_h,
-                               data, 0, 0, src_w, src_h,
-                               s->flip_x, s->flip_y, s->transparent_color);
-  }
+  sprite_draw_at(s, x, y);
   return 0;
 }
 
 static int l_sprite_updateSingle(lua_State *L) {
   lua_sprite_t *s = check_sprite(L, 1);
-  if (s->updates_enabled && s->visible && s->image) {
-    int draw_x = s->x;
-    int draw_y = s->y;
-    // Use extracted frame if available
-    const uint16_t *data = s->frame_data ? s->frame_data : s->image->data;
-    int src_w = s->frame_data ? s->frame_w : s->width;
-    int src_h = s->frame_data ? s->frame_h : s->height;
-    
-    // Handle NN scaling
-    if (s->use_nn_scaling && s->scale_nn > 1) {
-      int dst_w = src_w * s->scale_nn;
-      int dst_h = src_h * s->scale_nn;
-      display_draw_image_scaled_nn(draw_x, draw_y, data, src_w, src_h, dst_w, dst_h, s->transparent_color);
-    } else if (s->rotation != 0.0f || s->scale != 1.0f || s->scale_y != 1.0f) {
-      display_draw_image_scaled(draw_x, draw_y, src_w, src_h,
-                                data, s->scale,
-                                s->rotation, s->transparent_color);
-    } else {
-      display_draw_image_partial(draw_x, draw_y, src_w, src_h,
-                               data, 0, 0, src_w, src_h,
-                               s->flip_x, s->flip_y, s->transparent_color);
-    }
-  }
+  if (s->updates_enabled && s->visible && s->image)
+    sprite_draw_at(s, s->x, s->y);
   return 0;
 }
 
@@ -2607,14 +2582,13 @@ static int l_sprite_alphaCollision(lua_State *L) {
   lua_sprite_t *a = check_sprite(L, 1);
   lua_sprite_t *b = (lua_sprite_t *)luaL_checkudata(L, 2, GRAPHICS_SPRITE_MT);
 
-  // Get image data for each sprite
-  const uint16_t *a_data = a->frame_data ? a->frame_data : (a->image ? a->image->data : NULL);
-  int a_w = a->frame_data ? a->frame_w : a->width;
-  int a_h = a->frame_data ? a->frame_h : a->height;
-
-  const uint16_t *b_data = b->frame_data ? b->frame_data : (b->image ? b->image->data : NULL);
-  int b_w = b->frame_data ? b->frame_w : b->width;
-  int b_h = b->frame_data ? b->frame_h : b->height;
+  // Pixel data with its real dimensions; a sprite without pixels uses its
+  // bounds for the AABB fallback. Never the sprite size as a stride.
+  int a_w, a_h, b_w, b_h;
+  const uint16_t *a_data = sprite_pixels(a, &a_w, &a_h);
+  const uint16_t *b_data = sprite_pixels(b, &b_w, &b_h);
+  if (!a_data) { a_w = a->width; a_h = a->height; }
+  if (!b_data) { b_w = b->width; b_h = b->height; }
 
   // If either sprite has no image data, fall back to AABB overlap
   if (!a_data || !b_data || a_w <= 0 || a_h <= 0 || b_w <= 0 || b_h <= 0) {
