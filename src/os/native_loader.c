@@ -365,22 +365,29 @@ static bool native_run(const app_entry_t *app) {
       show_error("ELF: invalid segment layout", NULL);
       goto out;
     }
-    if (split_mode && data_vaddr_start > (uint32_t)(uintptr_t)load_base) {
+    // (An image that is all code has no PSRAM part: load_base stays NULL and
+    // there is no data region to check.  This guard used to fire for it, so
+    // every native app of 16 KB or less - hello_c, the SDK template - failed
+    // with "invalid segment layout" on hardware.)
+    if (split_mode && psram_size > 0 &&
+        data_vaddr_start > (uint32_t)(uintptr_t)load_base) {
       show_error("ELF: invalid segment layout", NULL);
       goto out;
     }
 
     // Writes go through exec_base (the uncached alias); relocated pointers
     // use the address the region runs at.  A pointer outside both split
-    // regions takes the data bias (the last region), as before.
+    // regions takes the data bias (the last region), as before; an all-code
+    // image has only the code region.
     elf_region_t regions[2];
     int nregions = 0;
     if (split_mode) {
       regions[nregions++] = (elf_region_t){code_vaddr, code_memsz, code_buf,
                                            (uint32_t)(uintptr_t)code_buf};
-      regions[nregions++] = (elf_region_t){data_vaddr_start, psram_size,
-                                           exec_base,
-                                           (uint32_t)(uintptr_t)load_base};
+      if (psram_size > 0)
+        regions[nregions++] = (elf_region_t){data_vaddr_start, psram_size,
+                                             exec_base,
+                                             (uint32_t)(uintptr_t)load_base};
     } else {
       regions[nregions++] = (elf_region_t){mem_min, image_size, exec_base,
                                            (uint32_t)(uintptr_t)load_base};
