@@ -304,18 +304,16 @@ def log_texts(entries) -> list[str]:
 
 # ── Heap metrics ────────────────────────────────────────────────────────────
 
-# The simulator maps umm_* onto malloc and umm_free_heap_size() returns a
-# constant, so get_heap_info cannot see a leak (audit §0.5). Leak tests first
-# prove the metric moves when an app allocates; until Task 22 makes the
-# metrics real that check fails, and the test is a strict xfail.
-HEAP_METRICS_XFAIL = pytest.mark.xfail(
-    strict=True,
-    reason="sim heap metrics are constant (umm_free_heap_size stub); "
-           "Task 22 makes them real")
+# The simulator's umm_* is a counting allocator (simulator/stubs/
+# driver_stubs.c), so get_heap_info's lua_heap_free_kb is 8 MB minus the live
+# umm/Lua bytes. test_system.py::test_heap_metrics_live proves that; the leak
+# tests call require_heap_metrics_live first, so if the metric ever goes
+# constant again they fail pointing at it instead of passing vacuously.
 
 
-def assert_heap_metrics_live(sim, min_drop_kb: int = 1024):
-    """Fail unless lua_heap_free_kb drops while heap_probe holds ~2 MB."""
+def measure_heap_probe(sim) -> tuple[int, int, int]:
+    """lua_heap_free_kb before heap_probe, while it holds ~2 MB, and after it
+    exits."""
     before = sim.call("get_heap_info")["lua_heap_free_kb"]
     sim.launch_app("heap_probe")
     sim.wait_for_log(r"^HP:HOLD", timeout=10)
@@ -323,9 +321,27 @@ def assert_heap_metrics_live(sim, min_drop_kb: int = 1024):
     sim.keypress("q")
     outcome = sim.wait_for_exit(timeout=10)
     assert outcome.get("result") == "returned", outcome
+    after = sim.call("get_heap_info")["lua_heap_free_kb"]
+    return before, during, after
+
+
+def assert_heap_metrics_live(sim, min_drop_kb: int = 1024):
+    """Fail unless lua_heap_free_kb drops while heap_probe holds ~2 MB."""
+    before, during, _ = measure_heap_probe(sim)
     assert before - during >= min_drop_kb, (
         f"get_heap_info did not see a 2 MB allocation "
         f"(free before={before} KB, while held={during} KB)")
+
+
+def require_heap_metrics_live(sim):
+    """Precondition for leak tests: a constant metric would make any leak
+    assertion pass vacuously."""
+    try:
+        assert_heap_metrics_live(sim)
+    except AssertionError as e:
+        pytest.fail("precondition failed: heap metrics are not live "
+                    f"(see test_system.py::test_heap_metrics_live): {e}",
+                    pytrace=False)
 
 
 # ── Golden images ───────────────────────────────────────────────────────────

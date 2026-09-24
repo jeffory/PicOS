@@ -11,7 +11,7 @@ Regression targets:
 
 import pytest
 
-from helpers import (HEAP_METRICS_XFAIL, assert_heap_metrics_live,
+from helpers import (require_heap_metrics_live,
                      lua_case_names, run_lua_app)
 
 
@@ -82,10 +82,9 @@ class TestNetworkLua:
     def test_network_suite_complete(self, network_run):
         network_run.assert_all_passed(NETWORK_CASES)
 
-    @HEAP_METRICS_XFAIL
     def test_network_no_heap_leak(self, simulator):
         """HTTP connection create/close leaves no more than 50 KB behind."""
-        assert_heap_metrics_live(simulator)
+        require_heap_metrics_live(simulator)
         free_before = simulator.call("get_heap_info")["lua_heap_free_kb"]
         run_lua_app(simulator, "network_test", timeout=15).assert_all_passed(
             NETWORK_CASES)

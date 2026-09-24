@@ -166,7 +166,11 @@ A missing golden fails the test. Create or refresh goldens with
 - The simulator runs its own display, audio, keyboard and network code, not
   `src/drivers/*` (see `specs/test-audit-2026-09-24.md` §2.7), so goldens and
   pixel values prove simulator output.
-- `get_heap_info` is constant in the simulator; the leak tests are strict xfails
-  until the heap metrics are real.
+- `get_heap_info` in the simulator counts the live `umm_*`/Lua bytes (a
+  counting allocator over malloc: 8 MB minus live). The largest free block is
+  approximated by the free total and fragmentation is always 0, so
+  fragmentation and `min_psram_kb` behaviour are still device-only.
+  `test_heap_metrics_live` proves the metric moves; the leak tests check it
+  first (`require_heap_metrics_live`).
 - `test_cdogs_memory.py` needs a built checkout of jeffory/picos-cdogs
   (`PICOS_CDOGS_DIR`, default `~/Projects/picos-cdogs`); it is allow-listed to skip.

@@ -10,10 +10,13 @@
 #include <math.h>
 #include <string.h>
 #include <dirent.h>
+#include <malloc.h>
+#include <stdatomic.h>
 #include <sys/stat.h>
 #include <sys/statvfs.h>
 #include "../hal/hal_display.h"
 #include "../sim_socket.h"
+#include "umm_malloc.h"
 // Real driver header — pulled in so the stub definitions below are checked
 // against the hardware signatures at compile time (any drift is an error).
 // "pico/mutex.h" inside it resolves to the simulator stub in stubs/pico/.
@@ -1030,21 +1033,73 @@ _Atomic(void (*)(void)) g_native_audio_callback = NULL;
 
 // audio_ring_free / audio_stream_debug live in sim_audio.c.
 
-// umm_malloc stubs (simulator maps to standard malloc)
-size_t umm_free_heap_size(void) { return 8 * 1024 * 1024; }
-size_t umm_max_free_block_size(void) { return 8 * 1024 * 1024; }
+// umm_malloc: a counting allocator over the host malloc (see stubs/
+// umm_malloc.h). Live bytes are malloc_usable_size() of every block handed
+// out, so the metric moves exactly with the allocations; Core 1 (network
+// thread) allocates too, hence the atomics. The simulated heap refuses
+// requests that would exceed 8 MB, like the device heap would.
+static _Atomic size_t s_umm_live;
+static _Atomic size_t s_umm_peak;
+
+static void umm_count_add(size_t n) {
+    size_t live = atomic_fetch_add(&s_umm_live, n) + n;
+    size_t peak = atomic_load(&s_umm_peak);
+    while (live > peak && !atomic_compare_exchange_weak(&s_umm_peak, &peak, live)) {
+    }
+}
+
+static void umm_count_sub(size_t n) {
+    // Never wrap: a block that did not come from umm_* (a malloc/umm_free mix,
+    // itself a bug on hardware) must not make the heap look 16 EB free.
+    size_t live = atomic_load(&s_umm_live);
+    while (!atomic_compare_exchange_weak(&s_umm_live, &live, live > n ? live - n : 0)) {
+    }
+}
+
+static bool umm_would_overflow(size_t size) {
+    return size > SIM_UMM_HEAP_SIZE || atomic_load(&s_umm_live) > SIM_UMM_HEAP_SIZE - size;
+}
+
+size_t sim_umm_live_bytes(void) { return atomic_load(&s_umm_live); }
+size_t sim_umm_peak_bytes(void) { return atomic_load(&s_umm_peak); }
+
+size_t umm_free_heap_size(void) {
+    size_t live = atomic_load(&s_umm_live);
+    return live < SIM_UMM_HEAP_SIZE ? SIM_UMM_HEAP_SIZE - live : 0;
+}
+size_t umm_max_free_block_size(void) { return umm_free_heap_size(); }
 int umm_fragmentation_metric(void) { return 0; }
+
 void* umm_malloc(size_t size) {
-    return malloc(size);
+    if (umm_would_overflow(size)) return NULL;
+    void *p = malloc(size);
+    if (p) umm_count_add(malloc_usable_size(p));
+    return p;
 }
 void umm_free(void* ptr) {
+    if (!ptr) return;
+    umm_count_sub(malloc_usable_size(ptr));
     free(ptr);
 }
 void* umm_realloc(void* ptr, size_t size) {
-    return realloc(ptr, size);
+    if (!ptr) return umm_malloc(size);
+    if (size == 0) {
+        umm_free(ptr);
+        return NULL;
+    }
+    size_t old = malloc_usable_size(ptr);
+    if (size > old && umm_would_overflow(size - old)) return NULL;
+    void *p = realloc(ptr, size);
+    if (!p) return NULL;  // ptr is untouched and still counted
+    umm_count_sub(old);
+    umm_count_add(malloc_usable_size(p));
+    return p;
 }
 void* umm_calloc(size_t num, size_t size) {
-    return calloc(num, size);
+    if (size && num > SIM_UMM_HEAP_SIZE / size) return NULL;
+    void *p = umm_malloc(num * size);
+    if (p) memset(p, 0, num * size);
+    return p;
 }
 
 // Lua bridge stubs — network/tcp now provided by real lua_bridge_network.c/tcp.c

@@ -13,7 +13,7 @@ from pathlib import Path
 
 import pytest
 
-from helpers import (HEAP_METRICS_XFAIL, assert_heap_metrics_live, log_texts,
+from helpers import (measure_heap_probe, require_heap_metrics_live, log_texts,
                      lua_case_names, run_lua_app)
 
 SYS_CASES = lua_case_names("sys_test")
@@ -73,10 +73,21 @@ class TestHeapInfo:
         assert "psram_total_kb" in result
         assert result["psram_total_kb"] >= 0
 
-    @HEAP_METRICS_XFAIL
+    def test_heap_metrics_live(self, simulator):
+        """get_heap_info tracks real allocations: lua_heap_free_kb drops by
+        at least 1 MB while heap_probe holds ~2 MB of Lua strings, and comes
+        back once the app has exited and its VM is closed."""
+        before, during, after = measure_heap_probe(simulator)
+        assert before - during >= 1024, (
+            f"no drop while 2 MB is held: before={before} KB, held={during} KB")
+        assert before - during <= 4096, (
+            f"implausible drop for 2 MB: before={before} KB, held={during} KB")
+        assert abs(before - after) <= 128, (
+            f"heap not returned after exit: before={before} KB, after={after} KB")
+
     def test_heap_info_after_app(self, simulator):
         """An app cycle leaves no more than 100 KB behind."""
-        assert_heap_metrics_live(simulator)
+        require_heap_metrics_live(simulator)
         free_before = simulator.call("get_heap_info")["lua_heap_free_kb"]
         run_lua_app(simulator, "sys_test", timeout=15).assert_clean_exit()
         free_after = simulator.call("get_heap_info")["lua_heap_free_kb"]

@@ -10,7 +10,7 @@ import base64
 
 import pytest
 
-from helpers import HEAP_METRICS_XFAIL, assert_heap_metrics_live, run_lua_app
+from helpers import require_heap_metrics_live, run_lua_app
 
 
 @pytest.mark.slow
@@ -26,10 +26,9 @@ class TestRapidAppCycles:
                 f"cycle {i + 1}/10: {run.describe()}")
             assert run.done and not run.problems, f"cycle {i + 1}/10: {run.describe()}"
 
-    @HEAP_METRICS_XFAIL
     def test_10_cycles_no_heap_leak(self, simulator):
         """10 cycles leave no more than 200 KB behind."""
-        assert_heap_metrics_live(simulator)
+        require_heap_metrics_live(simulator)
         free_initial = simulator.call("get_heap_info")["lua_heap_free_kb"]
         for i in range(10):
             run_lua_app(simulator, "sys_test", timeout=15).assert_clean_exit()

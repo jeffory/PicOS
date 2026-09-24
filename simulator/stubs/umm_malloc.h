@@ -1,5 +1,14 @@
 // umm_malloc.h stub for simulator
-// Maps umm_malloc to standard malloc
+//
+// umm_* is backed by the host malloc through a counting allocator
+// (simulator/stubs/driver_stubs.c): it tracks live and peak bytes with
+// malloc_usable_size, so umm_free_heap_size() reports 8 MB minus the live
+// umm/Lua allocations and a leak shows up in get_heap_info. Host malloc (not
+// a real umm heap) keeps every allocation visible to ASan.
+//
+// These are real functions, not macros onto malloc: TUs that include the real
+// third_party/umm_malloc/src/umm_malloc.h (lua_bridge_internal.h does) and TUs
+// that include this stub must reach the same counter.
 
 #ifndef UMM_MALLOC_H
 #define UMM_MALLOC_H
@@ -7,18 +16,24 @@
 #include <stdlib.h>
 #include <stddef.h>
 
-// umm_malloc is just standard malloc on PC
-#define umm_malloc(size) malloc(size)
-#define umm_free(ptr) free(ptr)
-#define umm_realloc(ptr, size) realloc(ptr, size)
-#define umm_calloc(num, size) calloc(num, size)
+void *umm_malloc(size_t size);
+void *umm_calloc(size_t num, size_t size);
+void *umm_realloc(void *ptr, size_t size);
+void umm_free(void *ptr);
 
-// Heap metrics (simulator has a host heap; report an untouched 8MB)
+// Simulated heap size (matches UMM_MALLOC_CFG_HEAP_SIZE in lua_psram_alloc.c)
+#define SIM_UMM_HEAP_SIZE (8u * 1024u * 1024u)
+
+// 8 MB minus live bytes; the largest block is approximated by the free size
+// (the host heap does not fragment the way umm does), fragmentation is 0.
 size_t umm_free_heap_size(void);
 size_t umm_max_free_block_size(void);
 int umm_fragmentation_metric(void);
 
-// Heap info structure (dummy)
+// Live and peak bytes currently held through umm_*.
+size_t sim_umm_live_bytes(void);
+size_t sim_umm_peak_bytes(void);
+
 struct umm_heap_info {
     size_t total_size;
     size_t used_size;
@@ -28,18 +43,17 @@ struct umm_heap_info {
 
 static inline void umm_info_get(struct umm_heap_info* info) {
     if (info) {
-        info->total_size = 8 * 1024 * 1024;  // 8MB simulated
-        info->used_size = 0;
-        info->free_size = 8 * 1024 * 1024;
-        info->max_used_size = 0;
+        info->total_size = SIM_UMM_HEAP_SIZE;
+        info->used_size = sim_umm_live_bytes();
+        info->free_size = umm_free_heap_size();
+        info->max_used_size = sim_umm_peak_bytes();
     }
 }
 
-// Initialize/finalize (no-ops)
+// Initialize/finalize (no-ops: the host heap needs no setup)
 static inline void umm_init(void) {}
 static inline void umm_fini(void) {}
 
-// umm_init_heap - initialize with specific heap (no-op on simulator, just use regular init)
 static inline void umm_init_heap(void* heap, size_t heap_size) {
     (void)heap;
     (void)heap_size;
