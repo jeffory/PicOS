@@ -270,6 +270,12 @@ static bool lua_run(const app_entry_t *app) {
     return false;
   }
   bool ok = lua_run_app(app);
+  // lua_close() has run every file handle's __gc by now; this closes what
+  // could not be (a handle whose finalizer never ran), so FatFS's 16 lock
+  // slots (FF_FS_LOCK) are all free for the next app.
+  int leaked = app_files_close_all();
+  if (leaked)
+    printf("[LUA] closed %d file(s) left open by '%s'\n", leaked, app->name);
   app_identity_end();
   return ok;
 }

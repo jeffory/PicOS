@@ -90,6 +90,9 @@ picos_unit_test(test_config SOURCES ${SRC}/os/config.c ${SD_FAKE}
                 INCLUDES ${SD_INCLUDES})
 picos_unit_test(test_appconfig SOURCES ${SRC}/os/appconfig.c ${SD_FAKE}
                 INCLUDES ${SD_INCLUDES})
+picos_unit_test(test_app_files SOURCES ${SRC}/os/app_identity.c
+                ${SRC}/os/app_manifest.c ${SRC}/os/appconfig.c ${SD_FAKE}
+                INCLUDES ${SD_INCLUDES})
 
 # OTA image authentication (ECDSA P-256 + strict .sha256), against the same
 # mbedTLS the firmware links (host build, cmake/picos_host_mbedtls.cmake) and
