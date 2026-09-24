@@ -95,7 +95,8 @@ static uint32_t native_addr_to_elf_vaddr(uint32_t addr) {
 // reads them as a vectored-boot request), so everything that must survive
 // lives in scratch[0-3]:
 //   scratch[0] = CRASH_TAG (bits 31-16) | flags (bits 15-8) | SFSR (bits 7-0)
-//   scratch[1] = stacked PC
+//   scratch[1] = stacked PC (outside a crash record: the one-shot OTA intent
+//                token, OTA_MAGIC — main() zeroes it on the crash path)
 //   scratch[2] = stacked LR
 //   scratch[3] = CFSR (all 32 bits)
 // scratch[5-7] hold supplementary data that watchdog_reboot(0, 0, 0) leaves
@@ -664,6 +665,11 @@ static void sys_poll(void) {
     stdio_flush();
     sleep_ms(100);
     reset_usb_boot(0, 0);
+  }
+  if (dev_commands_wants_reboot_ota()) {
+    // Launcher-only: drop it rather than let it fire when the app exits.
+    dev_commands_clear_reboot_ota();
+    printf("[DEV] reboot-ota ignored: an app is running (exit it first)\n");
   }
 }
 
@@ -1821,6 +1827,10 @@ int main(void) {
     // HardFault crash recovery — preserve fault data for later display
     memcpy(s_crash_data, (void *)watchdog_hw->scratch, sizeof(s_crash_data));
     s_had_crash = true;
+    // scratch[1] holds the stacked PC in a crash record, and is also the OTA
+    // intent token's slot (OTA_SCRATCH_IDX): clear it so a PC that happens to
+    // equal OTA_MAGIC can never read as an update request.
+    watchdog_hw->scratch[OTA_SCRATCH_IDX] = 0;
     if (scratch0 & CRASH_F_BOOTING)
       boot_attempt = (int)((scratch0 & CRASH_BOOT_ATTEMPT_MASK)
                            >> CRASH_BOOT_ATTEMPT_SHIFT) + 1;

@@ -947,7 +947,7 @@ void launcher_run(void) {
       watchdog_reboot(0, 0, 0);
     }
     if (dev_commands_wants_reboot_ota()) {
-      // The host staged /system/update.bin + .sha256 (tools/ota_flash.py):
+      // The host staged /system/update.bin + .sha256 + .sig (ota_flash.py):
       // set the one-shot OTA token and reboot. Does not return on success.
       dev_commands_clear_reboot_ota();
       const char *err = NULL;

@@ -170,6 +170,11 @@ static void menu_lua_hook(lua_State *L, lua_Debug *ar) {
     sleep_ms(100);
     reset_usb_boot(0, 0);
   }
+  if (dev_commands_wants_reboot_ota()) {
+    // Launcher-only: drop it rather than let it fire when the app exits.
+    dev_commands_clear_reboot_ota();
+    printf("[DEV] reboot-ota ignored: an app is running (exit it first)\n");
+  }
   if (kbd_consume_menu_press())
     system_menu_show(L);
   // Both screenshot triggers set s_screenshot_pending so the capture fires

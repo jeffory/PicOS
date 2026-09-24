@@ -461,8 +461,9 @@ static void dev_command_run(void *arg) {
     } else if (strcmp(s_cmd_buf, "reboot-flash") == 0) {
         s_cmd_reboot_flash = true;
     } else if (strcmp(s_cmd_buf, "reboot-ota") == 0) {
-        // Apply a staged /system/update.bin (+ .sha256): the launcher sets
-        // the OTA request token and reboots (ignored while an app runs).
+        // Apply a staged /system/update.bin (+ .sha256/.sig): the launcher
+        // sets the OTA request token and reboots.  While an app runs it is
+        // dropped (lua_bridge / native sys_poll clear it), not deferred.
         s_cmd_reboot_ota = true;
         printf("[DEV] reboot-ota requested\n");
     } else if (strncmp(s_cmd_buf, "launch ", 7) == 0) {
@@ -684,7 +685,7 @@ static void dev_command_run(void *arg) {
         printf("[DEV]   usb            - Enable USB storage mode\n");
         printf("[DEV]   reboot         - Reboot device\n");
         printf("[DEV]   reboot-flash   - Reboot to BOOTSEL for flashing\n");
-        printf("[DEV]   reboot-ota     - Apply staged /system/update.bin (needs .sha256)\n");
+        printf("[DEV]   reboot-ota     - Apply staged /system/update.bin (needs .sha256 + .sig)\n");
         printf("[DEV]   launch <arg>   - Launch app by ID or name\n");
         printf("[DEV]   list           - List installed apps\n");
         printf("[DEV]   screenshot     - Capture screen\n");
