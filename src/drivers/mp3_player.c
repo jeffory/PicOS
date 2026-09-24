@@ -340,43 +340,79 @@ static void dma_audio_irq_handler(void) {
 }
 
 // ── Refill compressed-data buffer from SD card or fed ring ────────────────────
-static bool refill_decode_buffer(void) {
+// What a refill achieved. The decode loop must stop on anything but
+// REFILL_GOT_DATA: retrying at once, as it used to, busy-spun Core 1 (no
+// WiFi, no other audio) for as long as Core 0 held the SD card or the video
+// player had not fed more data, whenever a partial frame was buffered.
+typedef enum {
+    REFILL_GOT_DATA,  // new bytes were appended
+    REFILL_WAIT,      // none now (SD busy, fed ring empty, buffer full): next tick
+    REFILL_EOF,       // the file is exhausted (or unreadable)
+} refill_t;
+
+static refill_t refill_decode_buffer(void) {
     // Shift leftover data to front
     if (s_buffer_pos > 0 && s_bytes_in_buffer > 0) {
         memmove(s_decode_buffer, s_decode_buffer + s_buffer_pos, s_bytes_in_buffer);
     }
     s_buffer_pos = 0;
 
+    refill_t result = REFILL_WAIT;
     int space = (int)MP3_DECODE_BUFFER_SIZE - s_bytes_in_buffer - MAD_BUFFER_GUARD;
     if (space > 0) {
         if (s_fed_mode) {
-            // Fed mode: read from compressed audio ring in PIO PSRAM
+            // Fed mode: read from the compressed audio ring (never EOF: the
+            // video player feeds more, or stops us)
             uint32_t avail = fed_ring_available();
             uint32_t to_read = ((uint32_t)space < avail) ? (uint32_t)space : avail;
             if (to_read > 4096) to_read = 4096;
             if (to_read > 0) {
                 fed_ring_read(s_decode_buffer + s_bytes_in_buffer, to_read);
                 s_bytes_in_buffer += (int)to_read;
+                result = REFILL_GOT_DATA;
             }
+        } else if (!s_file) {
+            result = REFILL_EOF;
         } else {
-            // SD mode: non-blocking read
-            if (!s_file) goto pad;
+            // SD mode: non-blocking positioned read
             int to_read = (space > 4096) ? 4096 : space;
             int br = sdcard_try_fread_at(s_file, s_file_pos,
                                          s_decode_buffer + s_bytes_in_buffer, to_read);
             if (br > 0) {
                 s_bytes_in_buffer += br;
                 s_file_pos += (uint32_t)br;
-            } else
+                result = REFILL_GOT_DATA;
+            } else if (br == SDCARD_BUSY) {
                 s_diag_sd_fail++;
+            } else {
+                if (br < 0) s_diag_sd_fail++;
+                result = REFILL_EOF;
+            }
         }
     }
 
-pad:
     // Zero-pad guard bytes for libmad
     memset(s_decode_buffer + s_bytes_in_buffer, 0, MAD_BUFFER_GUARD);
+    return result;
+}
 
-    return s_bytes_in_buffer > 0;
+// End of the file with no whole frame left: loop back to the start (at
+// most once per update, so an empty or unreadable file cannot spin) or
+// finish. Returns true when decoding should go on.
+static bool end_of_stream(bool *rewound) {
+    if (s_player.loop && !*rewound) {
+        *rewound = true;
+        s_file_pos = 0;
+        s_bytes_in_buffer = 0;
+        s_buffer_pos = 0;
+        mad_stream_init(s_mad_stream);
+        mad_frame_init(s_mad_frame);
+        mad_synth_init(s_mad_synth);
+        return refill_decode_buffer() == REFILL_GOT_DATA;
+    }
+    if (!s_player.loop)
+        s_player.playing = false;
+    return false;
 }
 
 // ── Decode: fill PCM ring buffer (called from main loop, NOT ISR) ───────────
@@ -398,6 +434,9 @@ static void decode_fill_ring(void) {
     int max_frames = 3;
     int frames_decoded = 0;
     int errors_this_update = 0;
+    bool rewound = false;
+    // Every pass either decodes a frame, gets new input, counts an error
+    // (capped), or leaves: the loop is bounded within one update.
     while (frames_decoded < max_frames && ring_free() >= 1152 * 2 * 2) {
         mad_stream_buffer(s_mad_stream, s_decode_buffer + s_buffer_pos, s_bytes_in_buffer + MAD_BUFFER_GUARD);
 
@@ -411,54 +450,28 @@ static void decode_fill_ring(void) {
                 }
             }
 
-            if (s_mad_stream->error == MAD_ERROR_BUFLEN) {
-                if (!refill_decode_buffer()) {
-                    if (s_fed_mode) {
-                        // Fed mode: no more data right now, just break
-                        break;
-                    }
-                    if (s_player.loop) {
-                        s_file_pos = 0;
-                        s_bytes_in_buffer = 0;
-                        s_buffer_pos = 0;
-                        refill_decode_buffer();
-                        mad_stream_init(s_mad_stream);
-                        mad_frame_init(s_mad_frame);
-                        mad_synth_init(s_mad_synth);
-                        continue;
-                    }
-                    s_player.playing = false;
-                    break;
-                }
-                continue;
+            bool need_data = s_mad_stream->error == MAD_ERROR_BUFLEN ||
+                             (s_mad_stream->error == MAD_ERROR_LOSTSYNC &&
+                              s_bytes_in_buffer < 256);
+            if (need_data) {
+                if (s_mad_stream->error != MAD_ERROR_BUFLEN)
+                    s_diag_decode_errs++;
+                refill_t r = refill_decode_buffer();
+                if (r == REFILL_GOT_DATA)
+                    continue;
+                if (r == REFILL_WAIT)
+                    break;  // no new data yet: next tick, don't spin
+                if (end_of_stream(&rewound))
+                    continue;
+                break;
             }
 
             if (MAD_RECOVERABLE(s_mad_stream->error)) {
+                // libmad skips past the bad data: try the next frame, but a
+                // resync storm yields the core after MAX_ERRORS_PER_UPDATE.
                 s_diag_decode_errs++;
-                // For LOSTSYNC with low buffer, try to refill first
-                if (s_mad_stream->error == MAD_ERROR_LOSTSYNC && s_bytes_in_buffer < 256) {
-                    if (!refill_decode_buffer()) {
-                        if (s_fed_mode) {
-                            break;
-                        }
-                        if (s_player.loop) {
-                            s_file_pos = 0;
-                            s_bytes_in_buffer = 0;
-                            s_buffer_pos = 0;
-                            refill_decode_buffer();
-                            mad_stream_init(s_mad_stream);
-                            mad_frame_init(s_mad_frame);
-                            mad_synth_init(s_mad_synth);
-                            continue;
-                        }
-                        s_player.playing = false;
-                        break;
-                    }
-                    continue;
-                }
-                
-                // Allow more recoverable errors - don't count toward the error limit
-                // just continue to next frame
+                if (++errors_this_update >= MAX_ERRORS_PER_UPDATE)
+                    break;
                 continue;
             }
 
