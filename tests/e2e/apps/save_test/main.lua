@@ -22,6 +22,21 @@ T.case("corrupt_file_reads_nil", function()
     T.eq(save.get("bad"), nil, "a corrupt save must read as no save")
 end)
 
+T.case("list_returns_saved_names", function()
+    T.ok(save.set("list_a", { v = 1 }), "set list_a")
+    T.ok(save.set("list_b", { v = 2 }), "set list_b")
+    local names = {}
+    for _, n in ipairs(save.list()) do names[n] = true end
+    T.ok(names.list_a, "list() lacks list_a")
+    T.ok(names.list_b, "list() lacks list_b")
+    T.ok(names.ok_slot, "list() lacks ok_slot")
+    T.ok(not names["list_a.json"], "list() kept the .json suffix")
+    T.ok(save.delete("list_b"), "delete list_b")
+    names = {}
+    for _, n in ipairs(save.list()) do names[n] = true end
+    T.ok(not names.list_b, "list() still has deleted list_b")
+end)
+
 T.case("legacy_save_migrates", function()
     -- Staged at the pre-Task-6 location /saves/legacy.json.
     T.ok(save.exists("legacy"), "legacy save not found")

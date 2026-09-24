@@ -130,25 +130,58 @@ static int l_save_delete(lua_State *L) {
     return 1;
 }
 
-static void save_list_callback(const sdcard_entry_t *entry, void *user);
+// l_save_list walks the directory twice: once to size the names, once to copy
+// them into a Lua-owned buffer. No Lua call may run inside the sdcard_list_dir
+// callback (an error there would unwind past the SD mutex and the open
+// directory), and a Lua-owned buffer cannot leak if a later push fails.
+typedef struct {
+    char *buf;      // NULL on the sizing pass
+    size_t len, cap;
+} save_names_t;
+
+static void save_list_callback(const sdcard_entry_t *entry, void *user) {
+    save_names_t *s = (save_names_t *)user;
+    if (entry->is_dir)
+        return;
+    size_t n = strlen(entry->name);
+    if (n <= 5 || strcmp(entry->name + n - 5, ".json") != 0)
+        return;
+    n -= 5;
+    if (!fs_name_valid(entry->name, n, SAVE_MAX_NAME))
+        return;  // not a name get() could open
+    if (s->buf) {
+        if (s->len + n + 1 > s->cap)
+            return;  // the directory grew between the passes
+        memcpy(s->buf + s->len, entry->name, n);
+        s->buf[s->len + n] = '\0';
+    }
+    s->len += n + 1;
+}
 
 static int l_save_list(lua_State *L) {
     lua_newtable(L);
+    const app_identity_t *me = app_identity_current();
+    if (!me)
+        return 1;
+    char path[SAVE_MAX_PATH];
+    snprintf(path, sizeof(path), "%s/saves", me->data_dir);
+
+    save_names_t s = {0};
+    sdcard_list_dir(path, save_list_callback, &s);
+    if (s.len == 0)
+        return 1;
+    s.cap = s.len;
+    s.len = 0;
+    s.buf = (char *)lua_newuserdatauv(L, s.cap, 0);
+    sdcard_list_dir(path, save_list_callback, &s);
 
     int idx = 1;
-    sdcard_list_dir("/saves", save_list_callback, &idx);
-
-    return 1;
-}
-
-static void save_list_callback(const sdcard_entry_t *entry, void *user) {
-    int *idx = (int *)user;
-    if (!entry->is_dir) {
-        char *ext = strrchr(entry->name, '.');
-        if (ext && strcmp(ext, ".json") == 0) {
-            *ext = '\0';
-        }
+    for (size_t off = 0; off < s.len; off += strlen(s.buf + off) + 1) {
+        lua_pushstring(L, s.buf + off);
+        lua_rawseti(L, -3, idx++);
     }
+    lua_pop(L, 1);  // the name buffer
+    return 1;
 }
 
 static const luaL_Reg l_save_lib[] = {

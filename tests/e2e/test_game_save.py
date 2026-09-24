@@ -75,10 +75,11 @@ def test_other_app_cannot_read_slot(save_runs):
 def test_saves_land_in_app_data_dir(save_runs):
     run, _ = save_runs
     saves = run.sd.joinpath(*SAVE_DIR)
-    for name in ("ok_slot", "slot1"):
+    for name in ("ok_slot", "slot1", "list_a"):
         f = saves / f"{name}.json"
         assert f.exists(), f"{f} missing: {sorted(p.name for p in saves.iterdir())}"
         assert not (run.sd / "saves" / f"{name}.json").exists()
+    assert not (saves / "list_b.json").exists(), "delete left list_b.json"
 
 
 def test_legacy_save_moved_into_app(save_runs):
