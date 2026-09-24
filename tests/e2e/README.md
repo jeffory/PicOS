@@ -47,11 +47,31 @@ tests/e2e/
 - `lua_suite`: run a test-kit app once in its own simulator and return its
   cases (use from a module-scoped fixture).
 
-After every test the harness checks each simulator the test used: the process
-must still be running, there must be no crash log, and stderr must not contain
-a sanitizer report. A failing test gets the simulator's stdout/stderr tails, log
-buffer, `/system/error.log` and a screenshot attached (terminal sections and
-pytest-html extras; files under `--artifacts-dir`).
+After every test the harness checks the simulators the test used: `simulator`
+and any other fixture value that is a simulator, plus every simulator started
+through `sim_factory` (registered on the test) or `sim_module_factory`
+(registered on the module). The process must still be running, there must be
+no crash log, and stderr must not contain a sanitizer report. A failing test
+gets the simulator's stdout/stderr tails, log buffer, `/system/error.log` and a
+screenshot attached (terminal sections and pytest-html extras; files under
+`--artifacts-dir`).
+
+`lua_suite` stops its simulator before its tests run, so it is not in that
+hook. Its health goes into `LuaRun.problems` instead: if the simulator dies
+mid-run, `run_lua_app` returns outcome `simulator_died` with the crash log,
+exit status, sanitizer lines and stderr tail as problems, and every case id
+(`check_case`, `assert_*`) fails with that evidence.
+
+## Quarantined flaky tests
+
+`@pytest.mark.flaky(reason=...)` quarantines a known flake: when it fails, the
+failure is reported as an xfail with a `quarantined flake: <reason>` reason and
+listed in its own "quarantined flaky tests that failed" summary section, and the
+run does not fail. Nothing is retried. A quarantined test whose simulator
+crashed, wrote a crash log or reported a sanitizer error is **not** forgiven: it
+fails the run like any other. Keep crash assertions out of flaky tests (see
+`test_cdogs_memory.py::test_gameplay_drive_did_not_crash`). Quarantine is a
+stopgap: each marker names the cause and the fix.
 
 ## Synchronising with the simulator
 

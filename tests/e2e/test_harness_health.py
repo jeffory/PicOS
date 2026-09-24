@@ -124,6 +124,25 @@ def test_flaky_failure_is_quarantined_not_retried(pytester, simulator_binary):
                                  "*test_flake (call): quarantined flake: known flake*"])
 
 
+def test_flaky_health_failure_is_not_quarantined(pytester, simulator_binary):
+    """A @pytest.mark.flaky test whose simulator crashed FAILS the run: the
+    quarantine forgives flaky assertions, never crashes."""
+    result = _inner(pytester, simulator_binary, """
+        import os, signal, time, pytest
+        @pytest.mark.flaky(reason="known flake")
+        def test_flake_that_crashes(simulator):
+            os.kill(simulator.process.pid, signal.SIGSEGV)
+            deadline = time.time() + 5
+            while simulator.process.poll() is None and time.time() < deadline:
+                time.sleep(0.05)
+    """)
+    assert result.ret == pytest.ExitCode.TESTS_FAILED, result.stdout.str()
+    result.assert_outcomes(failed=1)
+    out = result.stdout.str()
+    assert "Signal: SIGSEGV" in out, out
+    assert "quarantined flaky tests that failed" not in out, out
+
+
 CRASHER_APP = (
     'local T = picocalc.sys.loadlib("picotest")\n'
     'T.case("before", function() end)\n'

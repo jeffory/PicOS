@@ -1735,7 +1735,8 @@ def test_quickplay_reaches_live_mission(cdogs_simulator, cdogs_gameplay_stats):
        load actually resulted in MORE resident graphics than a plain boot
        does (mission-specific tile/sprite art), not just that the tag
        string matched.
-    3. No HardFault and no crash log — the simulator process is still
+    3. (Checked by test_gameplay_drive_did_not_crash, which is not
+       quarantined.) No HardFault and no crash log — the simulator process is still
        alive and healthy after reaching gameplay, not merely that one log
        line happened to appear before it died.
 
@@ -1770,11 +1771,33 @@ def test_quickplay_reaches_live_mission(cdogs_simulator, cdogs_gameplay_stats):
         "boot-time menu/UI set"
     )
 
-    combined = _combined_output(cdogs_simulator)
+    # The crash checks (point 3) live in test_gameplay_drive_did_not_crash,
+    # which is NOT quarantined: a crash must fail the run even when this
+    # flaky drive's own assertions are forgiven.
+
+
+@pytest.fixture(scope="module")
+def cdogs_drive_attempted(request, cdogs_simulator):
+    """Run (or reuse) the gameplay drive, tolerating its known step-detection
+    flake, so the crash checks below always see the simulator after it."""
+    try:
+        request.getfixturevalue("cdogs_gameplay_stats")
+    except Exception:  # the flaky drive failed; the crash check still runs
+        pass
+    return cdogs_simulator
+
+
+@pytest.mark.timeout(300)
+def test_gameplay_drive_did_not_crash(cdogs_drive_attempted):
+    """Not quarantined: after the gameplay drive (whether or not its flaky
+    screen detection reached a live mission) the simulator must have no
+    HardFault text, no crash log and no sanitizer report."""
+    sim = cdogs_drive_attempted
+    combined = _combined_output(sim)
     assert "HardFault" not in combined, (
-        "'HardFault' text found in the simulator's own output after "
-        "reaching a live mission:\n" + combined[-2000:]
+        "'HardFault' text found in the simulator's own output during the "
+        "gameplay drive:\n" + combined[-2000:]
     )
-    problems = cdogs_simulator.health_problems()
+    problems = sim.health_problems()
     assert not problems, (
-        "C-Dogs simulator unhealthy after reaching gameplay:\n" + "\n".join(problems))
+        "C-Dogs simulator unhealthy after the gameplay drive:\n" + "\n".join(problems))

@@ -322,9 +322,14 @@ def pytest_runtest_makereport(item, call):
 def _quarantine(item, report):
     """A failing @pytest.mark.flaky test is reported as a quarantined flake
     (an xfail with a "quarantined flake" reason, listed in its own summary
-    section) instead of failing the run. No retries."""
+    section) instead of failing the run. No retries.
+
+    Never for a health failure: if any simulator the test used crashed,
+    wrote a crash log or reported a sanitizer error, the failure stands."""
     marker = item.get_closest_marker("flaky")
     if not marker or not report.failed or report.when not in ("setup", "call"):
+        return
+    if any(sim.health_problems() for sim in _sims_of(item)):
         return
     reason = marker.kwargs.get("reason", "") or (marker.args[0] if marker.args else "")
     report.outcome = "skipped"
