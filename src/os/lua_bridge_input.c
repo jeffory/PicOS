@@ -1,4 +1,5 @@
 #include "lua_bridge_internal.h"
+#include "../drivers/kbd_event_queue.h"
 
 // Auto-repeat state. Declared up here because clearState() has to disarm it;
 // the repeat logic itself lives further down next to getButtonsRepeated().
@@ -49,6 +50,58 @@ static int l_input_update(lua_State *L) {
 
 static int l_input_getRawKey(lua_State *L) {
   lua_pushinteger(L, kbd_get_raw_key());
+  return 1;
+}
+
+// pollEvent() -> {type, key, char, mods, button, repeat} or nil when empty.
+// Events come from kbd_poll (input.update()) in the order the keys were
+// typed; reading them does not affect getChar()/getButtons*().
+static int l_input_pollEvent(lua_State *L) {
+  kbd_event_t ev;
+  if (!kbd_poll_event(&ev)) {
+    lua_pushnil(L);
+    return 1;
+  }
+  lua_createtable(L, 0, 6);
+  lua_pushstring(L, ev.type == KBD_EV_DOWN ? "down"
+                    : ev.type == KBD_EV_UP ? "up"
+                                           : "char");
+  lua_setfield(L, -2, "type");
+  lua_pushinteger(L, ev.key);
+  lua_setfield(L, -2, "key");
+  if (ev.type == KBD_EV_CHAR) {
+    char c = (char)ev.ch;
+    lua_pushlstring(L, &c, 1);
+    lua_setfield(L, -2, "char");
+  }
+  lua_pushinteger(L, (lua_Integer)kbd_buttons_from_mods(ev.flags));
+  lua_setfield(L, -2, "mods");
+  uint32_t btn = kbd_keycode_to_button(ev.key);
+  if (btn) {
+    lua_pushinteger(L, (lua_Integer)btn);
+    lua_setfield(L, -2, "button");
+  }
+  if (ev.flags & KBD_EVF_REPEAT) {
+    lua_pushboolean(L, 1);
+    lua_setfield(L, -2, "repeat");
+  }
+  return 1;
+}
+
+// isKeyDown(k) — k is a one-character string ("a"; letters ignore case) or
+// an integer keycode as pollEvent's `key` / getRawKey() report it.
+static int l_input_isKeyDown(lua_State *L) {
+  lua_Integer key;
+  if (lua_type(L, 1) == LUA_TSTRING) {
+    size_t len = 0;
+    const char *s = lua_tolstring(L, 1, &len);
+    luaL_argcheck(L, len == 1, 1, "expected a one-character string");
+    key = (unsigned char)s[0];
+  } else {
+    key = lb_checkint(L, 1);
+    luaL_argcheck(L, key >= 0 && key <= 255, 1, "keycode out of range 0-255");
+  }
+  lua_pushboolean(L, kbd_is_key_down((uint8_t)key));
   return 1;
 }
 
@@ -150,6 +203,8 @@ static const luaL_Reg l_input_lib[] = {
     {"clearState", l_input_clearState},
     {"setRepeat", l_input_setRepeat},
     {"getButtonsRepeated", l_input_getButtonsRepeated},
+    {"pollEvent", l_input_pollEvent},
+    {"isKeyDown", l_input_isKeyDown},
     {NULL, NULL}};
 
 
@@ -159,6 +214,8 @@ void lua_bridge_input_init(lua_State *L) {
   s_repeat_delay_ms = 200;
   s_repeat_rate_ms  = 80;
   repeat_reset();
+  // A new app starts with an empty event queue, not the launcher's keys.
+  kbd_flush_events();
 
   register_subtable(L, "input", l_input_lib);
   // Push button constants into picocalc.input

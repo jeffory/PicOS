@@ -350,7 +350,10 @@ function picocalc.input.getButtonsPressed() end
 ---@return integer bitmask
 function picocalc.input.getButtonsReleased() end
 
----Return the last ASCII character typed, or `nil` if none this frame.
+---Return the character typed this frame, or `nil` if none. One char per
+---`update()`: when several keys arrive in one poll, the rest are returned by
+---the following frames in order (up to 4 are kept). Holding a key repeats it.
+---Enter returns `"\n"`, Backspace `"\b"`, Ctrl+letter a control code.
 ---Includes full keyboard layout; use for text input.
 ---@return string|nil
 function picocalc.input.getChar() end
@@ -359,8 +362,9 @@ function picocalc.input.getChar() end
 ---@return integer
 function picocalc.input.getRawKey() end
 
----Clear all latched input state (held buttons, pending edges). Useful on
----scene transitions so stale presses don't leak into the new scene.
+---Clear all latched input state (held buttons, pending edges, queued
+---`pollEvent` events, `isKeyDown` state). Useful on scene transitions so
+---stale presses don't leak into the new scene.
 function picocalc.input.clearState() end
 
 ---Configure key auto-repeat for menus and lists.
@@ -372,6 +376,37 @@ function picocalc.input.setRepeat(delay_ms, rate_ms) end
 ---edges according to `setRepeat()`. Use this for menu navigation.
 ---@return integer bitmask
 function picocalc.input.getButtonsRepeated() end
+
+---@class picocalc.input.Event
+---@field type "down"|"up"|"char"
+---@field key integer Keycode: ASCII for printable keys, else the STM32 code (as `getRawKey()`; e.g. Up=0xB5, Esc=0xB1, Ctrl=0xA5)
+---@field char? string `"char"` events only: the character (as `getChar()` would return it)
+---@field mods integer BTN_SHIFT/BTN_CTRL/BTN_ALT/BTN_FN held at the event
+---@field button? integer The BTN_* constant for keys that have one
+---@field repeat? boolean true for a `down`/`char` produced by holding the key (read it as `ev["repeat"]`: `repeat` is a Lua keyword)
+
+---Pop the oldest keyboard event, or `nil` when none is queued. Events are
+---filled by `update()` in the order keys were pressed and released, so taps
+---shorter than a frame and several chars in one frame are all reported. A
+---key press gives `down` (+ `char` if it types one), its release `up`.
+---Independent of `getChar()`/`getButtons*()`: reading one does not consume
+---the other. 16 events are kept (the oldest is dropped); a new app starts
+---with an empty queue.
+---```lua
+---input.update()
+---for ev in input.pollEvent do
+---  if ev.type == "char" then text = text .. ev.char end
+---end
+---```
+---@return picocalc.input.Event|nil
+function picocalc.input.pollEvent() end
+
+---True while a key is held. `k` is a one-character string (`"w"`; letters
+---ignore case) or an integer keycode as `pollEvent` reports it. Works for
+---letters as well as buttons. Updated by `update()`.
+---@param k string|integer
+---@return boolean
+function picocalc.input.isKeyDown(k) end
 
 -- =============================================================================
 -- picocalc.sys

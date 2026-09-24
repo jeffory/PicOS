@@ -72,7 +72,7 @@ main()
 ### Central API (`src/os/os.h`)
 `PicoCalcAPI g_api` is a function pointer table wired in `main.c`. Sub-tables (all available to both Lua and native C apps unless noted):
 - `picocalc.display` / `g_api.display` — drawing primitives, DMA flush, brightness, `drawImageNN`, `flushRows`
-- `picocalc.input` / `g_api.input` — button state, character input, edge detection
+- `picocalc.input` / `g_api.input` — button state, character input, edge detection; Lua also has `pollEvent()` (ordered `{type="down"|"up"|"char", key, char, mods, button, repeat}` events, nil when empty) and `isKeyDown(k)` (any key, letters included)
 - `picocalc.fs` / `g_api.fs` — file open/read/write/close/exists/size/listDir (Lua file handles: see "File handles" under App Model)
 - `picocalc.sys` / `g_api.sys` — time, battery, log, reboot, system menu, poll (native apps), shouldExit
 - `picocalc.wifi` / `g_api.wifi` — connect/disconnect/status/IP/SSID/isAvailable
@@ -114,7 +114,7 @@ The Lua bridge is split into ~20 module files, coordinated by `lua_bridge.c`:
 - `lua_bridge_graphics.c` — image loading, sprites, spritesheets, tilemap, animations
   - **Object lifetimes:** every C pointer from one graphics object to another is anchored in a user value (`anchor_set`): a sprite keeps its image, stencil and tilemap, a spritesheet its image, a tilemap its tileset, an animation loop its frames. The display list (`s_sprites[]`) is mirrored by a registry table, so a sprite that has been `add()`ed is never collected while displayed; `remove()`/`removeSprites()`/`removeAll()` release it. `add()` is idempotent. Enumeration (`getAllSprites`, `performOnAllSprites`, `query*`, `overlappingSprites`, `moveWithCollisions`) and `getImage()` return the real objects. Blinkers are held weakly by `updateAll`. Sprite `width`/`height` are bounds only; drawing and `alphaCollision` use the image's (or source rect's) own size.
   - Only documented types are accepted: `image.loadFromBuffer` takes a string or a `qmibuf` handle (length checked against its size); `sprite.new` takes an image or nothing. Check userdata with `luaL_checkudata`/`luaL_testudata`, never `lua_touserdata`.
-- `lua_bridge_input.c` — buttons, keyboard, key repeat
+- `lua_bridge_input.c` — buttons, keyboard, key repeat, `pollEvent`/`isKeyDown`
 - `lua_bridge_json.c` — `picocalc.json` encode/decode
 - `lua_bridge_mod.c` — `picocalc.modplayer` MOD music
 - `lua_bridge_network.c` — WiFi control, HTTP client (OO connections with `HTTP_MT` metatable)
@@ -208,6 +208,12 @@ A debug hook fires every 256 opcodes (`lua_sethook` with `LUA_MASKCOUNT`). The h
 - Lua `sys.qmiPsramAlloc(size)` returns a bounds-checked buffer handle (userdata owning a `umm_malloc` block, freed by `qmiPsramFree` or GC); `qmiPsramRead/Write(handle, offset, …)` raise on out-of-range or freed handles. No raw pointers reach Lua.
 - DMA vs the XIP cache (`pio_psram_xip.h`): a source in cached QMI PSRAM (`0x11…`) has its lines cleaned (`xip_cache_clean_range`) and is read through the uncached alias; a cached destination gets whole lines DMA'd with `xip_cache_invalidate_range` before and after, and its partial end lines copied by the CPU from a bounce buffer (never invalidate a line shared with other data). Transfers hold the driver lock one 4KB segment at a time and yield it to a waiting core between segments.
 - `pio_psram_init()` called early in `main()`; non-fatal if chip absent
+
+### Keyboard (`src/drivers/keyboard.c`, `kbd_event_queue.h`)
+- The STM32 keyboard controller (I2C1, 10 kHz) queues `[state, keycode]` items in a FIFO: state 1=pressed, 2=hold, 3=released, for every key (letters included); keycode is ASCII for printable keys (already shifted) or a `KEY_*` code. `kbd_poll()` reads up to 8 items every 50 ms
+- Every item is decoded in order (`kbd_fifo_apply`, header-only and shared with the simulator and `tests/unit/test_kbd_event_queue.c`) into a 16-event queue (`pollEvent`; oldest dropped), a key-down set (`isKeyDown`; letters case-folded because Shift may come up first), a 4-char `getChar` backlog (still one char per poll) and the button masks. A press+release inside one poll reads as held for that poll
+- HOLD is a repeat of a press already seen (repeat-flagged events and a char, no press edge). A HOLD for a key pressed before `kbd_clear_state`/`kbd_discard_pending` only marks it held, so it cannot answer `ui_confirm`
+- `kbd_clear_state` also clears the queue; `lua_bridge_input_init` flushes it, so an app never receives the launcher's keys. Injected buttons/chars feed the queue too; in the simulator `hal_input.c` stages events and `kbd_poll` moves them in, so apps see them only after `input.update()`, as on hardware
 
 ### System Menu (`src/os/system_menu.c`)
 - Triggered by the Sym key; detected via `kbd_consume_menu_press()` in the Lua debug hook
