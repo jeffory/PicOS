@@ -403,7 +403,7 @@ typedef struct {
     void     (*playerStop)(pcsound_player_t p);
     bool     (*playerIsPlaying)(pcsound_player_t p);
     uint8_t  (*playerGetVolume)(pcsound_player_t p);
-    void     (*playerSetVolume)(pcsound_player_t p, uint8_t vol);   // 0–255
+    void     (*playerSetVolume)(pcsound_player_t p, uint8_t vol);   // 0–100
     void     (*playerSetLoop)(pcsound_player_t p, bool loop);
     void     (*playerFree)(pcsound_player_t p);   // never frees the player's sample
 

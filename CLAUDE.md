@@ -186,6 +186,7 @@ A debug hook fires every 256 opcodes (`lua_sethook` with `LUA_MASKCOUNT`). The h
 - `fileplayer.c` — streaming file playback from SD card
 - `mp3_player.c` — MP3 decoding via libmad; PCM ring buffer (32KB) in PIO PSRAM; DMA ISR reads from 1KB SRAM staging buffer, refilled by Core 1
 - `mp3_player_update()`, `fileplayer_update()` and `mod_player_update()` called on Core 1 every 1 ms tick
+- Volumes are 0-100 everywhere (`audio.setVolume`, sampleplayer, fileplayer, mp3player, modplayer); larger values clamp to 100 (the mixers scale by vol/100, so more would overdrive).
 
 ### Video Player (`src/drivers/video_player.cpp`)
 - MJPEG video playback with JPEGDEC decoding (JPEGDEC state lives in static SRAM)

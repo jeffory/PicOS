@@ -216,7 +216,7 @@ static int l_sound_sample_play(lua_State *L) {
 static int l_sound_sample_playAt(lua_State *L) {
     sound_sample_t *sample = check_sample(L, 1);
     (void)luaL_checknumber(L, 2); // 'when' — ignored on this hardware (no scheduler)
-    uint8_t vol = (uint8_t)lb_clamp_int(lb_optint(L, 3, 100), 0, 255);
+    uint8_t vol = (uint8_t)lb_clamp_int(lb_optint(L, 3, 100), 0, 100);
     (void)lb_optint(L, 4, vol); // rightvol — mono PWM, use left
     float rate = (float)luaL_optnumber(L, 5, 1.0);
 
@@ -384,7 +384,7 @@ static int l_sound_sampleplayer_isPlaying(lua_State *L) {
 
 static int l_sound_sampleplayer_setVolume(lua_State *L) {
     sound_player_t *player = check_player(L, 1);
-    uint8_t vol = (uint8_t)lb_clamp_int(lb_checkint(L, 2), 0, 255);
+    uint8_t vol = (uint8_t)lb_clamp_int(lb_checkint(L, 2), 0, 100);
     g_api.soundplayer->playerSetVolume(player, vol);
     return 0;
 }
@@ -561,8 +561,8 @@ static int l_sound_fileplayer_setOffset(lua_State *L) {
 
 static int l_sound_fileplayer_setVolume(lua_State *L) {
     fileplayer_t *player = check_fileplayer(L, 1);
-    uint8_t left = (uint8_t)lb_clamp_int(lb_checkint(L, 2), 0, 255);
-    uint8_t right = (uint8_t)lb_clamp_int(lb_optint(L, 3, left), 0, 255);
+    uint8_t left = (uint8_t)lb_clamp_int(lb_checkint(L, 2), 0, 100);
+    uint8_t right = (uint8_t)lb_clamp_int(lb_optint(L, 3, left), 0, 100);
     // API takes a single volume value; use left channel value (sets both channels)
     (void)right;
     g_api.soundplayer->filePlayerSetVolume(player, left);
@@ -852,7 +852,7 @@ static int l_sound_mp3player_getLength(lua_State *L) {
 
 static int l_sound_mp3player_setVolume(lua_State *L) {
     mp3_player_t *player = check_mp3player(L, 1);
-    uint8_t vol = (uint8_t)lb_clamp_int(lb_checkint(L, 2), 0, 255);
+    uint8_t vol = (uint8_t)lb_clamp_int(lb_checkint(L, 2), 0, 100);
     g_api.soundplayer->mp3PlayerSetVolume(player, vol);
     return 0;
 }

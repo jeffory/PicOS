@@ -20,9 +20,7 @@ APP = "sound_lifetimes"
 CASES = lua_case_names(APP)
 
 # Known bugs still open, {case: reason} (strict xfails).
-KNOWN_BUGS = {
-    "volume_range_0_100": "fileplayer volume is not capped at 100; next commit",
-}
+KNOWN_BUGS = {}
 
 
 def _setup(case, mode):

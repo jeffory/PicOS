@@ -873,6 +873,10 @@ uint32_t fileplayer_get_length(const fileplayer_t *player) {
 
 void fileplayer_set_volume(fileplayer_t *player, uint8_t left, uint8_t right) {
     if (!player) return;
+    // 0-100 like every other volume: the mixer scales by vol/100, so more
+    // would overdrive (and clip) the stream.
+    if (left > 100) left = 100;
+    if (right > 100) right = 100;
     player->volume = left;
     s_fp_volume_l = left;
     s_fp_volume_r = right > 0 ? right : left;

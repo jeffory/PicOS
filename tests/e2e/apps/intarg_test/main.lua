@@ -77,7 +77,7 @@ try("COORD_INT", function() b:draw(1000000000, 0) end)   -- exact integer: clipp
 local okp, sp = pcall(pc.sound.sampleplayer)
 if okp and sp then
     pcall(function() sp:setVolume(300) end)
-    log("SVOL_300", sp:getVolume())             -- clamped to 255, driver caps 100
+    log("SVOL_300", sp:getVolume())             -- clamped to 0-100
     pcall(function() sp:setVolume(-1) end)
     log("SVOL_NEG", sp:getVolume())             -- expect 0
 else

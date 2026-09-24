@@ -860,7 +860,7 @@ function PicOSSample:getSubsample(start_frame, end_frame) end
 ---Play this sample immediately. `when` is accepted but ignored (no scheduler
 ---on this hardware — playback starts now).
 ---@param when? number Reserved; ignored
----@param vol? integer Left volume 0–255 (default 100)
+---@param vol? integer Volume 0–100 (default 100; larger values clamp to 100)
 ---@param rightvol? integer Right volume (ignored — mono PWM)
 ---@param rate? number Playback rate multiplier (default 1.0)
 function PicOSSample:playAt(when, vol, rightvol, rate) end
@@ -906,7 +906,7 @@ function PicOSSamplePlayer:setOffset(seconds) end
 function PicOSSamplePlayer:getOffset() end
 
 ---Set playback volume.
----@param vol integer 0–255
+---@param vol integer 0–100 (larger values clamp to 100)
 function PicOSSamplePlayer:setVolume(vol) end
 
 ---Return the current volume.
@@ -962,9 +962,10 @@ function PicOSFilePlayer:getOffset() end
 ---@param seconds number
 function PicOSFilePlayer:setOffset(seconds) end
 
----Set per-channel volumes. `right` defaults to `left` if omitted.
----@param left integer 0–255
----@param right? integer 0–255
+---Set the volume. `right` is accepted for Playdate compatibility, but both
+---channels play at `left`.
+---@param left integer 0–100 (larger values clamp to 100)
+---@param right? integer 0–100
 function PicOSFilePlayer:setVolume(left, right) end
 
 ---Return the current left and right channel volumes.
@@ -1026,7 +1027,7 @@ function PicOSMp3Player:getLength() end
 function PicOSMp3Player:getSampleRate() end
 
 ---Set playback volume.
----@param vol integer 0–255
+---@param vol integer 0–100 (larger values clamp to 100)
 function PicOSMp3Player:setVolume(vol) end
 
 ---Return the current volume.
