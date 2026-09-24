@@ -325,6 +325,12 @@ static int l_sys_loadlib(lua_State *L) {
 
   int read = sdcard_fread(f, buf, size);
   sdcard_fclose(f);
+  if (read <= 0) {  // a failed read returns -1: buf[-1] was written here
+    umm_free(buf);
+    lua_pushnil(L);
+    lua_pushfstring(L, "cannot read %s", path);
+    return 2;
+  }
   buf[read] = '\0';
 
   // Load and execute (source text only — never precompiled bytecode)

@@ -13,15 +13,18 @@ static video_player_t *check_video(lua_State *L, int idx) {
 }
 
 static int l_video_new(lua_State *L) {
+    // The userdata first: if it raises (out of memory) there is no player to
+    // leak, and __gc ignores the NULL a failed create leaves behind.
+    video_player_t **ud = lua_newuserdatauv(L, sizeof(video_player_t *), 0);
+    *ud = NULL;
+    luaL_setmetatable(L, VIDEO_USERDATA);
     video_player_t *player = video_player_create();
     if (!player) {
         lua_pushnil(L);
         lua_pushstring(L, "failed to create video player");
         return 2;
     }
-    video_player_t **ud = lua_newuserdata(L, sizeof(video_player_t *));
     *ud = player;
-    luaL_setmetatable(L, VIDEO_USERDATA);
     return 1;
 }
 

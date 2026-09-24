@@ -413,7 +413,9 @@ static void copy_progress_trampoline(uint32_t done, uint32_t total, void *user) 
   lua_rawgeti(ctx->L, LUA_REGISTRYINDEX, ctx->fn_ref);
   lua_pushinteger(ctx->L, (lua_Integer)done);
   lua_pushinteger(ctx->L, (lua_Integer)total);
-  lua_pcall(ctx->L, 2, 0, 0);
+  if (lua_pcall(ctx->L, 2, 0, 0) != LUA_OK)
+    lua_pop(ctx->L, 1);  // errors in the callback are ignored (one per chunk
+                         // would otherwise pile up on the stack)
 }
 
 static int l_fs_copy(lua_State *L) {

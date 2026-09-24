@@ -58,4 +58,28 @@ T.case("terminal_new_accepts_screen_sizes", function()
     collectgarbage("collect")
 end)
 
+-- ── Protected callbacks leave nothing on the stack ────────────────────────
+-- fs.copy's progress trampoline lua_pcall'd the callback and never popped
+-- the error: one stack slot per 4 KB chunk, until the stack hit
+-- LUAI_MAXSTACK and the remaining callbacks failed with "stack overflow".
+T.case("fs_copy_failing_progress_callback", function()
+    local dir = "/data/" .. APP_ID
+    local src, dst = dir .. "/big.bin", dir .. "/big_copy.bin"
+    local f = T.ok(pc.fs.open(src, "w"))
+    local chunk = string.rep("x", 4096)
+    local N = 1100  -- more chunks than LUAI_MAXSTACK (1000) slots
+    for i = 1, N do pc.fs.write(f, chunk) end
+    pc.fs.close(f)
+    local calls = 0
+    local ok = pc.fs.copy(src, dst, function(done, total)
+        calls = calls + 1
+        error("progress callback failed")
+    end)
+    T.ok(ok, "copy failed")
+    T.eq(calls, N, "progress callbacks lost (stack full)")
+    T.eq(pc.fs.size(dst), N * 4096)
+    pc.fs.delete(src)
+    pc.fs.delete(dst)
+end)
+
 T.done()

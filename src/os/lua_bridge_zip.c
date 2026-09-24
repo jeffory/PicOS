@@ -13,51 +13,6 @@
 #include "hardware/watchdog.h"
 #endif
 
-// ── picocalc.zip.list(zip_path) → array of {name, size, compressed_size} ─────
-static int l_zip_list(lua_State *L) {
-    const char *zip_path = luaL_checkstring(L, 1);
-
-    if (!fs_sandbox_check(L, zip_path, false)) {
-        lua_pushnil(L);
-        lua_pushstring(L, "permission denied");
-        return 2;
-    }
-
-    zip_reader_t zr;
-    char err[ZIP_ERR_MAX];
-    if (!zip_reader_open(&zr, zip_path, err)) {
-        lua_pushnil(L);
-        lua_pushstring(L, err);
-        return 2;
-    }
-
-    int num_files = zip_reader_num_entries(&zr);
-    lua_createtable(L, num_files, 0);
-
-    for (int i = 0; i < num_files; i++) {
-        zip_entry_info_t info;
-        if (!zip_reader_stat_index(&zr, i, &info))
-            continue;
-
-        // Skip directories
-        if (info.is_dir)
-            continue;
-
-        lua_createtable(L, 0, 3);
-        lua_pushstring(L, info.name);
-        lua_setfield(L, -2, "name");
-        lua_pushinteger(L, (lua_Integer)info.size);
-        lua_setfield(L, -2, "size");
-        lua_pushinteger(L, (lua_Integer)info.comp_size);
-        lua_setfield(L, -2, "compressed_size");
-
-        lua_rawseti(L, -2, lua_rawlen(L, -2) + 1);
-    }
-
-    zip_reader_close(&zr);
-    return 1;
-}
-
 // ── Progress trampoline: pump the watchdog, then fire the Lua callback ───────
 
 typedef struct {
@@ -77,9 +32,12 @@ static bool lua_zip_progress(int done, int total, const char *name, void *user) 
         lua_pushvalue(p->L, 3);  // the callback
         lua_pushinteger(p->L, done);
         lua_pushinteger(p->L, total);
-        lua_pcall(p->L, 2, 0, 0);  // errors in the callback are ignored
+        if (lua_pcall(p->L, 2, 0, 0) != LUA_OK)
+            lua_pop(p->L, 1);  // errors in the callback are ignored
     }
-    return true;
+    // An exit request (sys.exit() in the callback, exit_app) stops the
+    // extraction; the app then exits from the next instruction.
+    return !lua_bridge_exit_requested();
 }
 
 // ── picocalc.zip.extract(zip_path, dest_dir [, progress_fn]) → ok [, err] ───
@@ -154,6 +112,62 @@ static void archive_do_close(lua_zip_archive_t *ar) {
     }
 }
 
+// Pushes an archive userdata (metatable set, not open yet): the reader lives
+// inside it, so an error that unwinds past an open reader leaves it to __gc.
+static lua_zip_archive_t *push_archive(lua_State *L) {
+    lua_zip_archive_t *ar =
+        (lua_zip_archive_t *)lua_newuserdatauv(L, sizeof(*ar), 0);
+    ar->open = false;
+    luaL_setmetatable(L, ZIP_MT);
+    return ar;
+}
+
+// Pushes the {name, size, compressed_size} array of the archive's files.
+static void push_entry_list(lua_State *L, zip_reader_t *zr) {
+    int n = zip_reader_num_entries(zr);
+    lua_createtable(L, n > 0 ? n : 0, 0);
+    for (int i = 0; i < n; i++) {
+        zip_entry_info_t info;
+        if (!zip_reader_stat_index(zr, i, &info) || info.is_dir)
+            continue;
+        lua_createtable(L, 0, 3);
+        lua_pushstring(L, info.name);
+        lua_setfield(L, -2, "name");
+        lua_pushinteger(L, (lua_Integer)info.size);
+        lua_setfield(L, -2, "size");
+        lua_pushinteger(L, (lua_Integer)info.comp_size);
+        lua_setfield(L, -2, "compressed_size");
+        lua_rawseti(L, -2, lua_rawlen(L, -2) + 1);
+    }
+}
+
+// ── picocalc.zip.list(zip_path) → array of {name, size, compressed_size} ─────
+// The reader is held in a (transient) archive userdata: the table building
+// below can raise (out of memory), and the archive's __gc then closes it.
+static int l_zip_list(lua_State *L) {
+    const char *zip_path = luaL_checkstring(L, 1);
+
+    if (!fs_sandbox_check(L, zip_path, false)) {
+        lua_pushnil(L);
+        lua_pushstring(L, "permission denied");
+        return 2;
+    }
+
+    lua_zip_archive_t *ar = push_archive(L);
+    char err[ZIP_ERR_MAX];
+    if (!zip_reader_open(&ar->zr, zip_path, err)) {
+        lua_pushnil(L);
+        lua_pushstring(L, err);
+        return 2;
+    }
+    ar->open = true;
+    s_lua_zip_open_count++;  // transient; not limited by ZIP_LUA_MAX_OPEN
+
+    push_entry_list(L, &ar->zr);
+    archive_do_close(ar);
+    return 1;
+}
+
 // ── zip.open(path) → archive [, err] ─────────────────────────────────────────
 static int l_zip_open(lua_State *L) {
     const char *path = luaL_checkstring(L, 1);
@@ -169,9 +183,7 @@ static int l_zip_open(lua_State *L) {
         return 2;
     }
 
-    lua_zip_archive_t *ar =
-        (lua_zip_archive_t *)lua_newuserdatauv(L, sizeof(*ar), 0);
-    ar->open = false;
+    lua_zip_archive_t *ar = push_archive(L);
 
     char err[ZIP_ERR_MAX];
     if (!zip_reader_open(&ar->zr, path, err)) {
@@ -182,30 +194,13 @@ static int l_zip_open(lua_State *L) {
     }
     ar->open = true;
     s_lua_zip_open_count++;
-
-    luaL_getmetatable(L, ZIP_MT);
-    lua_setmetatable(L, -2);
     return 1;
 }
 
 // ── ar:list() → array of {name, size, compressed_size} ───────────────────────
 static int l_ar_list(lua_State *L) {
     lua_zip_archive_t *ar = check_archive(L);
-    int n = zip_reader_num_entries(&ar->zr);
-    lua_createtable(L, n, 0);
-    for (int i = 0; i < n; i++) {
-        zip_entry_info_t info;
-        if (!zip_reader_stat_index(&ar->zr, i, &info) || info.is_dir)
-            continue;
-        lua_createtable(L, 0, 3);
-        lua_pushstring(L, info.name);
-        lua_setfield(L, -2, "name");
-        lua_pushinteger(L, (lua_Integer)info.size);
-        lua_setfield(L, -2, "size");
-        lua_pushinteger(L, (lua_Integer)info.comp_size);
-        lua_setfield(L, -2, "compressed_size");
-        lua_rawseti(L, -2, lua_rawlen(L, -2) + 1);
-    }
+    push_entry_list(L, &ar->zr);
     return 1;
 }
 
@@ -244,17 +239,33 @@ static int l_ar_read(lua_State *L) {
         return 2;
     }
 
-    void *data = NULL;
-    size_t len = 0;
+    // Decompressed straight into the result string's buffer (no heap copy
+    // to leak if an error unwinds, half the peak memory). Same cap as
+    // zip_reader_read_to_heap: ZIP_MAX_READ_MEM, or max_len when smaller.
+    zip_entry_info_t info;
+    if (!zip_reader_stat_index(&ar->zr, idx, &info)) {
+        lua_pushnil(L);
+        lua_pushstring(L, "bad zip");
+        return 2;
+    }
+    size_t cap = ZIP_MAX_READ_MEM;
+    if (max_len > 0 && (size_t)max_len < cap)
+        cap = (size_t)max_len;
+    if ((uint64_t)info.size > cap) {
+        lua_pushnil(L);
+        lua_pushstring(L, "size cap");
+        return 2;
+    }
+    luaL_Buffer b;
+    void *buf = luaL_buffinitsize(L, &b, (size_t)info.size);
     char err[ZIP_ERR_MAX];
-    if (!zip_reader_read_to_heap(&ar->zr, idx, &data, &len,
-                                 max_len > 0 ? (size_t)max_len : 0, err)) {
+    int n = zip_reader_read_to_buf(&ar->zr, idx, buf, (size_t)info.size, err);
+    if (n < 0) {
         lua_pushnil(L);
         lua_pushstring(L, err);
         return 2;
     }
-    lua_pushlstring(L, (const char *)data, len);
-    zip_reader_free(data);
+    luaL_pushresultsize(&b, (size_t)n);
     return 1;
 }
 

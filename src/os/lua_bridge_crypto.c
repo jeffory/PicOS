@@ -21,19 +21,18 @@ static int l_aes_ctr_update(lua_State *L) {
     size_t len;
     const char *input = luaL_checklstring(L, 2, &len);
 
-    uint8_t *output = umm_malloc(len);
-    if (!output) return luaL_error(L, "aes_ctr: out of memory");
+    // Straight into the result string's buffer: no temporary allocation to
+    // leak if an error unwinds, and no second copy.
+    luaL_Buffer b;
+    uint8_t *output = (uint8_t *)luaL_buffinitsize(L, &b, len);
 
     int ret = g_api.crypto->aesUpdate(ud->ctx,
                                       (const uint8_t *)input, output,
                                       (uint32_t)len);
-    if (ret != 0) {
-        umm_free(output);
+    if (ret != 0)
         return luaL_error(L, "aes_ctr: encrypt/decrypt failed (%d)", ret);
-    }
 
-    lua_pushlstring(L, (const char *)output, len);
-    umm_free(output);
+    luaL_pushresultsize(&b, len);
     return 1;
 }
 
@@ -126,23 +125,18 @@ static int l_crypto_random_bytes(lua_State *L) {
     if (n <= 0 || n > 4096)
         return luaL_error(L, "randomBytes: n must be 1-4096");
 
-    uint8_t *buf = umm_malloc((size_t)n);
-    if (!buf) return luaL_error(L, "randomBytes: out of memory");
-
     // No TRNG-seeded DRBG on this core: raise rather than hand back zeros.
-    if (!rng_ready()) {
-        umm_free(buf);
+    if (!rng_ready())
         return luaL_error(L, "randomBytes: no cryptographic RNG "
                              "(TRNG seeding failed)");
-    }
-    g_api.crypto->randomBytes(buf, (uint32_t)n);
-    if (!rng_ready()) {  // the DRBG failed during this request (buf zeroed)
-        umm_free(buf);
-        return luaL_error(L, "randomBytes: cryptographic RNG failed");
-    }
 
-    lua_pushlstring(L, (const char *)buf, (size_t)n);
-    umm_free(buf);
+    luaL_Buffer b;
+    uint8_t *buf = (uint8_t *)luaL_buffinitsize(L, &b, (size_t)n);
+    g_api.crypto->randomBytes(buf, (uint32_t)n);
+    if (!rng_ready())  // the DRBG failed during this request (buf zeroed)
+        return luaL_error(L, "randomBytes: cryptographic RNG failed");
+
+    luaL_pushresultsize(&b, (size_t)n);
     return 1;
 }
 
@@ -255,39 +249,39 @@ static int l_crypto_aes_ctr_new(lua_State *L) {
     if (iv_len != 16)
         return luaL_error(L, "aes_ctr_new: iv must be 16 bytes");
 
-    pccrypto_aes_t ctx = g_api.crypto->aesNew((const uint8_t *)key, (uint32_t)key_len,
-                                               (const uint8_t *)iv);
-    if (!ctx)
+    // The userdata first (its __gc ignores a NULL ctx), so an out-of-memory
+    // error while creating it cannot leak a context.
+    aes_ctr_ud_t *ud = (aes_ctr_ud_t *)lua_newuserdatauv(L, sizeof(aes_ctr_ud_t), 0);
+    ud->ctx = NULL;
+    luaL_setmetatable(L, AES_CTR_MT);
+    ud->ctx = g_api.crypto->aesNew((const uint8_t *)key, (uint32_t)key_len,
+                                   (const uint8_t *)iv);
+    if (!ud->ctx)
         return luaL_error(L, "aes_ctr_new: failed to create AES context");
-
-    aes_ctr_ud_t *ud = (aes_ctr_ud_t *)lua_newuserdata(L, sizeof(aes_ctr_ud_t));
-    ud->ctx = ctx;
-    luaL_getmetatable(L, AES_CTR_MT);
-    lua_setmetatable(L, -2);
     return 1;
 }
 
-static int l_crypto_ecdh_x25519_new(lua_State *L) {
-    pccrypto_ecdh_t ctx = g_api.crypto->ecdhX25519();
-    if (!ctx)
-        return luaL_error(L, "ecdh_x25519_new: failed to create ECDH context");
+// An ECDH userdata holding no context yet (__gc ignores NULL).
+static ecdh_ud_t *new_ecdh_ud(lua_State *L) {
+    ecdh_ud_t *ud = (ecdh_ud_t *)lua_newuserdatauv(L, sizeof(ecdh_ud_t), 0);
+    ud->ctx = NULL;
+    luaL_setmetatable(L, ECDH_MT);
+    return ud;
+}
 
-    ecdh_ud_t *ud = (ecdh_ud_t *)lua_newuserdata(L, sizeof(ecdh_ud_t));
-    ud->ctx = ctx;
-    luaL_getmetatable(L, ECDH_MT);
-    lua_setmetatable(L, -2);
+static int l_crypto_ecdh_x25519_new(lua_State *L) {
+    ecdh_ud_t *ud = new_ecdh_ud(L);  // before the context: nothing to leak
+    ud->ctx = g_api.crypto->ecdhX25519();
+    if (!ud->ctx)
+        return luaL_error(L, "ecdh_x25519_new: failed to create ECDH context");
     return 1;
 }
 
 static int l_crypto_ecdh_p256_new(lua_State *L) {
-    pccrypto_ecdh_t ctx = g_api.crypto->ecdhP256();
-    if (!ctx)
+    ecdh_ud_t *ud = new_ecdh_ud(L);  // before the context: nothing to leak
+    ud->ctx = g_api.crypto->ecdhP256();
+    if (!ud->ctx)
         return luaL_error(L, "ecdh_p256_new: failed to create ECDH context");
-
-    ecdh_ud_t *ud = (ecdh_ud_t *)lua_newuserdata(L, sizeof(ecdh_ud_t));
-    ud->ctx = ctx;
-    luaL_getmetatable(L, ECDH_MT);
-    lua_setmetatable(L, -2);
     return 1;
 }
 
