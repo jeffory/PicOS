@@ -6,7 +6,7 @@
 --
 -- The harness writes /data/<APP_ID>/servers.json before launch:
 --   {"http": port, "echo": port, "blackhole": port, "big_sum": n,
---    "case": "<one case name>"}
+--    "case": "<one case name>", "host": "<optional, default 127.0.0.1>"}
 -- and this app runs ONLY that case, so a case that crashes the simulator
 -- (the cross-core races this suite exists to reproduce) cannot take the
 -- others down with it. Cases are registered with case_fw(<literal name>, fn);
@@ -16,9 +16,10 @@ local pc = picocalc
 local net = pc.network
 local T = pc.sys.loadlib("picotest")
 
-local HOST = "127.0.0.1"
-
 local cfg = pc.json.decode(pc.fs.readFile("/data/" .. APP_ID .. "/servers.json"))
+-- The simulator runs the servers on loopback; a hardware run names the
+-- host (net_servers.py --advertise).
+local HOST = cfg.host or "127.0.0.1"
 
 pc.display.clear(pc.display.BLACK)
 pc.display.drawText(10, 10, "net_fw: " .. tostring(cfg.case), pc.display.WHITE)

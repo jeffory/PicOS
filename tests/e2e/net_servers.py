@@ -168,8 +168,8 @@ class _Server(ThreadingHTTPServer):
 
 
 class HttpTestServer:
-    def __init__(self):
-        self._srv = _Server(("127.0.0.1", 0), _Handler)
+    def __init__(self, host: str = "127.0.0.1"):
+        self._srv = _Server((host, 0), _Handler)
         self._srv.hits = []
         self._srv.posts = []
         self._srv.hang_closed = []
@@ -208,10 +208,10 @@ class TcpEchoServer:
     # More than the firmware's TCP ring (TCP_RECV_BUF_DEFAULT, 8 KiB)
     BURST_BODY = bytes((i * 7) & 0xFF for i in range(20000))
 
-    def __init__(self):
+    def __init__(self, host: str = "127.0.0.1"):
         self._lsock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         self._lsock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-        self._lsock.bind(("127.0.0.1", 0))
+        self._lsock.bind((host, 0))
         self._lsock.listen(16)
         self._lsock.settimeout(0.1)
         self.port = self._lsock.getsockname()[1]
@@ -316,9 +316,9 @@ class BlackholeServer:
     SYNs (net.ipv4.tcp_abort_on_overflow=0, the default) and connect()
     hangs until the client gives up."""
 
-    def __init__(self):
+    def __init__(self, host: str = "127.0.0.1"):
         self._lsock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        self._lsock.bind(("127.0.0.1", 0))
+        self._lsock.bind((host, 0))
         self._lsock.listen(0)
         self.port = self._lsock.getsockname()[1]
         self._fillers = []
@@ -354,3 +354,51 @@ class BlackholeServer:
         for s in self._fillers:
             s.close()
         self._lsock.close()
+
+
+def _adler(data: bytes) -> int:
+    a, b = 1, 0
+    for byte in data:
+        a = (a + byte) % 65521
+        b = (b + a) % 65521
+    return b * 65536 + a
+
+
+if __name__ == "__main__":
+    # Hardware runs: serve the net_fw cases to a PicoCalc on the LAN.
+    #   python3 tests/e2e/net_servers.py --advertise <this host's LAN IP> \
+    #       --case tcp_close_while_receiving --out /tmp/servers.json
+    # then put /tmp/servers.json at /data/com.test.net_fw/servers.json on the
+    # device and launch net_fw (see the Task 13 report's hardware checklist).
+    # The black-hole port is only black on this host's own stack; over the
+    # LAN a connect to it may succeed, so skip the *_connect_timeout cases.
+    import argparse
+    import json
+    ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
+    ap.add_argument("--bind", default="0.0.0.0")
+    ap.add_argument("--advertise", required=True,
+                    help="address the device uses to reach this host")
+    ap.add_argument("--case", required=True, help="net_fw case to run")
+    ap.add_argument("--out", default="servers.json")
+    args = ap.parse_args()
+    http = HttpTestServer(args.bind).start()
+    echo = TcpEchoServer(args.bind).start()
+    hole = BlackholeServer(args.bind).start()
+    cfg = {"host": args.advertise, "http": http.port, "echo": echo.port,
+           "blackhole": hole.port, "big_sum": _adler(big_body()),
+           "case": args.case}
+    with open(args.out, "w") as f:
+        json.dump(cfg, f)
+    print(f"serving on {args.bind}: {json.dumps(cfg)} -> {args.out}")
+    print("Ctrl-C to stop")
+    try:
+        while True:
+            time.sleep(1)
+            print(f"tcp open={echo.open_count()} accepted={echo.accepted} "
+                  f"http hits={len(http.hits)}", flush=True)
+    except KeyboardInterrupt:
+        pass
+    finally:
+        http.stop()
+        echo.stop()
+        hole.stop()
