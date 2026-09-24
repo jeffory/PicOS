@@ -3,6 +3,17 @@
 
 #define MODPLAYER_USERDATA "modplayer"
 
+// There is one MOD player (mod_player_create returns the same singleton and
+// resets it). So create() hands out one Lua handle: while that handle is
+// alive, create() returns it again, untouched. The registry holds it in a
+// weak-valued table (keyed by &s_mod_owner), so it is still collected when
+// the app drops it. s_mod_owner is the handle that owns the player: only its
+// __gc tears the player down. A handle that became unreachable but whose
+// finaliser has not run yet is already gone from the weak table, so a
+// create() in that window makes a new owner, and the stale finaliser must
+// not stop the new owner's music. Compared, never dereferenced.
+static const void *s_mod_owner = NULL;
+
 // The live player at idx, or a Lua error. The pointer is NULL once __gc ran
 // (reachable only from a later finaliser: __gc is not a method).
 static mod_player_t *check_modplayer(lua_State *L, int idx) {
@@ -13,15 +24,28 @@ static mod_player_t *check_modplayer(lua_State *L, int idx) {
 }
 
 static int l_mod_create(lua_State *L) {
+    lua_rawgetp(L, LUA_REGISTRYINDEX, &s_mod_owner);  // weak cache
+    if (lua_rawgeti(L, -1, 1) == LUA_TUSERDATA) {
+        mod_player_t **live = luaL_checkudata(L, -1, MODPLAYER_USERDATA);
+        if (*live && (const void *)live == s_mod_owner)
+            return 1;  // the one live handle
+    }
+    lua_pop(L, 1);  // the stale cache entry (nil)
+
+    // The userdata first: if it raises (out of memory) nothing is reset.
+    mod_player_t **ud = lua_newuserdatauv(L, sizeof(mod_player_t *), 0);
+    *ud = NULL;
+    luaL_setmetatable(L, MODPLAYER_USERDATA);
     mod_player_t *p = mod_player_create();
     if (!p) {
         lua_pushnil(L);
         lua_pushstring(L, "failed to create MOD player");
         return 2;
     }
-    mod_player_t **ud = lua_newuserdata(L, sizeof(mod_player_t *));
     *ud = p;
-    luaL_setmetatable(L, MODPLAYER_USERDATA);
+    s_mod_owner = ud;
+    lua_pushvalue(L, -1);
+    lua_rawseti(L, -3, 1);  // cache[1] = handle
     return 1;
 }
 
@@ -90,12 +114,15 @@ static int l_mod_set_loop(lua_State *L) {
     return 0;
 }
 
+// Only the owning handle stops the player and frees its module (see
+// s_mod_owner); a stale handle just goes dead.
 static int l_mod_gc(lua_State *L) {
     mod_player_t **ud = luaL_checkudata(L, 1, MODPLAYER_USERDATA);
-    if (*ud) {
+    if (*ud && (const void *)ud == s_mod_owner) {
         mod_player_destroy(*ud);
-        *ud = NULL;
+        s_mod_owner = NULL;
     }
+    *ud = NULL;
     return 0;
 }
 
@@ -123,6 +150,16 @@ static const luaL_Reg modplayer_funcs[] = {
 };
 
 void lua_bridge_mod_init(lua_State *L) {
+    // A fresh lua_State: the previous app's handle was finalised by
+    // lua_close (which cleared s_mod_owner); this is the safety net.
+    s_mod_owner = NULL;
+    lua_newtable(L);  // weak-valued handle cache
+    lua_createtable(L, 0, 1);
+    lua_pushliteral(L, "v");
+    lua_setfield(L, -2, "__mode");
+    lua_setmetatable(L, -2);
+    lua_rawsetp(L, LUA_REGISTRYINDEX, &s_mod_owner);
+
     // Create the modplayer metatable
     lb_register_type(L, MODPLAYER_USERDATA, modplayer_methods, modplayer_meta);
 

@@ -162,3 +162,67 @@ def test_destroyed_object_errors(simulator, name):
     _stage(simulator, f"dead_{name}", body)
     run = run_lua_app(simulator, f"dead_{name}", timeout=20)
     run.assert_all_passed(["destroyed"])
+
+
+# ── modplayer: one player, however many times create() is called ───────────
+
+SINGLETON = """
+T.case('create_twice', function()
+    local m1 = T.ok(pc.modplayer.create(), 'create 1')
+    T.ok(m1:load(APP_DIR .. '/m.mod'), 'load')
+    m1:setVolume(37)
+    m1:play(true)
+    T.ok(m1:isPlaying(), 'playing')
+    local m2 = T.ok(pc.modplayer.create(), 'create 2')
+    T.ok(rawequal(m1, m2), 'create() returns the one live player')
+    m2 = nil
+    collectgarbage('collect'); collectgarbage('collect')
+    T.ok(m1:isPlaying(), 'collecting the second handle stopped the first')
+    T.eq(m1:getVolume(), 37)
+    m1:stop()
+end)
+T.case('recreate_after_collect', function()
+    -- Once every handle is gone the player is released; a later create()
+    -- gets a fresh one, and the old finaliser does not tear it down.
+    collectgarbage('collect'); collectgarbage('collect')
+    local m = T.ok(pc.modplayer.create(), 'create')
+    T.eq(m:getVolume(), 100)
+    T.ok(m:load(APP_DIR .. '/m.mod'), 'load')
+    m:play(true)
+    collectgarbage('collect'); collectgarbage('collect')
+    T.ok(m:isPlaying(), 'still playing')
+    m:stop()
+end)
+T.case('stale_finaliser', function()
+    -- m1 is unreachable (so gone from create()'s weak cache) but not yet
+    -- finalised when a later finaliser calls create(): m2 is a new owner,
+    -- and m1's finaliser, which runs after, must leave m2's player alone.
+    local R = {}
+    do
+        local m1 = pc.modplayer.create()
+        local holder = setmetatable({}, {__gc = function()
+            local m2 = pc.modplayer.create()
+            R.fresh = not rawequal(m2, m1)
+            m2:load(APP_DIR .. '/m.mod')
+            m2:setVolume(55)
+            m2:play(true)
+            R.m2 = m2
+        end})
+        holder.m1 = m1   -- holder is marked after m1: its finaliser runs first
+    end
+    collectgarbage('collect'); collectgarbage('collect'); collectgarbage('collect')
+    T.ok(R.m2, 'the holder finaliser never ran')
+    T.ok(R.fresh, 'create() returned the collected handle')
+    T.ok(R.m2:isPlaying(), "m1's finaliser stopped m2")
+    T.eq(R.m2:getVolume(), 55)
+    T.ok(rawequal(pc.modplayer.create(), R.m2), 'm2 is the live handle')
+    R.m2:stop()
+end)
+"""
+
+
+def test_modplayer_create_is_shared(simulator):
+    _stage(simulator, "mod_single", SINGLETON, ("audio",))
+    run = run_lua_app(simulator, "mod_single", timeout=20)
+    run.assert_all_passed(["create_twice", "recreate_after_collect",
+                           "stale_finaliser"])
