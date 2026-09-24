@@ -662,41 +662,35 @@ static sound_lua_cb_t *register_lua_cb(lua_State *L, sound_lua_cb_t *arr,
     return cb;
 }
 
+// Fires one pending slot's callback. A failed callback's error is printed
+// and popped: lua_bridge_service runs this from sys.sleep and the terminal
+// waits too, whose C frames live for the whole wait, so every error left on
+// the stack used to pile up there until lua_rawgeti wrote past the stack.
+static void fire_sound_cb(lua_State *L, sound_lua_cb_t *cb, const char *what) {
+    if (!cb->pending || cb->ref == 0)
+        return;
+    cb->pending = 0;
+    lua_rawgeti(L, LUA_REGISTRYINDEX, cb->ref);
+    if (lua_pcall(L, 0, 0, 0) != LUA_OK) {
+        const char *err = lua_tostring(L, -1);
+        printf("[SOUND-LUA] %s callback error: %s\n", what,
+               err ? err : "(not a string)");
+        lua_pop(L, 1);
+    }
+}
+
 // Poll all callback slots and fire any pending Lua functions.
-// Called from Core 0 in menu_lua_hook every 256 opcodes.
+// Called on Core 0 by lua_bridge_service (count hook, sys.sleep, terminal
+// waits).
 void lua_bridge_sound_poll(lua_State *L) {
-    // Fileplayer finish callbacks
-    for (int i = 0; i < MAX_FILEPLAYER_CBS; i++) {
-        if (s_fp_finish_cbs[i].pending && s_fp_finish_cbs[i].ref != 0) {
-            s_fp_finish_cbs[i].pending = 0;
-            lua_rawgeti(L, LUA_REGISTRYINDEX, s_fp_finish_cbs[i].ref);
-            lua_pcall(L, 0, 0, 0);
-        }
-    }
-    // Fileplayer loop callbacks
-    for (int i = 0; i < MAX_FILEPLAYER_CBS; i++) {
-        if (s_fp_loop_cbs[i].pending && s_fp_loop_cbs[i].ref != 0) {
-            s_fp_loop_cbs[i].pending = 0;
-            lua_rawgeti(L, LUA_REGISTRYINDEX, s_fp_loop_cbs[i].ref);
-            lua_pcall(L, 0, 0, 0);
-        }
-    }
-    // Sampleplayer finish callbacks
-    for (int i = 0; i < MAX_SAMPLEPLAYER_CBS; i++) {
-        if (s_sp_finish_cbs[i].pending && s_sp_finish_cbs[i].ref != 0) {
-            s_sp_finish_cbs[i].pending = 0;
-            lua_rawgeti(L, LUA_REGISTRYINDEX, s_sp_finish_cbs[i].ref);
-            lua_pcall(L, 0, 0, 0);
-        }
-    }
-    // Sampleplayer loop callbacks
-    for (int i = 0; i < MAX_SAMPLEPLAYER_CBS; i++) {
-        if (s_sp_loop_cbs[i].pending && s_sp_loop_cbs[i].ref != 0) {
-            s_sp_loop_cbs[i].pending = 0;
-            lua_rawgeti(L, LUA_REGISTRYINDEX, s_sp_loop_cbs[i].ref);
-            lua_pcall(L, 0, 0, 0);
-        }
-    }
+    for (int i = 0; i < MAX_FILEPLAYER_CBS; i++)
+        fire_sound_cb(L, &s_fp_finish_cbs[i], "fileplayer finish");
+    for (int i = 0; i < MAX_FILEPLAYER_CBS; i++)
+        fire_sound_cb(L, &s_fp_loop_cbs[i], "fileplayer loop");
+    for (int i = 0; i < MAX_SAMPLEPLAYER_CBS; i++)
+        fire_sound_cb(L, &s_sp_finish_cbs[i], "sampleplayer finish");
+    for (int i = 0; i < MAX_SAMPLEPLAYER_CBS; i++)
+        fire_sound_cb(L, &s_sp_loop_cbs[i], "sampleplayer loop");
 }
 
 // ── Fileplayer callbacks ────────────────────────────────────────────────────
