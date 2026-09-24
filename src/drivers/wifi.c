@@ -5,6 +5,7 @@
 #include "../os/config.h"
 #include "../os/system_menu.h"
 #include "../os/toast.h"
+#include "ca_bundle.h"
 #include "display.h"
 #include "http.h"
 
@@ -230,6 +231,62 @@ static void tcpip_cb(struct mg_tcpip_if *ifp, int ev, void *ev_data) {
   }
 }
 
+// ── TLS
+// ──────────────────────────────────────────────────────────────────────
+
+// A verifying handshake needs the wall clock (certificate validity dates).
+// Returns false — and, if SNTP has given up, starts another sync so a retry
+// can succeed — when the clock has not been set yet.
+static bool tls_clock_ready(void) {
+  if (clock_is_set()) return true;
+  wifi_status_t st = s_status;
+  if (s_sntp_next_retry_ms == 0 && s_sntp_retries >= SNTP_MAX_RETRIES &&
+      (st == WIFI_STATUS_CONNECTED || st == WIFI_STATUS_ONLINE)) {
+    s_sntp_retries = 0;
+    start_sntp();
+  }
+  return false;
+}
+
+// Start TLS on nc: SNI + host-name check, and the root bundle unless the
+// connection opted out (opts.ca empty => MBEDTLS_SSL_VERIFY_NONE).
+static bool tls_start(struct mg_connection *nc, const char *host,
+                      bool insecure) {
+  struct mg_tls_opts opts = {0};
+  opts.name = mg_str(host);
+  if (!insecure) {
+    // PEM: Mongoose passes len + 1 so the parser sees the terminating NUL.
+    opts.ca = mg_str_n(g_ca_bundle_pem, g_ca_bundle_pem_len);
+  } else {
+    printf("[TLS] %s: certificate verification DISABLED (setInsecure)\n",
+           host);
+  }
+  mg_tls_init(nc, &opts);
+  return nc->is_tls_hs;
+}
+
+bool wifi_tls_verify_error(struct mg_connection *nc, char *out, size_t n) {
+  if (!nc || !nc->tls) return false;
+  struct mg_tls *tls = (struct mg_tls *)nc->tls;
+  uint32_t flags = mbedtls_ssl_get_verify_result(&tls->ssl);
+  if (flags == 0 || flags == (uint32_t)-1) return false;
+  const char *why;
+  if (flags & MBEDTLS_X509_BADCERT_NOT_TRUSTED)
+    why = "certificate not trusted (its root CA is not in the PicOS bundle)";
+  else if (flags & MBEDTLS_X509_BADCERT_EXPIRED)
+    why = "certificate expired";
+  else if (flags & MBEDTLS_X509_BADCERT_FUTURE)
+    why = "certificate not yet valid (is the clock right?)";
+  else if (flags & MBEDTLS_X509_BADCERT_CN_MISMATCH)
+    why = "certificate does not match the host name";
+  else if (flags & MBEDTLS_X509_BADCERT_REVOKED)
+    why = "certificate revoked";
+  else
+    why = "certificate verification failed";
+  snprintf(out, n, "TLS: %s (flags 0x%lx)", why, (unsigned long)flags);
+  return true;
+}
+
 // ── Core 1 request drainer
 // ────────────────────────────────────────────────
 
@@ -271,6 +328,16 @@ static void drain_requests(void) {
           // http_close_all()'s busy-wait detects progress correctly.
           c->state = HTTP_STATE_CONNECTING;
 
+          if (c->use_ssl && !c->insecure && !tls_clock_ready()) {
+            printf("[HTTP] Refusing TLS to %s: clock not set\n", c->server);
+            snprintf(c->err, sizeof(c->err), "%s", WIFI_TLS_ERR_CLOCK);
+            c->state = HTTP_STATE_FAILED;
+            c->pending |= HTTP_CB_FAILED | HTTP_CB_CLOSED;
+            umm_free(c->extra_hdrs); c->extra_hdrs = NULL;
+            umm_free(c->tx_buf);     c->tx_buf = NULL;
+            break;
+          }
+
           struct mg_connection *nc = mg_http_connect(&s_mgr, url, http_ev_fn, c);
           if (!nc) {
             printf("[HTTP] mg_http_connect failed\n");
@@ -285,10 +352,7 @@ static void drain_requests(void) {
           }
 
           if (c->use_ssl) {
-            struct mg_tls_opts opts = {0};
-            opts.name = mg_str(c->server);
-            mg_tls_init(nc, &opts);
-            if (!nc->is_tls_hs) {
+            if (!tls_start(nc, c->server, c->insecure)) {
               printf("[HTTP] TLS init failed\n");
               mg_close_conn(nc);
               snprintf(c->err, sizeof(c->err), "%s", "TLS init failed");
@@ -329,6 +393,15 @@ static void drain_requests(void) {
           snprintf(url, sizeof(url), "%s://%s:%u",
                    tc->use_ssl ? "tls" : "tcp", tc->host, tc->port);
           printf("[TCP] Connecting to %s (SSL=%d)...\n", url, tc->use_ssl);
+          if (tc->use_ssl && !tc->insecure && !tls_clock_ready()) {
+            printf("[TCP] Refusing TLS to %s: clock not set\n", tc->host);
+            snprintf(tc->err, sizeof(tc->err), "%s", WIFI_TLS_ERR_CLOCK);
+            uint32_t save = spin_lock_blocking(tc->spinlock);
+            tc->state = TCP_STATE_FAILED;
+            tc->pending |= TCP_CB_FAILED;
+            spin_unlock(tc->spinlock, save);
+            break;
+          }
           tc->state = TCP_STATE_CONNECTING;
           struct mg_connection *nc = mg_connect(&s_mgr, url, tcp_ev_fn, tc);
           if (!nc) {
@@ -340,10 +413,7 @@ static void drain_requests(void) {
           // A tls:// URL only sets nc->is_tls; without mg_tls_init no
           // handshake runs. Same init as the HTTPS path above.
           if (tc->use_ssl) {
-            struct mg_tls_opts opts = {0};
-            opts.name = mg_str(tc->host);
-            mg_tls_init(nc, &opts);
-            if (!nc->is_tls_hs) {
+            if (!tls_start(nc, tc->host, tc->insecure)) {
               printf("[TCP] TLS init failed\n");
               nc->fn_data = NULL;  // keep MG_EV_CLOSE from marking it CLOSED
               mg_close_conn(nc);

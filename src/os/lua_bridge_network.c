@@ -296,6 +296,14 @@ static int l_http_setKeepAlive(lua_State *L) {
   return 0;
 }
 
+// conn:setInsecure(bool) — HTTPS without certificate verification or the
+// SNTP clock gate.  Default false; for self-signed development servers only.
+static int l_http_setInsecure(lua_State *L) {
+  http_ud_t *ud = check_http_open(L, 1);
+  g_api.http->setInsecure(ud->conn, lua_toboolean(L, 2));
+  return 0;
+}
+
 // conn:setByteRange(from, to)
 static int l_http_setByteRange(lua_State *L) {
   http_ud_t *ud = check_http_open(L, 1);
@@ -520,6 +528,7 @@ static int l_http_setConnectionClosedCallback(lua_State *L) {
 static const luaL_Reg l_http_methods[] = {
     {"close", l_http_close},
     {"setKeepAlive", l_http_setKeepAlive},
+    {"setInsecure", l_http_setInsecure},
     {"setByteRange", l_http_setByteRange},
     {"setConnectTimeout", l_http_setConnectTimeout},
     {"setReadTimeout", l_http_setReadTimeout},

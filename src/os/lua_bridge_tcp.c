@@ -196,6 +196,14 @@ static int l_tcp_setConnectTimeout(lua_State *L) {
     return 0;
 }
 
+// tcp:setInsecure(bool) — before connect(): TLS without certificate
+// verification or the SNTP clock gate (self-signed dev servers only).
+static int l_tcp_setInsecure(lua_State *L) {
+    tcp_ud_t *ud = check_tcp_open(L, 1);
+    ud->conn->insecure = lua_toboolean(L, 2);
+    return 0;
+}
+
 static int l_tcp_setReadTimeout(lua_State *L) {
     tcp_ud_t *ud = check_tcp(L, 1);
     ud->read_timeout_ms = (uint32_t)(luaL_checknumber(L, 2) * 1000.0);
@@ -275,6 +283,7 @@ static const luaL_Reg l_tcp_methods[] = {
     {"error", l_tcp_error},
     {"isConnected", l_tcp_isConnected},
     {"setConnectTimeout", l_tcp_setConnectTimeout},
+    {"setInsecure", l_tcp_setInsecure},
     {"setReadTimeout", l_tcp_setReadTimeout},
     {"setConnectCallback", l_tcp_setConnectCallback},
     {"setReadCallback", l_tcp_setReadCallback},

@@ -423,6 +423,7 @@ enum {
     SLOT_TCP_AVAILABLE,
     SLOT_TCP_GET_ERROR,
     SLOT_TCP_GET_EVENTS,
+    SLOT_TCP_CONNECT_EX,
     SLOT_TCP_END,
 
     // picocalc_ui_t (3 functions) — stub
@@ -498,7 +499,7 @@ enum {
     SLOT_TERM_PAD1, SLOT_TERM_PAD2, SLOT_TERM_PAD3, SLOT_TERM_PAD4, SLOT_TERM_PAD5,
     SLOT_TERMINAL_END,
 
-    // picocalc_http_t (15 functions)
+    // picocalc_http_t (16 functions)
     SLOT_HTTP_NEW_CONN = SLOT_TERMINAL_END,
     SLOT_HTTP_GET,
     SLOT_HTTP_POST,
@@ -514,6 +515,7 @@ enum {
     SLOT_HTTP_SET_READ_TIMEOUT,
     SLOT_HTTP_SET_READ_BUFFER_SIZE,
     SLOT_HTTP_IS_COMPLETE,
+    SLOT_HTTP_SET_INSECURE,
     SLOT_HTTP_END,
 
     // picocalc_soundplayer_t (35 functions)
@@ -1807,6 +1809,19 @@ static void tramp_tcp_connect(uc_engine *uc) {
     write_reg(uc, UC_ARM_REG_R0, handle_wrap(c));
 }
 
+static void tramp_tcp_connect_ex(uc_engine *uc) {
+    uint32_t host_addr = read_reg(uc, UC_ARM_REG_R0);
+    uint16_t port = (uint16_t)read_reg(uc, UC_ARM_REG_R1);
+    uint32_t flags = read_reg(uc, UC_ARM_REG_R2);
+    char *host = uc_read_string(uc, host_addr);
+    tcp_conn_t *c = tcp_alloc();
+    if (c && host) {
+        c->insecure = (flags & PCTCP_TLS_INSECURE) != 0;
+        tcp_connect(c, host, port, (flags & PCTCP_TLS) != 0);
+    }
+    write_reg(uc, UC_ARM_REG_R0, handle_wrap(c));
+}
+
 static void tramp_tcp_write(uc_engine *uc) {
     uint32_t handle = read_reg(uc, UC_ARM_REG_R0);
     uint32_t buf_addr = read_reg(uc, UC_ARM_REG_R1);
@@ -2027,6 +2042,13 @@ static void tramp_http_is_complete(uc_engine *uc) {
     http_conn_t *c = handle_unwrap(handle);
     bool complete = c && (c->state == HTTP_STATE_DONE || c->state == HTTP_STATE_FAILED);
     write_reg(uc, UC_ARM_REG_R0, complete ? 1 : 0);
+}
+
+static void tramp_http_set_insecure(uc_engine *uc) {
+    uint32_t handle = read_reg(uc, UC_ARM_REG_R0);
+    bool insecure = read_reg(uc, UC_ARM_REG_R1) != 0;
+    http_conn_t *c = handle_unwrap(handle);
+    if (c) c->insecure = insecure;
 }
 
 // =============================================================================
@@ -3149,6 +3171,7 @@ void unicorn_tramp_init(uc_engine *uc) {
     s_dispatch[SLOT_TCP_AVAILABLE]  = tramp_tcp_available;
     s_dispatch[SLOT_TCP_GET_ERROR]  = tramp_tcp_get_error;
     s_dispatch[SLOT_TCP_GET_EVENTS] = tramp_tcp_get_events;
+    s_dispatch[SLOT_TCP_CONNECT_EX] = tramp_tcp_connect_ex;
 
     // UI
     s_dispatch[SLOT_UI_TEXT_INPUT]        = tramp_ui_text_input;
@@ -3215,6 +3238,7 @@ void unicorn_tramp_init(uc_engine *uc) {
     s_dispatch[SLOT_HTTP_SET_READ_TIMEOUT]   = tramp_http_set_read_timeout;
     s_dispatch[SLOT_HTTP_SET_READ_BUFFER_SIZE]= tramp_http_set_read_buffer_size;
     s_dispatch[SLOT_HTTP_IS_COMPLETE]        = tramp_http_is_complete;
+    s_dispatch[SLOT_HTTP_SET_INSECURE]       = tramp_http_set_insecure;
 
     // Soundplayer
     s_dispatch[SLOT_SND_SAMPLE_LOAD]       = tramp_snd_sample_load;
@@ -3438,7 +3462,7 @@ void unicorn_build_api_struct(uc_engine *uc, uint32_t api_base, uint32_t tramp_b
     uint32_t wifi_count = SLOT_WIFI_END - SLOT_WIFI_CONNECT;
     sub_base = write_func_table(uc, sub_base, tramp_base, SLOT_WIFI_CONNECT, wifi_count);
 
-    // picocalc_tcp_t (7 function pointers)
+    // picocalc_tcp_t (8 function pointers)
     uint32_t tcp_addr = sub_base;
     uint32_t tcp_count = SLOT_TCP_END - SLOT_TCP_CONNECT;
     sub_base = write_func_table(uc, sub_base, tramp_base, SLOT_TCP_CONNECT, tcp_count);
@@ -3555,7 +3579,7 @@ void unicorn_build_api_struct(uc_engine *uc, uint32_t api_base, uint32_t tramp_b
     write32(uc, api_base + 64, video_addr);
     write32(uc, api_base + 68, modplayer_addr);
     write32(uc, api_base + 72, zip_addr);
-    write32(uc, api_base + 76, 7);  // version = 7 (video seek/OSD; 6 = fonts; matches src/main.c g_api.version)
+    write32(uc, api_base + 76, 8);  // version = 8 (http->setInsecure, tcp->connectEx; 7 = video seek/OSD; matches src/main.c g_api.version)
 
     printf("[UNICORN] PicoCalcAPI struct at 0x%08x, version=7\n", api_base);
 }

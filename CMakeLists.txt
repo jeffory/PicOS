@@ -322,6 +322,7 @@ add_executable(picocalc_os
     src/drivers/sdcard.c
     src/drivers/wifi.c
     src/drivers/rng.c
+    src/drivers/ca_bundle.c
     src/drivers/http.c
     src/drivers/tcp.c
     src/drivers/mod_player.c

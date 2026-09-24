@@ -154,7 +154,11 @@ void tcp_ev_fn(struct mg_connection *nc, int ev, void *ev_data) {
     tcp_conn_t *c = (tcp_conn_t *)nc->fn_data;
     if (!c) return;
 
-    if (ev == MG_EV_CONNECT) {
+    // A TLS socket is CONNECTED (writable, TCP_CB_CONNECT) only after the
+    // handshake and certificate check (MG_EV_TLS_HS); until then the connect
+    // timeout keeps running, so a stalled handshake fails like a stalled
+    // connect.  Plain TCP is CONNECTED at MG_EV_CONNECT.
+    if ((ev == MG_EV_CONNECT && !nc->is_tls) || ev == MG_EV_TLS_HS) {
         c->deadline_connect = 0;
         if (c->read_timeout_ms > 0)
             c->deadline_read = to_ms_since_boot(get_absolute_time()) + c->read_timeout_ms;
@@ -195,7 +199,8 @@ void tcp_ev_fn(struct mg_connection *nc, int ev, void *ev_data) {
                 c->deadline_read = to_ms_since_boot(get_absolute_time()) + c->read_timeout_ms;
         }
     } else if (ev == MG_EV_ERROR) {
-        snprintf(c->err, sizeof(c->err), "Mongoose error: %s", (char *)ev_data);
+        if (!wifi_tls_verify_error(nc, c->err, sizeof(c->err)))
+            snprintf(c->err, sizeof(c->err), "Mongoose error: %s", (char *)ev_data);
         uint32_t save = spin_lock_blocking(c->spinlock);
         c->state = TCP_STATE_FAILED;
         c->pending |= TCP_CB_FAILED;

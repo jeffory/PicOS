@@ -391,6 +391,10 @@ static void http_setByteRange_w(pchttp_t c, int from, int to) { ((http_conn_t *)
 static void http_setConnectTimeout_w(pchttp_t c, int s) { ((http_conn_t *)c)->connect_timeout_ms = (uint32_t)(s * 1000); }
 static void http_setReadTimeout_w(pchttp_t c, int s) { ((http_conn_t *)c)->read_timeout_ms = (uint32_t)(s * 1000); }
 static bool http_setReadBufferSize_w(pchttp_t c, int bytes) { return http_set_recv_buf((http_conn_t *)c, (uint32_t)bytes); }
+static bool http_isComplete_w(pchttp_t c) { http_conn_t *hc = (http_conn_t *)c; return hc->state == HTTP_STATE_DONE || hc->state == HTTP_STATE_FAILED; }
+// The simulator's libcurl transport keeps its own TLS policy; the flag is
+// stored so the API behaves the same (see src/drivers/wifi.c for firmware).
+static void http_setInsecure_w(pchttp_t c, bool insecure) { ((http_conn_t *)c)->insecure = insecure; }
 
 static const picocalc_http_t s_http_impl = {
     .newConn = http_newConn_w, .get = http_get_w, .post = http_post_w,
@@ -399,6 +403,7 @@ static const picocalc_http_t s_http_impl = {
     .getProgress = http_getProgress_w, .setKeepAlive = http_setKeepAlive_w,
     .setByteRange = http_setByteRange_w, .setConnectTimeout = http_setConnectTimeout_w,
     .setReadTimeout = http_setReadTimeout_w, .setReadBufferSize = http_setReadBufferSize_w,
+    .isComplete = http_isComplete_w, .setInsecure = http_setInsecure_w,
 };
 
 // -- App config wrappers --
@@ -415,7 +420,7 @@ static void sim_wire_g_api(void) {
     g_api.soundplayer = &s_soundplayer_impl;
     g_api.http        = &s_http_impl;
     g_api.appconfig   = &s_appconfig_impl;
-    g_api.version     = 7;  // 7 = video time seek/position, OSD, hasEnded; 6 = fonts (matches src/main.c)
+    g_api.version     = 8;  // 8 = http->setInsecure, tcp->connectEx; 7 = video seek/OSD; 6 = fonts (matches src/main.c)
 }
 
 int main(int argc, char** argv) {

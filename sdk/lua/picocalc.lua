@@ -1076,6 +1076,15 @@ local PicOSHttpConn = {}
 ---@return string? error
 function picocalc.network.http.new(server, port, use_ssl) end
 
+---HTTPS verifies the server certificate against the OS root bundle and the
+---host name, and fails with an error starting "clock not set" until SNTP has
+---set the clock after WiFi connects (retry a few seconds later). A
+---certificate that does not verify fails with "TLS: <reason>".
+---`setInsecure(true)` (before get/post) turns both off for THIS connection —
+---only for self-signed development servers.
+---@param flag boolean default false
+function PicOSHttpConn:setInsecure(flag) end
+
 ---Enable or disable HTTP keep-alive for this connection.
 ---@param flag boolean
 function PicOSHttpConn:setKeepAlive(flag) end
@@ -1177,12 +1186,20 @@ picocalc.tcp = {}
 ---@class PicOSTcpConn : userdata
 local PicOSTcpConn = {}
 
----Create a TCP (or TLS) connection object.
+---Create a TCP (or TLS) connection object.  With `use_ssl` the server
+---certificate is verified (OS root bundle + host name) and the socket counts
+---as connected only after the TLS handshake; a TLS connect before SNTP has set
+---the clock fails with "clock not set".
 ---@param host string Hostname or IP
 ---@param port? integer Default: 80
 ---@param use_ssl? boolean `true` for TLS
 ---@return PicOSTcpConn
 function picocalc.tcp.new(host, port, use_ssl) end
+
+---Before `connect()`: TLS without certificate verification or the clock
+---check (self-signed development servers only). Default false.
+---@param flag boolean
+function PicOSTcpConn:setInsecure(flag) end
 
 ---Write data to the connection. Returns bytes written, or -1 on error.
 ---@param data string

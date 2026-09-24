@@ -88,7 +88,7 @@ main()
 - `g_api.video` — MJPEG video playback (Phase 2; Lua exposes as `picocalc.video`)
 - `g_api.modplayer` — MOD tracker music (Phase 2; Lua exposes as `picocalc.modplayer`)
 - `g_api.zip` — ZIP extraction plus read-in-place archive handles (Lua exposes as `picocalc.zip`)
-- `g_api.version` — 1 = Phase 1, 2 = Phase 2, 3 = `fs->browse`, 4 = clip rect + mode-7 plane, 5 = zip read-in-place handles, 6 = fonts (setFont/getFont/getFontWidth/getFontHeight/textWidth/loadFont/unloadFont/drawTextTransparent), 7 = video time seek/position, progress OSD, `hasEnded`
+- `g_api.version` — 1 = Phase 1, 2 = Phase 2, 3 = `fs->browse`, 4 = clip rect + mode-7 plane, 5 = zip read-in-place handles, 6 = fonts (setFont/getFont/getFontWidth/getFontHeight/textWidth/loadFont/unloadFont/drawTextTransparent), 7 = video time seek/position, progress OSD, `hasEnded`, 8 = TLS verification: `http->setInsecure`, `tcp->connectEx` (`PCTCP_TLS`/`PCTCP_TLS_INSECURE`)
 
 > ⚠️ **Config naming**: in Lua, `picocalc.config` (alias `picocalc.appconfig`) is the **per-app** store (`/data/<APP_ID>/config.json`); `picocalc.sysconfig` is the **system-wide** store (`/system/config.json`). Older docs had these inverted.
 
@@ -154,10 +154,18 @@ A debug hook fires every 256 opcodes (`lua_sethook` with `LUA_MASKCOUNT`). The h
 - Core 0 → Core 1 IPC: spinlock-guarded 8-slot ring buffer; push via `wifi_req_push()`. Request types: `CONN_REQ_HTTP_START`, `CONN_REQ_HTTP_CLOSE`, `CONN_REQ_WIFI_CONNECT`, `CONN_REQ_WIFI_DISCONNECT`
 - Auto-connects on boot if `"wifi_ssid"` / `"wifi_pass"` exist in config
 
+### TLS policy (`src/drivers/wifi.c`, `ca_bundle.c`, `rng.c`)
+- **Verification on by default.** Every HTTPS and `tls://` TCP connection verifies the server certificate (chain to a root in `src/drivers/ca_bundle.c`, validity dates, host name via SNI). Failures reach Lua as `"TLS: certificate not trusted …"` / `"… expired"` / `"… does not match the host name"`.
+- **SNTP gate.** Validity dates need the wall clock, so a verifying connection is refused until SNTP has set it (`clock_is_set()`), with an error starting `"clock not set"` (`WIFI_TLS_ERR_CLOCK`); if SNTP had given up, the refusal restarts it, so a retry a few seconds later works.
+- **Opt-out, per connection:** Lua `conn:setInsecure(true)` (HTTP, before `get`/`post`) or `tcp:setInsecure(true)` (before `connect`); native `http->setInsecure(c, true)` or `tcp->connectEx(host, port, PCTCP_TLS | PCTCP_TLS_INSECURE)`. Skips verification and the clock gate; logs `[TLS] <host>: certificate verification DISABLED`. For self-signed dev servers only.
+- **TCP TLS sockets** report connected (`TCP_CB_CONNECT`, writable) only after the handshake (`MG_EV_TLS_HS`); the connect timeout covers the handshake.
+- **CA bundle** — 11 roots (ISRG X1/X2, GTS R1/R4, Sectigo E46/R46, USERTrust ECC/RSA, DigiCert G2, SSL.com TLS ECC/RSA 2022), chosen from the chains of `picos.jeffory.dev`, `github.com` and `*.githubusercontent.com`. Each TLS connection parses it into PSRAM. To add a root: put its PEM in `tools/ca/`, add it to `ROOTS` in `tools/gen_ca_bundle.py` (with why), run `python3 tools/gen_ca_bundle.py` (`--check` verifies the committed files, `--extract <system bundle>` refreshes the PEMs). Check a host's chain with `openssl s_client -connect HOST:443 -servername HOST -showcerts`.
+- **Randomness.** `src/drivers/rng.c`: RP2350 TRNG (von Neumann + CRNGT + autocorrelation health tests) → mbedTLS entropy pool → one CTR_DRBG per core. Mongoose's `mg_random` (`MG_ENABLE_CUSTOM_RANDOM`) and `picocalc.crypto` use it; `MBEDTLS_ENTROPY_HARDWARE_ALT` (get_rand_64) is off.
+
 ### HTTP Client (`src/drivers/http.c`)
 - Mongoose-based HTTP/1.1 client running on Core 1
 - Static pool of 8 simultaneous connections (`HTTP_MAX_CONNECTIONS`)
-- **HTTPS supported** via `pico_lwip_mbedtls` + `pico_mbedtls` (see `src/mbedtls_config.h`)
+- **HTTPS supported** via `pico_lwip_mbedtls` + `pico_mbedtls` (see `src/mbedtls_config.h`), certificate-verified (see TLS policy)
 - `pending` bitmask set by Core 1 (`http_ev_fn`); Lua callbacks fired by Core 0 via `http_lua_fire_pending()`
 - `http_close_all()` called at start of `lua_bridge_register()` to clear stale connections between apps
 
@@ -372,10 +380,11 @@ Status constants: `picocalc.network.kStatusNotConnected` (0), `kStatusConnected`
 - Boot mirrors `src/main.c`: `config_load()`, idle-dim init, network, Core 1, `system_menu_init()`, launcher. Idle dim stays inert (the keyboard stub never polls it).
 - SD paths resolve `..` lexically and anything that would leave the SD root is refused (`[SIM] SD escape: <path>` on the `err` log source).
 - Test control channel (`simulator/sim_socket_handler.c`, `sim_test_control.c`): `get_log_buffer {since_seq, tail}` returns `{lines:[{seq,t_ms,src,text}], next_seq, dropped, more}` with `src` = `lua`/`native`/`os`/`err`; `subscribe {"logs":true}` pushes `log {seq,src,text}` notifications; `app.exited` carries `{name, id, found, result: returned|error|exit_sentinel|load_failed, error, runtime_ms, launch_id}`; `launch_app` returns `{queued, busy, launch_id}` and `get_last_outcome` returns the last `app.exited` params (backfill when a notification was dropped); `display_stats.present_count`; `inject_*` return `input_seq` and `get_input_state` reports `consumed_seq`. `--test-mode` makes Lua error screens and launch refusals return at once (the text is on the `err` source). The TCP listener binds 127.0.0.1 only; `--unix-socket PATH|none` overrides or disables the `./picos_control` UNIX socket (the E2E harness passes `none`). Python client: `tests/e2e/picos_simulator.py`.
+- TLS certificate verification, the SNTP clock gate and the TRNG are firmware-only: the simulator's libcurl transport keeps its own TLS policy and only stores the `setInsecure` flag. The OTA *checks* (checksum + signature against the TEST key, `src/os/ota_verify.c`) do run in the simulator; flashing does not.
 - `picocalc.video` is stubbed (no decoder): `player()` returns nil-backed handles; every video trampoline is a no-op.
 - `umm_*` is a counting allocator over host malloc: `umm_free_heap_size()` / `get_heap_info` report 8 MB minus the live umm/Lua bytes, but the largest free block is approximated by the free total and fragmentation is always 0 (fragmentation and `min_psram_kb` refusals stay device-only).
 - Sanitizer builds: `make simulator-asan` (ASan+UBSan, `build_sim_asan/`) and `make simulator-tsan` (`build_sim_tsan/`), built with clang. Run the E2E suite against one with `PICOS_SIM_BINARY=build_sim_asan/picos_simulator`; `asan_only` tests run only there. TSan is informational (the sim's RPC socket thread and Core 1 audio state race by design).
-- Everything else (zip including read-in-place archive handles, modplayer, display clip rect, drawPlane, tilemap, sprites) mirrors firmware, including `g_api.version = 7`.
+- Everything else (zip including read-in-place archive handles, modplayer, display clip rect, drawPlane, tilemap, sprites) mirrors firmware, including `g_api.version = 8`.
 
 ## Not Yet Implemented
 

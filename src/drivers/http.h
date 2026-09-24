@@ -67,6 +67,7 @@ typedef struct {
     uint16_t port;
     bool     use_ssl;
     bool     keep_alive;
+    bool     insecure;           // TLS without certificate checks (opt-in)
     int32_t  range_from;         // -1 = not set
     int32_t  range_to;           // -1 = not set
     uint32_t connect_timeout_ms;

@@ -30,4 +30,20 @@ T.case("http_error_handling", function()
     conn:close()
 end)
 
+-- TLS verification is on by default (firmware); setInsecure is the explicit,
+-- per-connection opt-out for self-signed dev servers (API v8).
+T.case("tls_set_insecure_optout", function()
+    local conn = T.ok(net.http.new("192.0.2.1", 443, true, "e2e_tls"),
+                      "http.new returned nil")
+    T.eq(type(conn.setInsecure), "function", "http conn:setInsecure")
+    conn:setInsecure(true)
+    conn:setInsecure(false)
+    conn:close()
+    T.ok(pc.tcp, "picocalc.tcp")
+    local sock = T.ok(pc.tcp.new("192.0.2.1", 443, true), "tcp.new returned nil")
+    T.eq(type(sock.setInsecure), "function", "tcp:setInsecure")
+    sock:setInsecure(true)
+    sock:close()
+end)
+
 T.done()

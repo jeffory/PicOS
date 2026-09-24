@@ -73,8 +73,11 @@ extern void umm_free(void *ptr);
 // TLS SNI — sends server_name extension in ClientHello (required for shared-IP HTTPS hosts)
 #define MBEDTLS_SSL_SERVER_NAME_INDICATION
 
-// Time support
+// Time support.  HAVE_TIME_DATE makes X.509 verification check validity
+// dates, against time() — overridden in wifi.c to return the SNTP clock.
+// wifi.c refuses verifying handshakes until SNTP has set it.
 #define MBEDTLS_HAVE_TIME
+#define MBEDTLS_HAVE_TIME_DATE
 #define MBEDTLS_PLATFORM_MS_TIME_ALT
 
 // Memory tuning

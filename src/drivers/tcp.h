@@ -31,6 +31,7 @@ typedef struct {
     char     host[128];
     uint16_t port;
     bool     use_ssl;
+    bool     insecure;  // TLS without certificate checks (opt-in, set before connect)
     
     char err[TCP_ERR_MAX];
     uint32_t pending;  // TCP_CB_* flags

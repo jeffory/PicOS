@@ -432,8 +432,13 @@ void http_ev_fn(struct mg_connection *nc, int ev, void *ev_data) {
       pending_set(c, HTTP_CB_REQUEST | HTTP_CB_COMPLETE);
       nc->is_closing = 1;
     } else {
-      // No data received, treat as failure
-      conn_fail(c, "Mongoose error: %s", (char *)ev_data);
+      // No data received, treat as failure.  A certificate that did not
+      // verify gets a readable reason instead of mbedTLS's error number.
+      char tls_err[HTTP_ERR_MAX];
+      if (wifi_tls_verify_error(nc, tls_err, sizeof(tls_err)))
+        conn_fail(c, "%s", tls_err);
+      else
+        conn_fail(c, "Mongoose error: %s", (char *)ev_data);
     }
   } else if (ev == MG_EV_CLOSE) {
     printf("[HTTP] Connection closed (slot %ld, state %d)\n",

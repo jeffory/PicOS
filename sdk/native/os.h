@@ -269,6 +269,12 @@ typedef enum {
     TCP_CB_FAILED   = (1 << 4),
 } tcp_event_t;
 
+// connectEx() flags (API version 8).
+#define PCTCP_TLS          (1u << 0)  // TLS; the server certificate is verified
+                                      // against the OS root bundle + host name
+#define PCTCP_TLS_INSECURE (1u << 1)  // with PCTCP_TLS: skip verification
+                                      // (self-signed dev servers only)
+
 typedef struct {
     // Open a TCP connection to host:port. Non-blocking.
     pctcp_t (*connect)(const char *host, uint16_t port, bool use_ssl);
@@ -284,6 +290,11 @@ typedef struct {
     const char * (*getError)(pctcp_t c);
     // Returns bitmask of pending events (TCP_CB_*).
     uint32_t (*getEvents)(pctcp_t c);
+    // --- API version 8 ---
+    // connect() with PCTCP_* flags. A TLS socket reports TCP_CB_CONNECT only
+    // once the handshake (and certificate check) has succeeded; a TLS
+    // connect before SNTP has set the clock fails with "clock not set".
+    pctcp_t (*connectEx)(const char *host, uint16_t port, uint32_t flags);
 } picocalc_tcp_t;
 
 // --- UI Widgets -------------------------------------------------------------
@@ -360,6 +371,12 @@ typedef struct {
     // Returns true when the request has completed (success or failure).
     // Use getStatus()/getError() to determine outcome.
     bool  (*isComplete)(pchttp_t c);
+    // --- API version 8 ---
+    // HTTPS verifies the server certificate (OS root bundle + host name) and
+    // refuses to connect until SNTP has set the clock ("clock not set").
+    // setInsecure(c, true) before get()/post() skips both — for self-signed
+    // development servers only.
+    void  (*setInsecure)(pchttp_t c, bool insecure);
 } picocalc_http_t;
 
 // --- Sound Player -----------------------------------------------------------
@@ -647,6 +664,8 @@ typedef struct PicoCalcAPI {
                                              // 4=clip rect + mode-7 plane + display parity
                                              // 5=zip read-in-place handles
                                              // 7=video time seek/position, OSD, hasEnded
+                                             // 8=TLS verification: http->setInsecure,
+                                             //   tcp->connectEx
 } PicoCalcAPI;
 
 // The global API instance, populated during os_init()

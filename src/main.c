@@ -520,14 +520,35 @@ static void display_flush_with_toasts(void) {
     display_flush();
 }
 
+// Native TCP: allocate a slot, then queue the connect.  (connect used to be
+// tcp_connect cast to the wrong signature — host landed in the conn slot.)
+static pctcp_t native_tcp_connect_ex(const char *host, uint16_t port,
+                                     uint32_t flags) {
+    if (!host) return NULL;
+    tcp_conn_t *c = tcp_alloc();
+    if (!c) return NULL;
+    c->insecure = (flags & PCTCP_TLS_INSECURE) != 0;
+    if (!tcp_connect(c, host, port, (flags & PCTCP_TLS) != 0)) {
+        tcp_free(c);
+        return NULL;
+    }
+    return (pctcp_t)c;
+}
+
+static pctcp_t native_tcp_connect(const char *host, uint16_t port,
+                                  bool use_ssl) {
+    return native_tcp_connect_ex(host, port, use_ssl ? PCTCP_TLS : 0);
+}
+
 static picocalc_tcp_t s_tcp_impl = {
-    .connect = (pctcp_t (*)(const char *, uint16_t, bool))tcp_connect,
+    .connect = native_tcp_connect,
     .write = (int (*)(pctcp_t, const void *, int))tcp_write,
     .read = (int (*)(pctcp_t, void *, int))tcp_read,
     .close = (void (*)(pctcp_t))tcp_close,
     .available = (int (*)(pctcp_t))tcp_bytes_available,
     .getError = (const char *(*)(pctcp_t))tcp_get_error,
     .getEvents = (uint32_t (*)(pctcp_t))tcp_take_pending,
+    .connectEx = native_tcp_connect_ex,
 };
 
 static picocalc_input_t s_input_impl = {
@@ -981,6 +1002,10 @@ static bool http_isComplete_w(pchttp_t c) {
     return hc->state == HTTP_STATE_DONE || hc->state == HTTP_STATE_FAILED;
 }
 
+static void http_setInsecure_w(pchttp_t c, bool insecure) {
+    ((http_conn_t *)c)->insecure = insecure;
+}
+
 static const picocalc_http_t s_http_impl = {
     .newConn           = http_newConn_w,
     .get               = http_get_w,
@@ -997,6 +1022,7 @@ static const picocalc_http_t s_http_impl = {
     .setReadTimeout    = http_setReadTimeout_w,
     .setReadBufferSize = http_setReadBufferSize_w,
     .isComplete        = http_isComplete_w,
+    .setInsecure       = http_setInsecure_w,
 };
 
 // ── Sound player impl ─────────────────────────────────────────────────────────
@@ -1917,7 +1943,7 @@ int main(void) {
   g_api.video       = &s_video_impl;
   g_api.modplayer   = &s_modplayer_impl;
   g_api.zip         = &s_zip_impl;
-  g_api.version     = 7;  // 7 = video time seek/position, OSD, hasEnded; 6 = fonts; 5 = zip read-in-place handles
+  g_api.version     = 8;  // 8 = TLS verify: http->setInsecure, tcp->connectEx; 7 = video seek/OSD; 6 = fonts; 5 = zip handles
   // fs wired after SD card init
 
   // Bring up the QMI PSRAM in quad (QPI) mode before any PSRAM pointers are
