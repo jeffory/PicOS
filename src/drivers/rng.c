@@ -18,12 +18,18 @@
 #include <stdio.h>
 #include <string.h>
 
-// rng_clk cycles between ring-oscillator samples.  The von Neumann corrector
-// discards ~3/4 of the bits, so one 192-bit EHR block costs roughly
-// 192 * 4 * TRNG_SAMPLE_CNT cycles (~25 us at 150 MHz).  Must be >= 17 when
-// the corrector is bypassed; it is not here, but stay well clear anyway.
-#define TRNG_SAMPLE_CNT   32u
-#define TRNG_TIMEOUT_US   20000u  // per 192-bit block
+// rng_clk cycles between ring-oscillator samples.  Sampling faster than the
+// ring decorrelates makes the autocorrelation/CRNGT tests fail: measured on a
+// PicoCalc (RP2350, 200 MHz, 20 blocks per setting, Sep 2026), 32 cycles passed
+// 1/20 on the shortest chain and 0/20 on the others, 128 passed 20/20 on chains
+// 0-1 but only 14/20 on chains 2-3, and 256 and 1024 passed 20/20 on all four.
+// 32 made every Core 0 boot seed fail (and a8015f6, which panicked on that
+// failure, boot-looped).  So: 256 (~1 ms per 192-bit block), and retries after
+// a health-test failure use 1024 (~4.5 ms).  The TRNG is only read to seed the
+// DRBGs at boot (reseeding is disabled), so the cost is a few ms, once.
+#define TRNG_SAMPLE_CNT        256u
+#define TRNG_SAMPLE_CNT_RETRY 1024u
+#define TRNG_TIMEOUT_US   20000u  // per 192-bit block (>4x the slow setting)
 #define TRNG_MAX_RETRIES  4       // health-test failures tolerated per block
 
 // The entropy pool demands this many TRNG bytes before it will seed the DRBG
@@ -64,7 +70,7 @@ static bool trng_block(uint32_t words[6]) {
     trng_hw->rng_imr = 0xFu;              // no interrupts; we poll the ISR
     trng_hw->rng_icr = 0xFFFFFFFFu;       // clear EHR_VALID and errors
     trng_hw->trng_config = 0;             // shortest ROSC chain
-    trng_hw->sample_cnt1 = TRNG_SAMPLE_CNT;
+    trng_hw->sample_cnt1 = attempt == 0 ? TRNG_SAMPLE_CNT : TRNG_SAMPLE_CNT_RETRY;
     trng_hw->trng_debug_control = 0;      // VNC + CRNGT + autocorr all on
     trng_hw->rnd_source_enable = 1;
 
