@@ -158,6 +158,18 @@ picocalc.sys.log("STILL_RUNNING")
 # ── sys.sleep shares the hook's service pass (review: Lua Low "Three service
 # loops have drifted: sleep ignores the menu and exit") ──────────────────────
 
+def _wait_white(sim, x=6, y=40, timeout=3.0):
+    """The app's white frame on the panel (the log line can come before the
+    present): the baseline a menu overlay then changes."""
+    deadline = time.time() + timeout
+    px = sim.call("get_pixel", {"x": x, "y": y})
+    while px["rgb565"] != 0xFFFF and time.time() < deadline:
+        time.sleep(0.02)
+        px = sim.call("get_pixel", {"x": x, "y": y})
+    assert px["rgb565"] == 0xFFFF, px
+    return px
+
+
 def _pixel_changes(sim, x, y, before, timeout):
     deadline = time.time() + timeout
     while time.time() < deadline:
@@ -180,12 +192,7 @@ picocalc.sys.sleep(30000)
 picocalc.sys.log("SLEEP_RETURNED")
 """
     _run_until_ready(simulator, "sleep_menu", code)
-    deadline = time.time() + 3
-    before = simulator.call("get_pixel", {"x": 6, "y": 40})
-    while before["rgb565"] != 0xFFFF and time.time() < deadline:
-        time.sleep(0.02)
-        before = simulator.call("get_pixel", {"x": 6, "y": 40})
-    assert before["rgb565"] == 0xFFFF, before
+    before = _wait_white(simulator)
     simulator.keypress("menu")
     after = _pixel_changes(simulator, 6, 40, before, timeout=3.0)
     assert after is not None, "system menu did not open during sys.sleep(30000)"
@@ -204,12 +211,13 @@ picocalc.sys.log("EXIT_READY")
 while true do pcall(busy) end
 """
     _run_until_ready(simulator, "menu_exit", code)
-    before = simulator.call("get_pixel", {"x": 6, "y": 40})
+    before = _wait_white(simulator)
     simulator.keypress("menu")
     assert _pixel_changes(simulator, 6, 40, before, timeout=3.0), \
         "system menu did not open"
-    # Up wraps from the first item to the last one, Exit App.
-    for key in ("up", "enter"):
-        seq = simulator.keypress(key)["input_seq"]
-        simulator.wait_input_consumed(seq, timeout=3)
+    # Up wraps from the first item to the last one, Exit App. (Paced, not
+    # wait_input_consumed: the simulator's consumed_seq can stay behind a
+    # menu injection, a harness quirk seen with the old hook too.)
+    time.sleep(0.2)
+    simulator.keypress_sequence(["up", "enter"], delay_ms=200)
     _assert_exited(simulator.wait_for_exit(timeout=EXIT_TIMEOUT))
