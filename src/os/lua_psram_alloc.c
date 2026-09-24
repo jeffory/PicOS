@@ -109,6 +109,9 @@ static void l_warnfoff(void *ud, const char *message, int tocont) {
 void lua_psram_alloc_init(void) {
   critical_section_init(&g_umm_critsec);
 #ifdef PICOS_SIMULATOR
+  // 8 MB for the counting allocator, the device size under --real-umm
+  // (the simulator's umm owns its own arena; this buffer is never used).
+  UMM_MALLOC_CFG_HEAP_SIZE = (uint32_t)sim_umm_heap_size();
   if (!s_lua_psram_heap) {
     s_lua_psram_heap = malloc(UMM_MALLOC_CFG_HEAP_SIZE);
     if (!s_lua_psram_heap) {
@@ -127,9 +130,82 @@ void lua_psram_alloc_init(void) {
          free_after_init, free_after_init / 1024);
 }
 
+#ifdef PICOS_LUA_ALLOC_HISTOGRAM
+// Opt-in measurement build (-DPICOS_LUA_ALLOC_HISTOGRAM): histograms the Lua
+// allocator's request sizes and prints them when the VM's last block is freed
+// (lua_close). Lua passes the old block size on every realloc/free, so live
+// objects per size bin are exact. Bins: 8-byte steps up to 256, then powers
+// of two. Not for release builds (static counters).
+#define HIST_FINE_BINS 32          // 1..256 in 8-byte steps
+#define HIST_BINS (HIST_FINE_BINS + 6)  // 257-512 .. >8K
+static uint32_t s_hist_events[HIST_BINS];   // allocations requested per bin
+static int32_t  s_hist_live[HIST_BINS];     // live objects per bin now
+static int32_t  s_hist_at_peak[HIST_BINS];  // live objects per bin at peak
+static int32_t  s_hist_live_total, s_hist_peak_total;
+static size_t   s_hist_live_bytes, s_hist_peak_bytes;
+
+static int hist_bin(size_t n) {
+  if (n <= 256) return (int)((n + 7) / 8) - 1;
+  int b = HIST_FINE_BINS;
+  for (size_t lim = 512; n > lim && b < HIST_BINS - 1; lim <<= 1) b++;
+  return b;
+}
+
+static void hist_label(int b, char *out, size_t len) {
+  if (b < HIST_FINE_BINS) {
+    snprintf(out, len, "%d-%d", b * 8 + 1, b * 8 + 8);
+  } else if (b == HIST_BINS - 1) {
+    snprintf(out, len, ">%d", 256 << (HIST_BINS - 1 - HIST_FINE_BINS));
+  } else {
+    int lo = 256 << (b - HIST_FINE_BINS);
+    snprintf(out, len, "%d-%d", lo + 1, lo * 2);
+  }
+}
+
+static void hist_dump(void) {
+  printf("[ALLOCHIST] bin events live_at_peak (peak objects=%ld bytes=%lu)\n",
+         (long)s_hist_peak_total, (unsigned long)s_hist_peak_bytes);
+  for (int b = 0; b < HIST_BINS; b++) {
+    if (!s_hist_events[b]) continue;
+    char label[24];
+    hist_label(b, label, sizeof(label));
+    printf("[ALLOCHIST] %s %lu %ld\n", label, (unsigned long)s_hist_events[b],
+           (long)s_hist_at_peak[b]);
+  }
+  memset(s_hist_events, 0, sizeof(s_hist_events));
+  memset(s_hist_at_peak, 0, sizeof(s_hist_at_peak));
+  s_hist_peak_total = 0;
+  s_hist_peak_bytes = 0;
+}
+
+static void hist_record(void *ptr, size_t osize, size_t nsize) {
+  if (ptr) {
+    s_hist_live[hist_bin(osize)]--;
+    s_hist_live_total--;
+    s_hist_live_bytes -= osize;
+  }
+  if (nsize) {
+    s_hist_events[hist_bin(nsize)]++;
+    s_hist_live[hist_bin(nsize)]++;
+    s_hist_live_total++;
+    s_hist_live_bytes += nsize;
+    if (s_hist_live_bytes > s_hist_peak_bytes) {
+      s_hist_peak_bytes = s_hist_live_bytes;
+      s_hist_peak_total = s_hist_live_total;
+      memcpy(s_hist_at_peak, s_hist_live, sizeof(s_hist_live));
+    }
+  }
+  if (ptr && !nsize && s_hist_live_total == 0) hist_dump();
+}
+#endif
+
 void *lua_psram_alloc(void *ud, void *ptr, size_t osize, size_t nsize) {
   (void)ud;
   (void)osize;
+#ifdef PICOS_LUA_ALLOC_HISTOGRAM
+  // Lua passes a type tag, not a size, as osize when ptr is NULL.
+  hist_record(ptr, ptr ? osize : 0, nsize);
+#endif
 
   if (nsize == 0) {
     umm_free(ptr);

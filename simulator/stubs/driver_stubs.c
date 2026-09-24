@@ -1072,8 +1072,43 @@ _Atomic(void (*)(void)) g_native_audio_callback = NULL;
 // out, so the metric moves exactly with the allocations; Core 1 (network
 // thread) allocates too, hence the atomics. The simulated heap refuses
 // requests that would exceed 8 MB, like the device heap would.
+//
+// --real-umm (sim_umm_use_real) switches every umm_* call to the firmware's
+// own umm_malloc (stubs/sim_real_umm.c) on a device-sized arena instead, so
+// the 200-byte block cost, fragmentation and the largest free block behave
+// as on hardware. Chosen once at startup, before the first allocation.
 static _Atomic size_t s_umm_live;
 static _Atomic size_t s_umm_peak;
+static bool s_umm_real;
+
+void   sim_real_umm_init_heap(void *ptr, size_t size);
+void  *sim_real_umm_malloc(size_t size);
+void  *sim_real_umm_calloc(size_t num, size_t size);
+void  *sim_real_umm_realloc(void *ptr, size_t size);
+void   sim_real_umm_free(void *ptr);
+size_t sim_real_umm_free_heap_size(void);
+size_t sim_real_umm_max_free_block_size(void);
+int    sim_real_umm_fragmentation_metric(void);
+
+bool sim_umm_use_real(void) {
+    if (s_umm_real) return true;
+    // +8 so the heap can start 4 bytes past an 8-byte boundary: umm blocks
+    // are 200 bytes and data sits 4 bytes into a block, so every umm pointer
+    // is then 8-byte aligned (the 64-bit host's Lua objects want that; the
+    // device's 0x11200000 heap gives 4-byte alignment, enough for 32-bit).
+    uint8_t *arena = malloc(SIM_REAL_UMM_HEAP_SIZE + 8);
+    if (!arena) return false;
+    uint8_t *base = arena + ((4 - ((uintptr_t)arena & 7)) & 7);
+    sim_real_umm_init_heap(base, SIM_REAL_UMM_HEAP_SIZE);
+    s_umm_real = true;
+    return true;
+}
+
+bool sim_umm_is_real(void) { return s_umm_real; }
+
+size_t sim_umm_heap_size(void) {
+    return s_umm_real ? SIM_REAL_UMM_HEAP_SIZE : SIM_UMM_HEAP_SIZE;
+}
 
 static void umm_count_add(size_t n) {
     size_t live = atomic_fetch_add(&s_umm_live, n) + n;
@@ -1094,28 +1129,47 @@ static bool umm_would_overflow(size_t size) {
     return size > SIM_UMM_HEAP_SIZE || atomic_load(&s_umm_live) > SIM_UMM_HEAP_SIZE - size;
 }
 
-size_t sim_umm_live_bytes(void) { return atomic_load(&s_umm_live); }
-size_t sim_umm_peak_bytes(void) { return atomic_load(&s_umm_peak); }
+size_t sim_umm_live_bytes(void) {
+    if (s_umm_real) return SIM_REAL_UMM_HEAP_SIZE - sim_real_umm_free_heap_size();
+    return atomic_load(&s_umm_live);
+}
+size_t sim_umm_peak_bytes(void) {
+    // The real umm keeps no peak; report the counting one (0 in real mode).
+    return atomic_load(&s_umm_peak);
+}
 
 size_t umm_free_heap_size(void) {
+    if (s_umm_real) return sim_real_umm_free_heap_size();
     size_t live = atomic_load(&s_umm_live);
     return live < SIM_UMM_HEAP_SIZE ? SIM_UMM_HEAP_SIZE - live : 0;
 }
-size_t umm_max_free_block_size(void) { return umm_free_heap_size(); }
-int umm_fragmentation_metric(void) { return 0; }
+size_t umm_max_free_block_size(void) {
+    if (s_umm_real) return sim_real_umm_max_free_block_size();
+    return umm_free_heap_size();
+}
+int umm_fragmentation_metric(void) {
+    if (s_umm_real) return sim_real_umm_fragmentation_metric();
+    return 0;
+}
 
 void* umm_malloc(size_t size) {
+    if (s_umm_real) return sim_real_umm_malloc(size);
     if (umm_would_overflow(size)) return NULL;
     void *p = malloc(size);
     if (p) umm_count_add(malloc_usable_size(p));
     return p;
 }
 void umm_free(void* ptr) {
+    if (s_umm_real) {
+        sim_real_umm_free(ptr);
+        return;
+    }
     if (!ptr) return;
     umm_count_sub(malloc_usable_size(ptr));
     free(ptr);
 }
 void* umm_realloc(void* ptr, size_t size) {
+    if (s_umm_real) return sim_real_umm_realloc(ptr, size);
     if (!ptr) return umm_malloc(size);
     if (size == 0) {
         umm_free(ptr);
@@ -1130,6 +1184,7 @@ void* umm_realloc(void* ptr, size_t size) {
     return p;
 }
 void* umm_calloc(size_t num, size_t size) {
+    if (s_umm_real) return sim_real_umm_calloc(num, size);
     if (size && num > SIM_UMM_HEAP_SIZE / size) return NULL;
     void *p = umm_malloc(num * size);
     if (p) memset(p, 0, num * size);

@@ -172,6 +172,7 @@ add_library(sim_hal STATIC
     stubs/pico_sdk_stubs.c
     stubs/hardware_stubs.c
     stubs/driver_stubs.c
+    stubs/sim_real_umm.c
     stubs/keyboard_stub.c
 )
 

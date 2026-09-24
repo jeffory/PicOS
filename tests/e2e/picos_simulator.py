@@ -23,7 +23,7 @@ import time
 import threading
 from collections import deque
 from pathlib import Path
-from typing import Any, Optional, List
+from typing import Any, Optional, List, Sequence
 
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent
@@ -135,6 +135,7 @@ class PicosSimulator:
         test_mode: bool = False,
         crash_log_path: Optional[str] = None,
         unix_socket: Optional[str] = "none",
+        extra_args: Sequence[str] = (),
     ):
         self.binary_path = binary_path or str(self.DEFAULT_BINARY)
         self.sd_card_path = sd_card_path or str(self.DEFAULT_SD_CARD)
@@ -152,6 +153,8 @@ class PicosSimulator:
         # --unix-socket: "none" (default) keeps parallel instances from
         # binding ./picos_control in the cwd; None = the sim's default.
         self.unix_socket = unix_socket
+        # More simulator flags, e.g. ["--real-umm"] (device-accurate heap).
+        self.extra_args = list(extra_args)
         self.process: Optional[subprocess.Popen] = None
         # Exit status once the process has been reaped (stop() or crash).
         self.returncode: Optional[int] = None
@@ -216,6 +219,7 @@ class PicosSimulator:
             cmd += ["--crash-log", str(self.crash_log_path)]
         if self.unix_socket:
             cmd += ["--unix-socket", str(self.unix_socket)]
+        cmd += self.extra_args
 
         env = sanitizer_env(os.environ.copy())
         if self.headless:

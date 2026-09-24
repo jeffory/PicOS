@@ -23,6 +23,7 @@
 #include "terminal.h"
 #include "launcher.h"
 #include "lua_psram_alloc.h"
+#include "stubs/umm_malloc.h"  // sim_umm_use_real (--real-umm)
 #include "splash_logo.h"
 #include "drivers/display.h"
 #include "drivers/sound.h"
@@ -145,6 +146,8 @@ static void print_usage(const char* program) {
     printf("  --show-splash        Show boot splash screen with delays\n");
     printf("  --test-mode          Error screens return at once; idle dim off\n");
     printf("  --debug              Enable debug logging\n");
+    printf("  --real-umm           Run umm_* on the firmware's umm_malloc (device heap\n"
+           "                       size, 200 B blocks) instead of the counting allocator\n");
     printf("  --build-info         Print build facts (sanitizers) and exit\n");
     printf("  --help               Show this help\n");
 }
@@ -192,6 +195,13 @@ static void parse_args(int argc, char** argv) {
             sim_set_test_mode(true);
         } else if (strcmp(argv[i], "--debug") == 0) {
             hal_set_debug_mode(1);
+        } else if (strcmp(argv[i], "--real-umm") == 0) {
+            // Before anything allocates: every umm_* call from here on goes
+            // to the real umm heap.
+            if (!sim_umm_use_real()) {
+                fprintf(stderr, "--real-umm: cannot allocate the umm arena\n");
+                exit(1);
+            }
         } else {
             printf("Unknown option: %s\n", argv[i]);
             print_usage(argv[0]);
