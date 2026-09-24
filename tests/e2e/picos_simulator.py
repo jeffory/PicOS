@@ -29,25 +29,35 @@ from typing import Any, Optional, List
 PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent
 
 # Sanitizer runtime options for sanitizer builds of the simulator (make
-# simulator-asan / simulator-tsan); ignored by a release build. Every report
-# is fatal (abort → the health hook sees a dead sim plus the report on
-# stderr). Leak checking stays off until there is a suppressions file.
-# allocator_may_return_null keeps the firmware's OOM contract (umm_malloc
-# returns NULL) instead of ASan aborting on a huge request. TSan keeps going
-# after a report: its leg is informational (see tests/e2e/README.md).
+# simulator-asan / simulator-tsan); ignored by a release build. These are the
+# audit's (§5.1 R4): every ASan/UBSan report is fatal (abort → the health hook
+# sees a dead sim plus the report on stderr), and leak checking stays off
+# until there is a suppressions file. TSan keeps going after a report: its
+# leg is informational (see tests/e2e/README.md).
 SANITIZER_ENV = {
-    "ASAN_OPTIONS": "abort_on_error=1:halt_on_error=1:detect_leaks=0:"
-                    "allocator_may_return_null=1",
+    "ASAN_OPTIONS": "abort_on_error=1:halt_on_error=1:detect_leaks=0",
     "UBSAN_OPTIONS": "print_stacktrace=1:halt_on_error=1",
     "TSAN_OPTIONS": "halt_on_error=0:second_deadlock_stack=1:suppressions="
                     + str(PROJECT_ROOT / "tests" / "e2e" / "tsan.supp"),
 }
 
 
+def _merge_options(ours: str, theirs: str) -> str:
+    """Merge two k=v:k=v sanitizer option strings per key; `theirs` (the
+    caller's environment) wins on a clash."""
+    merged = {}
+    for opts in (ours, theirs):
+        for item in filter(None, opts.split(":")):
+            key, _, value = item.partition("=")
+            merged[key] = value
+    return ":".join(f"{k}={v}" for k, v in merged.items())
+
+
 def sanitizer_env(env: dict) -> dict:
-    """`env` plus SANITIZER_ENV (values already in `env` win)."""
+    """`env` with SANITIZER_ENV merged in per option key (options already in
+    `env` win, the rest of ours are kept)."""
     for key, value in SANITIZER_ENV.items():
-        env.setdefault(key, value)
+        env[key] = _merge_options(value, env.get(key, ""))
     return env
 
 

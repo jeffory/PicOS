@@ -258,6 +258,17 @@ def test_real_sanitizer_report_fails_the_test(pytester, simulator_binary):
     assert "h_sanitizer_selftest" in out, out  # the stack came through
 
 
+def test_sanitizer_options_merge_per_key(monkeypatch):
+    """A caller's ASAN_OPTIONS overrides only the keys it sets; the suite's
+    other options survive (setdefault used to drop them all)."""
+    from picos_simulator import sanitizer_env
+    env = sanitizer_env({"ASAN_OPTIONS": "detect_leaks=1:verbosity=1"})
+    opts = dict(o.split("=", 1) for o in env["ASAN_OPTIONS"].split(":"))
+    assert opts == {"abort_on_error": "1", "halt_on_error": "1",
+                    "detect_leaks": "1", "verbosity": "1"}, opts
+    assert "allocator_may_return_null" not in env["ASAN_OPTIONS"]
+
+
 def test_missing_golden_fails(tmp_path):
     img = np.zeros((4, 4, 3), dtype=np.uint8)
     missing = tmp_path / "nope.png"
