@@ -16,10 +16,18 @@ static sound_context_t s_context;
 
 /* The mixer runs in audio.c's DMA refill ISR on Core 1 and reads
  * s_context.players[] and their samples. Everything that changes which
- * sample a player reads, or frees sample data, holds this lock (a striped
- * spin lock with IRQs off: no claimed hardware lock, and held for a few
- * microseconds at most). Never nested: helpers named *_locked expect it
- * held. */
+ * sample a player reads, or frees sample data, holds this lock (a spin lock
+ * with IRQs off). The ISR holds it for one mix chunk: 32 frames (audio.c's
+ * MIX_CHUNK) x up to SOUND_MAX_SAMPLES players, tens of microseconds, four
+ * times per 128-frame DMA buffer; Core 0 holds it for field updates only.
+ * Never nested: helpers named *_locked expect it held.
+ *
+ * Which spin lock: critical_section_init() would claim one of the eight
+ * exclusive locks (24-31) that http.c/tcp.c claim per connection, so the
+ * mixer uses a striped lock (16-23, shared only with the SDK's mutexes and
+ * queues, whose hold times are a few instructions). It can never be
+ * g_umm_critsec's lock: that one is claimed (lua_psram_alloc.c), so the
+ * Core 1 audio path never waits on a Core 0 umm heap walk. */
 static critical_section_t s_mix_cs;
 static bool s_mix_cs_ready;
 
@@ -70,7 +78,7 @@ static bool parse_wav_header(sound_sample_t *sample, uint8_t *data, uint32_t siz
 
 void sound_init(void) {
     if (!s_mix_cs_ready) {
-        critical_section_init(&s_mix_cs);
+        critical_section_init_with_lock_num(&s_mix_cs, next_striped_spin_lock_num());
         s_mix_cs_ready = true;
     }
     // Reclaim any loaded sample data before dropping the pointers (app exit
@@ -170,16 +178,29 @@ void sound_mixer_process(int32_t *out_l, int32_t *out_r, int frames) {
 void sound_pump_callbacks(void) {
     for (int p = 0; p < SOUND_MAX_SAMPLES; p++) {
         sound_player_t *player = &s_context.players[p];
+        if (!player->finish_pending && !player->loop_pending)
+            continue;
+        // Take the flags and the callbacks together under the lock, so a
+        // player destroyed on Core 0 (which clears them under the same
+        // lock) is never called back with its old arguments.
+        int (*fin)(void *) = NULL, (*loop)(void *) = NULL;
+        void *fin_arg = NULL, *loop_arg = NULL;
+        mix_lock();
         if (player->finish_pending) {
             player->finish_pending = false;
-            if (player->finish_callback)
-                player->finish_callback(player->finish_callback_arg);
+            fin = player->finish_callback;
+            fin_arg = player->finish_callback_arg;
         }
         if (player->loop_pending) {
             player->loop_pending = false;
-            if (player->loop_callback)
-                player->loop_callback(player->loop_callback_arg);
+            loop = player->loop_callback;
+            loop_arg = player->loop_callback_arg;
         }
+        mix_unlock();
+        if (fin)
+            fin(fin_arg);
+        if (loop)
+            loop(loop_arg);
     }
 }
 
@@ -428,14 +449,18 @@ float sound_player_get_rate(const sound_player_t *player) {
 
 void sound_player_set_finish_callback(sound_player_t *player, int (*cb)(void *), void *arg) {
     if (!player) return;
+    mix_lock();
     player->finish_callback = cb;
     player->finish_callback_arg = arg;
+    mix_unlock();
 }
 
 void sound_player_set_loop_callback(sound_player_t *player, int (*cb)(void *), void *arg) {
     if (!player) return;
+    mix_lock();
     player->loop_callback = cb;
     player->loop_callback_arg = arg;
+    mix_unlock();
 }
 
 sound_sample_t *sound_sample_new_blank(float seconds, uint32_t sample_rate, uint8_t bits_per_sample, uint8_t channels) {
