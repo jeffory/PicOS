@@ -650,6 +650,63 @@ local function download_file_with_redirects(url, dest_path, redirect_count, on_c
     conn:get(path, {["User-Agent"] = "PicOS-Store/1.0"})
 end
 
+-- Fetch a small text body (a checksum file) into memory, following
+-- redirects: on_done(body) or on_done(nil, err).  Leaves WiFi up, unlike
+-- download_file_with_redirects, so a download can follow it.
+local function fetch_small_text(url, redirect_count, on_done)
+    if redirect_count >= MAX_REDIRECTS then
+        on_done(nil, "Too many redirects")
+        return
+    end
+    local host, port, ssl, path = parse_url(url)
+    if not host then on_done(nil, "Invalid URL") return end
+    local conn = net.http.new(host, port, ssl)
+    if not conn then on_done(nil, "Cannot connect") return end
+    conn:setConnectTimeout(15)
+    conn:setReadTimeout(15)
+    conn:setReadBufferSize(512)
+    current_conn = conn
+
+    local body, finished = "", false
+    local function drain()
+        while conn:getBytesAvailable() > 0 do
+            local data = conn:read()
+            if not data or #data == 0 then break end
+            if #body < 1024 then body = body .. data end
+        end
+    end
+    local function finish(text, err)
+        if finished then return end
+        finished = true
+        conn:close()
+        if current_conn == conn then current_conn = nil end
+        on_done(text, err)
+    end
+
+    conn:setRequestCallback(drain)
+    conn:setRequestCompleteCallback(function()
+        drain()
+        local status = conn:getResponseStatus()
+        local hdrs = conn:getResponseHeaders()
+        if status and status >= 300 and status < 400 and hdrs and hdrs["location"] then
+            finished = true
+            conn:close()
+            if current_conn == conn then current_conn = nil end
+            fetch_small_text(hdrs["location"], redirect_count + 1, on_done)
+            return
+        end
+        if status ~= 200 then
+            finish(nil, "HTTP " .. tostring(status))
+            return
+        end
+        finish(body)
+    end)
+    conn:setConnectionClosedCallback(function()
+        finish(nil, conn:getError() or "Connection closed")
+    end)
+    conn:get(path, {["User-Agent"] = "PicOS-Store/1.1"})
+end
+
 -- ── App installation ───────────────────────────────────────────────────────
 
 local function install_app(app)
@@ -827,25 +884,47 @@ local function start_firmware_update()
                   "/releases/download/" .. tag .. "/picocalc_os.sha256"
 
     if fs.exists(BIN_PATH) then fs.delete(BIN_PATH) end
+    if fs.exists(HASH_PATH) then fs.delete(HASH_PATH) end
 
-    download_file_with_redirects(url, BIN_PATH, 0, function(ok, err)
-        if not ok then
-            print("[STORE] Firmware download failed: " .. tostring(err))
+    -- The OS refuses to flash an image without /system/update.sha256, so
+    -- fetch the release's checksum first (small, in memory), then the image.
+    fetch_small_text(fw_hash_url, 0, function(body, herr)
+        local hash = body and body:match("^%s*(%x+)")
+        if not hash or #hash ~= 64 then
+            print("[STORE] Firmware checksum download failed: " ..
+                  tostring(herr or "no SHA-256 in response"))
             download_retry_needed = true
             return
         end
 
-        -- Verify size
-        local actual = fs.size(BIN_PATH)
-        if actual and actual < 256 then
-            fs.delete(BIN_PATH)
-            download_retry_needed = true
-            return
-        end
+        download_file_with_redirects(url, BIN_PATH, 0, function(ok, err)
+            if not ok then
+                print("[STORE] Firmware download failed: " .. tostring(err))
+                download_retry_needed = true
+                return
+            end
 
-        download_complete = true
-        download_stage = nil
-        current_screen = SCR_FW_CONFIRM
+            -- Verify size
+            local actual = fs.size(BIN_PATH)
+            if actual and actual < 256 then
+                fs.delete(BIN_PATH)
+                download_retry_needed = true
+                return
+            end
+
+            local hf = fs.open(HASH_PATH, "w")
+            if not hf then
+                fs.delete(BIN_PATH)
+                download_retry_needed = true
+                return
+            end
+            fs.write(hf, hash:lower() .. "\n")
+            fs.close(hf)
+
+            download_complete = true
+            download_stage = nil
+            current_screen = SCR_FW_CONFIRM
+        end)
     end)
 end
 

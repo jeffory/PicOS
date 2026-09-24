@@ -1130,8 +1130,20 @@ void* umm_calloc(size_t num, size_t size) {
 // Lua bridge stubs — network/tcp now provided by real lua_bridge_network.c/tcp.c
 void lua_bridge_crypto_init(void) {}
 
-// OTA stub
-void ota_trigger_update(const char* url) { (void)url; }
+// OTA stubs (flashing is firmware-only).  Signatures match ota_update.h.
+#include "../../src/os/ota_update.h"
+bool ota_prepare_update(const char *bin_path, const char **out_err) {
+    if (!sdcard_fexists(bin_path)) {
+        *out_err = "Firmware file not found";
+        return false;
+    }
+    return true;
+}
+bool ota_trigger_update(const char *bin_path, const char **out_err) {
+    (void)bin_path;
+    *out_err = "OTA flashing is not supported in the simulator";
+    return false;
+}
 
 // Video player stubs
 typedef struct { int dummy; } VideoPlayer;

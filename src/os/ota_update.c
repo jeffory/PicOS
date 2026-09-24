@@ -118,12 +118,14 @@ static bool ota_parse_hash_file(const char *path, uint8_t out_hash[32]) {
 }
 
 // Verify .bin against .sha256 hash file. Returns true if hash matches.
+// The hash file is mandatory: a missing or malformed one fails the update
+// (an unverified image is never flashed).
 static bool ota_verify_hash(const char *bin_path, const char *hash_path) {
     uint8_t file_hash[32], expected_hash[32];
 
     if (!ota_parse_hash_file(hash_path, expected_hash)) {
-        printf("[OTA] No valid hash file at %s, skipping verification\n", hash_path);
-        return true; // No hash file = skip verification (hash is optional)
+        printf("[OTA] No valid hash file at %s, refusing to flash\n", hash_path);
+        return false;
     }
 
     ota_show_status("Verifying firmware...", "Computing SHA-256", COLOR_WHITE);
@@ -272,9 +274,9 @@ bool ota_check_pending(void) {
 bool ota_apply_update(void) {
     printf("[OTA] Applying firmware update from %s\n", OTA_BIN_PATH);
 
-    // Verify hash if hash file exists
+    // Verify the image against the (mandatory) hash file
     if (!ota_verify_hash(OTA_BIN_PATH, OTA_HASH_PATH)) {
-        ota_show_status("Update failed!", "SHA-256 hash mismatch", COLOR_RED);
+        ota_show_status("Update failed!", "SHA-256 missing or mismatch", COLOR_RED);
         printf("[OTA] Hash verification failed\n");
         goto fail;
     }
@@ -381,9 +383,9 @@ fail:
     return false;
 }
 
-bool ota_trigger_update(const char *bin_path, const char **out_err) {
+bool ota_prepare_update(const char *bin_path, const char **out_err) {
     int size = sdcard_fsize(bin_path);
-    printf("[OTA] Triggering update from %s, size=%d\n", bin_path, size);
+    printf("[OTA] Checking update %s, size=%d\n", bin_path, size);
     if (size < 0) {
         *out_err = "Firmware file not found";
         return false;
@@ -415,6 +417,21 @@ bool ota_trigger_update(const char *bin_path, const char **out_err) {
         *out_err = "Invalid firmware (bad vector table)";
         return false;
     }
+
+    // The boot-time updater refuses an image without a hash; say so now
+    // rather than after a reboot.
+    uint8_t expected[32];
+    if (!ota_parse_hash_file(OTA_HASH_PATH, expected)) {
+        *out_err = "Missing checksum file " OTA_HASH_PATH;
+        return false;
+    }
+    return true;
+}
+
+bool ota_trigger_update(const char *bin_path, const char **out_err) {
+    if (!ota_prepare_update(bin_path, out_err))
+        return false;
+    int size = sdcard_fsize(bin_path);
 
     // If the file is not already at the standard path, it needs to be there
     // for the boot-time updater to find it.

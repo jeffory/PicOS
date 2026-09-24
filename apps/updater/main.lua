@@ -5,7 +5,6 @@ local display = picocalc.display
 local input = picocalc.input
 local sys = picocalc.sys
 local net = picocalc.network
-local config = picocalc.sysconfig
 local fs = picocalc.fs
 local ui = picocalc.ui
 
@@ -289,7 +288,7 @@ end
 local function download_hash_file(url, redirect_count)
     redirect_count = redirect_count or 0
     if redirect_count >= MAX_REDIRECTS then
-        -- Hash is optional, just skip
+        -- No checksum: applyUpdate will refuse and say so
         current_screen = SCR_DONE
         return
     end
@@ -354,7 +353,7 @@ local function download_hash_file(url, redirect_count)
     conn:setConnectionClosedCallback(function()
         current_conn = nil
         if current_screen == SCR_DOWNLOADING then
-            -- Hash download failed, non-fatal
+            -- Hash download failed: applyUpdate will refuse and say so
             current_screen = SCR_DONE
         end
     end)
@@ -699,9 +698,13 @@ local function start_download()
     download_retry_needed = false
     download_retry_url = remote_bin_url
 
-    -- Delete old file to ensure we start fresh
+    -- Delete old files to ensure we start fresh (a stale checksum would
+    -- only make the OS reject the new image at boot)
     if fs.exists(BIN_PATH) then
         fs.delete(BIN_PATH)
+    end
+    if fs.exists(HASH_PATH) then
+        fs.delete(HASH_PATH)
     end
     print("[UPDATER] start_download: remote_size=" .. tostring(remote_size) ..
           " url=" .. tostring(remote_bin_url))

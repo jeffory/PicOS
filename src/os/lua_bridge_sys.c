@@ -1,4 +1,5 @@
 #include "lua_bridge_internal.h"
+#include "app_identity.h"
 #include "lua_psram_alloc.h"
 #include "crashlog.h"
 #include "idle_dim.h"
@@ -11,6 +12,7 @@
 #include "hardware/gpio.h"
 #include <malloc.h>
 #include <stdatomic.h>
+#include <strings.h>
 
 // ── picocalc.sys.* ───────────────────────────────────────────────────────────
 
@@ -231,9 +233,30 @@ static int l_sys_getVersion(lua_State *L) {
   return 1;
 }
 
+// sys.applyUpdate(path) — flash firmware.  Registered only for OS apps
+// (sys_update_allowed); validates the image and its checksum file, then asks
+// the user before rebooting into the updater.
 static int l_sys_applyUpdate(lua_State *L) {
   const char *path = luaL_checkstring(L, 1);
+  if (!fs_sandbox_check(L, path, false)) {
+    lua_pushboolean(L, false);
+    lua_pushstring(L, "access denied");
+    return 2;
+  }
   const char *err = NULL;
+  if (!ota_prepare_update(path, &err)) {
+    lua_pushboolean(L, false);
+    lua_pushstring(L, err ? err : "Unknown error");
+    return 2;
+  }
+  char msg[160];
+  snprintf(msg, sizeof(msg), "Flash firmware from %s? The device reboots.",
+           path);
+  if (!ui_confirm(msg)) {
+    lua_pushboolean(L, false);
+    lua_pushstring(L, "cancelled");
+    return 2;
+  }
   bool ok = ota_trigger_update(path, &err);
   if (!ok) {
     lua_pushboolean(L, false);
@@ -399,7 +422,6 @@ static const luaL_Reg l_sys_lib[] = {{"getMemInfo", l_sys_getMemInfo},
                                      {"getPowerStatus", l_sys_getPowerStatus},
                                      {"getClock", l_sys_getClock},
                                      {"getVersion", l_sys_getVersion},
-                                     {"applyUpdate", l_sys_applyUpdate},
                                      {"addMenuItem", l_sys_addMenuItem},
                                      {"clearMenuItems", l_sys_clearMenuItems},
                                      {"pauseBackground", l_sys_pauseBackground},
@@ -417,10 +439,30 @@ static const luaL_Reg l_sys_lib[] = {{"getMemInfo", l_sys_getMemInfo},
                                      {NULL, NULL}};
 
 
+// sys.applyUpdate is for the OS's own updaters: the "system-update"
+// requirement AND an OS app (under /system/, or the updater/store id).
+// app.json is written by the app itself, so the requirement alone is
+// consent, not a boundary; the id/location check narrows it to OS apps.
+static bool sys_update_allowed(void) {
+  const app_identity_t *me = app_identity_current();
+  if (!me || !app_identity_has_requirement("system-update"))
+    return false;
+  if (strncasecmp(me->dir, "/system/", 8) == 0)
+    return true;
+  return strcmp(me->id, "com.picos.updater") == 0 ||
+         strcmp(me->id, "com.picos.store") == 0;
+}
+
 void lua_bridge_sys_init(lua_State *L) {
-  
   s_lua_callback_count = 0;
   system_menu_clear_items();
 
-register_subtable(L, "sys", l_sys_lib);
+  // picocalc.sys (picocalc is at the top of the stack)
+  lua_newtable(L);
+  luaL_setfuncs(L, l_sys_lib, 0);
+  if (sys_update_allowed()) {
+    lua_pushcfunction(L, l_sys_applyUpdate);
+    lua_setfield(L, -2, "applyUpdate");
+  }
+  lua_setfield(L, -2, "sys");
 }

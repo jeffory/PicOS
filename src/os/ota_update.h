@@ -18,7 +18,12 @@ bool ota_check_pending(void);
 // On failure, it clears the flag and returns false.
 bool ota_apply_update(void);
 
-// Trigger an OTA update: validate file, set scratch register, reboot.
+// Validate an update without applying it: size, vector table, and the
+// mandatory OTA_HASH_PATH checksum file (its match is checked at boot).
+// Returns false with a message in out_err.
+bool ota_prepare_update(const char *bin_path, const char **out_err);
+
+// Trigger an OTA update: ota_prepare_update, set scratch register, reboot.
 // Called from Lua bridge. Does not return on success.
 // Returns false with error message in out_err on failure.
 bool ota_trigger_update(const char *bin_path, const char **out_err);

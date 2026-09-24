@@ -423,9 +423,13 @@ function picocalc.sys.getMemInfo() end
 ---@return string
 function picocalc.sys.getVersion() end
 
----Apply an OTA firmware update from a `.uf2` file.
----@param path string Absolute SD card path to the `.uf2` file
----@return boolean ok
+---Apply an OTA firmware update from a raw `.bin` image. Needs
+---`/system/update.sha256` (the SHA-256 of the image) and asks the user to
+---confirm; reboots on success. **Only present** for OS apps (id
+---`com.picos.updater`/`com.picos.store`, or under `/system/`) that declare the
+---`"system-update"` requirement; nil otherwise.
+---@param path string Absolute SD card path to the `.bin` file
+---@return boolean ok false with an error ("cancelled" if declined)
 ---@return string? error
 function picocalc.sys.applyUpdate(path) end
 
@@ -683,11 +687,14 @@ picocalc.appconfig.reset = picocalc.config.reset
 -- picocalc.sysconfig  (system-wide, /system/config.json)
 -- =============================================================================
 
+---**Only present** when the app's `app.json` declares the `"sysconfig"`
+---requirement (nil otherwise).
 ---@class picocalc.sysconfig
 picocalc.sysconfig = {}
 
----Read a system config value. Well-known keys: `"wifi_ssid"`, `"wifi_pass"`,
----`"brightness"`, `"dim_timeout_s"`.
+---Read a system config value. Well-known keys: `"wifi_ssid"`,
+---`"brightness"`, `"dim_timeout_s"`. `"wifi_pass"` is write-only: `get`
+---always returns nil for it.
 ---@param key string
 ---@return string? value `nil` if key does not exist
 function picocalc.sysconfig.get(key) end

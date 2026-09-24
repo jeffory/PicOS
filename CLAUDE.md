@@ -76,7 +76,7 @@ main()
 - `picocalc.fs` / `g_api.fs` — file open/read/write/close/exists/size/listDir
 - `picocalc.sys` / `g_api.sys` — time, battery, log, reboot, system menu, poll (native apps), shouldExit
 - `picocalc.wifi` / `g_api.wifi` — connect/disconnect/status/IP/SSID/isAvailable
-- `picocalc.sysconfig` / `g_api.config` — system-wide key/value config (get/set/save/load)
+- `picocalc.sysconfig` / `g_api.config` — system-wide key/value config (get/set/save/load); Lua only with the `"sysconfig"` requirement
 - `picocalc.audio` / `g_api.audio` — tone generation, PCM streaming (playTone/stopTone/setVolume/startStream/stopStream/pushSamples)
 - `picocalc.tcp` / `g_api.tcp` — raw TCP/TLS sockets (connect/write/read/close/available/getError/getEvents)
 - `picocalc.ui` / `g_api.ui` — modal dialogs (textInput/textInputSimple/confirm)
@@ -196,7 +196,7 @@ A debug hook fires every 256 opcodes (`lua_sethook` with `LUA_MASKCOUNT`). The h
 ### Config (`src/os/config.c`)
 - Flat JSON key/value store persisted at `/system/config.json`
 - `config_load()` at boot; `config_save()` writes back to SD
-- Exposed to Lua as `picocalc.sysconfig.get(key)`, `.set(key, value)`, `.save()`, `.load()` (NOT `picocalc.config` — that's the per-app store, see the naming warning above)
+- Exposed to Lua as `picocalc.sysconfig.get(key)`, `.set(key, value)`, `.save()`, `.load()` (NOT `picocalc.config` — that's the per-app store, see the naming warning above), registered only for apps whose `app.json` declares `"sysconfig"` (otherwise `picocalc.sysconfig` is nil). `wifi_pass` is write-only: `get("wifi_pass")` always returns nil, `set` works. Native apps' `g_api.config` is unrestricted.
 - Well-known keys: `"wifi_ssid"`, `"wifi_pass"`, `"brightness"`, `"dim_timeout_s"` (idle screen-dim timeout in seconds; `"0"` disables; default 60)
 
 ### UI Widgets (`src/os/ui.c`, `text_input.c`)
@@ -276,7 +276,9 @@ Apps can request elevated requirements via the `requirements` array in `app.json
     "root-filesystem",    // grants full SD card read/write access
     "http",               // app needs WiFi/network connectivity
     "audio",              // app needs audio output
-    "clipboard"           // reserved for future use
+    "clipboard",          // reserved for future use
+    "sysconfig",          // picocalc.sysconfig (system config; wifi_pass write-only)
+    "system-update"       // sys.applyUpdate — OS updater/store only (see below)
   ]
 }
 ```
@@ -291,6 +293,8 @@ end
 Without `"root-filesystem"`, the sandbox (`fs_sandbox_check` → `fs_path_allowed` in `src/os/fs_path.c`, host-tested) allows reads of the app's own `/apps/<dir>` and of `/system/lib/`, and read + write of `/data/<app_id>`; relative paths and any `..` are refused. It guards `picocalc.fs.*` and the image, font and zip loaders, the sound loaders (`sound.sample`/`sampleplayer` paths, `sample:load`, `sample:save`, `fileplayer:load`, `mp3player:load`), `modplayer:load`, `video:load` and `crypto.sha256File`. When `"root-filesystem"` is granted, the app bypasses the sandbox and can access the entire SD card.
 
 `picocalc.config` always reads and writes the running app's own `/data/<app_id>/config.json`: the store is bound to the identity's id on each call and unbound at every app start and exit, so one app never sees another's keys.
+
+`picocalc.sys.applyUpdate(path)` is registered only when the app declares `"system-update"` AND is an OS app: its id is `com.picos.updater` or `com.picos.store`, or its directory is under `/system/`. (Requirements are consent, not a boundary — an app writes its own `app.json` — so the id/location check narrows it.) It checks the path against the sandbox, validates the image and requires `/system/update.sha256`, then shows a `ui_confirm` naming the file before rebooting into the updater; declining returns `false, "cancelled"`. The boot-time updater refuses to flash when the `.sha256` file is missing or does not match.
 
 When `"http"` is granted, WiFi will remain connected after initial time sync (for power saving) so the app can make HTTP requests.
 
