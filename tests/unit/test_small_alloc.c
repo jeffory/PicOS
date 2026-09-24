@@ -33,7 +33,12 @@ static int fake_find(void *p) {
     if (s_blocks[i] == p) return i;
   return -1;
 }
+static unsigned s_fail_rng;        // non-zero: refuse ~1 in 16 at random
 static bool fake_refuse(void) {
+  if (s_fail_rng) {
+    s_fail_rng = s_fail_rng * 1103515245u + 12345u;
+    if (((s_fail_rng >> 16) & 15) == 0) return true;
+  }
   if (s_fail_after < 0) return false;
   if (s_fail_after == 0) return true;
   s_fail_after--;
@@ -73,6 +78,7 @@ static void fake_reset(void) {
   s_nblocks = 0;
   s_bad_frees = 0;
   s_fail_after = -1;
+  s_fail_rng = 0;
   s_allocs = s_frees = 0;
 }
 
@@ -184,6 +190,13 @@ static void test_free_routing(void) {
   CHECK_EQ_INT(s_bad_frees, 0);
   small_free(h, NULL, 0);     // free(NULL) is a no-op
   CHECK_EQ_INT(s_bad_frees, 0);
+  // Lua frees an absent array part as realloc(NULL, 0, 0): nothing is
+  // allocated (a zero-byte backing block would leak - the counting
+  // simulator heap lost ~2 MB to this in a table-heavy run).
+  int allocs = s_allocs;
+  CHECK(small_realloc(h, NULL, 0, 0) == NULL);
+  CHECK(small_alloc(h, 0) == NULL);
+  CHECK_EQ_INT(s_allocs, allocs);
   end_heap(h);
 }
 
@@ -319,8 +332,11 @@ static void test_slabs_released(void) {
 }
 
 // Random alloc / realloc / free against a shadow table, checking contents.
-static void test_random_stress(void) {
+// With `failing`, the backing refuses about one request in 16: a refused
+// alloc/realloc must leave the old block intact and leak nothing.
+static void random_stress(bool failing) {
   small_heap_t *h = new_heap();
+  if (failing) s_fail_rng = 777;
   enum { SLOTS = 3000, OPS = 100000 };
   static void *ptr[SLOTS];
   static size_t len[SLOTS];
@@ -337,6 +353,7 @@ static void test_random_stress(void) {
                                     : 1 + (rng >> 9) % SMALL_ALLOC_MAX;
     if (!ptr[i]) {
       ptr[i] = small_alloc(h, n);
+      if (!ptr[i]) continue;  // refused
       len[i] = n;
       seed[i] = rng;
       fill(ptr[i], n, seed[i]);
@@ -347,6 +364,10 @@ static void test_random_stress(void) {
     } else {
       if (!holds(ptr[i], len[i], seed[i])) bad++;
       void *q = small_realloc(h, ptr[i], len[i], n);
+      if (!q) {  // refused: the old block is untouched
+        if (!holds(ptr[i], len[i], seed[i])) bad++;
+        continue;
+      }
       size_t keep = len[i] < n ? len[i] : n;
       if (!holds(q, keep, seed[i])) bad++;
       ptr[i] = q;
@@ -366,8 +387,14 @@ static void test_random_stress(void) {
   small_stats(h, &st);
   CHECK_EQ_INT(st.objects, 0);
   CHECK(st.slabs <= 1);
+  // Nothing but the heap, its directory and the spare is left in the backing.
+  CHECK(s_nblocks <= 3);
+  s_fail_rng = 0;
   end_heap(h);
 }
+
+static void test_random_stress(void) { random_stress(false); }
+static void test_random_stress_failing(void) { random_stress(true); }
 
 // Many slabs: the directory grows and every object stays owned.
 static void test_many_slabs(void) {
@@ -419,6 +446,7 @@ int main(void) {
   test_fallback_small_block();
   test_slabs_released();
   test_random_stress();
+  test_random_stress_failing();
   test_many_slabs();
   test_asan_poisoning();
   return check_report("test_small_alloc");

@@ -261,6 +261,7 @@ bool small_owns(const small_heap_t *h, const void *ptr) {
 }
 
 void *small_alloc(small_heap_t *h, size_t size) {
+  if (size == 0) return NULL;  // Lua never wants a block for zero bytes
   int cls = small_class_of(size);
   if (cls >= 0) {
     void *p = slot_take(h, cls, size);
@@ -279,11 +280,13 @@ void small_free(small_heap_t *h, void *ptr, size_t osize) {
 }
 
 void *small_realloc(small_heap_t *h, void *ptr, size_t osize, size_t nsize) {
-  if (!ptr) return small_alloc(h, nsize);
+  // nsize 0 first: Lua frees an absent block as realloc(NULL, 0, 0), which
+  // must not allocate anything.
   if (nsize == 0) {
     small_free(h, ptr, osize);
     return NULL;
   }
+  if (!ptr) return small_alloc(h, nsize);
   small_slab_t *s = slab_of(h, ptr);
   int ncls = small_class_of(nsize);
 

@@ -45,7 +45,7 @@ def _fields(value):
 
 
 def _assert_phases(r):
-    for phase in ("LIVE20K", "CHURN100K", "GROW"):
+    for phase in ("LIVE20K", "CHURN100K", "EMPTY20K", "GROW"):
         assert r.get(phase) == "ok", f"{phase}: {r.get(phase)}"
 
 
@@ -80,12 +80,15 @@ def test_small_objects_real_umm(sim_factory, test_sd_card):
     assert int(end["slabs"]) < int(live["slabs"]) // 10, (live, end)
 
 
-def test_heap_returned_after_exit_real_umm(sim_factory, test_sd_card):
-    """Every slab and the pool bookkeeping go back to umm when the Lua state
-    closes, so an app leaves no small blocks pinned in the heap (C-Dogs
-    needs one ~5.9 MB block after a Lua app has run): a second run starts
-    from exactly the heap the first one did, largest block included."""
-    sim = sim_factory(test_sd_card, extra_args=["--real-umm"])
+@pytest.mark.parametrize("extra_args", [[], ["--real-umm"]],
+                         ids=["counting", "real_umm"])
+def test_heap_returned_after_exit(sim_factory, test_sd_card, extra_args):
+    """Every slab, the pool bookkeeping and every block routed through the
+    pools go back to umm when the Lua state closes, so an app leaves nothing
+    pinned in the heap (C-Dogs needs one ~5.9 MB block after a Lua app has
+    run): a second run starts from exactly the heap the first one did,
+    largest block included, and ends with the same free heap."""
+    sim = sim_factory(test_sd_card, extra_args=extra_args)
     starts, free_after = [], []
     for _ in range(2):
         r = _run(sim)

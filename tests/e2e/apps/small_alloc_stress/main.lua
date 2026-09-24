@@ -62,7 +62,16 @@ phase("CHURN100K", function()
     assert(made == 100000)
 end)
 
--- 3: tables growing through every size class and past it (realloc across
+-- 3: empty tables - freeing one frees its absent array part as
+--    realloc(NULL, 0), which must not allocate (it leaked a block each)
+phase("EMPTY20K", function()
+    local t = {}
+    for i = 1, 20000 do t[i] = {} end
+    t = nil
+    collectgarbage("collect")
+end)
+
+-- 4: tables growing through every size class and past it (realloc across
 --    classes and out of the pools), strings of every short length
 phase("GROW", function()
     local t = {}
