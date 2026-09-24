@@ -106,9 +106,9 @@ jobs:
 
   # The firmware network stack in the simulator (make simulator-net:
   # src/drivers/wifi.c/http.c/tcp.c on Mongoose/POSIX, simulator/net/) against
-  # local servers: tests/e2e/test_network_firmware.py. The review's Core 0/
-  # Core 1 close races are strict xfails there, so a fix shows up as XPASS
-  # (a failure) until its marker goes. Optional: not a required check. About
+  # local servers: tests/e2e/test_network_firmware.py, including regression
+  # tests for the fixed Core 0/Core 1 close races from the code review
+  # (KNOWN_BUGS there is empty). Optional: not a required check. About
   # 5 minutes (a ~1 min build locally at -j4 plus deps; the suite is ~15 s).
   e2e-firmware-net:
     name: E2E firmware-net (${{ matrix.sim }})
