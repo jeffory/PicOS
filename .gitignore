@@ -79,3 +79,6 @@ apps/**/*.su
 *.aseprite
 
 .cursor/
+.understand-anything/
+.playwright-mcp/
+.codegraph/
