@@ -18,7 +18,7 @@ jobs:
       - name: Require the OTA update signing key
         if: env.HAVE_SIGNING_KEY != 'true'
         run: |
-          echo "::error::The UPDATE_SIGNING_KEY secret is not set. A release must embed the real OTA public key (the default TEST key's private half is in the repo). See CLAUDE.md 'OTA update policy' for how to create the key and add the secret."
+          echo "::error::The UPDATE_SIGNING_KEY secret is not set. A release must embed the real OTA public key (the default TEST key's private half is in the repo). Create one with 'python3 tools/sign_update.py genkey priv.pem pub.pem', add it with 'gh secret set UPDATE_SIGNING_KEY < priv.pem' and keep priv.pem safe; the key policy is under 'System update' in src/os/CLAUDE.md."
           exit 1
 
       - name: Checkout
