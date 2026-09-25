@@ -18,7 +18,14 @@
 #include <math.h>
 
 #include "../os/image_decoders.h"
-#include "../fonts/font_scientifica.h"
+#include "../fonts/font_registry.h"
+// The image blitters build at -O2 (the firmware is -Os): these loops are where
+// sprite/tilemap frame time goes, and -O2 unswitches and unrolls the
+// specialised loops in display_clip.h. Only these: display.c as a whole at
+// -O2 grows by ~8 KB of flash, all of it competing with the Lua VM for the
+// 16 KB XIP cache.
+#define DISP_HOT __attribute__((optimize("O2")))
+#include "display_clip.h"
 
 // ── Framebuffer ──────────────────────────────────────────────────────────────
 // Placed in internal SRAM smoothly now that the Lua heap has been relocated
@@ -33,6 +40,14 @@ static int s_back_buffer_idx = 0;
 // buffer without swapping.  Screenshot/readback must follow this, not the
 // front-buffer index, or flushRows-only apps read back a stale frame.
 static const uint16_t *s_last_presented = s_framebuffers[0];
+
+// Shadow of the write-only VSCRSADD scroll register (see
+// display_get_scroll_offset).  0 = identity (no hardware scroll).
+// The write counter lets apps detect that someone else (system menu,
+// launcher) wrote the register even when the value matches what they last
+// set — e.g. a reset to 0 while the app's own offset was 0.
+static int s_scroll_offset = 0;
+static uint32_t s_scroll_offset_writes = 0;
 static bool s_dma_active = false;
 
 // DMA channel for LCD transfers
@@ -42,241 +57,42 @@ static uint s_pio_sm = 0;
 // Transparent color key (0 = disabled)
 static uint16_t s_transparent_color = 0;
 
-// ── Built-in 6x8 font (ASCII 0x20–0x7E) ─────────────────────────────────────
-// Minimal 6x8 pixel font data — each character is 6 bytes (columns), 8 rows.
-// This is a standard "font6x8" pattern used widely in embedded projects.
-// Replace with a nicer font by swapping this array and updating FONT_W/H.
+// Clip rect (inclusive bounds). All pixel-writing primitives respect it
+// except display_clear(), display_flush*(), the post-processing effects
+// (whole-framebuffer by design), and the tgx rotated-blit path.
+static int s_clip_x0 = 0, s_clip_y0 = 0;
+static int s_clip_x1 = FB_WIDTH - 1, s_clip_y1 = FB_HEIGHT - 1;
 
-#define FONT_W 6
-#define FONT_H 8
+// The clip rect in the form the shared rasterisers (display_clip.h) take.
+static inline disp_clip_t cur_clip(void) {
+  return (disp_clip_t){s_clip_x0, s_clip_y0, s_clip_x1, s_clip_y1};
+}
 
-// Minimal ASCII 6x8 font (chars 0x20 to 0x7E = 95 characters)
-// Format: column bytes, LSB = top pixel
-static const uint8_t s_font6x8[95][6] = {
-    {0x00, 0x00, 0x00, 0x00, 0x00, 0x00}, // ' '
-    {0x00, 0x00, 0x5F, 0x00, 0x00, 0x00}, // '!'
-    {0x00, 0x07, 0x00, 0x07, 0x00, 0x00}, // '"'
-    {0x14, 0x7F, 0x14, 0x7F, 0x14, 0x00}, // '#'
-    {0x24, 0x2A, 0x7F, 0x2A, 0x12, 0x00}, // '$'
-    {0x23, 0x13, 0x08, 0x64, 0x62, 0x00}, // '%'
-    {0x36, 0x49, 0x55, 0x22, 0x50, 0x00}, // '&'
-    {0x00, 0x05, 0x03, 0x00, 0x00, 0x00}, // '''
-    {0x00, 0x1C, 0x22, 0x41, 0x00, 0x00}, // '('
-    {0x00, 0x41, 0x22, 0x1C, 0x00, 0x00}, // ')'
-    {0x08, 0x2A, 0x1C, 0x2A, 0x08, 0x00}, // '*'
-    {0x08, 0x08, 0x3E, 0x08, 0x08, 0x00}, // '+'
-    {0x00, 0x50, 0x30, 0x00, 0x00, 0x00}, // ','
-    {0x08, 0x08, 0x08, 0x08, 0x08, 0x00}, // '-'
-    {0x00, 0x60, 0x60, 0x00, 0x00, 0x00}, // '.'
-    {0x20, 0x10, 0x08, 0x04, 0x02, 0x00}, // '/'
-    {0x3E, 0x51, 0x49, 0x45, 0x3E, 0x00}, // '0'
-    {0x00, 0x42, 0x7F, 0x40, 0x00, 0x00}, // '1'
-    {0x42, 0x61, 0x51, 0x49, 0x46, 0x00}, // '2'
-    {0x21, 0x41, 0x45, 0x4B, 0x31, 0x00}, // '3'
-    {0x18, 0x14, 0x12, 0x7F, 0x10, 0x00}, // '4'
-    {0x27, 0x45, 0x45, 0x45, 0x39, 0x00}, // '5'
-    {0x3C, 0x4A, 0x49, 0x49, 0x30, 0x00}, // '6'
-    {0x01, 0x71, 0x09, 0x05, 0x03, 0x00}, // '7'
-    {0x36, 0x49, 0x49, 0x49, 0x36, 0x00}, // '8'
-    {0x06, 0x49, 0x49, 0x29, 0x1E, 0x00}, // '9'
-    {0x00, 0x36, 0x36, 0x00, 0x00, 0x00}, // ':'
-    {0x00, 0x56, 0x36, 0x00, 0x00, 0x00}, // ';'
-    {0x00, 0x08, 0x14, 0x22, 0x41, 0x00}, // '<'
-    {0x14, 0x14, 0x14, 0x14, 0x14, 0x00}, // '='
-    {0x41, 0x22, 0x14, 0x08, 0x00, 0x00}, // '>'
-    {0x02, 0x01, 0x51, 0x09, 0x06, 0x00}, // '?'
-    {0x32, 0x49, 0x79, 0x41, 0x3E, 0x00}, // '@'
-    {0x7E, 0x11, 0x11, 0x11, 0x7E, 0x00}, // 'A'
-    {0x7F, 0x49, 0x49, 0x49, 0x36, 0x00}, // 'B'
-    {0x3E, 0x41, 0x41, 0x41, 0x22, 0x00}, // 'C'
-    {0x7F, 0x41, 0x41, 0x22, 0x1C, 0x00}, // 'D'
-    {0x7F, 0x49, 0x49, 0x49, 0x41, 0x00}, // 'E'
-    {0x7F, 0x09, 0x09, 0x09, 0x01, 0x00}, // 'F'
-    {0x3E, 0x41, 0x49, 0x49, 0x7A, 0x00}, // 'G'
-    {0x7F, 0x08, 0x08, 0x08, 0x7F, 0x00}, // 'H'
-    {0x00, 0x41, 0x7F, 0x41, 0x00, 0x00}, // 'I'
-    {0x20, 0x40, 0x41, 0x3F, 0x01, 0x00}, // 'J'
-    {0x7F, 0x08, 0x14, 0x22, 0x41, 0x00}, // 'K'
-    {0x7F, 0x40, 0x40, 0x40, 0x40, 0x00}, // 'L'
-    {0x7F, 0x02, 0x04, 0x02, 0x7F, 0x00}, // 'M'
-    {0x7F, 0x04, 0x08, 0x10, 0x7F, 0x00}, // 'N'
-    {0x3E, 0x41, 0x41, 0x41, 0x3E, 0x00}, // 'O'
-    {0x7F, 0x09, 0x09, 0x09, 0x06, 0x00}, // 'P'
-    {0x3E, 0x41, 0x51, 0x21, 0x5E, 0x00}, // 'Q'
-    {0x7F, 0x09, 0x19, 0x29, 0x46, 0x00}, // 'R'
-    {0x46, 0x49, 0x49, 0x49, 0x31, 0x00}, // 'S'
-    {0x01, 0x01, 0x7F, 0x01, 0x01, 0x00}, // 'T'
-    {0x3F, 0x40, 0x40, 0x40, 0x3F, 0x00}, // 'U'
-    {0x1F, 0x20, 0x40, 0x20, 0x1F, 0x00}, // 'V'
-    {0x3F, 0x40, 0x38, 0x40, 0x3F, 0x00}, // 'W'
-    {0x63, 0x14, 0x08, 0x14, 0x63, 0x00}, // 'X'
-    {0x07, 0x08, 0x70, 0x08, 0x07, 0x00}, // 'Y'
-    {0x61, 0x51, 0x49, 0x45, 0x43, 0x00}, // 'Z'
-    {0x00, 0x7F, 0x41, 0x41, 0x00, 0x00}, // '['
-    {0x02, 0x04, 0x08, 0x10, 0x20, 0x00}, // '\'
-    {0x00, 0x41, 0x41, 0x7F, 0x00, 0x00}, // ']'
-    {0x04, 0x02, 0x01, 0x02, 0x04, 0x00}, // '^'
-    {0x40, 0x40, 0x40, 0x40, 0x40, 0x00}, // '_'
-    {0x00, 0x01, 0x02, 0x04, 0x00, 0x00}, // '`'
-    {0x20, 0x54, 0x54, 0x54, 0x78, 0x00}, // 'a'
-    {0x7F, 0x48, 0x44, 0x44, 0x38, 0x00}, // 'b'
-    {0x38, 0x44, 0x44, 0x44, 0x20, 0x00}, // 'c'
-    {0x38, 0x44, 0x44, 0x48, 0x7F, 0x00}, // 'd'
-    {0x38, 0x54, 0x54, 0x54, 0x18, 0x00}, // 'e'
-    {0x08, 0x7E, 0x09, 0x01, 0x02, 0x00}, // 'f'
-    {0x08, 0x14, 0x54, 0x54, 0x3C, 0x00}, // 'g'
-    {0x7F, 0x08, 0x04, 0x04, 0x78, 0x00}, // 'h'
-    {0x00, 0x44, 0x7D, 0x40, 0x00, 0x00}, // 'i'
-    {0x20, 0x40, 0x44, 0x3D, 0x00, 0x00}, // 'j'
-    {0x7F, 0x10, 0x28, 0x44, 0x00, 0x00}, // 'k'
-    {0x00, 0x41, 0x7F, 0x40, 0x00, 0x00}, // 'l'
-    {0x7C, 0x04, 0x18, 0x04, 0x78, 0x00}, // 'm'
-    {0x7C, 0x08, 0x04, 0x04, 0x78, 0x00}, // 'n'
-    {0x38, 0x44, 0x44, 0x44, 0x38, 0x00}, // 'o'
-    {0x7C, 0x14, 0x14, 0x14, 0x08, 0x00}, // 'p'
-    {0x08, 0x14, 0x14, 0x18, 0x7C, 0x00}, // 'q'
-    {0x7C, 0x08, 0x04, 0x04, 0x08, 0x00}, // 'r'
-    {0x48, 0x54, 0x54, 0x54, 0x20, 0x00}, // 's'
-    {0x04, 0x3F, 0x44, 0x40, 0x20, 0x00}, // 't'
-    {0x3C, 0x40, 0x40, 0x20, 0x7C, 0x00}, // 'u'
-    {0x1C, 0x20, 0x40, 0x20, 0x1C, 0x00}, // 'v'
-    {0x3C, 0x40, 0x30, 0x40, 0x3C, 0x00}, // 'w'
-    {0x44, 0x28, 0x10, 0x28, 0x44, 0x00}, // 'x'
-    {0x0C, 0x50, 0x50, 0x50, 0x3C, 0x00}, // 'y'
-    {0x44, 0x64, 0x54, 0x4C, 0x44, 0x00}, // 'z'
-    {0x00, 0x08, 0x36, 0x41, 0x00, 0x00}, // '{'
-    {0x00, 0x00, 0x7F, 0x00, 0x00, 0x00}, // '|'
-    {0x00, 0x41, 0x36, 0x08, 0x00, 0x00}, // '}'
-    {0x08, 0x08, 0x2A, 0x1C, 0x08, 0x00}, // '~' (→ arrow, used as placeholder)
-};
+// Host RGB565 -> the framebuffer's byte-swapped (panel) order.
+static inline uint16_t fb_color(uint16_t c) { return disp_px(c, true); }
 
-// ── 8x12 font (ASCII 0x20-0x7E) ──────────────────────────────────────────────
-// Format: 12 bytes per char (1 byte per row, MSB = leftmost pixel, 8 cols)
-// Each byte represents one row of pixels from top to bottom.
-static const uint8_t s_font8x12[95][12] = {
-    {0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00}, // ' '
-    {0x00,0x00,0x18,0x18,0x18,0x18,0x18,0x00,0x18,0x18,0x00,0x00}, // '!'
-    {0x00,0x66,0x66,0x66,0x24,0x00,0x00,0x00,0x00,0x00,0x00,0x00}, // '"'
-    {0x00,0x00,0x6C,0x6C,0xFE,0x6C,0xFE,0x6C,0x6C,0x00,0x00,0x00}, // '#'
-    {0x00,0x10,0x7C,0xD6,0xD0,0x7C,0x16,0xD6,0x7C,0x10,0x00,0x00}, // '$'
-    {0x00,0x00,0xC2,0xC6,0x0C,0x18,0x30,0x66,0xC6,0x00,0x00,0x00}, // '%'
-    {0x00,0x00,0x38,0x6C,0x38,0x76,0xDC,0xCC,0x76,0x00,0x00,0x00}, // '&'
-    {0x00,0x30,0x30,0x30,0x60,0x00,0x00,0x00,0x00,0x00,0x00,0x00}, // '''
-    {0x00,0x00,0x0C,0x18,0x30,0x30,0x30,0x18,0x0C,0x00,0x00,0x00}, // '('
-    {0x00,0x00,0x30,0x18,0x0C,0x0C,0x0C,0x18,0x30,0x00,0x00,0x00}, // ')'
-    {0x00,0x00,0x00,0x66,0x3C,0xFF,0x3C,0x66,0x00,0x00,0x00,0x00}, // '*'
-    {0x00,0x00,0x00,0x18,0x18,0x7E,0x18,0x18,0x00,0x00,0x00,0x00}, // '+'
-    {0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x18,0x18,0x30,0x00,0x00}, // ','
-    {0x00,0x00,0x00,0x00,0x00,0xFE,0x00,0x00,0x00,0x00,0x00,0x00}, // '-'
-    {0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x18,0x18,0x00,0x00,0x00}, // '.'
-    {0x00,0x00,0x02,0x06,0x0C,0x18,0x30,0x60,0xC0,0x00,0x00,0x00}, // '/'
-    {0x00,0x00,0x7C,0xC6,0xCE,0xDE,0xF6,0xE6,0x7C,0x00,0x00,0x00}, // '0'
-    {0x00,0x00,0x18,0x38,0x78,0x18,0x18,0x18,0x7E,0x00,0x00,0x00}, // '1'
-    {0x00,0x00,0x7C,0xC6,0x06,0x1C,0x30,0x60,0xFE,0x00,0x00,0x00}, // '2'
-    {0x00,0x00,0x7C,0xC6,0x06,0x3C,0x06,0xC6,0x7C,0x00,0x00,0x00}, // '3'
-    {0x00,0x00,0x0C,0x1C,0x3C,0x6C,0xFE,0x0C,0x0C,0x00,0x00,0x00}, // '4'
-    {0x00,0x00,0xFE,0xC0,0xFC,0x06,0x06,0xC6,0x7C,0x00,0x00,0x00}, // '5'
-    {0x00,0x00,0x3C,0x60,0xC0,0xFC,0xC6,0xC6,0x7C,0x00,0x00,0x00}, // '6'
-    {0x00,0x00,0xFE,0xC6,0x0C,0x18,0x30,0x30,0x30,0x00,0x00,0x00}, // '7'
-    {0x00,0x00,0x7C,0xC6,0xC6,0x7C,0xC6,0xC6,0x7C,0x00,0x00,0x00}, // '8'
-    {0x00,0x00,0x7C,0xC6,0xC6,0x7E,0x06,0x0C,0x78,0x00,0x00,0x00}, // '9'
-    {0x00,0x00,0x00,0x18,0x18,0x00,0x00,0x18,0x18,0x00,0x00,0x00}, // ':'
-    {0x00,0x00,0x00,0x18,0x18,0x00,0x00,0x18,0x18,0x30,0x00,0x00}, // ';'
-    {0x00,0x00,0x06,0x0C,0x18,0x30,0x18,0x0C,0x06,0x00,0x00,0x00}, // '<'
-    {0x00,0x00,0x00,0x00,0x7E,0x00,0x7E,0x00,0x00,0x00,0x00,0x00}, // '='
-    {0x00,0x00,0x60,0x30,0x18,0x0C,0x18,0x30,0x60,0x00,0x00,0x00}, // '>'
-    {0x00,0x00,0x7C,0xC6,0x0C,0x18,0x18,0x00,0x18,0x00,0x00,0x00}, // '?'
-    {0x00,0x00,0x7C,0xC6,0xDE,0xDE,0xDE,0xC0,0x7C,0x00,0x00,0x00}, // '@'
-    {0x00,0x00,0x10,0x38,0x6C,0xC6,0xFE,0xC6,0xC6,0x00,0x00,0x00}, // 'A'
-    {0x00,0x00,0xFC,0x66,0x66,0x7C,0x66,0x66,0xFC,0x00,0x00,0x00}, // 'B'
-    {0x00,0x00,0x3C,0x66,0xC0,0xC0,0xC0,0x66,0x3C,0x00,0x00,0x00}, // 'C'
-    {0x00,0x00,0xF8,0x6C,0x66,0x66,0x66,0x6C,0xF8,0x00,0x00,0x00}, // 'D'
-    {0x00,0x00,0xFE,0x62,0x68,0x78,0x68,0x62,0xFE,0x00,0x00,0x00}, // 'E'
-    {0x00,0x00,0xFE,0x62,0x68,0x78,0x68,0x60,0xF0,0x00,0x00,0x00}, // 'F'
-    {0x00,0x00,0x3C,0x66,0xC0,0xC0,0xCE,0x66,0x3E,0x00,0x00,0x00}, // 'G'
-    {0x00,0x00,0xC6,0xC6,0xC6,0xFE,0xC6,0xC6,0xC6,0x00,0x00,0x00}, // 'H'
-    {0x00,0x00,0x3C,0x18,0x18,0x18,0x18,0x18,0x3C,0x00,0x00,0x00}, // 'I'
-    {0x00,0x00,0x1E,0x0C,0x0C,0x0C,0xCC,0xCC,0x78,0x00,0x00,0x00}, // 'J'
-    {0x00,0x00,0xE6,0x66,0x6C,0x78,0x6C,0x66,0xE6,0x00,0x00,0x00}, // 'K'
-    {0x00,0x00,0xF0,0x60,0x60,0x60,0x62,0x66,0xFE,0x00,0x00,0x00}, // 'L'
-    {0x00,0x00,0xC6,0xEE,0xFE,0xD6,0xC6,0xC6,0xC6,0x00,0x00,0x00}, // 'M'
-    {0x00,0x00,0xC6,0xE6,0xF6,0xDE,0xCE,0xC6,0xC6,0x00,0x00,0x00}, // 'N'
-    {0x00,0x00,0x7C,0xC6,0xC6,0xC6,0xC6,0xC6,0x7C,0x00,0x00,0x00}, // 'O'
-    {0x00,0x00,0xFC,0x66,0x66,0x7C,0x60,0x60,0xF0,0x00,0x00,0x00}, // 'P'
-    {0x00,0x00,0x7C,0xC6,0xC6,0xC6,0xD6,0xDE,0x7C,0x0E,0x00,0x00}, // 'Q'
-    {0x00,0x00,0xFC,0x66,0x66,0x7C,0x6C,0x66,0xE6,0x00,0x00,0x00}, // 'R'
-    {0x00,0x00,0x7C,0xC6,0x60,0x38,0x0C,0xC6,0x7C,0x00,0x00,0x00}, // 'S'
-    {0x00,0x00,0x7E,0x5A,0x18,0x18,0x18,0x18,0x3C,0x00,0x00,0x00}, // 'T'
-    {0x00,0x00,0xC6,0xC6,0xC6,0xC6,0xC6,0xC6,0x7C,0x00,0x00,0x00}, // 'U'
-    {0x00,0x00,0xC6,0xC6,0xC6,0xC6,0x6C,0x38,0x10,0x00,0x00,0x00}, // 'V'
-    {0x00,0x00,0xC6,0xC6,0xC6,0xD6,0xFE,0xEE,0xC6,0x00,0x00,0x00}, // 'W'
-    {0x00,0x00,0xC6,0x6C,0x38,0x38,0x6C,0xC6,0xC6,0x00,0x00,0x00}, // 'X'
-    {0x00,0x00,0x66,0x66,0x66,0x3C,0x18,0x18,0x3C,0x00,0x00,0x00}, // 'Y'
-    {0x00,0x00,0xFE,0xC6,0x8C,0x18,0x32,0x66,0xFE,0x00,0x00,0x00}, // 'Z'
-    {0x00,0x00,0x3C,0x30,0x30,0x30,0x30,0x30,0x3C,0x00,0x00,0x00}, // '['
-    {0x00,0x00,0xC0,0x60,0x30,0x18,0x0C,0x06,0x02,0x00,0x00,0x00}, // '\'
-    {0x00,0x00,0x3C,0x0C,0x0C,0x0C,0x0C,0x0C,0x3C,0x00,0x00,0x00}, // ']'
-    {0x10,0x38,0x6C,0xC6,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00}, // '^'
-    {0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0xFF,0x00,0x00}, // '_'
-    {0x30,0x30,0x18,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00}, // '`'
-    {0x00,0x00,0x00,0x00,0x78,0x0C,0x7C,0xCC,0x76,0x00,0x00,0x00}, // 'a'
-    {0x00,0x00,0xE0,0x60,0x7C,0x66,0x66,0x66,0xDC,0x00,0x00,0x00}, // 'b'
-    {0x00,0x00,0x00,0x00,0x7C,0xC6,0xC0,0xC6,0x7C,0x00,0x00,0x00}, // 'c'
-    {0x00,0x00,0x1C,0x0C,0x7C,0xCC,0xCC,0xCC,0x76,0x00,0x00,0x00}, // 'd'
-    {0x00,0x00,0x00,0x00,0x7C,0xC6,0xFE,0xC0,0x7C,0x00,0x00,0x00}, // 'e'
-    {0x00,0x00,0x1C,0x36,0x30,0x78,0x30,0x30,0x78,0x00,0x00,0x00}, // 'f'
-    {0x00,0x00,0x00,0x00,0x76,0xCC,0xCC,0x7C,0x0C,0x78,0x00,0x00}, // 'g'
-    {0x00,0x00,0xE0,0x60,0x6C,0x76,0x66,0x66,0xE6,0x00,0x00,0x00}, // 'h'
-    {0x00,0x00,0x18,0x00,0x38,0x18,0x18,0x18,0x3C,0x00,0x00,0x00}, // 'i'
-    {0x00,0x00,0x06,0x00,0x0E,0x06,0x06,0x66,0x66,0x3C,0x00,0x00}, // 'j'
-    {0x00,0x00,0xE0,0x60,0x66,0x6C,0x78,0x6C,0xE6,0x00,0x00,0x00}, // 'k'
-    {0x00,0x00,0x38,0x18,0x18,0x18,0x18,0x18,0x3C,0x00,0x00,0x00}, // 'l'
-    {0x00,0x00,0x00,0x00,0xEC,0xFE,0xD6,0xC6,0xC6,0x00,0x00,0x00}, // 'm'
-    {0x00,0x00,0x00,0x00,0xDC,0x66,0x66,0x66,0x66,0x00,0x00,0x00}, // 'n'
-    {0x00,0x00,0x00,0x00,0x7C,0xC6,0xC6,0xC6,0x7C,0x00,0x00,0x00}, // 'o'
-    {0x00,0x00,0x00,0x00,0xDC,0x66,0x66,0x7C,0x60,0xF0,0x00,0x00}, // 'p'
-    {0x00,0x00,0x00,0x00,0x76,0xCC,0xCC,0x7C,0x0C,0x1E,0x00,0x00}, // 'q'
-    {0x00,0x00,0x00,0x00,0xDC,0x76,0x60,0x60,0xF0,0x00,0x00,0x00}, // 'r'
-    {0x00,0x00,0x00,0x00,0x7C,0xC0,0x7C,0x06,0xFC,0x00,0x00,0x00}, // 's'
-    {0x00,0x00,0x10,0x30,0x7C,0x30,0x30,0x34,0x18,0x00,0x00,0x00}, // 't'
-    {0x00,0x00,0x00,0x00,0xCC,0xCC,0xCC,0xCC,0x76,0x00,0x00,0x00}, // 'u'
-    {0x00,0x00,0x00,0x00,0xC6,0xC6,0x6C,0x38,0x10,0x00,0x00,0x00}, // 'v'
-    {0x00,0x00,0x00,0x00,0xC6,0xD6,0xFE,0x6C,0x44,0x00,0x00,0x00}, // 'w'
-    {0x00,0x00,0x00,0x00,0xC6,0x6C,0x38,0x6C,0xC6,0x00,0x00,0x00}, // 'x'
-    {0x00,0x00,0x00,0x00,0xC6,0xC6,0x6C,0x38,0x18,0x70,0x00,0x00}, // 'y'
-    {0x00,0x00,0x00,0x00,0xFC,0x98,0x30,0x64,0xFC,0x00,0x00,0x00}, // 'z'
-    {0x00,0x00,0x0E,0x18,0x18,0x70,0x18,0x18,0x0E,0x00,0x00,0x00}, // '{'
-    {0x00,0x00,0x18,0x18,0x18,0x00,0x18,0x18,0x18,0x00,0x00,0x00}, // '|'
-    {0x00,0x00,0x70,0x18,0x18,0x0E,0x18,0x18,0x70,0x00,0x00,0x00}, // '}'
-    {0x00,0x00,0x76,0xDC,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00}, // '~'
-};
+// ── Active font ─────────────────────────────────────────────────────────────
+// All glyph data and the renderer live in src/fonts/. This driver only
+// tracks which registry slot is active — the id, never a pointer: an app can
+// unload the slot it has selected (font_registry_unload is in the native API),
+// so the pointer is re-resolved on every use and a freed slot self-heals the
+// selection back to the built-in 6x8.
+static int s_active_font_id = 0;
 
-#define FONT8X12_W 8
-#define FONT8X12_H 12
-
-// Active font selection: 0 = 6x8 (default), 1 = 8x12
-static int s_active_font = 0;
+static const pc_font_t *active_font(void) {
+  const pc_font_t *f = font_registry_get(s_active_font_id);
+  if (!f) { s_active_font_id = 0; f = font_registry_get(0); }
+  return f;
+}
 
 void display_set_font(int font_id) {
-  if (font_id >= 0 && font_id <= 3)
-    s_active_font = font_id;
+  if (font_registry_get(font_id)) s_active_font_id = font_id;
 }
 
-int display_get_font(void) {
-  return s_active_font;
-}
-
-int display_get_font_width(void) {
-  if (s_active_font == 1) return FONT8X12_W;
-  if (s_active_font == 2 || s_active_font == 3) return FONT_SCI_WIDTH;
-  return FONT_W;
-}
-
-int display_get_font_height(void) {
-  if (s_active_font == 1) return FONT8X12_H;
-  if (s_active_font == 2 || s_active_font == 3) return FONT_SCI_HEIGHT;
-  return FONT_H;
-}
+int display_get_font(void) { return s_active_font_id; }
+int display_get_font_width(void) { return active_font()->max_width; }
+int display_get_font_height(void) { return active_font()->height; }
+const pc_font_t *display_get_active_font(void) { return active_font(); }
 
 // ── ST7365P Command set
 // ───────────────────────────────────────────────────────
@@ -555,47 +371,17 @@ void display_clear(uint16_t color) {
 }
 
 void display_set_pixel(int x, int y, uint16_t color) {
-  if (x < 0 || x >= FB_WIDTH || y < 0 || y >= FB_HEIGHT)
+  if (x < s_clip_x0 || x > s_clip_x1 || y < s_clip_y0 || y > s_clip_y1)
     return;
   uint16_t be = (color >> 8) | (color << 8);
   s_framebuffer[y * FB_WIDTH + x] = be;
 }
 
 void display_fill_rect(int x, int y, int w, int h, uint16_t color) {
-  if (x < 0) {
-    w += x;
-    x = 0;
-  }
-  if (y < 0) {
-    h += y;
-    y = 0;
-  }
-  if (x + w > FB_WIDTH)
-    w = FB_WIDTH - x;
-  if (y + h > FB_HEIGHT)
-    h = FB_HEIGHT - y;
-  if (w <= 0 || h <= 0)
-    return;
-
-  uint16_t be = (color >> 8) | (color << 8);
-
-  // Optimize for full-width fills
-  if (x == 0 && w == FB_WIDTH) {
-    uint32_t color32 = ((uint32_t)be << 16) | be;
-    uint32_t *fb32 = (uint32_t *)&s_framebuffer[y * FB_WIDTH];
-    size_t count32 = (w * h) / 2;
-    for (size_t i = 0; i < count32; i++) {
-      fb32[i] = color32;
-    }
-    return;
-  }
-
-  // Standard per-row fill
-  for (int row = y; row < y + h; row++) {
-    uint16_t *p = &s_framebuffer[row * FB_WIDTH + x];
-    for (int col = 0; col < w; col++)
-      p[col] = be;
-  }
+  // Clipped once in int64 (x + w cannot overflow); full-width bands use
+  // 32-bit stores.
+  disp_clip_t c = cur_clip();
+  disp_fill(s_framebuffer, FB_WIDTH, &c, x, y, w, h, fb_color(color));
 }
 
 void display_draw_rect(int x, int y, int w, int h, uint16_t color) {
@@ -605,29 +391,23 @@ void display_draw_rect(int x, int y, int w, int h, uint16_t color) {
   display_fill_rect(x + w - 1, y, 1, h, color);
 }
 
+// Bresenham, started at the first step inside the clip and stopped after the
+// last (display_clip.h): drawLine(0,0,1e9,1e9) costs 320 steps, not 1e9.
 void display_draw_line(int x0, int y0, int x1, int y1, uint16_t color) {
-  // Bresenham's line algorithm
-  int dx = abs(x1 - x0), sx = x0 < x1 ? 1 : -1;
-  int dy = -abs(y1 - y0), sy = y0 < y1 ? 1 : -1;
-  int err = dx + dy, e2;
-  while (true) {
-    display_set_pixel(x0, y0, color);
-    if (x0 == x1 && y0 == y1)
-      break;
-    e2 = 2 * err;
-    if (e2 >= dy) {
-      err += dy;
-      x0 += sx;
-    }
-    if (e2 <= dx) {
-      err += dx;
-      y0 += sy;
-    }
-  }
+  disp_clip_t c = cur_clip();
+  disp_line(s_framebuffer, FB_WIDTH, &c, x0, y0, x1, y1, fb_color(color));
 }
 
-// Midpoint circle algorithm (outline only)
+// Midpoint circle algorithm (outline only). Circles whose bounding box misses
+// the clip are rejected; radii past DISP_CIRCLE_MIDPOINT_MAX (where the O(r)
+// loop would spin for up to minutes) are drawn per visible row/column.
 void display_draw_circle(int cx, int cy, int r, uint16_t color) {
+  disp_clip_t c = cur_clip();
+  if (disp_circle_rejected(&c, cx, cy, r)) return;
+  if (r > DISP_CIRCLE_MIDPOINT_MAX) {
+    disp_circle_big(s_framebuffer, FB_WIDTH, &c, cx, cy, r, fb_color(color));
+    return;
+  }
   int x = r, y = 0, d = 1 - r;
   while (x >= y) {
     display_set_pixel(cx + x, cy + y, color);
@@ -648,8 +428,16 @@ void display_draw_circle(int cx, int cy, int r, uint16_t color) {
   }
 }
 
-// Filled circle using horizontal spans
+// Filled circle using horizontal spans (rejection and the large-radius path
+// as for the outline above).
 void display_fill_circle(int cx, int cy, int r, uint16_t color) {
+  disp_clip_t c = cur_clip();
+  if (disp_circle_rejected(&c, cx, cy, r)) return;
+  if (r > DISP_CIRCLE_MIDPOINT_MAX) {
+    disp_fill_circle_rows(s_framebuffer, FB_WIDTH, &c, cx, cy, r,
+                          fb_color(color));
+    return;
+  }
   int x = r, y = 0, d = 1 - r;
   while (x >= y) {
     display_fill_rect(cx - x, cy + y, 2 * x + 1, 1, color);
@@ -668,17 +456,17 @@ void display_fill_circle(int cx, int cy, int r, uint16_t color) {
 
 // Fast vertical line fill — stride-based pointer walk, no Bresenham overhead.
 void display_fill_vline(int x, int y0, int y1, uint16_t color) {
-  if (x < 0 || x >= FB_WIDTH)
+  if (x < s_clip_x0 || x > s_clip_x1)
     return;
   if (y0 > y1) {
     int t = y0;
     y0 = y1;
     y1 = t;
   }
-  if (y0 < 0)
-    y0 = 0;
-  if (y1 >= FB_HEIGHT)
-    y1 = FB_HEIGHT - 1;
+  if (y0 < s_clip_y0)
+    y0 = s_clip_y0;
+  if (y1 > s_clip_y1)
+    y1 = s_clip_y1;
   if (y0 > y1)
     return;
   uint16_t be = (color >> 8) | (color << 8);
@@ -691,7 +479,7 @@ void display_fill_vline(int x, int y0, int y1, uint16_t color) {
 void display_draw_textured_column(int x, int y0, int y1,
                                   const uint16_t *tex, int tex_w, int tex_h,
                                   int tex_x, int tex_y0, int tex_y1) {
-  if (x < 0 || x >= FB_WIDTH || y0 > y1 || !tex)
+  if (x < s_clip_x0 || x > s_clip_x1 || y0 > y1 || !tex)
     return;
   if (tex_x < 0 || tex_x >= tex_w)
     return;
@@ -707,12 +495,12 @@ void display_draw_textured_column(int x, int y0, int y1,
 
   // Clip top
   uint32_t tex_pos = (uint32_t)tex_y0 << 16; // starting texture position
-  if (y0 < 0) {
-    tex_pos += step * (uint32_t)(-y0);
-    y0 = 0;
+  if (y0 < s_clip_y0) {
+    tex_pos += step * (uint32_t)(s_clip_y0 - y0);
+    y0 = s_clip_y0;
   }
-  if (y1 >= FB_HEIGHT)
-    y1 = FB_HEIGHT - 1;
+  if (y1 > s_clip_y1)
+    y1 = s_clip_y1;
   if (y0 > y1)
     return;
 
@@ -732,7 +520,7 @@ void display_draw_textured_column(int x, int y0, int y1,
 // Gradient vertical line — interpolates RGB565 channels using fixed-point.
 void display_fill_vline_gradient(int x, int y0, int y1, uint16_t color_top,
                                  uint16_t color_bottom) {
-  if (x < 0 || x >= FB_WIDTH)
+  if (x < s_clip_x0 || x > s_clip_x1)
     return;
   if (y0 > y1) {
     int t = y0;
@@ -745,10 +533,10 @@ void display_fill_vline_gradient(int x, int y0, int y1, uint16_t color_top,
 
   // Clip
   int orig_y0 = y0;
-  if (y0 < 0)
-    y0 = 0;
-  if (y1 >= FB_HEIGHT)
-    y1 = FB_HEIGHT - 1;
+  if (y0 < s_clip_y0)
+    y0 = s_clip_y0;
+  if (y1 > s_clip_y1)
+    y1 = s_clip_y1;
   if (y0 > y1)
     return;
 
@@ -771,292 +559,76 @@ void display_fill_vline_gradient(int x, int y0, int y1, uint16_t color_top,
   }
 }
 
-// Fill a triangle using scanline algorithm
+// Scanline triangle: rows clipped to the clip rect before the loop, each row
+// a span fill (display_clip.h keeps the original edge formulas).
 void display_fill_triangle(int x0, int y0, int x1, int y1, int x2, int y2,
                            uint16_t color) {
-  // Sort vertices by Y coordinate
-  if (y0 > y1) {
-    int temp = y0;
-    y0 = y1;
-    y1 = temp;
-    temp = x0;
-    x0 = x1;
-    x1 = temp;
-  }
-  if (y0 > y2) {
-    int temp = y0;
-    y0 = y2;
-    y2 = temp;
-    temp = x0;
-    x0 = x2;
-    x2 = temp;
-  }
-  if (y1 > y2) {
-    int temp = y1;
-    y1 = y2;
-    y2 = temp;
-    temp = x1;
-    x1 = x2;
-    x2 = temp;
-  }
+  disp_clip_t c = cur_clip();
+  disp_fill_triangle(s_framebuffer, FB_WIDTH, &c, x0, y0, x1, y1, x2, y2,
+                     fb_color(color));
+}
 
-  // Degenerate: all same y
-  if (y0 == y2) return;
-
-  float inv_dy02 = 1.0f / (float)(y2 - y0);  // long edge, always valid
-
-  if (y0 == y1) {
-    // Top-flat: both v0 and v1 at top, scan down to v2
-    for (int y = y0; y <= y2; y++) {
-      float t = (float)(y - y0) * inv_dy02;
-      int xa = x0 + (int)((x2 - x0) * t);  // v0->v2
-      int xb = x1 + (int)((x2 - x1) * t);  // v1->v2 (same span since y0==y1)
-      if (xa > xb) { int tmp = xa; xa = xb; xb = tmp; }
-      display_draw_line(xa, y, xb, y, color);
-    }
-  } else if (y1 == y2) {
-    // Bottom-flat: v0 at top, both v1 and v2 at bottom
-    float inv_dy01 = 1.0f / (float)(y1 - y0);
-    for (int y = y0; y <= y1; y++) {
-      float t = (float)(y - y0) * inv_dy01;
-      int xa = x0 + (int)((x1 - x0) * t);  // v0->v1
-      int xb = x0 + (int)((x2 - x0) * t);  // v0->v2 (same span since y1==y2)
-      if (xa > xb) { int tmp = xa; xa = xb; xb = tmp; }
-      display_draw_line(xa, y, xb, y, color);
-    }
-  } else {
-    // General: split at y1
-    float inv_dy01 = 1.0f / (float)(y1 - y0);
-    float inv_dy12 = 1.0f / (float)(y2 - y1);
-
-    // Top half (y0 to y1): short edge v0->v1, long edge v0->v2
-    for (int y = y0; y <= y1; y++) {
-      float t_short = (float)(y - y0) * inv_dy01;
-      float t_long  = (float)(y - y0) * inv_dy02;
-      int xa = x0 + (int)((x1 - x0) * t_short);
-      int xb = x0 + (int)((x2 - x0) * t_long);
-      if (xa > xb) { int tmp = xa; xa = xb; xb = tmp; }
-      display_draw_line(xa, y, xb, y, color);
-    }
-    // Bottom half (y1 to y2): short edge v1->v2, long edge v0->v2
-    for (int y = y1; y <= y2; y++) {
-      float t_short = (float)(y - y1) * inv_dy12;
-      float t_long  = (float)(y - y0) * inv_dy02;
-      int xa = x1 + (int)((x2 - x1) * t_short);
-      int xb = x0 + (int)((x2 - x0) * t_long);
-      if (xa > xb) { int tmp = xa; xa = xb; xb = tmp; }
-      display_draw_line(xa, y, xb, y, color);
-    }
-  }
+// Text goes through the shared renderer in src/fonts/font.c. The hardware
+// framebuffer is byte-swapped, so colors are swapped here; the clip rect is
+// the driver's own.
+static int draw_text_fb(int x, int y, const char *text, uint16_t fg,
+                        uint16_t bg, bool transparent) {
+  uint16_t fg_be = (fg >> 8) | (fg << 8);
+  uint16_t bg_be = (bg >> 8) | (bg << 8);
+  return font_render(active_font(), s_framebuffer, FB_WIDTH,
+                     s_clip_x0, s_clip_y0, s_clip_x1, s_clip_y1,
+                     x, y, text, fg_be, bg_be, transparent);
 }
 
 int display_draw_text(int x, int y, const char *text, uint16_t fg,
                       uint16_t bg) {
-  int start_x = x;
-  uint16_t fg_be = (fg >> 8) | (fg << 8);
-  uint16_t bg_be = (bg >> 8) | (bg << 8);
-
-  if (s_active_font == 1) {
-    // 8x12 font: row-major, MSB = leftmost pixel
-    while (*text) {
-      char c = *text++;
-      if (c < 0x20 || c > 0x7E) c = '?';
-      const uint8_t *glyph = s_font8x12[c - 0x20];
-      for (int row = 0; row < FONT8X12_H; row++) {
-        uint8_t rowdata = glyph[row];
-        int py = y + row;
-        if (py < 0 || py >= FB_HEIGHT) continue;
-        for (int col = 0; col < FONT8X12_W; col++) {
-          int px = x + col;
-          if (px >= 0 && px < FB_WIDTH) {
-            s_framebuffer[py * FB_WIDTH + px] =
-                (rowdata & (0x80 >> col)) ? fg_be : bg_be;
-          }
-        }
-      }
-      x += FONT8X12_W;
-    }
-  } else if (s_active_font == 2 || s_active_font == 3) {
-    // scientifica / scientifica-bold: row-major, MSB = leftmost pixel, 6x12
-    while (*text) {
-      char c = *text++;
-      if (c < 0x20 || c > 0x7E) c = '?';
-      const uint8_t *glyph = (s_active_font == 3)
-          ? font_scientifica_bold_glyph(c)
-          : font_scientifica_glyph(c);
-      for (int row = 0; row < FONT_SCI_HEIGHT; row++) {
-        uint8_t rowdata = glyph[row];
-        int py = y + row;
-        if (py < 0 || py >= FB_HEIGHT) continue;
-        for (int col = 0; col < FONT_SCI_WIDTH; col++) {
-          int px = x + col;
-          if (px >= 0 && px < FB_WIDTH) {
-            s_framebuffer[py * FB_WIDTH + px] =
-                (rowdata & (0x80 >> col)) ? fg_be : bg_be;
-          }
-        }
-      }
-      x += FONT_SCI_WIDTH;
-    }
-  } else {
-    // 6x8 font: column-major, LSB = top pixel
-    while (*text) {
-      char c = *text++;
-      if (c < 0x20 || c > 0x7E) c = '?';
-      const uint8_t *glyph = s_font6x8[c - 0x20];
-      for (int col = 0; col < FONT_W; col++) {
-        uint8_t coldata = glyph[col];
-        for (int row = 0; row < FONT_H; row++) {
-          int px = x + col;
-          int py = y + row;
-          if (px >= 0 && px < FB_WIDTH && py >= 0 && py < FB_HEIGHT) {
-            s_framebuffer[py * FB_WIDTH + px] =
-                (coldata & (1 << row)) ? fg_be : bg_be;
-          }
-        }
-      }
-      x += FONT_W;
-    }
-  }
-  return x - start_x;
+  return draw_text_fb(x, y, text, fg, bg, false);
 }
 
+int display_draw_text_transparent(int x, int y, const char *text, uint16_t fg) {
+  return draw_text_fb(x, y, text, fg, 0, true);
+}
+
+// Horizontal counterpart to display_fill_vline. Sugar over display_fill_rect,
+// which is already the row-optimized path — this exists for call-site symmetry
+// with fill_vline, not for speed.
+void display_fill_hline(int y, int x0, int x1, uint16_t color) {
+  if (x0 > x1) { int t = x0; x0 = x1; x1 = t; }
+  display_fill_rect(x0, y, x1 - x0 + 1, 1, color);
+}
+
+// Offscreen buffers are host byte order (no swap) and clip to their bounds.
 int display_draw_text_to_buffer(uint16_t *buf, int buf_w, int buf_h,
                                 int x, int y, const char *text,
                                 uint16_t fg, uint16_t bg) {
-  int start_x = x;
-  // Note: buffer stores host-byte-order (no byte-swap)
-
-  if (s_active_font == 1) {
-    while (*text) {
-      char c = *text++;
-      if (c < 0x20 || c > 0x7E) c = '?';
-      const uint8_t *glyph = s_font8x12[c - 0x20];
-      for (int row = 0; row < FONT8X12_H; row++) {
-        uint8_t rowdata = glyph[row];
-        int py = y + row;
-        if (py < 0 || py >= buf_h) continue;
-        for (int col = 0; col < FONT8X12_W; col++) {
-          int px = x + col;
-          if (px >= 0 && px < buf_w)
-            buf[py * buf_w + px] = (rowdata & (0x80 >> col)) ? fg : bg;
-        }
-      }
-      x += FONT8X12_W;
-    }
-  } else if (s_active_font == 2 || s_active_font == 3) {
-    while (*text) {
-      char c = *text++;
-      if (c < 0x20 || c > 0x7E) c = '?';
-      const uint8_t *glyph = (s_active_font == 3)
-          ? font_scientifica_bold_glyph(c)
-          : font_scientifica_glyph(c);
-      for (int row = 0; row < FONT_SCI_HEIGHT; row++) {
-        uint8_t rowdata = glyph[row];
-        int py = y + row;
-        if (py < 0 || py >= buf_h) continue;
-        for (int col = 0; col < FONT_SCI_WIDTH; col++) {
-          int px = x + col;
-          if (px >= 0 && px < buf_w)
-            buf[py * buf_w + px] = (rowdata & (0x80 >> col)) ? fg : bg;
-        }
-      }
-      x += FONT_SCI_WIDTH;
-    }
-  } else {
-    while (*text) {
-      char c = *text++;
-      if (c < 0x20 || c > 0x7E) c = '?';
-      const uint8_t *glyph = s_font6x8[c - 0x20];
-      for (int col = 0; col < FONT_W; col++) {
-        uint8_t coldata = glyph[col];
-        for (int row = 0; row < FONT_H; row++) {
-          int px = x + col;
-          int py = y + row;
-          if (px >= 0 && px < buf_w && py >= 0 && py < buf_h)
-            buf[py * buf_w + px] = (coldata & (1 << row)) ? fg : bg;
-        }
-      }
-      x += FONT_W;
-    }
-  }
-  return x - start_x;
+  return font_render(active_font(), buf, buf_w, 0, 0, buf_w - 1, buf_h - 1,
+                     x, y, text, fg, bg, false);
 }
 
 int display_text_width(const char *text) {
-  int len = 0;
-  while (*text++)
-    len++;
-  int fw = FONT_W;
-  if (s_active_font == 1) fw = FONT8X12_W;
-  else if (s_active_font == 2 || s_active_font == 3) fw = FONT_SCI_WIDTH;
-  return len * fw;
+  return font_text_width(active_font(), text);
 }
 
+// Opaque blit of a whole w x h image (clipped once, paired byte swap).
 void display_draw_image(int x, int y, int w, int h, const uint16_t *data) {
-  for (int row = 0; row < h; row++) {
-    int py = y + row;
-    if (py < 0 || py >= FB_HEIGHT)
-      continue;
-    for (int col = 0; col < w; col++) {
-      int px = x + col;
-      if (px < 0 || px >= FB_WIDTH)
-        continue;
-      uint16_t c = data[row * w + col];
-      s_framebuffer[py * FB_WIDTH + px] = (c >> 8) | (c << 8);
-    }
-  }
+  disp_clip_t c = cur_clip();
+  disp_blit(s_framebuffer, FB_WIDTH, &c, x, y, data, w, h, 0, 0, w, h, false,
+            false, 0, true);
 }
 
-void display_draw_image_partial(int x, int y, int img_w, int img_h,
+// Backs every image, sprite, tilemap and animation draw. The destination rect
+// is clipped once, then one of four specialised loops runs (opaque/keyed x
+// flipped/not; display_clip.h). transparent_color 0 means "use the global
+// key"; a key of 0 draws opaque (black cannot be a colour key).
+DISP_HOT void display_draw_image_partial(int x, int y, int img_w, int img_h,
                                 const uint16_t *data, int sx, int sy, int sw,
                                 int sh, bool flip_x, bool flip_y,
                                 uint16_t transparent_color) {
-  // (x, y) is the top-left corner of the image.
-  int draw_x = x;
-  int draw_y = y;
-  if (sx < 0) {
-    sw += sx;
-    sx = 0;
-  }
-  if (sy < 0) {
-    sh += sy;
-    sy = 0;
-  }
-  if (sx + sw > img_w)
-    sw = img_w - sx;
-  if (sy + sh > img_h)
-    sh = img_h - sy;
-
-  if (sw <= 0 || sh <= 0 || !data)
-    return;
-
-  // Use global setting if transparent_color is 0
   if (transparent_color == 0)
     transparent_color = s_transparent_color;
-
-  for (int row = 0; row < sh; row++) {
-    int py = draw_y + row;
-    if (py < 0 || py >= FB_HEIGHT)
-      continue;
-
-    int src_row = flip_y ? (sy + sh - 1 - row) : (sy + row);
-
-    for (int col = 0; col < sw; col++) {
-      int px = draw_x + col;
-      if (px < 0 || px >= FB_WIDTH)
-        continue;
-
-      int src_col = flip_x ? (sx + sw - 1 - col) : (sx + col);
-      uint16_t c = data[src_row * img_w + src_col];
-
-      // Skip transparent pixels (compare in native endian)
-      if (transparent_color != 0 && c == transparent_color)
-        continue;
-
-      s_framebuffer[py * FB_WIDTH + px] = (c >> 8) | (c << 8);
-    }
-  }
+  disp_clip_t c = cur_clip();
+  disp_blit(s_framebuffer, FB_WIDTH, &c, x, y, data, img_w, img_h, sx, sy, sw,
+            sh, flip_x, flip_y, transparent_color, true);
 }
 
 void display_draw_image_scaled(int x, int y, int img_w, int img_h,
@@ -1116,12 +688,21 @@ void display_draw_image_scaled(int x, int y, int img_w, int img_h,
     }
   }
 
-  // Use masked version if transparency is enabled, otherwise use regular version
+  // Use masked version if transparency is enabled, otherwise use regular
+  // version.  The clip is passed through (converted from the driver's
+  // inclusive bounds to the decoder's half-open rect) so TGX renders into a
+  // sub-view of the framebuffer and cannot write outside it.
   if (transparent_color != 0) {
-    tgx_draw_image_scaled_masked(fb, FB_WIDTH, FB_HEIGHT, data, img_w, img_h, (int)cx, (int)cy,
-                                  scale, angle, transparent_color);
+    tgx_draw_image_scaled_masked(fb, FB_WIDTH, FB_HEIGHT,
+                                 s_clip_x0, s_clip_y0,
+                                 s_clip_x1 + 1, s_clip_y1 + 1,
+                                 data, img_w, img_h, (int)cx, (int)cy,
+                                 scale, angle, transparent_color);
   } else {
-    tgx_draw_image_scaled(fb, FB_WIDTH, FB_HEIGHT, data, img_w, img_h, (int)cx, (int)cy,
+    tgx_draw_image_scaled(fb, FB_WIDTH, FB_HEIGHT,
+                          s_clip_x0, s_clip_y0,
+                          s_clip_x1 + 1, s_clip_y1 + 1,
+                          data, img_w, img_h, (int)cx, (int)cy,
                           scale, angle);
   }
 
@@ -1133,68 +714,23 @@ void display_draw_image_scaled(int x, int y, int img_w, int img_h,
   }
 }
 
-void display_draw_image_nn(int x, int y, const uint16_t *data,
+// Native drawImageNN: integer nearest-neighbour upscale, clipped once
+// (display_clip.h). Negative offsets that are not a multiple of scale start
+// mid-block; they used to be rounded to a block boundary and wrote rows above
+// the framebuffer.
+DISP_HOT void display_draw_image_nn(int x, int y, const uint16_t *data,
                            int src_w, int src_h, int scale) {
-  if (!data || src_w <= 0 || src_h <= 0 || scale <= 0)
-    return;
-
-  int dst_w = src_w * scale;
-  int dst_h = src_h * scale;
-
-  // Early reject if entirely off-screen
-  if (x >= FB_WIDTH || y >= FB_HEIGHT || x + dst_w <= 0 || y + dst_h <= 0)
-    return;
-
-  // Clamp source region to framebuffer bounds
-  int src_y0 = 0, src_y1 = src_h;
-  int src_x0 = 0, src_x1 = src_w;
-  if (y < 0) { src_y0 = (-y) / scale; y += src_y0 * scale; }
-  if (x < 0) { src_x0 = (-x) / scale; x += src_x0 * scale; }
-  if (y + (src_y1 - src_y0) * scale > FB_HEIGHT)
-    src_y1 = src_y0 + (FB_HEIGHT - y) / scale;
-  if (x + (src_x1 - src_x0) * scale > FB_WIDTH)
-    src_x1 = src_x0 + (FB_WIDTH - x) / scale;
-
-  uint16_t *fb = s_framebuffer;
-  int clamped_w = (src_x1 - src_x0) * scale;
-
-  for (int sy = src_y0; sy < src_y1; sy++) {
-    const uint16_t *src_row = &data[sy * src_w + src_x0];
-    int fb_y = y + (sy - src_y0) * scale;
-    uint16_t *dst_row = &fb[fb_y * FB_WIDTH + x];
-
-    // Build one scaled row with byte-swap
-    if (scale == 2) {
-      // Fast path: 32-bit writes for scale==2 (halves store count)
-      for (int sx = 0; sx < src_x1 - src_x0; sx++) {
-        uint16_t c = src_row[sx];
-        uint16_t be = (c >> 8) | (c << 8);
-        uint32_t pair = ((uint32_t)be << 16) | be;
-        *(uint32_t *)&dst_row[sx * 2] = pair;
-      }
-    } else {
-      for (int sx = 0; sx < src_x1 - src_x0; sx++) {
-        uint16_t c = src_row[sx];
-        uint16_t be = (c >> 8) | (c << 8);
-        int dx = sx * scale;
-        for (int s = 0; s < scale; s++)
-          dst_row[dx + s] = be;
-      }
-    }
-
-    // Duplicate the row (scale-1) times
-    for (int s = 1; s < scale; s++) {
-      memcpy(&fb[(fb_y + s) * FB_WIDTH + x], dst_row, clamped_w * sizeof(uint16_t));
-    }
-  }
+  disp_clip_t c = cur_clip();
+  disp_blit_nn(s_framebuffer, FB_WIDTH, &c, x, y, data, src_w, src_h, scale,
+               true);
 }
 
 void display_blit_be(int x, int y, const uint16_t *data, int w, int h) {
   if (!data || w <= 0 || h <= 0)
     return;
 
-  // Early reject if entirely off-screen
-  if (x >= FB_WIDTH || y >= FB_HEIGHT || x + w <= 0 || y + h <= 0)
+  // Early reject if entirely outside the clip rect
+  if (x > s_clip_x1 || y > s_clip_y1 || x + w - 1 < s_clip_x0 || y + h - 1 < s_clip_y0)
     return;
 
   // Clip source region
@@ -1202,10 +738,10 @@ void display_blit_be(int x, int y, const uint16_t *data, int w, int h) {
   int src_x1 = w, src_y1 = h;
   int dst_x = x, dst_y = y;
 
-  if (dst_x < 0) { src_x0 = -dst_x; dst_x = 0; }
-  if (dst_y < 0) { src_y0 = -dst_y; dst_y = 0; }
-  if (dst_x + (src_x1 - src_x0) > FB_WIDTH)  src_x1 = src_x0 + (FB_WIDTH - dst_x);
-  if (dst_y + (src_y1 - src_y0) > FB_HEIGHT) src_y1 = src_y0 + (FB_HEIGHT - dst_y);
+  if (dst_x < s_clip_x0) { src_x0 = s_clip_x0 - dst_x; dst_x = s_clip_x0; }
+  if (dst_y < s_clip_y0) { src_y0 = s_clip_y0 - dst_y; dst_y = s_clip_y0; }
+  if (dst_x + (src_x1 - src_x0) - 1 > s_clip_x1) src_x1 = src_x0 + (s_clip_x1 - dst_x + 1);
+  if (dst_y + (src_y1 - src_y0) - 1 > s_clip_y1) src_y1 = src_y0 + (s_clip_y1 - dst_y + 1);
 
   int copy_w = src_x1 - src_x0;
   int copy_h = src_y1 - src_y0;
@@ -1220,63 +756,17 @@ void display_blit_be(int x, int y, const uint16_t *data, int w, int h) {
   }
 }
 
-void display_draw_image_scaled_nn(int x, int y, const uint16_t *data,
+// Nearest-neighbour scale to dst_w x dst_h, clipped once. Source pixel
+// (dx*src_w/dst_w, dy*src_h/dst_h) exactly — the old 16.16 ratio truncated
+// 65536/3 and so sampled the wrong column at every multiple of 3 for scale 3.
+DISP_HOT void display_draw_image_scaled_nn(int x, int y, const uint16_t *data,
                                    int src_w, int src_h, int dst_w, int dst_h,
                                    uint16_t transparent_color) {
-  if (!data || dst_w <= 0 || dst_h <= 0 || src_w <= 0 || src_h <= 0)
-    return;
-
-  // (x, y) is the top-left corner of the scaled image.
-  int draw_x = x;
-  int draw_y = y;
-
-  // Clamp to framebuffer bounds
-  if (draw_x >= FB_WIDTH || draw_y >= FB_HEIGHT)
-    return;
-  if (draw_x + dst_w < 0 || draw_y + dst_h < 0)
-    return;
-
-  // Calculate actual drawing bounds
-  int start_x = draw_x < 0 ? -draw_x : 0;
-  int start_y = draw_y < 0 ? -draw_y : 0;
-  int end_x = (draw_x + dst_w > FB_WIDTH) ? FB_WIDTH - draw_x : dst_w;
-  int end_y = (draw_y + dst_h > FB_HEIGHT) ? FB_HEIGHT - draw_y : dst_h;
-
-  if (end_x <= start_x || end_y <= start_y)
-    return;
-
-  // Use global setting if transparent_color is 0
   if (transparent_color == 0)
     transparent_color = s_transparent_color;
-
-  // Fixed-point ratios (16-bit precision)
-  uint32_t ratio_x = ((uint32_t)src_w << 16) / (uint32_t)dst_w;
-  uint32_t ratio_y = ((uint32_t)src_h << 16) / (uint32_t)dst_h;
-
-  uint16_t *fb = s_framebuffer;
-
-  for (int dy = start_y; dy < end_y; dy++) {
-    // Source Y position (fixed-point)
-    uint32_t sy = (dy * ratio_y) >> 16;
-    if (sy >= (uint32_t)src_h)
-      sy = src_h - 1;
-
-    for (int dx = start_x; dx < end_x; dx++) {
-      // Source X position (fixed-point)
-      uint32_t sx = (dx * ratio_x) >> 16;
-      if (sx >= (uint32_t)src_w)
-        sx = src_w - 1;
-
-      uint16_t color = data[sy * src_w + sx];
-      
-      // Skip transparent pixels
-      if (transparent_color != 0 && color == transparent_color)
-        continue;
-      
-      // Byte-swap for big-endian framebuffer
-      fb[(draw_y + dy) * FB_WIDTH + (draw_x + dx)] = (color >> 8) | (color << 8);
-    }
-  }
+  disp_clip_t c = cur_clip();
+  disp_blit_scaled(s_framebuffer, FB_WIDTH, &c, x, y, data, src_w, src_h,
+                   dst_w, dst_h, transparent_color, true);
 }
 
 void display_set_transparent_color(uint16_t color) {
@@ -1285,6 +775,110 @@ void display_set_transparent_color(uint16_t color) {
 
 uint16_t display_get_transparent_color(void) {
   return s_transparent_color;
+}
+
+// ── Clip rect ────────────────────────────────────────────────────────────────
+
+void display_set_clip_rect(int x, int y, int w, int h) {
+  int x1 = x + w - 1;
+  int y1 = y + h - 1;
+  if (x < 0) x = 0;
+  if (y < 0) y = 0;
+  if (x1 > FB_WIDTH - 1) x1 = FB_WIDTH - 1;
+  if (y1 > FB_HEIGHT - 1) y1 = FB_HEIGHT - 1;
+  if (x1 < x || y1 < y) {
+    // Empty rect: clamp to a 1x1 region outside all writes is impossible,
+    // so collapse to a zero-size marker at (0,0)-(-1,-1)
+    x = 0; y = 0; x1 = -1; y1 = -1;
+  }
+  s_clip_x0 = x; s_clip_y0 = y;
+  s_clip_x1 = x1; s_clip_y1 = y1;
+}
+
+void display_get_clip_rect(int *x, int *y, int *w, int *h) {
+  if (x) *x = s_clip_x0;
+  if (y) *y = s_clip_y0;
+  if (w) *w = s_clip_x1 - s_clip_x0 + 1;
+  if (h) *h = s_clip_y1 - s_clip_y0 + 1;
+}
+
+void display_clear_clip_rect(void) {
+  s_clip_x0 = 0; s_clip_y0 = 0;
+  s_clip_x1 = FB_WIDTH - 1; s_clip_y1 = FB_HEIGHT - 1;
+}
+
+// ── Mode 7 (perspective ground plane) ───────────────────────────────────────
+// Renders `tex` as a ground plane seen from a camera at (cam_x, cam_y),
+// `cam_z` units above the plane, facing `angle` radians (0 = toward +Y in
+// texture space, rotating clockwise). Rows below `horizon_y` are filled;
+// `scale` tunes the field of view (larger = further view / smaller texels).
+// Power-of-two texture dimensions wrap seamlessly; other sizes clamp at edges.
+void display_draw_plane(const uint16_t *tex, int tex_w, int tex_h,
+                        float cam_x, float cam_y, float cam_z,
+                        float angle, int horizon_y, float scale) {
+  if (!tex || tex_w <= 0 || tex_h <= 0 || cam_z <= 0.0f) return;
+  if (scale <= 0.0f) scale = 1.0f;
+
+  const bool pow2 = ((tex_w & (tex_w - 1)) == 0) && ((tex_h & (tex_h - 1)) == 0);
+  const uint32_t mask_w = (uint32_t)tex_w - 1;
+  const uint32_t mask_h = (uint32_t)tex_h - 1;
+
+  const float sin_a = sinf(angle);
+  const float cos_a = cosf(angle);
+  // Forward (0 rad → +Y in texture space) and right vectors
+  const float fwd_x = -sin_a, fwd_y = cos_a;
+  const float right_x = cos_a, right_y = sin_a;
+
+  int y0 = horizon_y + 1;
+  if (y0 < s_clip_y0) y0 = s_clip_y0;
+  if (y0 < 0) y0 = 0;
+  int y1 = s_clip_y1;
+  if (y1 > FB_HEIGHT - 1) y1 = FB_HEIGHT - 1;
+  if (y0 > y1) return;
+
+  const int cx0 = s_clip_x0 < 0 ? 0 : s_clip_x0;
+  const int cx1 = s_clip_x1 > FB_WIDTH - 1 ? FB_WIDTH - 1 : s_clip_x1;
+  const int half_w = FB_WIDTH / 2;
+
+  for (int y = y0; y <= y1; y++) {
+    const int p = y - horizon_y;  // > 0
+    // Depth of this scanline along the ground
+    const float z = cam_z * scale / (float)p;
+
+    // World position at the centre of the row
+    const float center_x = cam_x + fwd_x * z;
+    const float center_y = cam_y + fwd_y * z;
+
+    // World-units per screen pixel along the row
+    const float step_x = right_x * z / scale;
+    const float step_y = right_y * z / scale;
+
+    // 16.16 fixed point for the inner loop; start at the clip left edge
+    int32_t fx = (int32_t)((center_x + (cx0 - half_w) * step_x) * 65536.0f);
+    int32_t fy = (int32_t)((center_y + (cx0 - half_w) * step_y) * 65536.0f);
+    const int32_t dx = (int32_t)(step_x * 65536.0f);
+    const int32_t dy = (int32_t)(step_y * 65536.0f);
+
+    uint16_t *row = &s_framebuffer[y * FB_WIDTH + cx0];
+    if (pow2) {
+      for (int x = cx0; x <= cx1; x++) {
+        const uint16_t c = tex[((fy >> 16) & mask_h) * tex_w + ((fx >> 16) & mask_w)];
+        *row++ = (c >> 8) | (c << 8);
+        fx += dx;
+        fy += dy;
+      }
+    } else {
+      for (int x = cx0; x <= cx1; x++) {
+        int tx = fx >> 16, ty = fy >> 16;
+        if (tx < 0) tx = 0; else if (tx >= tex_w) tx = tex_w - 1;
+        if (ty < 0) ty = 0; else if (ty >= tex_h) ty = tex_h - 1;
+        const uint16_t c = tex[ty * tex_w + tx];
+        *row++ = (c >> 8) | (c << 8);
+        fx += dx;
+        fy += dy;
+      }
+    }
+  }
 }
 
 // When true, display_flush() blocks until DMA completes before returning.
@@ -1886,9 +1480,16 @@ const uint16_t *display_get_screen_buffer(void) {
 
 // Hardware vertical scroll using ST7365P VSCRDEF + VSCRSADD registers.
 // top_fixed: fixed rows at top, scroll_height: scrollable area height,
-// bottom_fixed: fixed rows at bottom. top_fixed + scroll_height + bottom_fixed
-// must equal LCD_HEIGHT (320). scroll_offset: row offset within the scroll area.
+// bottom_fixed: fixed rows at bottom. The ST7365P frame memory is 480 lines
+// (the visible panel is lines 0..319), so the three values must sum to 480 —
+// e.g. (0, 320, 160) makes the whole visible panel a mod-320 scroll ring.
+// scroll_offset: absolute frame-memory line shown at the top of the scroll
+// area; wraps within the scroll area.
+//
+// Both setters must wait out any in-flight flush DMA: lcd_write_cmd toggles
+// CS and would interleave command bytes into an active pixel stream.
 void display_set_scroll_area(int top_fixed, int scroll_height, int bottom_fixed) {
+  display_wait_for_flush();
   lcd_write_cmd(0x33); // VSCRDEF
   uint8_t data[6] = {
     (uint8_t)(top_fixed >> 8), (uint8_t)(top_fixed & 0xFF),
@@ -1899,7 +1500,23 @@ void display_set_scroll_area(int top_fixed, int scroll_height, int bottom_fixed)
 }
 
 void display_set_scroll_offset(int offset) {
+  display_wait_for_flush();
   lcd_write_cmd(0x37); // VSCRSADD
   uint8_t data[2] = {(uint8_t)(offset >> 8), (uint8_t)(offset & 0xFF)};
   lcd_write_data(data, 2);
+  s_scroll_offset = offset;
+  s_scroll_offset_writes++;
+}
+
+// Last offset written via display_set_scroll_offset (the panel register is
+// write-only).  The OS resets the offset to 0 whenever it takes over the
+// screen (system menu, app switch), so apps driving hardware scroll must
+// poll this each frame and resynchronise when it no longer matches what
+// they last set.
+int display_get_scroll_offset(void) {
+  return s_scroll_offset;
+}
+
+uint32_t display_get_scroll_offset_writes(void) {
+  return s_scroll_offset_writes;
 }

@@ -1,0 +1,7 @@
+{
+  "id": "com.picos.test.scrollreg",
+  "name": "ScrollReg Test",
+  "description": "E2E fixture: hardware vertical-scroll register semantics (VSCRDEF ring, VSCRSADD remap, flushRows-into-ring, write counter).",
+  "version": "1.0.0",
+  "author": "PicOS tests"
+}

@@ -77,8 +77,9 @@ local mp3_vol         = 80    -- default 80% (scale 0-100)
 local mp3_sample_rate = 44100 -- updated after load; used to convert samples→seconds
 
 -- Video player
-local vid_player = nil
-local vid_name   = ""
+local vid_player  = nil
+local vid_name    = ""
+local vid_vol_ttl = 0     -- ticks left to show the volume readout
 
 -- Text viewer
 local TXT_COLS = 53   -- 320 / 6 = 53 chars
@@ -348,6 +349,8 @@ local HELP_LINES = {
   "  Esc           Exit to launcher",
   "",
   "  Enter/F3       Play/pause MP3 audio",
+  "  Video: Enter pause/resume/replay, Left/Right",
+  "         seek 5s, Up/Down volume, Esc back",
   "",
   "  Directories shown in cyan.",
   "  Marked files shown in yellow.",
@@ -418,30 +421,49 @@ local function draw_mp3_view()
 end
 
 -- ── Drawing: Video player ────────────────────────────────────────────────────
+-- The driver draws its own progress OSD (bar + elapsed/total time) over the
+-- bottom of the video: it appears on play/pause/seek and hides after a few
+-- seconds while playing.  While playing we draw nothing else and let the
+-- player's deferred flush present each frame; only paused/ended stills get a
+-- header, drawn every tick with a full flush (the driver syncs both buffers
+-- for exactly that case).
+local VID_SKIP_MS = 5000
+
+local function vid_video_top()
+  local _, h = vid_player:getSize()
+  if h > 320 then h = 320 end
+  return math.floor((320 - h) / 2)
+end
+
 local function draw_vid_view()
-    if not vid_player then return end
+  if not vid_player then return end
 
-    local paused = vid_player:isPaused()
+  local paused = vid_player:isPaused()
+  local ended  = vid_player:hasEnded()
 
-    if paused then
-        disp.fillRect(0, 0, SW, HDR_H, HDR_ACT)
-        disp.drawText(1, 2, pad("Video: " .. vid_name, 53), WHITE, HDR_ACT)
-        disp.drawText(140, 150, "PAUSED", YELLOW, BG)
-    end
-
-    local fps = vid_player:getFPS()
-    local fps_str = string.format("%.1f FPS", fps)
-    local fw = #fps_str * CHAR_W
-    local fx = SW - fw - 2
-    disp.fillRect(fx, 0, fw + 2, CHAR_H + 2, BG)
-    disp.drawText(fx + 1, 1, fps_str, YELLOW, BG)
-
+  if paused or ended then
+    -- Two-line header only: a footer would sit on top of the driver's
+    -- progress bar when the video fills the screen.
     local info = vid_player:getInfo()
-    local dropped = info.dropped_frames or 0
-    local drop_str = string.format("Drop:%d", dropped)
-    local dw = #drop_str * CHAR_W
-    disp.fillRect(0, 0, dw + 2, CHAR_H + 2, BG)
-    disp.drawText(1, 1, drop_str, dropped > 50 and disp.RED or CYAN, BG)
+    disp.fillRect(0, 0, SW, HDR_H * 2, HDR_ACT)
+    local stats = string.format("%.0ffps drop:%d", info.fps or 0, info.dropped_frames or 0)
+    local title_max = 53 - #stats - 2
+    local title = "Video: " .. vid_name
+    if #title > title_max then title = title:sub(1, title_max - 1) .. "~" end
+    disp.drawText(1, 2, title, WHITE, HDR_ACT)
+    disp.drawText(SW - #stats * CHAR_W - 2, 2, stats, YELLOW, HDR_ACT)
+    local hint = ended and "Enter:Replay  </>:Seek  Esc:Back"
+                        or "Enter:Resume  </>:Seek  Up/Dn:Vol  Esc:Back"
+    disp.drawText(1, HDR_H + 2, pad(hint, 53), GRAY, HDR_ACT)
+  end
+
+  -- Transient volume readout, kept inside the video rows so the player's
+  -- own region flush carries it while playing.
+  if vid_vol_ttl > 0 then
+    local v = string.format(" Vol: %d%% ", mp3_vol)
+    local x = math.floor((SW - #v * CHAR_W) / 2)
+    disp.drawText(x, vid_video_top() + 4, v, WHITE, HDR_ACT)
+  end
 end
 
 local function open_vid_view(path, fname)
@@ -451,44 +473,50 @@ local function open_vid_view(path, fname)
     set_status("Cannot load video: " .. fname)
     return
   end
-  v:setLoop(true)
+  v:setLoop(false)          -- hold the last frame; Enter replays
   v:setAutoFlush(true)
+  v:setOSD(true)
   v:play()
-  vid_player = v
-  vid_name   = fname
+  if v:hasAudio() then v:setVolume(mp3_vol) end
+  vid_player  = v
+  vid_name    = fname
+  vid_vol_ttl = 0
   state = ST.VIDEO_VIEW
 end
 
 local function handle_vid_view(pressed)
-    if not vid_player then state = ST.BROWSE; return end
+  if not vid_player then state = ST.BROWSE; return end
 
-    local ch = input.getChar()
-    if pressed & input.BTN_ESC ~= 0 then
-        vid_player:stop(); vid_player = nil; state = ST.BROWSE; return
+  local ch = input.getChar()
+  if pressed & input.BTN_ESC ~= 0 then
+    vid_player:stop(); vid_player = nil; state = ST.BROWSE; return
+  end
+
+  if pressed & input.BTN_ENTER ~= 0 or pressed & input.BTN_F3 ~= 0 or ch == " " then
+    if vid_player:hasEnded() then
+      vid_player:play()                 -- replay from the start
+    elseif vid_player:isPaused() then
+      vid_player:resume()
+    else
+      vid_player:pause()
     end
+  end
 
-    if pressed & input.BTN_ENTER ~= 0 or pressed & input.BTN_F3 ~= 0 or ch == " " then
-        if vid_player:isPaused() then
-            vid_player:resume()
-        else
-            vid_player:pause()
-        end
+  -- Seeks clamp at both ends and never wrap; seeking after the end resumes
+  -- playback from the target.
+  if pressed & input.BTN_RIGHT ~= 0 then
+    vid_player:seekRelativeMs(VID_SKIP_MS)
+  elseif pressed & input.BTN_LEFT ~= 0 then
+    vid_player:seekRelativeMs(-VID_SKIP_MS)
+  end
+
+  if vid_player:hasAudio() then
+    if pressed & input.BTN_UP ~= 0 then
+      mp3_vol = math.min(100, mp3_vol + 10); vid_player:setVolume(mp3_vol); vid_vol_ttl = 60
+    elseif pressed & input.BTN_DOWN ~= 0 then
+      mp3_vol = math.max(0,   mp3_vol - 10); vid_player:setVolume(mp3_vol); vid_vol_ttl = 60
     end
-
-    local fps = vid_player:getFPS()
-    if fps < 1 then fps = 20 end
-    local skip_frames = math.max(60, math.floor(3 * fps))
-
-    local info = vid_player:getInfo()
-    if pressed & input.BTN_RIGHT ~= 0 then
-        vid_player:seek(info.current_frame + skip_frames)
-        vid_player:resetStats()
-    elseif pressed & input.BTN_LEFT ~= 0 then
-        local target = info.current_frame - skip_frames
-        if target < 0 then target = 0 end
-        vid_player:seek(target)
-        vid_player:resetStats()
-    end
+  end
 end
 
 -- ── Batch selection helper ───────────────────────────────────────────────────
@@ -1107,9 +1135,11 @@ while running do
 
   if state == ST.VIDEO_VIEW then
     -- Video player handles its own flushing via setAutoFlush(true).
-    -- Only flush when paused (to show overlay) or when player was destroyed.
+    -- Only flush when showing a still (paused/ended: header + footer drawn
+    -- each tick) or when the player was destroyed.
+    if vid_vol_ttl > 0 then vid_vol_ttl = vid_vol_ttl - 1 end
     if not vid_updated then
-      if vid_player and vid_player:isPaused() then
+      if vid_player and (vid_player:isPaused() or vid_player:hasEnded()) then
         disp.flush()
       elseif not vid_player then
         disp.flush()  -- player was destroyed (exiting video view)

@@ -1,0 +1,39 @@
+name: Unit Tests
+
+# Host-side tests that need neither the Pico SDK nor the simulator:
+#   make test-unit            C unit tests (tests/unit, ctest, ASan+UBSan)
+#   pytest tests/unit         Python tool tests (mkfont)
+#   make test-lua             Lua syntax check of every app
+on:
+  push:
+    branches: [master, develop]
+  pull_request:
+    branches: [master, develop]
+  workflow_dispatch:
+
+jobs:
+  unit:
+    name: Unit (host)
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update -q
+          # clang: its compiler-rt carries ASan/UBSan; lua5.4: make test-lua
+          sudo apt-get install -y cmake clang lua5.4 python3-venv
+          command -v lua >/dev/null || sudo ln -sf "$(command -v lua5.4)" /usr/local/bin/lua
+          python3 -m venv .venv
+          .venv/bin/pip install --upgrade pip
+          .venv/bin/pip install -r tests/e2e/requirements.txt
+
+      - name: C unit tests (ctest)
+        run: make test-unit UNIT_CC=clang
+
+      - name: Python unit tests
+        run: .venv/bin/python -m pytest tests/unit -v
+
+      - name: Lua syntax check
+        run: make test-lua

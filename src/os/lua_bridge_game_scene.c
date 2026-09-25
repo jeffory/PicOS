@@ -443,11 +443,7 @@ void lua_bridge_game_scene_init(lua_State *L) {
     memset(s_scene_stack, 0, sizeof(s_scene_stack));
     memset(s_pools, 0, sizeof(s_pools));
 
-    luaL_newmetatable(L, "picocalc.game.scene.pool");
-    lua_pushvalue(L, -1);
-    lua_setfield(L, -2, "__index");
-    luaL_setfuncs(L, l_pool_methods, 0);
-    lua_pop(L, 1);
+    lb_register_type(L, "picocalc.game.scene.pool", l_pool_methods, NULL);
 
     lua_newtable(L);
     luaL_setfuncs(L, l_scene_lib, 0);

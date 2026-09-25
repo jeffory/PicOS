@@ -649,6 +649,8 @@ local function ram_start_test()
             return
         end
         if test_bytes > max_test then test_bytes = max_test end
+        -- Whole blocks only: qmiPsramWrite is bounds-checked
+        test_bytes = test_bytes - test_bytes % RAM_BLOCK_SIZE
         ram_qmi_handle = sys.qmiPsramAlloc(test_bytes)
         if not ram_qmi_handle then
             ram_state = "error"

@@ -251,11 +251,7 @@ static const luaL_Reg l_camera_lib[] = {
 };
 
 void lua_bridge_game_camera_init(lua_State *L) {
-    luaL_newmetatable(L, CAMERA_MT);
-    lua_pushvalue(L, -1);
-    lua_setfield(L, -2, "__index");
-    luaL_setfuncs(L, l_camera_methods, 0);
-    lua_pop(L, 1);
+    lb_register_type(L, CAMERA_MT, l_camera_methods, NULL);
     
     lua_newtable(L);
     luaL_setfuncs(L, l_camera_lib, 0);

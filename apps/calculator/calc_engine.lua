@@ -4,6 +4,12 @@
 local Engine = {}
 Engine.__index = Engine
 
+-- PicOS runs Lua with single-precision floats (LUA_32BITS): ~7 significant
+-- digits, integers exact only up to 2^24. Host tests run with doubles.
+local FLOAT32 = (2^24 + 1 == 2^24)
+local SIG_FMT = FLOAT32 and "%.7g" or "%.10g"
+local EXACT_INT_LIMIT = FLOAT32 and 2^24 or 1e15
+
 function Engine.new()
     local self = setmetatable({}, Engine)
     self.angle_mode = "deg"   -- "deg", "rad", "grad"
@@ -452,7 +458,7 @@ function Engine:format_result(n)
     end
 
     -- Check if it's an integer
-    if n == math.floor(n) and math.abs(n) < 1e15 then
+    if n == math.floor(n) and math.abs(n) < EXACT_INT_LIMIT then
         return string.format("%.0f", n)
     end
 
@@ -467,7 +473,7 @@ function Engine:format_result(n)
     end
 
     -- Regular decimal
-    local s = string.format("%.10g", n)
+    local s = string.format(SIG_FMT, n)
     return s
 end
 

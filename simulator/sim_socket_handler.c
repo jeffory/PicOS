@@ -3,6 +3,7 @@
 
 #include "sim_socket.h"
 #include "sim_socket_handler.h"
+#include "sim_test_control.h"
 #include "hal/hal_sdcard.h"
 #include "hal/hal_display.h"
 #include "hal/hal_input.h"
@@ -16,6 +17,7 @@
 #include "os/os.h"
 #include "sim_wifi.h"
 #include "os/terminal.h"
+#include "dev_ops.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -39,54 +41,7 @@
 #define STBI_WRITE_NO_STDIO
 #include "stb_image_write.h"
 
-// ── Circular log buffer ───────────────────────────────────────────────────────
-
-#define LOG_LINE_MAX 256
-#define LOG_BUFFER_LINES 1024
-
-static char s_log_lines[LOG_BUFFER_LINES][LOG_LINE_MAX];
-static int s_log_head = 0;
-static int s_log_count = 0;
-
-static pthread_mutex_t s_log_mutex = PTHREAD_MUTEX_INITIALIZER;
-
-void sim_log_append(const char *line) {
-    if (!line) return;
-    pthread_mutex_lock(&s_log_mutex);
-    int idx = (s_log_head + s_log_count) % LOG_BUFFER_LINES;
-    if (s_log_count < LOG_BUFFER_LINES) {
-        s_log_count++;
-    } else {
-        s_log_head = (s_log_head + 1) % LOG_BUFFER_LINES;
-    }
-    strncpy(s_log_lines[idx], line, LOG_LINE_MAX - 1);
-    s_log_lines[idx][LOG_LINE_MAX - 1] = '\0';
-    pthread_mutex_unlock(&s_log_mutex);
-}
-
-char *sim_get_log_buffer(void) {
-    static char buf[65536];
-    buf[0] = '\0';
-    pthread_mutex_lock(&s_log_mutex);
-    for (int i = 0; i < s_log_count; i++) {
-        int idx = (s_log_head + i) % LOG_BUFFER_LINES;
-        size_t len = strlen(buf);
-        size_t line_len = strlen(s_log_lines[idx]);
-        if (len + line_len + 2 < sizeof(buf)) {
-            if (len > 0) strncat(buf, "\n", sizeof(buf) - len - 1);
-            strncat(buf, s_log_lines[idx], sizeof(buf) - len - 1);
-        }
-    }
-    pthread_mutex_unlock(&s_log_mutex);
-    return buf;
-}
-
-int sim_get_log_buffer_count(void) {
-    pthread_mutex_lock(&s_log_mutex);
-    int count = s_log_count;
-    pthread_mutex_unlock(&s_log_mutex);
-    return count;
-}
+// The log ring, launch slot and app outcome live in sim_test_control.c.
 
 // ── Active terminal tracking ─────────────────────────────────────────────────
 
@@ -94,54 +49,6 @@ static void *s_active_terminal = NULL;
 
 void sim_set_active_terminal(void *term) { s_active_terminal = term; }
 void *sim_get_active_terminal(void) { return s_active_terminal; }
-
-// ── Launch queue (mirrors dev_commands pattern) ─────────────────────────────────
-
-static const char *s_pending_launch = NULL;
-static bool s_exit_requested = false;
-
-void sim_handler_clear_pending_launch(void) {
-    if (s_pending_launch) {
-        free((void *)s_pending_launch);
-        s_pending_launch = NULL;
-    }
-}
-
-void sim_handler_request_exit(void) {
-    s_exit_requested = true;
-}
-
-const char *sim_handler_get_pending_launch(void) {
-    return s_pending_launch;
-}
-
-void sim_handler_clear_pending_launch_state(void) {
-    sim_handler_clear_pending_launch();
-    s_exit_requested = false;
-}
-
-bool sim_handler_check_launch(void) {
-    if (s_exit_requested) {
-        s_exit_requested = false;
-        kbd_inject_buttons(BTN_ESC);
-    }
-    if (s_pending_launch) {
-        const char *name = s_pending_launch;
-        s_pending_launch = NULL;
-        char started_params[256];
-        snprintf(started_params, sizeof(started_params),
-                 "{\"name\":\"%s\"}", name);
-        sim_socket_notify("app.started", started_params);
-        bool ok = launcher_launch_by_name(name);
-        char params[256];
-        snprintf(params, sizeof(params),
-                 "{\"name\":\"%s\",\"ok\":%s}", name, ok ? "true" : "false");
-        sim_socket_notify("app.exited", params);
-        free((void *)name);
-        return true;
-    }
-    return false;
-}
 
 // ── WiFi error injection ──────────────────────────────────────────────────────
 
@@ -406,39 +313,104 @@ static char *h_ping(const char *params) {
     return strdup(buf);
 }
 
+// Hands the name to the main thread (sim_handler_check_launch). The launch
+// happens when the launcher loop next runs, i.e. after any running app exits;
+// the outcome arrives as the app.exited notification.
 static char *h_launch_app(const char *params) {
     char name[128] = {0};
     json_get_str(params, "name", name, sizeof(name));
     if (!name[0]) {
         return strdup("{\"jsonrpc\":\"2.0\",\"error\":{\"code\":-32602,\"message\":\"name required\"}}");
     }
-    s_pending_launch = strdup(name);
-    static char buf[256];
+    const char *running = launcher_get_running_app_name();
+    bool busy = running && running[0];
+    uint32_t launch_id = sim_launch_request(name, NULL);
+    char buf[128];
     snprintf(buf, sizeof(buf),
-             "{\"jsonrpc\":\"2.0\",\"result\":{\"ok\":true,\"app_name\":\"%s\"}}", name);
+             "{\"jsonrpc\":\"2.0\",\"result\":{\"queued\":true,\"busy\":%s,"
+             "\"launch_id\":%u}}",
+             busy ? "true" : "false", launch_id);
     return strdup(buf);
+}
+
+// The app.exited params of the last finished launch ({"launch_id":0} if
+// none). Backfill for clients whose app.exited notification was dropped.
+static char *h_get_last_outcome(const char *params) {
+    (void)params;
+    char *outcome = sim_last_outcome_json();
+    if (!outcome) return NULL;
+    size_t n = strlen(outcome) + 32;
+    char *buf = malloc(n);
+    if (buf) snprintf(buf, n, "{\"jsonrpc\":\"2.0\",\"result\":%s}", outcome);
+    free(outcome);
+    return buf;
+}
+
+static char *h_rescan_apps(const char *params) {
+    (void)params;
+    sim_rescan_request();
+    return strdup("{\"jsonrpc\":\"2.0\",\"result\":{\"queued\":true}}");
 }
 
 static char *h_exit_app(const char *params) {
     (void)params;
-    extern void dev_commands_set_exit(void);
-    dev_commands_set_exit();
+    // Same semantics as the dev `exit` command (dev_ops.c): with no app
+    // running it is an error reply, and the launcher drops the flag.
+    char reply[DEV_OP_REPLY_MAX];
+    bool ok = dev_op_exit(reply, sizeof(reply));
     // Also inject ESC key so native apps with input-based exit loops
     // (checking getButtonsPressed/getChar instead of shouldExit) will exit.
-    kbd_inject_buttons(BTN_ESC);
-    return strdup("{\"jsonrpc\":\"2.0\",\"result\":{\"ok\":true}}");
+    if (ok) kbd_inject_buttons(BTN_ESC);
+    char esc[2 * DEV_OP_REPLY_MAX];
+    json_escape(reply, esc, sizeof(esc));
+    size_t n = strlen(esc) + 96;
+    char *buf = malloc(n);
+    if (buf)
+        snprintf(buf, n,
+                 "{\"jsonrpc\":\"2.0\",\"result\":{\"ok\":%s,\"message\":\"%s\"}}",
+                 ok ? "true" : "false", esc);
+    return buf;
+}
+
+// Run one dev-command line on Core 0 (see dev_commands_stub.c): the
+// launcher loop or a running app's Lua pump executes it, like a line on the
+// firmware's serial console. params: {"cmd": "...", "timeout_ms": N}.
+static char *h_dev_command(const char *params) {
+    char cmd[300] = {0};
+    if (!json_get_str(params, "cmd", cmd, sizeof(cmd)) || !cmd[0])
+        return strdup("{\"jsonrpc\":\"2.0\",\"error\":{\"code\":-32602,\"message\":\"cmd required\"}}");
+    int timeout_ms = 15000;
+    json_get_int(params, "timeout_ms", &timeout_ms);
+    extern bool dev_commands_sim_run(const char *cmd, int timeout_ms,
+                                     char *reply, size_t reply_len, bool *ok);
+    char reply[DEV_OP_REPLY_MAX];
+    bool ok = false;
+    dev_commands_sim_run(cmd, timeout_ms, reply, sizeof(reply), &ok);
+    char esc[2 * DEV_OP_REPLY_MAX];
+    json_escape(reply, esc, sizeof(esc));
+    size_t n = strlen(esc) + 96;
+    char *buf = malloc(n);
+    if (buf)
+        snprintf(buf, n,
+                 "{\"jsonrpc\":\"2.0\",\"result\":{\"ok\":%s,\"output\":\"%s\"}}",
+                 ok ? "true" : "false", esc);
+    return buf;
 }
 
 static char *h_get_running_app(const char *params) {
     (void)params;
+    // Always an object, so clients can .get("name") without a None check:
+    // {"running": bool, "name": str | null}.
     const char *name = launcher_get_running_app_name();
+    sim_strbuf_t sb = {0};
     if (name && name[0]) {
-        static char buf[256];
-        snprintf(buf, sizeof(buf),
-                 "{\"jsonrpc\":\"2.0\",\"result\":{\"name\":\"%s\"}}", name);
-        return strdup(buf);
+        sim_sb_appendf(&sb, "{\"jsonrpc\":\"2.0\",\"result\":{\"running\":true,\"name\":");
+        sim_sb_append_json_str(&sb, name);
+        sim_sb_appendf(&sb, "}}");
+    } else {
+        sim_sb_appendf(&sb, "{\"jsonrpc\":\"2.0\",\"result\":{\"running\":false,\"name\":null}}");
     }
-    return strdup("{\"jsonrpc\":\"2.0\",\"result\":null}");
+    return sim_sb_finish(&sb);
 }
 
 static uint32_t button_name_to_mask(const char *button) {
@@ -464,6 +436,16 @@ static uint32_t button_name_to_mask(const char *button) {
     return 0;
 }
 
+// Injections answer with the seq assigned to them; get_input_state reports
+// when the OS has read it. RPCs run on one thread, so "last issued" is ours.
+static char *input_seq_response(void) {
+    char buf[96];
+    snprintf(buf, sizeof(buf),
+             "{\"jsonrpc\":\"2.0\",\"result\":{\"ok\":true,\"input_seq\":%u}}",
+             hal_input_last_issued_seq());
+    return strdup(buf);
+}
+
 static char *h_inject_button(const char *params) {
     char button[32] = {0}, action[16] = {0};
     json_get_str(params, "button", button, sizeof(button));
@@ -479,18 +461,16 @@ static char *h_inject_button(const char *params) {
 
     if (strcmp(action, "release") == 0) {
         kbd_release_buttons(btn_mask);
-        return strdup("{\"jsonrpc\":\"2.0\",\"result\":{\"ok\":true}}");
-    }
-    if (strcmp(action, "press") == 0) {
+    } else if (strcmp(action, "press") == 0) {
         // Hold until an explicit "release" — for modifier chords (ctrl+s etc.)
         kbd_hold_buttons(btn_mask);
         SDL_Delay(16);
-        return strdup("{\"jsonrpc\":\"2.0\",\"result\":{\"ok\":true}}");
+    } else {
+        // "click" / default: one-shot press, held ~HAL_INJECT_HOLD_MS ms before auto-release
+        kbd_inject_buttons(btn_mask);
+        SDL_Delay(16);
     }
-    // "click" / default: one-shot press, auto-released after one read
-    kbd_inject_buttons(btn_mask);
-    SDL_Delay(16);
-    return strdup("{\"jsonrpc\":\"2.0\",\"result\":{\"ok\":true}}");
+    return input_seq_response();
 }
 
 static char *h_inject_char(const char *params) {
@@ -500,7 +480,20 @@ static char *h_inject_char(const char *params) {
         return strdup("{\"jsonrpc\":\"2.0\",\"error\":{\"code\":-32602,\"message\":\"char required\"}}");
     }
     kbd_inject_char(ch[0]);
-    return strdup("{\"jsonrpc\":\"2.0\",\"result\":{\"ok\":true}}");
+    return input_seq_response();
+}
+
+// Highest input seq the OS has read (every seq <= consumed_seq was seen by
+// kbd_poll / the char reader), and the last seq issued.
+static char *h_get_input_state(const char *params) {
+    (void)params;
+    uint32_t issued = 0, consumed = 0;
+    hal_input_get_seq_state(&issued, &consumed);
+    char buf[128];
+    snprintf(buf, sizeof(buf),
+             "{\"jsonrpc\":\"2.0\",\"result\":{\"issued_seq\":%u,\"consumed_seq\":%u}}",
+             issued, consumed);
+    return strdup(buf);
 }
 
 static char *h_screenshot(const char *params) {
@@ -868,47 +861,31 @@ static char *h_set_wifi_state(const char *params) {
     return strdup("{\"jsonrpc\":\"2.0\",\"result\":{\"ok\":true}}");
 }
 
+// {since_seq, tail}: entries with seq >= since_seq (0 = all held), or only
+// the newest `tail` of them. Paged at ~256 KB ("more":true).
 static char *h_get_log_buffer(const char *params) {
-    (void)params;
-    char *log = sim_get_log_buffer();
-    int count = sim_get_log_buffer_count();
+    unsigned int since = 0, tail = 0;
+    json_get_uint(params, "since_seq", &since);
+    json_get_uint(params, "tail", &tail);
+    char *body = sim_log_build_json(since, tail);
+    if (!body) return strdup("{\"jsonrpc\":\"2.0\",\"error\":{\"code\":-32603,\"message\":\"out of memory\"}}");
+    size_t n = strlen(body) + 40;
+    char *resp = malloc(n);
+    if (resp) snprintf(resp, n, "{\"jsonrpc\":\"2.0\",\"result\":%s}", body);
+    free(body);
+    return resp;
+}
 
-    // Build a JSON array of lines from the newline-separated log text
-    // Estimate: each line needs escaping + quotes + comma
-    size_t buf_size = 65536;
-    char *buf = malloc(buf_size);
-    if (!buf) return strdup("{\"jsonrpc\":\"2.0\",\"error\":{\"code\":-32603,\"message\":\"out of memory\"}}");
-
-    int off = snprintf(buf, buf_size,
-                       "{\"jsonrpc\":\"2.0\",\"result\":{\"count\":%d,\"lines\":[", count);
-
-    if (log && log[0]) {
-        char escaped_line[1024];
-        const char *p = log;
-        int first = 1;
-        while (*p) {
-            const char *nl = strchr(p, '\n');
-            size_t len = nl ? (size_t)(nl - p) : strlen(p);
-            // Temporarily null-terminate this line for json_escape
-            char saved = p[len];
-            ((char *)p)[len] = '\0';
-            json_escape(p, escaped_line, sizeof(escaped_line));
-            ((char *)p)[len] = saved;
-
-            int wrote = snprintf(buf + off, buf_size - (size_t)off,
-                                 "%s\"%s\"", first ? "" : ",", escaped_line);
-            if (wrote > 0) off += wrote;
-            first = 0;
-
-            if (!nl) break;
-            p = nl + 1;
-        }
-    }
-
-    snprintf(buf + off, buf_size - (size_t)off, "]}}");
-    char *result = strdup(buf);
-    free(buf);
-    return result;
+// {"logs":bool}: push each new log entry to this client as a `log`
+// notification {seq,src,text}.
+static char *h_subscribe(const char *params) {
+    bool logs = false;
+    json_get_bool(params, "logs", &logs);
+    sim_socket_set_log_subscription(logs);
+    char buf[96];
+    snprintf(buf, sizeof(buf), "{\"jsonrpc\":\"2.0\",\"result\":{\"logs\":%s}}",
+             logs ? "true" : "false");
+    return strdup(buf);
 }
 
 static char *h_set_time_multiplier(const char *params) {
@@ -918,6 +895,24 @@ static char *h_set_time_multiplier(const char *params) {
     hal_set_time_multiplier(mult);
     static char buf[64];
     snprintf(buf, sizeof(buf), "{\"jsonrpc\":\"2.0\",\"result\":{\"ok\":true,\"multiplier\":%g}}", mult);
+    return strdup(buf);
+}
+
+// step_time {ms}: advance the --virtual-time clock (a paused one included)
+// by ms. Returns {"now_ms"}; step_time {ms:0} reads the clock.
+static char *h_step_time(const char *params) {
+    int ms = 0;
+    json_get_int(params, "ms", &ms);
+    if (ms < 0)
+        return strdup("{\"jsonrpc\":\"2.0\",\"error\":{\"code\":-32602,"
+                      "\"message\":\"ms must be >= 0\"}}");
+    uint64_t now_ms = 0;
+    if (!hal_time_step((uint32_t)ms, &now_ms))
+        return strdup("{\"jsonrpc\":\"2.0\",\"error\":{\"code\":-32002,"
+                      "\"message\":\"step_time needs --virtual-time\"}}");
+    char buf[96];
+    snprintf(buf, sizeof(buf), "{\"jsonrpc\":\"2.0\",\"result\":{\"now_ms\":%llu}}",
+             (unsigned long long)now_ms);
     return strdup(buf);
 }
 
@@ -983,14 +978,38 @@ static char *h_shutdown(const char *params) {
     return strdup("{\"jsonrpc\":\"2.0\",\"result\":{\"ok\":true}}");
 }
 
+// ── Sanitizer self-test ──────────────────────────────────────────────────────
+// ASan builds only, and only with --test-mode: reads one byte past a heap
+// block so the E2E suite can prove, end to end, that a sanitizer report on
+// stderr fails the test (test_harness_health.py). A release build refuses.
+
+#if defined(__SANITIZE_ADDRESS__)
+#define SIM_ASAN_BUILD 1
+#elif defined(__has_feature)
+#if __has_feature(address_sanitizer)
+#define SIM_ASAN_BUILD 1
+#endif
+#endif
+
+static char *h_sanitizer_selftest(const char *params) {
+    (void)params;
+#ifdef SIM_ASAN_BUILD
+    if (sim_test_mode()) {
+        volatile char *p = malloc(16);
+        volatile char c = p[16];  // heap-buffer-overflow: ASan aborts here
+        (void)c;
+        free((void *)p);
+    }
+#endif
+    return strdup("{\"jsonrpc\":\"2.0\",\"error\":{\"code\":-32601,"
+                  "\"message\":\"needs an ASan build and --test-mode\"}}");
+}
+
 // ── Clear log buffer ─────────────────────────────────────────────────────────
 
 static char *h_clear_log_buffer(const char *params) {
     (void)params;
-    pthread_mutex_lock(&s_log_mutex);
-    s_log_head = 0;
-    s_log_count = 0;
-    pthread_mutex_unlock(&s_log_mutex);
+    sim_log_clear();
     return strdup("{\"jsonrpc\":\"2.0\",\"result\":{\"ok\":true}}");
 }
 
@@ -1106,8 +1125,8 @@ static char *h_display_stats(const char *params) {
     if (!resp) return strdup("{\"jsonrpc\":\"2.0\",\"error\":{\"code\":-32603,\"message\":\"oom\"}}");
     snprintf(resp, 512,
         "{\"jsonrpc\":\"2.0\",\"result\":{\"nonzero_pixels\":%d,\"total_pixels\":%d,"
-        "\"unique_colors\":%d,\"first_nonzero\":%s%s}}",
-        nonzero, total, unique, first_nz, pixel_at);
+        "\"unique_colors\":%d,\"first_nonzero\":%s%s,\"present_count\":%u}}",
+        nonzero, total, unique, first_nz, pixel_at, hal_display_get_present_count());
     return resp;
 }
 
@@ -1238,6 +1257,7 @@ static struct {
     { "ping",                h_ping },
     { "launch_app",         h_launch_app },
     { "exit_app",           h_exit_app },
+    { "dev_command",        h_dev_command },
     { "get_running_app",    h_get_running_app },
     { "inject_button",      h_inject_button },
     { "inject_char",        h_inject_char },
@@ -1257,6 +1277,7 @@ static struct {
     { "set_wifi_state",     h_set_wifi_state },
     { "get_log_buffer",     h_get_log_buffer },
     { "set_time_multiplier",h_set_time_multiplier },
+    { "step_time",          h_step_time },
     { "get_terminal_buffer", h_get_terminal_buffer },
     { "shutdown",           h_shutdown },
     { "clear_log_buffer",   h_clear_log_buffer },
@@ -1265,37 +1286,37 @@ static struct {
     { "display_stats",      h_display_stats },
     { "display_diff",       h_display_diff },
     { "get_pixel",          h_get_pixel },
+    { "rescan_apps",        h_rescan_apps },
+    { "get_last_outcome",   h_get_last_outcome },
+    { "subscribe",          h_subscribe },
+    { "get_input_state",    h_get_input_state },
+    { "sanitizer_selftest", h_sanitizer_selftest },
     { NULL, NULL },
 };
 
-static void wrap_response(int id, const char *result, char *out, size_t max) {
-    snprintf(out, max, "{\"jsonrpc\":\"2.0\",\"id\":%d,", id);
-    size_t base = strlen(out);
-    if (result && result[0] == '{') {
-        // Handler returns full JSON-RPC envelope like {"jsonrpc":"2.0","result":...}
-        // Skip past the handler's "jsonrpc":"2.0", to avoid duplicate key
-        const char *inner = result + 1;  // skip opening '{'
+// Adds "id" to a handler's result. Handlers return either a full envelope
+// {"jsonrpc":"2.0",...} (whose jsonrpc key is dropped to avoid a duplicate)
+// or a bare object {...} that becomes the rest of the envelope. Heap-sized:
+// responses (screenshots, files, logs) have no fixed upper bound.
+static char *wrap_response(int id, const char *result) {
+    const char *inner = result + 1;  // skip opening '{'
+    if (result[0] == '{') {
         const char *skip = strstr(inner, "\"jsonrpc\"");
-        if (skip) {
-            // Find the comma after the jsonrpc value
-            const char *after = strchr(skip, ',');
-            if (after) {
-                after++;  // skip the comma
-                while (*after == ' ' || *after == '\t') after++;
-                strncpy(out + base, after, max - base - 1);
-            } else {
-                strncpy(out + base, inner, max - base - 1);
-            }
-        } else {
-            strncpy(out + base, inner, max - base - 1);
+        const char *after = skip ? strchr(skip, ',') : NULL;
+        if (after) {
+            after++;
+            while (*after == ' ' || *after == '\t') after++;
+            inner = after;
         }
-    } else if (result) {
-        snprintf(out + base, max - base, "\"result\":%s}", result);
-    } else {
-        strncat(out, "}", max - strlen(out) - 1);
     }
-    out[max - 1] = '\0';
-    strncat(out, "\n", max - strlen(out) - 1);
+    size_t n = strlen(result) + 64;
+    char *out = malloc(n);
+    if (!out) return NULL;
+    if (result[0] == '{')
+        snprintf(out, n, "{\"jsonrpc\":\"2.0\",\"id\":%d,%s\n", id, inner);
+    else
+        snprintf(out, n, "{\"jsonrpc\":\"2.0\",\"id\":%d,\"result\":%s}\n", id, result);
+    return out;
 }
 
 char *sim_handler_dispatch(const char *request, const char *end) {
@@ -1318,7 +1339,7 @@ char *sim_handler_dispatch(const char *request, const char *end) {
 
     const char *method_start = strstr(request, "\"method\"");
     if (!method_start || method_start >= end) {
-        static char err[64];
+        char err[128];
         snprintf(err, sizeof(err),
                  "{\"jsonrpc\":\"2.0\",\"id\":%d,\"error\":{\"code\":-32600,\"message\":\"method missing\"}}", id);
         return strdup(err);
@@ -1369,10 +1390,8 @@ char *sim_handler_dispatch(const char *request, const char *end) {
             if (!result) {
                 ret = strdup("{\"jsonrpc\":\"2.0\",\"error\":{\"code\":-32603,\"message\":\"handler returned null\"}}");
             } else {
-                static char resp_buf[1024 * 1024];
-                wrap_response(id, result, resp_buf, sizeof(resp_buf));
+                ret = wrap_response(id, result);
                 free(result);
-                ret = strdup(resp_buf);
             }
             free(params);
             return ret;

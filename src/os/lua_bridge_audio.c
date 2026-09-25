@@ -4,8 +4,8 @@
 // ── picocalc.audio.* ───────────────────────────────────────────────────────────
 
 static int l_audio_playTone(lua_State *L) {
-  uint32_t freq = (uint32_t)luaL_checkinteger(L, 1);
-  uint32_t duration = (uint32_t)luaL_optinteger(L, 2, 0);
+  uint32_t freq = (uint32_t)lb_checkint(L, 1);
+  uint32_t duration = (uint32_t)lb_optint(L, 2, 0);
   audio_play_tone(freq, duration);
   return 0;
 }
@@ -17,13 +17,13 @@ static int l_audio_stopTone(lua_State *L) {
 }
 
 static int l_audio_setVolume(lua_State *L) {
-  uint8_t vol = (uint8_t)luaL_checkinteger(L, 1);
+  uint8_t vol = (uint8_t)lb_clamp_int(lb_checkint(L, 1), 0, 100);
   audio_set_volume(vol);
   return 0;
 }
 
 static int l_audio_startStream(lua_State *L) {
-  uint32_t rate = (uint32_t)luaL_checkinteger(L, 1);
+  uint32_t rate = (uint32_t)lb_checkint(L, 1);
   audio_start_stream(rate);
   return 0;
 }
@@ -41,7 +41,8 @@ static int l_audio_pushSamples(lua_State *L) {
   int count = (n > 512) ? 512 : n;
   for (int i = 0; i < count; i++) {
     lua_rawgeti(L, 1, i + 1);
-    buf[i] = (int16_t)lua_tointeger(L, -1);
+    buf[i] = (int16_t)lb_clamp_int(lb_checkint_at(L, -1, 1, "sample"),
+                                   INT16_MIN, INT16_MAX);
     lua_pop(L, 1);
   }
   audio_push_samples(buf, count / 2);

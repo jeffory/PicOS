@@ -1,0 +1,7 @@
+{
+    "id": "com.picos.font_test",
+    "name": "Font Test",
+    "description": "Built-in and loaded font rendering fixture",
+    "version": "1.0",
+    "author": "PicOS"
+}

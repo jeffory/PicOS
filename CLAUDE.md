@@ -1,10 +1,16 @@
 # CLAUDE.md
 
-This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
-
 ## Project Overview
 
 PicOS is a bare-metal embedded OS for the [ClockworkPi PicoCalc v2.0](https://www.clockworkpi.com/) handheld device. It runs on a Pimoroni Pico Plus 2 W (RP2350, 8MB QMI PSRAM + 8MB PIO PSRAM, WiFi). A resident C firmware lives in flash; apps are Lua scripts or native ELF binaries on an SD card; all hardware is exposed via a `picocalc.*` Lua API and a C `PicoCalcAPI` struct.
+
+**Where detail lives.** Subsystem notes are in nested `CLAUDE.md` files (loaded when you read files in that directory). Read the one for an area before changing it:
+- `src/drivers/CLAUDE.md` — display, WiFi/HTTP/TCP, TLS and randomness, audio, video, PIO PSRAM, keyboard
+- `src/os/CLAUDE.md` — app runners and exit teardown, Lua bridge internals (object types, number rules, count hook, sticky exit), sandbox, file handles, config stores, save slots, OTA policy, crash records, Lua heap
+- `simulator/CLAUDE.md` — simulator divergences, the test control channel, `--test-mode` and virtual time, allocators, sanitizer and firmware-net builds. Read it before writing an E2E test or trusting a simulator result.
+- `docs/` (wiki submodule) — the app-facing API reference. It lags the code; where it disagrees with the nested files, the nested files are right.
+
+This file keeps only what applies across the tree. Record subsystem behaviour in the nested file (or header comment) nearest the code.
 
 ## Build Commands
 
@@ -41,7 +47,15 @@ Output: `build/picocalc_os.uf2` — drag-and-drop to Pico in BOOTSEL mode.
 ### Debug
 USB serial at 115200 baud. App log calls appear as `[APP] message`. Lua errors display on-screen with stack trace (dismiss with **Esc**).
 
-There is no automated test suite or linter.
+Stage multi-file apps (hardware or simulator) with the `push_app` MCP tool (`tools/picos_mcp.py`): it ships the directory as one ZIP and extracts it on-device with the `unzip <zip> <dest>` dev command (`rm <path>` cleans up), far faster than per-file transfers. Dev commands run on an app stack, so `unzip` is safe at the launcher.
+
+Dev commands while an app runs (`src/dev_commands.c`, `lua_bridge.c`, native `sys_poll`): plain `reboot` and `reboot-flash` are honoured at once and kill the app without teardown (a native app that never calls `sys->poll()` latches them until the launcher); `reboot-ota` is dropped (`reboot-ota ignored`), so `make flash-ota` (`tools/ota_flash.py`) exits the app first; `usb` waits for the launcher. `exit` with no app running replies `Error: exit: no app running` and still closes a modal open at the launcher (system menu, text input).
+
+### Tests
+- **E2E (simulator)**: `SDL_VIDEODRIVER=dummy pytest tests/e2e -n auto` (see `tests/e2e/README.md`; config and markers in the repo-level `pytest.ini`). Runs against `build_sim/picos_simulator`; `PICOS_SIM_BINARY` (or `--simulator-path`) selects another build: `make simulator-asan` (`build_sim_asan/`, enables `asan_only` tests), `make simulator-tsan`, `make simulator-net` / `-net-asan` / `-net-tsan` (`build_sim_net/`…, the firmware network stack; enables `firmware_net` tests). Virtual time and `--real-umm` are described in `simulator/CLAUDE.md`. Lua fixture apps report through `tests/e2e/lib/picotest.lua` (staged as `/system/lib/picotest.lua`).
+- **E2E (hardware)**: `--target hw:/dev/serial/by-id/<PicOS device>` runs the `hardware`/`both` tests on a real PicoCalc through `tests/e2e/hw_target.py` (they skip, allow-listed, on the simulator).
+- **Unit**: `make test-unit` (host C tests: `tests/unit/CMakeLists.txt` → `build_unit/`, ctest, ASan+UBSan; covers the pure modules `elf_plan`, `fs_path`, `app_manifest`, `config`/`appconfig` over an in-memory SD fake, `wav`, `audio_ring`, `zip_name`, `text_wrap`, `lua_numfmt` vs glibc, fonts), `python3 -m pytest tests/unit`, `make test-lua`.
+- **Fuzz**: `make fuzz` runs the libFuzzer targets in `tests/fuzz/` (clang; `FUZZ_TARGETS=`, `FUZZ_SECONDS=`). CI runs them nightly (`.github/workflows/fuzz.yml`) and the unit job on every push (`unit.yml`). There is no linter.
 
 ## Architecture
 
@@ -57,6 +71,7 @@ main()
   sdcard_init()
   lua_psram_alloc_init()        // umm_malloc heap on QMI PSRAM
   config_load()                 // /system/config.json
+  boot_crypto_init()            // on the OS stack: Core 0 CTR_DRBG seed + CA bundle parse
   wifi_init() → http_init() → tcp_init()
   multicore_launch_core1()      // Core 1: wifi_poll, http, mp3, fileplayer
   system_menu_init()
@@ -64,144 +79,49 @@ main()
 ```
 
 ### Dual-Core Model
-- **Core 0**: Runs the launcher, Lua VM, and native apps. Owns the display, keyboard, and SD card.
-- **Core 1**: Runs the network stack (Mongoose/CYW43) and audio decode (MP3, fileplayer). Polls every 5ms. Core 0 communicates via IPC ring buffer (`wifi_req_push()`). **Core 0 must never call `mg_*` functions directly.**
+- **Core 0**: runs the launcher, Lua VM and native apps. Owns the display, keyboard and SD card.
+- **Core 1**: runs the network stack (Mongoose/CYW43) and audio decode (MP3, fileplayer, MOD) on a 1 ms tick. Core 0 talks to it through an IPC ring (`wifi_req_push()`). **Core 0 must never call `mg_*` functions directly.** Core 1 only try-locks shared player/SD state and skips the tick when busy.
 
 ### Central API (`src/os/os.h`)
-`PicoCalcAPI g_api` is a function pointer table wired in `main.c`. Sub-tables (all available to both Lua and native C apps unless noted):
-- `picocalc.display` / `g_api.display` — drawing primitives, DMA flush, brightness, `drawImageNN`, `flushRows`
-- `picocalc.input` / `g_api.input` — button state, character input, edge detection
-- `picocalc.fs` / `g_api.fs` — file open/read/write/close/exists/size/listDir
-- `picocalc.sys` / `g_api.sys` — time, battery, log, reboot, system menu, poll (native apps), shouldExit
-- `picocalc.wifi` / `g_api.wifi` — connect/disconnect/status/IP/SSID/isAvailable
-- `picocalc.config` / `g_api.config` — system-wide key/value config (get/set/save/load)
-- `picocalc.audio` / `g_api.audio` — tone generation, PCM streaming (playTone/stopTone/setVolume/startStream/stopStream/pushSamples)
-- `picocalc.tcp` / `g_api.tcp` — raw TCP/TLS sockets (connect/write/read/close/available/getError/getEvents)
-- `picocalc.ui` / `g_api.ui` — modal dialogs (textInput/textInputSimple/confirm)
-- `g_api.http` — HTTP/HTTPS client (Phase 1; Lua exposes as `picocalc.network.http` OO objects)
-- `g_api.soundplayer` — sample/fileplayer/MP3 player (Phase 1; Lua exposes as `picocalc.sound`)
-- `g_api.appconfig` — per-app key/value config (Phase 1; Lua exposes as `picocalc.appconfig`)
-- `g_api.crypto` — crypto primitives: SHA-256/SHA-1/HMAC/AES-CTR/ECDH (Phase 1; Lua exposes as `picocalc.crypto`)
-- `g_api.graphics` — image loading and drawing (Phase 2; Lua exposes as `picocalc.graphics.image`)
-- `g_api.video` — MJPEG video playback (Phase 2; Lua exposes as `picocalc.video`)
-- `g_api.version` — 1 = Phase 1 additions present, 2 = Phase 2 additions present
+`PicoCalcAPI g_api` is a function pointer table wired in `main.c`. Sub-tables, native name → Lua name:
+- `display`, `input`, `fs`, `sys`, `wifi`, `audio`, `tcp`, `ui` → `picocalc.<same>`. Lua input also has `pollEvent()` (ordered `{type="down"|"up"|"char", key, char, mods, button, repeat}` events, nil when empty) and `isKeyDown(k)`; Lua TCP sockets are `picocalc.tcp.new(host, port, tls)` objects.
+- `http` → `picocalc.network.http` (OO connections); `soundplayer` → `picocalc.sound`; `graphics` → `picocalc.graphics.image`; `video` → `picocalc.video`; `modplayer` → `picocalc.modplayer`; `zip` → `picocalc.zip`; `crypto` → `picocalc.crypto` (SHA-256/SHA-1/HMAC/AES-CTR/ECDH).
+- `appconfig` → `picocalc.config` **and** `picocalc.appconfig` (same store, two names).
+- `picocalc.sysconfig` is Lua-only and needs the `"sysconfig"` requirement; there is no `g_api.config`.
+- `g_api.version`: 1 = Phase 1, 2 = Phase 2, 3 = `fs->browse`, 4 = clip rect + mode-7 plane, 5 = zip read-in-place handles, 6 = fonts (setFont/getFont/getFontWidth/getFontHeight/textWidth/loadFont/unloadFont/drawTextTransparent), 7 = video time seek/position, progress OSD, `hasEnded`, 8 = TLS verification: `http->setInsecure`, `tcp->connectEx` (`PCTCP_TLS`/`PCTCP_TLS_INSECURE`).
+
+> ⚠️ **Config naming**: in Lua, `picocalc.config` (alias `picocalc.appconfig`) is the **per-app** store (`/data/<APP_ID>/config.json`); `picocalc.sysconfig` is the **system-wide** store (`/system/config.json`).
 
 ### App Lifecycle (`src/os/launcher.c`)
-1. Scans `/apps/` on SD for dirs containing `main.lua` or `main.elf`
-2. Reads `app.json` with a hand-rolled minimal JSON parser (no cJSON — flash savings)
-3. Auto-detects app type: `main.elf` → native, `main.lua` → Lua (native wins if both present)
-4. Shows scrollable menu with battery % header
-5. Dispatches via `AppRunner` vtable (`src/os/app_runner.h`):
-   - **Lua apps** (`src/os/lua_runner.c`): `malloc`s `main.lua`, creates fresh `lua_State`, calls `lua_bridge_register()`, runs `lua_pcall()`, then `lua_close()`
-   - **Native apps** (`src/os/native_loader.c`): ELF32 PIE loader, relocates to PSRAM (code in SRAM if fits), runs on PSP (Process Stack Pointer) via `launch_on_psp()` trampoline
+1. Scans `/apps/` for dirs containing `main.lua` or `main.elf` (native wins if both), reads each `app.json`, shows a scrollable menu with a battery % header.
+2. Installs the app's identity (`src/os/app_identity.c`: id, dirs, requirements). Every enforcement check reads it, never the `APP_*` Lua globals.
+3. Runs the app through the `AppRunner` vtable (`src/os/app_runner.h`) on its own `PSPLIM`-guarded PSP stack (`app_stack_run()`; IRQs and the launcher stay on the MSP): **Lua** (`lua_runner.c`, 64 KB VM stack) or **native** (`native_loader.c`, ELF32 PIE relocated to PSRAM, validated by the pure `elf_plan.c`).
+4. Tears down whatever the app left open: files, handles, players, connections, fonts, menu items, zip handles (full lists in `src/os/CLAUDE.md`).
 
-### Lua Bridge (split across `src/os/lua_bridge_*.c`)
-The Lua bridge is split into 14 module files, coordinated by `lua_bridge.c`:
-- `lua_bridge_audio.c` — tone/PCM streaming
-- `lua_bridge_config.c` — config get/set/save/load
-- `lua_bridge_display.c` — drawing primitives
-- `lua_bridge_fs.c` — filesystem operations
-- `lua_bridge_graphics.c` — image loading, sprites, spritesheets, animations, image cache
-- `lua_bridge_input.c` — buttons, keyboard
-- `lua_bridge_network.c` — WiFi control, HTTP client (OO connections with `HTTP_MT` metatable)
-- `lua_bridge_perf.c` — performance profiling
-- `lua_bridge_repl.c` — interactive Lua REPL
-- `lua_bridge_sound.c` — sound samples, file player, MP3 player
-- `lua_bridge_sys.c` — system functions, menu items
-- `lua_bridge_ui.c` — modal dialogs
-- `lua_bridge_video.c` — MJPEG video playback
+### Lua Bridge (`src/os/lua_bridge*.c`)
+- One file per `picocalc.*` module, coordinated by `lua_bridge.c`. Functions are `static int l_<module>_<fn>(lua_State *L)` wrappers in `luaL_Reg` tables passed to `register_subtable()`; integer constants (button codes, colour names) are pushed with `lua_pushinteger` / `lua_setfield`.
+- Every userdata type registers with `lb_register_type()` (methods in a separate `__index` table, locked metatable), and each `__gc` leaves its object dead so a resurrected object is rejected. Check userdata with `luaL_checkudata`/`luaL_testudata`, never `lua_touserdata`.
+- Lua 5.4.7 with a restricted stdlib: `base`, `table`, `string`, `math`, `coroutine`, `utf8`. Blocked: `io`, `os`, `package`, `debug`; `dofile`/`loadfile` removed. `load` is text-only (bytecode rejected), as are app `main.lua` and `sys.loadlib`.
+- Numbers: `lua_Integer` is 32-bit and `lua_Number` is `float` (integers exact only to 2^24). Bridge quantity arguments (coordinates, sizes, durations, volumes) round floats to nearest; identifiers (handles, enums, colours, masks, byte counts, ports) require exact integers. Compile-time config lives in `cmake/picos_lua.cmake`.
 
-All `picocalc.*` Lua functions are `static int l_<module>_<fn>(lua_State *L)` wrappers. Registered via `luaL_Reg` tables passed to `register_subtable()`. Integer constants (button codes, color names) are pushed with `lua_pushinteger` / `lua_setfield`.
-
-Lua 5.4.7 is embedded with restricted stdlib: `base`, `table`, `string`, `math`, `utf8`, `coroutine`. Blocked: `io`, `os`, `package`. Compile-time config: `LUA_32BITS=1`, `LUA_USE_LONGJMP=1`, `LUAI_MAXSTACK=500`.
-
-A debug hook fires every 256 opcodes (`lua_sethook` with `LUA_MASKCOUNT`). The hook checks for the Sym (Menu) key and fires pending HTTP Lua callbacks via `http_lua_fire_pending()`.
-
-### Display Driver (`src/drivers/display.c`)
-- ST7365P 320×320 IPS LCD over **PIO0 SPI** at 100 MHz (not hardware SPI1)
-- Double-buffered: `uint16_t s_framebuffers[2][320*320]` in **SRAM** (not PSRAM)
-- Non-blocking DMA flush via `display_flush()` — DMA reads SRAM (AHB bus), independent of PSRAM (QMI/XIP)
-- PIO0 is **completely independent** from the CYW43 WiFi chip (which uses SPI1) — no bus sharing, no lock needed
-- Colors are RGB565 host-byte-order; display.c byte-swaps on write (display is big-endian)
-- Built-in 6×8 bitmap font for ASCII 0x20–0x7E
-- `display_darken()` copies front buffer → back buffer (darkened) for system menu overlay
-
-### WiFi / Network Stack (`src/drivers/wifi.c`, `http.c`, `tcp.c`)
-- CYW43 on SPI1; `WIFI_ENABLED=1` defined by CMake for WiFi boards; all CYW43 code is `#ifdef WIFI_ENABLED` guarded
-- **Core 1 exclusively owns the Mongoose event manager** (`s_mgr`). Core 0 never calls `mg_*` functions.
-- Core 0 → Core 1 IPC: spinlock-guarded 8-slot ring buffer; push via `wifi_req_push()`. Request types: `CONN_REQ_HTTP_START`, `CONN_REQ_HTTP_CLOSE`, `CONN_REQ_WIFI_CONNECT`, `CONN_REQ_WIFI_DISCONNECT`
-- Auto-connects on boot if `"wifi_ssid"` / `"wifi_pass"` exist in config
-
-### HTTP Client (`src/drivers/http.c`)
-- Mongoose-based HTTP/1.1 client running on Core 1
-- Static pool of 8 simultaneous connections (`HTTP_MAX_CONNECTIONS`)
-- **HTTPS supported** via `pico_lwip_mbedtls` + `pico_mbedtls` (see `src/mbedtls_config.h`)
-- `pending` bitmask set by Core 1 (`http_ev_fn`); Lua callbacks fired by Core 0 via `http_lua_fire_pending()`
-- `http_close_all()` called at start of `lua_bridge_register()` to clear stale connections between apps
-
-### TCP Sockets (`src/drivers/tcp.c`)
-- Raw TCP/TLS client layer, also Mongoose-based on Core 1
-- Pool of 4 connections (`TCP_MAX_CONNECTIONS`)
-- Non-blocking, cross-core (Core 0 requests, Core 1 handles)
-- Exposed as `picocalc.tcp` in the C API and via Lua bridge
-
-### Audio (`src/drivers/audio.c`, `sound.c`, `mp3_player.c`, `fileplayer.c`)
-- PWM audio output on GP26 (left) / GP27 (right)
-- `audio.c` — tone generation (square wave) and PCM streaming via DMA
-- `sound.c` — sound sample loading and playback (WAV-like)
-- `fileplayer.c` — streaming file playback from SD card
-- `mp3_player.c` — MP3 decoding via libmad; PCM ring buffer (32KB) in PIO PSRAM; DMA ISR reads from 1KB SRAM staging buffer, refilled by Core 1
-- `mp3_player_update()` and `fileplayer_update()` called on Core 1 every 5ms
-
-### Video Player (`src/drivers/video_player.cpp`)
-- MJPEG video playback with JPEGDEC decoding
-- Frame buffer pool (3×96KB JPEG buffers) staged in PIO PSRAM at offset 0x8000
-- SD → PIO PSRAM → QMI buffer → JPEGDEC → framebuffer
-- Exposed as `picocalc.video` in Lua
-
-### PIO PSRAM (`src/drivers/pio_psram.c`)
-- Second 8MB PSRAM on the PicoCalc v2.0 mainboard, accessed via PIO1 SPI
-- Completely independent bus from QMI PSRAM/Flash XIP cache
-- Used for: MP3 PCM ring buffer (addr 0x0000, 32KB) and video buffer pool (addr 0x8000)
-- `pio_psram_init()` called early in `main()`; non-fatal if chip absent
+### Drivers: rules that apply everywhere
+- **Framebuffer pixels are byte-swapped RGB565** (panel order): every primitive swaps on write, every reader swaps back, and native apps writing via `getBackBuffer()` write swapped pixels.
+- Every display primitive clips to the clip rect **once**, before any pixel loop. The simulator has its own display implementation (`simulator/stubs/driver_stubs.c`): a primitive change lands in both.
+- Every HTTPS / `tls://` connection verifies the server certificate and waits for SNTP to set the clock; `setInsecure(true)` (Lua) or `PCTCP_TLS_INSECURE` (native) opts one connection out, for self-signed dev servers only.
+- Volumes are 0-100 everywhere; larger values clamp.
 
 ### System Menu (`src/os/system_menu.c`)
-- Triggered by the Sym key; detected via `kbd_consume_menu_press()` in the Lua debug hook
-- Overlays the current framebuffer (darkened with `display_darken()`)
-- Apps and OS can register items with `system_menu_add_item()` / `picocalc.sys.addMenuItem()`
-
-### Config (`src/os/config.c`)
-- Flat JSON key/value store persisted at `/system/config.json`
-- `config_load()` at boot; `config_save()` writes back to SD
-- Exposed to Lua as `picocalc.config.get(key)`, `.set(key, value)`, `.save()`, `.load()`
-- Well-known keys: `"wifi_ssid"`, `"wifi_pass"`, `"brightness"`, `"dim_timeout_s"` (idle screen-dim timeout in seconds; `"0"` disables; default 60)
-
-### UI Widgets (`src/os/ui.c`, `text_input.c`)
-- `ui_draw_header()` — titlebar with battery/WiFi/clock
-- `ui_draw_footer()` — footer with status text
-- `ui_draw_tabs()` — tab container with keyboard shortcuts
-- `ui_text_input()` / `text_input_show()` — blocking modal text input
-- `ui_confirm()` — yes/no confirmation dialog
-- Exposed as `picocalc.ui` in the C API
-
-### Hardware Pin Definitions
-**All pins must be defined in `src/hardware.h` only — never hardcoded elsewhere.**
-
-| Peripheral | Interface | Key Pins |
-|---|---|---|
-| ST7365P LCD | PIO0 SPI (100 MHz) | MOSI=GP11, SCK=GP10, CS=GP13, DC=GP14, RST=GP15 |
-| SD Card | SPI0 (25 MHz) | MOSI=GP19, SCK=GP18, MISO=GP16, CS=GP17 |
-| Keyboard (STM32) | I2C1 (10 kHz) | SDA=GP6, SCL=GP7, addr=0x1F |
-| Audio L/R | PWM | GP26, GP27 |
-| PIO PSRAM (mainboard) | PIO1 SPI | CS=GP20, SCK=GP21, MOSI=GP2, MISO=GP3 |
-| USB VBUS Sense | GPIO | GP24 |
+- Triggered by the Sym key; detected via `kbd_consume_menu_press()` in the Lua count hook.
+- Overlays the current framebuffer (darkened with `display_darken()`).
+- Apps and OS register items with `system_menu_add_item()` / `picocalc.sys.addMenuItem()`.
 
 ### Memory Map
-- **SRAM heap**: ~28.8KB free after BSS (for `malloc`/`free` — tiny, must be freed promptly)
-- **QMI PSRAM (8MB)**: Lua heap via `umm_malloc` at 0x11200000 (cached alias). ELF app data/BSS. Never mix `umm_malloc`/`umm_free` with standard `malloc`/`free`.
-- **PIO PSRAM (8MB)**: MP3 PCM ring buffer (32KB). Accessed via `pio_psram_read`/`pio_psram_write`. Also exposed to native apps via `g_api.psram`.
-- **Main stack**: 4KB in SCRATCH memory (`__StackBottom`=0x20081000, `__StackTop`=0x20082000)
-- **Native app stack**: 8KB static SRAM buffer (`s_native_stack`), runs on PSP
+- **SRAM heap**: ~2.6 KB (`__end__`=0x2007f580 to `__HeapLimit`=0x20080000; the 400 KB double framebuffer is BSS), so effectively none: scratch buffers go through `umm_malloc`.
+- **QMI PSRAM (8 MB)**: Lua heap via `umm_malloc` at 0x11200000 (cached alias), 6 MB minus the 128 KB Core 1 pool; ELF app data/BSS. Every umm allocation costs at least one 200-byte block (small Lua objects share slabs; see `src/os/CLAUDE.md`).
+- **PIO PSRAM (8 MB)**: the OS owns everything below `0x48000` (MP3 PCM ring); apps get `0x48000`+, range-checked for Lua and native. Accessed via `pio_psram_read`/`pio_psram_write` and `g_api.psram`.
+- **Main stack (MSP)**: 4 KB in SCRATCH (`__StackBottom`=0x20081000, `__StackTop`=0x20082000), `MSPLIM`-guarded. Boot, the launcher (menus, USB MSC) and every IRQ run here; dev commands and screenshot save move to a short-lived 32 KB PSRAM stack. Measured peak ~2.2-2.5 KB; the `stack` dev command prints it and the running app's stack peak.
+- **Lua VM stack**: 64 KB `umm_malloc` per launch, on the PSP. PSRAM because no SRAM region that size exists; costs ~10-50% on C-call-heavy Lua code (pure Lua loops unchanged).
+- **Native app stack**: 16 KB SRAM `malloc` if available (in practice never), else 64 KB `umm_malloc`; on the PSP.
 
 ## Coding Conventions
 
@@ -210,8 +130,8 @@ A debug hook fires every 256 opcodes (`lua_sethook` with `LUA_MASKCOUNT`). The h
 - Static module vars: `s_` prefix (e.g., `s_framebuffers`)
 - Globals: `g_` prefix (e.g., `g_api`)
 - Macros: `UPPER_CASE`
-- All `malloc()` calls must be paired with explicit `free()`; `umm_malloc()` with `umm_free()`
-- PSRAM allocations via `umm_malloc` (Lua heap) or PIO PSRAM APIs (audio buffers)
+- `umm_malloc` pairs with `umm_free`, `malloc` with `free`; the two heaps never mix. PSRAM allocations go through `umm_malloc` (Lua heap) or the PIO PSRAM APIs (audio buffers).
+- Pins are defined only in `src/hardware.h`.
 - BTN_* constants live in `os.h` (not keyboard.h)
 
 ## Extending the OS
@@ -222,6 +142,9 @@ A debug hook fires every 256 opcodes (`lua_sethook` with `LUA_MASKCOUNT`). The h
 3. Add a `picocalc_<name>_t` struct to `os.h`
 4. Wire function pointers in `main.c`
 5. Add sources and link libraries in `CMakeLists.txt`
+
+### Changing the native API (`PicoCalcAPI`)
+The struct exists three times: `src/os/os.h`, `sdk/native/os.h` and the simulator's trampoline tables (`simulator/unicorn_trampolines.c`). Never insert a field before `version` (it would move); add new fields after it, in the same order in both headers and the trampolines, bump `g_api.version` in `src/main.c` and the trampolines' version write together, then run `python3 tools/check_native_abi.py --cc arm-none-eabi-gcc` (CI's `native-sdk` job) and extend and rebuild the E2E probe (`tests/e2e/native/api_probe.c`, `make -C tests/e2e/native`); `tests/e2e/test_native.py` checks the running layout.
 
 ### Exposing a new Lua API
 1. Create `src/os/lua_bridge_<module>.c`
@@ -237,73 +160,43 @@ Apps are directories at `/apps/<name>/` on a FAT32 SD card containing:
 - `main.lua` — Lua app (loop until `return` to exit to launcher)
 - `main.elf` — native C/TinyGo app (ELF32 PIE; native takes priority if both present)
 
-Pre-set globals (Lua): `APP_DIR` (e.g. `"/apps/hello"`), `APP_NAME`, `APP_ID`, `APP_REQUIREMENTS`.
+The `id` becomes `/data/<id>`: 1-79 characters of `[A-Za-z0-9._-]`, folded to lower case; the launcher refuses an invalid one (rules in `src/os/CLAUDE.md`). Optional `"min_psram_kb": N` makes the launcher refuse to start the app (on-screen reason + error.log entry) unless the PSRAM heap has a single free block of at least N KB — the largest block is the test, not total free bytes.
 
-Native apps receive `PicoCalcAPI *api` as their entry point argument. Use `api->sys->poll()` each frame and check `api->sys->shouldExit()` to handle the system menu exit.
+Pre-set Lua globals: `APP_DIR` (e.g. `"/apps/hello"`), `APP_NAME`, `APP_ID`, `APP_REQUIREMENTS` (booleans, e.g. `APP_REQUIREMENTS.root_filesystem`). They are convenience copies: the sandbox and the per-app stores read the C-side identity, so an app that rewrites them gains nothing.
+
+Native apps receive `PicoCalcAPI *api` as their entry point argument. Call `api->sys->poll()` each frame and check `api->sys->shouldExit()` to handle the system menu exit. Anything the app does not free (files, images, players, terminals, crypto contexts, `qmiAlloc` blocks, HTTP/TCP connections, loaded fonts, menu items, zip handles) is freed when `picos_main` returns. Freeing a handle twice is ignored only until its address is reused by a newer handle of the same kind (then the second free releases the newer one), so free each handle once.
 
 ### App Requirements
+`requirements` in `app.json`:
+- `"filesystem"` (default): read `/apps/<dir>` and `/system/lib/`, read + write `/data/<app_id>`; relative paths and `..` are refused. The sandbox (`src/os/fs_path.c`) guards `picocalc.fs` and every loader that takes a path.
+- `"root-filesystem"`: full SD card read/write.
+- `"http"`: network access; WiFi stays connected after the boot time sync.
+- `"audio"`: audio output.
+- `"clipboard"`: reserved.
+- `"sysconfig"`: registers `picocalc.sysconfig` (`wifi_pass` is write-only).
+- `"system-update"`: `sys.applyUpdate`, for the OS updater/store only. Updates are flashed only when signed: dev builds embed the TEST key in `tests/keys/` (`make flash-ota` signs with it); release builds need the `UPDATE_SIGNING_KEY` secret. The full OTA policy is in `src/os/CLAUDE.md`.
 
-Apps can request elevated requirements via the `requirements` array in `app.json`:
+### Crash records
+- `/system/error.log`: app-level failures (Lua errors and panics, native loader errors, launch refusals), each with a `Heap:` line.
+- `/system/crashlog.txt`: HardFault dumps and `UNCLEAN EXIT` entries, written at the next boot.
+- `/system/running.txt`: dirty-exit marker; if it survives a boot, the named app never returned to the launcher.
+- Boot-loop protection: after `BOOT_MAX_RETRIES` (3) failed boots the boot watchdog stays off and a fault at the limit halts with "Boot failed N times - halted"; power-cycling with the batteries out clears it (a USB replug keeps the scratch registers).
 
-```json
-{
-  "requirements": [
-    "filesystem",         // default: read /apps/<dirname> and /data/<app_id>
-    "root-filesystem",    // grants full SD card read/write access
-    "http",               // app needs WiFi/network connectivity
-    "audio",              // app needs audio output
-    "clipboard"           // reserved for future use
-  ]
-}
-```
+## Lua API Notes
 
-The `APP_REQUIREMENTS` global in Lua is a table with boolean fields:
-```lua
-if APP_REQUIREMENTS.root_filesystem then
-  -- App has full filesystem access
-end
-```
+- API reference: `docs/API-*.md` (wiki submodule; see the caveat at the top).
+- System libraries live in `/system/lib/` and load via `picocalc.sys.loadlib(name)`: `download.lua` provides `download.toFile(url, dest, opts)` (blocking HTTP(S)-to-SD streaming download). `picocalc.crypto.sha256File(path)` returns a file's SHA-256 as lowercase hex.
+- Names that differ from the wiki or other APIs: HTTP connections have no `conn:query`; the TCP socket's error getter is `tcp:error()` (native keeps `g_api.tcp->getError`); `picocalc.video` players have no `destroy()` (the collector frees them). There is no `graphics.cache` table; sprite `setImageDrawMode`, `setIgnoresDrawOffset`, stencils, sprite clip rects, `addDirtyRect` and `markDirty` are accepted but not applied.
 
-When `"root-filesystem"` is granted, the app bypasses the default sandbox (`/apps/<name>` read + `/data/<app_id>` write) and can access the entire SD card.
+## Simulator
 
-When `"http"` is granted, WiFi will remain connected after initial time sync (for power saving) so the app can make HTTP requests.
-
-SD card auto-creates `/data/` and `/system/` on first mount.
-
-## Lua API Reference
-
-### picocalc.network
-
-```lua
--- Connection status
-picocalc.network.getStatus()          -- kStatusNotConnected | kStatusConnected | kStatusNotAvailable
-picocalc.network.setEnabled(flag, fn) -- enable/disable WiFi; fn() called when done
-
--- HTTP connections (supports HTTPS via usessl=true)
-local conn = picocalc.network.http.new(server, [port], [usessl], [reason])
-conn:setKeepAlive(bool)
-conn:setByteRange(from, to)
-conn:setConnectTimeout(seconds)
-conn:setReadTimeout(seconds)
-conn:setReadBufferSize(bytes)
-conn:get(path, [headers])
-conn:post(path, [headers], data)
-conn:query(path, [headers], data)     -- alias for post
-conn:close()
-conn:getError()                       -- nil or error string
-conn:getProgress()                    -- bytesReceived, totalBytes
-conn:getBytesAvailable()
-conn:read([length])                   -- returns string or nil
-conn:getResponseStatus()              -- HTTP status code integer
-conn:getResponseHeaders()             -- table of {key=value}
-conn:setRequestCallback(fn)           -- data arrived
-conn:setHeadersReadCallback(fn)       -- headers parsed
-conn:setRequestCompleteCallback(fn)   -- body complete
-conn:setConnectionClosedCallback(fn)  -- connection closed or failed
-```
-
-Status constants: `picocalc.network.kStatusNotConnected` (0), `kStatusConnected` (1), `kStatusNotAvailable` (2).
+`make simulator` builds `build_sim/picos_simulator` (SDL2 + Unicorn Engine for native ELF apps). What it does not model, in brief (full list in `simulator/CLAUDE.md`):
+- `picocalc.crypto` is absent; `picocalc.video` is stubbed; TLS verification, the SNTP clock gate and the TRNG are firmware-only.
+- Display, sample mixer and MP3 player are separate simulator implementations (`stubs/driver_stubs.c`, `sim_audio.c`): keep them in step with the firmware, and confirm colour and timing on hardware.
+- Networking is libcurl unless you build `make simulator-net` (the firmware stack on Mongoose, no TLS).
+- `umm_*` is a counting allocator: largest-block and fragmentation figures need `--real-umm`.
 
 ## Not Yet Implemented
 
 - `picocalc.display.drawBitmap` / raw bitmap blitting (use `picocalc.graphics.image` instead for image loading)
+- Native-app HTTP callbacks (`http_fire_c_pending` is a no-op; native apps must poll `http->isComplete()`)

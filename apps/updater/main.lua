@@ -5,7 +5,6 @@ local display = picocalc.display
 local input = picocalc.input
 local sys = picocalc.sys
 local net = picocalc.network
-local config = picocalc.sysconfig
 local fs = picocalc.fs
 local ui = picocalc.ui
 
@@ -15,8 +14,10 @@ local GH_REPO      = "jeffory/picOS"
 local GH_API_PATH  = "/repos/" .. GH_REPO .. "/releases/latest"
 local BIN_FILENAME  = "picocalc_os.bin"
 local HASH_FILENAME = "picocalc_os.sha256"
+local SIG_FILENAME  = "picocalc_os.sig"
 local BIN_PATH      = "/system/update.bin"
 local HASH_PATH     = "/system/update.sha256"
+local SIG_PATH      = "/system/update.sig"
 local MAX_REDIRECTS = 3
 
 -- Screen dimensions
@@ -51,6 +52,7 @@ local remote_size = 0
 local remote_changelog = nil
 local remote_bin_url = nil
 local remote_hash_url = nil
+local remote_sig_url = nil
 
 -- Download state
 local download_received = 0
@@ -253,6 +255,7 @@ local function check_for_update()
             "/releases/download/" .. tag .. "/"
         remote_bin_url = dl_base .. BIN_FILENAME
         remote_hash_url = dl_base .. HASH_FILENAME
+        remote_sig_url = dl_base .. SIG_FILENAME
 
         local local_ver = sys.getVersion()
         if version_newer(remote_version, local_ver) then
@@ -286,23 +289,25 @@ end
 
 -- ── Network: Download with redirect following ───────────────────────────────
 
-local function download_hash_file(url, redirect_count)
+-- Fetch a small release file (checksum or signature) into memory, following
+-- redirects, then write `extract(body)` to `dest`.  `on_done()` runs either
+-- way: without a file applyUpdate refuses and says why.
+local function download_small_file(url, dest, extract, on_done, redirect_count)
     redirect_count = redirect_count or 0
     if redirect_count >= MAX_REDIRECTS then
-        -- Hash is optional, just skip
-        current_screen = SCR_DONE
+        on_done()
         return
     end
 
     local host, port, ssl, path = parse_url(url)
     if not host then
-        current_screen = SCR_DONE
+        on_done()
         return
     end
 
     local conn = net.http.new(host, port, ssl)
     if not conn then
-        current_screen = SCR_DONE
+        on_done()
         return
     end
 
@@ -312,10 +317,11 @@ local function download_hash_file(url, redirect_count)
     current_conn = conn
 
     local body = ""
+    local finished = false
 
     conn:setRequestCallback(function()
         local avail = conn:getBytesAvailable()
-        if avail > 0 then
+        if avail > 0 and #body < 1024 then
             body = body .. conn:read()
         end
     end)
@@ -324,6 +330,7 @@ local function download_hash_file(url, redirect_count)
         local http_status = conn:getResponseStatus()
 
         local resp_headers = conn:getResponseHeaders()
+        finished = true
         conn:close()
         current_conn = nil
 
@@ -331,37 +338,56 @@ local function download_hash_file(url, redirect_count)
             -- Follow redirect
             local location = resp_headers and resp_headers["location"]
             if location then
-                download_hash_file(location, redirect_count + 1)
+                download_small_file(location, dest, extract, on_done,
+                                    redirect_count + 1)
                 return
             end
         end
 
-        if http_status == 200 and #body > 0 then
-            -- Extract just the hex hash (first 64 chars)
-            local hash = body:match("^(%x+)")
-            if hash then
-                local hf = fs.open(HASH_PATH, "w")
-                if hf then
-                    fs.write(hf, hash)
-                    fs.close(hf)
-                end
+        local data = (http_status == 200) and extract(body) or nil
+        if data then
+            local f = fs.open(dest, "w")
+            if f then
+                fs.write(f, data)
+                fs.close(f)
             end
         end
-
-        current_screen = SCR_DONE
+        on_done()
     end)
 
     conn:setConnectionClosedCallback(function()
         current_conn = nil
-        if current_screen == SCR_DOWNLOADING then
-            -- Hash download failed, non-fatal
-            current_screen = SCR_DONE
+        if not finished then
+            finished = true
+            on_done()
         end
     end)
 
     if not conn:get(path, {["User-Agent"] = "PicOS-Updater/1.0"}) then
+        on_done()
+    end
+end
+
+-- Checksum (64 hex digits) then signature (DER ECDSA P-256), then Done.
+local function download_hash_file(url)
+    local function finish_download()
         current_screen = SCR_DONE
     end
+    download_small_file(url, HASH_PATH, function(body)
+        local hash = body:match("^%s*(%x+)%s*$")
+        return (hash and #hash == 64) and hash or nil
+    end, function()
+        if not remote_sig_url then
+            finish_download()
+            return
+        end
+        download_small_file(remote_sig_url, SIG_PATH, function(body)
+            if #body >= 8 and #body <= 128 and body:byte(1) == 0x30 then
+                return body
+            end
+            return nil
+        end, finish_download)
+    end)
 end
 
 -- Fallback for servers that don't support Range requests
@@ -382,7 +408,10 @@ local function download_fallback(host, port, ssl, path)
 
     conn:setConnectTimeout(30)
     conn:setReadTimeout(60)
-    if not conn:setReadBufferSize(32 * 1024) then
+    -- Large ring (PSRAM): nothing slows the sender on the device; 32 KB
+    -- if the heap cannot spare it.
+    if not conn:setReadBufferSize(256 * 1024) and
+       not conn:setReadBufferSize(32 * 1024) then
         error_msg = "Failed to allocate download buffer"
         ui.toast(error_msg, ui.TOAST_ERROR)
         current_screen = SCR_MAIN
@@ -686,7 +715,7 @@ local function fetch_firmware(url, redirect_count)
         return
     end
 
-    -- Use fallback download with smaller buffer (512KB) to avoid OOM
+    -- Streaming download: 256 KB PSRAM receive ring, 32 KB if that fails
     download_fallback(host, port, ssl, path)
 end
 
@@ -699,9 +728,16 @@ local function start_download()
     download_retry_needed = false
     download_retry_url = remote_bin_url
 
-    -- Delete old file to ensure we start fresh
+    -- Delete old files to ensure we start fresh (a stale checksum or
+    -- signature would only make the OS reject the new image)
     if fs.exists(BIN_PATH) then
         fs.delete(BIN_PATH)
+    end
+    if fs.exists(HASH_PATH) then
+        fs.delete(HASH_PATH)
+    end
+    if fs.exists(SIG_PATH) then
+        fs.delete(SIG_PATH)
     end
     print("[UPDATER] start_download: remote_size=" .. tostring(remote_size) ..
           " url=" .. tostring(remote_bin_url))

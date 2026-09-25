@@ -1,8 +1,14 @@
 #include "launcher.h"
 #include "launcher_types.h"
+#include "crashlog.h"
+#include "app_manifest.h"
 #include "app_runner.h"
+#include "sim_hooks.h"
 #include "lua_runner.h"
 #include "native_loader.h"
+#include "ota_update.h"
+#include "app_stack.h"
+#include "zip_archive.h"
 #include "../drivers/audio.h"
 #include "../drivers/display.h"
 #include "../drivers/image_api.h"
@@ -11,6 +17,7 @@
 #include "../drivers/pio_psram.h"
 #include "../drivers/sdcard.h"
 #include "../drivers/wifi.h"
+#include "../fonts/font_registry.h"
 
 #include "clock.h"
 #include "config.h"
@@ -23,6 +30,7 @@
 #include <stdatomic.h>
 
 #include "../dev_commands.h"
+#include "../usb/usb_msc.h"
 #include "pico/stdlib.h"
 #include "hardware/clocks.h"
 #include "hardware/uart.h"
@@ -38,72 +46,14 @@
 // ── App discovery
 // ─────────────────────────────────────────────────────────────
 
-#define MAX_APPS 32
+// App table lives in PSRAM; the only SRAM cost is s_cat_indices (uint8_t,
+// so the cap can go to 255 before the index type needs widening).
+#define MAX_APPS 64
 
 static app_entry_t *s_apps = NULL;
 static int s_app_count = 0;
 
-// Tiny JSON parser — just enough to pull "name", "description", "version"
-// from a simple flat JSON object.  Not a full parser.
-static bool json_get_string(const char *json, const char *key, char *out,
-                            int out_len) {
-  char search[64];
-  snprintf(search, sizeof(search), "\"%s\"", key);
-  const char *p = json;
-  while ((p = strstr(p, search)) != NULL) {
-    const char *q = p + strlen(search);
-    while (*q == ' ' || *q == ':' || *q == '\t')
-      q++;
-    if (*q == '"') {
-      q++; // skip opening quote
-      int i = 0;
-      while (*q && *q != '"' && i < out_len - 1)
-        out[i++] = *q++;
-      out[i] = '\0';
-      return true;
-    }
-    p++; // false match (key name inside a value), keep searching
-  }
-  return false;
-}
-
-static bool json_get_int(const char *json, const char *key, uint32_t *out) {
-  char search[64];
-  snprintf(search, sizeof(search), "\"%s\"", key);
-  const char *p = strstr(json, search);
-  if (!p)
-    return false;
-  p += strlen(search);
-  while (*p == ' ' || *p == ':' || *p == '\t')
-    p++;
-  *out = (uint32_t)atoi(p);
-  return true;
-}
-
-static bool json_has_requirement(const char *json, const char *requirement) {
-  const char *p = strstr(json, "\"requirements\"");
-  if (!p)
-    return false;
-  while (*p && *p != '[')
-    p++;
-  if (*p != '[')
-    return false;
-
-  char search[96];
-  snprintf(search, sizeof(search), "\"%s\"", requirement);
-  const char *bracket_start = p;
-
-  while (*p && *p != ']') {
-    if (strstr(p, search)) {
-      const char *found      = strstr(p, search);
-      const char *bracket_end = strchr(bracket_start, ']');
-      if (found < bracket_end)
-        return true;
-    }
-    p++;
-  }
-  return false;
-}
+// app.json is read by app_manifest.c (bounded, escape-aware, host-tested).
 
 static void on_app_dir(const sdcard_entry_t *entry, void *user) {
   (void)user;
@@ -111,8 +61,11 @@ static void on_app_dir(const sdcard_entry_t *entry, void *user) {
     return;
   if (entry->name[0] == '.')
     return;
-  if (s_app_count >= MAX_APPS)
+  if (s_app_count >= MAX_APPS) {
+    printf("[LAUNCHER] WARNING: app cap (%d) reached, ignoring '%s'\n",
+           MAX_APPS, entry->name);
     return;
+  }
 
   // Detect available runtimes
   char lua_path[160], elf_path[160];
@@ -132,10 +85,6 @@ static void on_app_dir(const sdcard_entry_t *entry, void *user) {
   app_entry_t *app = &s_apps[s_app_count];
   snprintf(app->path, sizeof(app->path), "/apps/%s", entry->name);
   app->type                = has_elf ? APP_TYPE_NATIVE : APP_TYPE_LUA;
-  app->has_root_filesystem = false;
-  app->has_http            = false;
-  app->has_audio           = false;
-  app->system_clock_khz    = 0;
 
   // Try to load app.json for display name / description / id / requirements
   char json_path[160];
@@ -143,31 +92,12 @@ static void on_app_dir(const sdcard_entry_t *entry, void *user) {
   int json_len = 0;
   char *json = sdcard_read_file(json_path, &json_len);
   if (json) {
-    if (!json_get_string(json, "id", app->id, sizeof(app->id)))
-      snprintf(app->id, sizeof(app->id), "local.%s", entry->name);
-    if (!json_get_string(json, "name", app->name, sizeof(app->name)))
-      strncpy(app->name, entry->name, sizeof(app->name));
-    if (!json_get_string(json, "description", app->description,
-                         sizeof(app->description)))
-      app->description[0] = '\0';
-    if (!json_get_string(json, "version", app->version, sizeof(app->version)))
-      strncpy(app->version, "1.0", sizeof(app->version));
-
-    app->has_root_filesystem = json_has_requirement(json, "root-filesystem");
-    app->has_http            = json_has_requirement(json, "http");
-    app->has_audio           = json_has_requirement(json, "audio");
-    json_get_int(json, "system_clock_khz", &app->system_clock_khz);
-    if (!json_get_string(json, "category", app->category, sizeof(app->category)))
-      app->category[0] = '\0';
-
+    app_manifest_parse(json, json_len > 0 ? (size_t)json_len : 0, entry->name,
+                       app);
     umm_free(json);
   } else {
     printf("[LAUNCHER] WARNING: failed to read '%s', using dir name\n", json_path);
-    snprintf(app->id, sizeof(app->id), "local.%s", entry->name);
-    strncpy(app->name, entry->name, sizeof(app->name));
-    app->description[0] = '\0';
-    strncpy(app->version, "?", sizeof(app->version));
-    app->category[0] = '\0';
+    app_manifest_defaults(entry->name, app);
   }
 
   // Try to load app icon (PNG first, then BMP)
@@ -188,6 +118,32 @@ static int compare_app_name(const void *a, const void *b) {
                     ((const app_entry_t *)b)->name);
 }
 
+// Ids are folded, so two apps whose ids differ only in case (or were
+// copied) share /data/<id> and the per-app config store.  Say so at scan
+// time; the launcher does not guess which one is the impostor.
+// dev `reboot-ota`, run on the OS stack (see the launcher loop).
+typedef struct {
+  const char *err;
+} launcher_ota_ctx_t;
+
+static void launcher_reboot_ota(void *arg) {
+  launcher_ota_ctx_t *ctx = (launcher_ota_ctx_t *)arg;
+  ota_trigger_update(OTA_BIN_PATH, &ctx->err);  // returns only on failure
+}
+
+static void warn_shared_ids(void) {
+  for (int i = 0; i < s_app_count; i++) {
+    for (int j = i + 1; j < s_app_count; j++) {
+      if (strcmp(s_apps[i].id, s_apps[j].id) != 0)
+        continue;
+      printf("[LAUNCHER] WARNING: %s and %s share id %s (one /data dir)\n",
+             s_apps[i].path, s_apps[j].path, s_apps[i].id);
+      sim_log_os("[LAUNCHER] WARNING: %s and %s share id %s (one /data dir)",
+                 s_apps[i].path, s_apps[j].path, s_apps[i].id);
+    }
+  }
+}
+
 static void scan_apps(void) {
   // Free previously loaded icons before rescan
   for (int i = 0; i < s_app_count; i++) {
@@ -204,6 +160,7 @@ static void scan_apps(void) {
   sdcard_list_dir("/apps", on_app_dir, NULL);
   if (s_app_count > 1)
     qsort(s_apps, s_app_count, sizeof(app_entry_t), compare_app_name);
+  warn_shared_ids();
   printf("[LAUNCHER] Found %d apps\n", s_app_count);
   fflush(stdout);
 }
@@ -234,7 +191,8 @@ static const uint16_t s_cat_colors[CAT_COUNT] = {
 };
 
 // Per-category app indices into s_apps[]
-static int s_cat_indices[CAT_COUNT][MAX_APPS];
+_Static_assert(MAX_APPS <= 255, "s_cat_indices is uint8_t");
+static uint8_t s_cat_indices[CAT_COUNT][MAX_APPS];
 static int s_cat_counts[CAT_COUNT];
 
 static category_t parse_category(const char *cat_str) {
@@ -253,7 +211,7 @@ static void build_category_indices(void) {
   for (int i = 0; i < s_app_count; i++) {
     category_t cat = parse_category(s_apps[i].category);
     if (cat < CAT_COUNT)
-      s_cat_indices[cat][s_cat_counts[cat]++] = i;
+      s_cat_indices[cat][s_cat_counts[cat]++] = (uint8_t)i;
   }
 }
 
@@ -528,12 +486,25 @@ void launcher_apply_clock(uint32_t khz) {
   printf("[LAUNCHER] Changing clock: %lu -> %lu MHz\n", 
          (unsigned long)(current_khz / 1000), (unsigned long)(khz / 1000));
 
-  // 1. Pause Core 1 background tasks (WiFi/Audio) to avoid bus corruption
+  // 1. Pause Core 1 background tasks (WiFi/Audio) to avoid bus corruption.
+  // Paused Core 1 relays the watchdog only while Core 0's heartbeat is
+  // fresh, so kick it here: the whole change takes milliseconds, well
+  // inside the 10 s timeout, and a hang in it still resets.
+  watchdog_update();
   g_core1_pause = true;
   for (int i = 0; i < 200 && !g_core1_paused; i++)
     sleep_ms(1);
-  if (!g_core1_paused)
-    printf("[LAUNCHER] Core 1 pause timeout (200ms) during clock change\n");
+  if (!g_core1_paused) {
+    // Changing VREG/PLL/QMI timing under a running Core 1 risks corrupting
+    // its PSRAM/SD/WiFi traffic mid-transfer. Nothing has been touched yet
+    // (no VREG, no QMI/PIO PSRAM timing, no PLL), so give up cleanly: the
+    // app runs at the current clock.
+    printf("[LAUNCHER] Core 1 pause timeout (200ms): clock change to %lu MHz "
+           "aborted, staying at %lu MHz\n",
+           (unsigned long)(khz / 1000), (unsigned long)(current_khz / 1000));
+    g_core1_pause = false;
+    return;
+  }
 
   // 2. Up-clocking: Raise voltage BEFORE increasing frequency
   if (khz > current_khz) {
@@ -618,6 +589,45 @@ void launcher_apply_clock(uint32_t khz) {
 static volatile const char *s_running_app_name = NULL;
 static volatile uint32_t s_app_launch_time_ms = 0;
 
+// Refuse a launch: error.log entry, test-channel outcome, and a screen with
+// the reason held for 3 s (skipped in --test-mode).
+static void launcher_refuse(const app_entry_t *app, const char *title,
+                            const char *reason, const char *detail,
+                            const char *heap, const char *hint) {
+  // The app never started: a dev `exit` during the hold must not name it.
+  s_running_app_name = NULL;
+  s_app_launch_time_ms = 0;
+  crashlog_write("APP FAILED", app->name, reason, detail);
+  sim_log_err("[LAUNCHER] %s: %s: %s", app->name, reason, detail);
+#ifdef PICOS_SIMULATOR
+  {
+    char outcome[160];
+    snprintf(outcome, sizeof(outcome), "%s: %s", reason, detail);
+    sim_app_outcome_set(SIM_APP_RESULT_LOAD_FAILED, outcome);
+  }
+#endif
+  display_clear(COLOR_BLACK);
+  display_draw_text(8, 8, title, COLOR_RED, COLOR_BLACK);
+  display_draw_text(8, 20, app->name, COLOR_WHITE, COLOR_BLACK);
+  display_draw_text(8, 36, reason, COLOR_WHITE, COLOR_BLACK);
+  display_draw_text(8, 48, detail, COLOR_WHITE, COLOR_BLACK);
+  display_draw_text(8, 64, heap, COLOR_GRAY, COLOR_BLACK);
+  display_draw_text(8, 88, hint, COLOR_GRAY, COLOR_BLACK);
+  display_flush();
+  // Hold the reason on screen; keep serving dev commands meanwhile (still
+  // launcher context, no app running) so a screenshot can capture it.
+  // A dev `exit` or `launch` ends the hold early; the launcher loop then
+  // clears the exit and runs any pending launch.
+  for (int i = 0; i < 30 && !sim_test_mode(); i++) {
+    watchdog_update();
+    dev_commands_poll();
+    dev_commands_process();
+    if (dev_commands_wants_exit())
+      break;
+    sleep_ms(100);
+  }
+}
+
 static bool run_app(int idx) {
   if (idx < 0 || idx >= s_app_count)
     return false;
@@ -625,15 +635,45 @@ static bool run_app(int idx) {
   app_entry_t *app = &s_apps[idx];
   s_running_app_name = app->name;
   s_app_launch_time_ms = to_ms_since_boot(get_absolute_time());
+  sim_app_outcome_begin(app->name, app->id);
 
   // Free any PSRAM used by the MP3 player (from a previous Lua app)
   // so we have maximum memory for the next app.
   mp3_player_deinit();
 
-  printf("[LAUNCHER] Starting app %d '%s' (type=%s), PSRAM free: %zu\n",
-         idx, app->name,
-         app->type == APP_TYPE_NATIVE ? "native" : "lua",
-         lua_psram_alloc_free_size());
+  const char *type_str = app->type == APP_TYPE_NATIVE ? "native" : "lua";
+  char heap[96];
+  crashlog_describe_heap(heap, sizeof(heap));
+  printf("[LAUNCHER] Starting app %d '%s' (type=%s), PSRAM %s\n",
+         idx, app->name, type_str, heap);
+
+  // An id is used as a path component (/data/<id>/...): refuse one that could
+  // escape it ("../evil", "a/b") instead of sandboxing the app into someone
+  // else's directory.
+  if (!app_manifest_id_valid(app->id)) {
+    launcher_refuse(app, "Cannot launch app:", "invalid app id in app.json",
+                    app->id, heap, "Use only A-Z a-z 0-9 . _ - in \"id\".");
+    return false;
+  }
+
+  // Refuse up front when the app declares a contiguous-PSRAM requirement the
+  // heap cannot meet.  Total free bytes are not the test: a native image or
+  // a big asset arena needs ONE block, and a fragmented heap fails that with
+  // plenty free.  Failing here gives a readable reason instead of the app
+  // dying part-way through its own init.
+  if (app->min_psram_kb > 0) {
+    size_t largest_kb = lua_psram_alloc_largest_block() / 1024u;
+    if (largest_kb < app->min_psram_kb) {
+      char detail[96];
+      snprintf(detail, sizeof(detail),
+               "needs %luK contiguous, largest block %luK",
+               (unsigned long)app->min_psram_kb, (unsigned long)largest_kb);
+      launcher_refuse(app, "Not enough memory to launch:",
+                      "not enough PSRAM to launch", detail, heap,
+                      "Reboot to defragment the heap.");
+      return false;
+    }
+  }
 
   // ── Shared pre-launch setup ───────────────────────────────────────────────
 
@@ -646,10 +686,16 @@ static bool run_app(int idx) {
     if (wst == WIFI_STATUS_CONNECTED || wst == WIFI_STATUS_CONNECTING ||
         wst == WIFI_STATUS_ONLINE) {
       wifi_disconnect();
-      // Wait for Core 1 to process the disconnect request before pausing it
-      // for the clock change. wifi_disconnect() queues via IPC ring buffer.
-      sleep_ms(50);
     }
+    // Wait for Core 1 to finish the hardware disconnect (bounded) before the
+    // clock change: changing sysclk while the driver still talks to the chip
+    // triggers an "hdr mismatch" error storm on Core 1.
+    for (int i = 0; i < WIFI_HW_DISCONNECT_WAIT_MS / 5 && !wifi_hw_disconnected();
+         i++)
+      sleep_ms(5);  // bounded (WIFI_HW_DISCONNECT_WAIT_MS)
+    if (!wifi_hw_disconnected())
+      printf("[LAUNCHER] WiFi not idle after %d ms; changing clock anyway\n",
+             WIFI_HW_DISCONNECT_WAIT_MS);
   }
 
   if (app->system_clock_khz > 0) {
@@ -669,6 +715,19 @@ static bool run_app(int idx) {
   }
 
   // ── Dispatch to runner ────────────────────────────────────────────────────
+  // Apps inherit global display state: always hand them a full-screen clip
+  // rect and an identity scroll offset so a previous app's setClipRect or
+  // hardware-scroll registers can't leak into the next one.
+  display_clear_clip_rect();
+  display_set_scroll_offset(0);
+  display_set_font(0);            // nor the previous app's font selection
+  font_registry_unload_all();     // nor its loaded fonts
+
+  // Dirty-exit marker: if this file still exists at the next boot, the app
+  // never returned to the launcher (hang → watchdog, hardfault, panic, or
+  // power loss) and the boot code reports it with the app's name.
+  crashlog_mark_running(app->id, app->name, type_str);
+
   bool ok = false;
   for (int i = 0; s_runners[i]; i++) {
     if (s_runners[i]->can_handle(app)) {
@@ -677,18 +736,31 @@ static bool run_app(int idx) {
     }
   }
 
+  // The runner returned, so whatever happened has been reported already.
+  crashlog_clear_running();
+  sim_app_outcome_end(ok);
+
   // ── Shared post-exit cleanup ──────────────────────────────────────────────
+  display_clear_clip_rect();      // don't let an app's clip rect leak back to the launcher
+  display_set_scroll_offset(0);   // nor its hardware-scroll offset
+  display_set_font(0);            // nor the previous app's font selection
+  font_registry_unload_all();     // nor its loaded fonts
+
   if (app->system_clock_khz > 0) {
     launcher_apply_clock(200000); // Reset to system default
   }
 
   system_menu_clear_items();
 
+  // Native apps have no GC — reclaim any archive handles they leaked so the
+  // fixed pool is whole for the next app.
+  zip_archive_close_all();
+
   s_running_app_name = NULL;
   s_app_launch_time_ms = 0;
 
-  printf("[LAUNCHER] App '%s' exited (ok=%d), PSRAM free: %zu\n",
-         app->name, ok, lua_psram_alloc_free_size());
+  crashlog_describe_heap(heap, sizeof(heap));
+  printf("[LAUNCHER] App '%s' exited (ok=%d), PSRAM %s\n", app->name, ok, heap);
 
   return ok;
 }
@@ -751,9 +823,6 @@ static void handle_input(uint32_t pressed, bool *dirty) {
   if (pressed & BTN_ENTER) {
     if (count > 0 && s_selected < count) {
       int app_idx = list_app_idx(s_selected);
-      size_t free_mem = lua_psram_alloc_free_size();
-      printf("[LAUNCHER] PSRAM free before launch: %zu bytes\n", free_mem);
-
       int saved_tab = s_active_tab;
 
       run_app(app_idx);
@@ -856,28 +925,41 @@ void launcher_run(void) {
 
     bool dirty = sim_launched;
     if (dev_commands_get_pending_launch()) {
+      // Take the request before running it: the name points into the dev
+      // command buffer, and a `launch` that arrives while this one runs (or
+      // during a refusal's hold) must stay pending, not be cleared after.
+      char name[64];
+      snprintf(name, sizeof(name), "%s", dev_commands_get_pending_launch());
+      dev_commands_clear_pending_launch();
       dev_commands_clear_exit();
-      if (launcher_launch_by_name(dev_commands_get_pending_launch())) {
+      if (launcher_launch_by_name(name)) {
         kbd_clear_state();
         scan_apps();
         build_category_indices();
         dirty = true;
       }
-      dev_commands_clear_pending_launch();
     }
 
 #ifdef PICOS_SIMULATOR
     {
+      // Simulator shutdown (window close, SIGINT, the shutdown RPC) is the
+      // only way out of the launcher. It used to ride the dev exit flag, so
+      // an `exit` at the launcher also quit the simulator.
       extern volatile int g_running;
-      if (!g_running) dev_commands_set_exit();
+      if (!g_running) {
+        printf("[LAUNCHER] Simulator shutting down\n");
+        fflush(stdout);
+        break;
+      }
     }
 #endif
-    if (dev_commands_wants_exit()) {
-      printf("[LAUNCHER] Exit requested, shutting down...\n");
-      fflush(stdout);
+    // A dev `exit` with no app running (already answered "no app running"
+    // by the command), or one left over after a modal or an app already
+    // closed, has nothing to exit: drop it. launcher_run must never return
+    // on hardware — main() would fall into newlib's _exit, whose breakpoint
+    // HardFaults and reboots the device.
+    if (dev_commands_wants_exit())
       dev_commands_clear_exit();
-      break;
-    }
 
     if (dev_commands_wants_list()) {
       launcher_list_apps();
@@ -889,11 +971,29 @@ void launcher_run(void) {
       sleep_ms(100);
       watchdog_reboot(0, 0, 0);
     }
+    if (dev_commands_wants_reboot_ota()) {
+      // The host staged /system/update.bin + .sha256 + .sig (ota_flash.py):
+      // validate (hash + ECDSA verify), set the one-shot OTA token and
+      // reboot. Does not return on success. Runs on the 32 KB OS stack:
+      // the signature check is too deep for the launcher's 4 KB MSP.
+      dev_commands_clear_reboot_ota();
+      launcher_ota_ctx_t ctx = {0};
+      if (!app_stack_run_os(launcher_reboot_ota, &ctx))
+        ctx.err = "out of memory for the OS stack";
+      printf("[DEV] reboot-ota failed: %s\n",
+             ctx.err ? ctx.err : "unknown error");
+    }
     if (dev_commands_wants_reboot_flash()) {
       printf("[DEV] Rebooting to BOOTSEL mode...\n");
       stdio_flush();
       sleep_ms(100);
       reset_usb_boot(0, 0);
+    }
+    if (dev_commands_wants_usb()) {
+      dev_commands_clear_usb();
+      usb_msc_enter_mode();
+      kbd_clear_state();
+      dirty = true;
     }
 
     if (kbd_consume_menu_press()) {

@@ -36,24 +36,29 @@ var (
 )
 
 var docFileMapping = map[string]string{
-	"display":  "API-Display-and-Graphics.md",
-	"input":    "API-Input.md",
-	"sys":      "API-System-and-Config.md",
-	"config":   "API-System-and-Config.md",
-	"fs":       "API-Filesystem.md",
-	"wifi":     "API-Network-and-WiFi.md",
-	"network":  "API-Network-and-WiFi.md",
-	"ui":       "API-UI.md",
-	"audio":    "API-Audio-and-Sound.md",
-	"sound":    "API-Audio-and-Sound.md",
-	"perf":     "API-Performance.md",
-	"graphics": "API-Display-and-Graphics.md",
+	"display":   "API-Display-and-Graphics.md",
+	"input":     "API-Input.md",
+	"sys":       "API-System-and-Config.md",
+	"config":    "API-System-and-Config.md",
+	"fs":        "API-Filesystem.md",
+	"wifi":      "API-Network-and-WiFi.md",
+	"network":   "API-Network-and-WiFi.md",
+	"ui":        "API-UI.md",
+	"audio":     "API-Audio-and-Sound.md",
+	"sound":     "API-Audio-and-Sound.md",
+	"perf":      "API-Performance.md",
+	"graphics":  "API-Display-and-Graphics.md",
 	"video":     "API-Video.md",
 	"repl":      "API-Repl.md",
 	"terminal":  "API-Terminal.md",
 	"crypto":    "API-Crypto.md",
 	"modplayer": "API-Modplayer.md",
 	"sysconfig": "API-Sysconfig.md",
+	"appconfig": "API-System-and-Config.md",
+	"game":      "API-Game.md",
+	"json":      "API-JSON.md",
+	"tcp":       "API-TCP.md",
+	"zip":       "API-Zip.md",
 }
 
 func main() {
@@ -110,10 +115,27 @@ func parseLuaBridgeFile(path string, modules map[string]*Module) {
 	moduleReg := regexp.MustCompile(`register_subtable\s*\(\s*L\s*,\s*"(\w+)"`)
 	matches := moduleReg.FindAllStringSubmatch(contentStr, -1)
 
+	// Modules built by hand and attached with lua_setfield(L, -2, "<name>")
+	// (sys, graphics, network, game, tcp, zip) instead of register_subtable.
+	// Only a name matching the file's own module (lua_bridge_<name>.c) or a
+	// known module counts, so result-table fields ("name", "size") are skipped.
+	fileModule := strings.TrimSuffix(strings.TrimPrefix(filepath.Base(path), "lua_bridge_"), ".c")
+	setfieldReg := regexp.MustCompile(`lua_setfield\s*\(\s*L\s*,\s*-2\s*,\s*"(\w+)"\s*\)`)
+	for _, match := range setfieldReg.FindAllStringSubmatch(contentStr, -1) {
+		if _, known := docFileMapping[match[1]]; match[1] == fileModule || known {
+			matches = append(matches, match)
+		}
+	}
+
 	moduleNames := []string{}
+	seenModules := map[string]bool{}
 	for _, match := range matches {
 		if len(match) > 1 {
 			moduleName := match[1]
+			if seenModules[moduleName] {
+				continue
+			}
+			seenModules[moduleName] = true
 			moduleNames = append(moduleNames, moduleName)
 			if _, ok := modules[moduleName]; !ok {
 				modules[moduleName] = &Module{
@@ -126,7 +148,26 @@ func parseLuaBridgeFile(path string, modules map[string]*Module) {
 		}
 	}
 
+	// Sub-module files (lua_bridge_game_camera.c, _scene.c, _save.c) never
+	// register a module themselves: lua_bridge_game.c attaches their tables
+	// with lua_settable. Attribute their functions to the parent module,
+	// qualified by the C prefix (l_camera_new -> "camera.new").
 	if len(moduleNames) == 0 {
+		parent, _, found := strings.Cut(fileModule, "_")
+		if _, known := docFileMapping[parent]; !found || !known {
+			return
+		}
+		if _, ok := modules[parent]; !ok {
+			modules[parent] = &Module{Name: parent, DocFile: docFileMapping[parent]}
+		}
+		subReg := regexp.MustCompile(`\{\s*"(\w+)"\s*,\s*l_([a-z0-9]+)_\w+\s*\}`)
+		for _, match := range subReg.FindAllStringSubmatch(contentStr, -1) {
+			if strings.HasPrefix(match[1], "__") {
+				continue
+			}
+			m := modules[parent]
+			m.Functions = append(m.Functions, Function{Name: match[2] + "." + match[1], Module: parent})
+		}
 		return
 	}
 
@@ -198,11 +239,30 @@ func parseLuaBridgeFile(path string, modules map[string]*Module) {
 		}
 	}
 
+	// Aliases: one luaL_Reg registered under two names (config and
+	// appconfig both use l_config_lib) — the l_<module>_ match credits only
+	// one of them, so a same-file module left empty gets its sibling's list.
+	for _, modName := range moduleNames {
+		if m := modules[modName]; m != nil && len(m.Functions) == 0 {
+			for _, other := range moduleNames {
+				if o := modules[other]; o != nil && other != modName && len(o.Functions) > 0 {
+					for _, f := range o.Functions {
+						m.Functions = append(m.Functions, Function{Name: f.Name, Module: modName})
+					}
+					break
+				}
+			}
+		}
+	}
+
 	for _, modName := range moduleNames {
 		if m, ok := modules[modName]; ok {
 			seenFuncs := make(map[string]bool)
 			uniqueFuncs := []Function{}
 			for _, f := range m.Functions {
+				if strings.HasPrefix(f.Name, "__") {
+					continue // metamethods are not API
+				}
 				if !seenFuncs[f.Name] {
 					seenFuncs[f.Name] = true
 					uniqueFuncs = append(uniqueFuncs, f)
@@ -269,7 +329,7 @@ func checkDocumentation(module *Module, docContents map[string]string) {
 		searchPatterns := []string{
 			fmt.Sprintf("picocalc.%s.%s(", module.Name, fname),
 			fmt.Sprintf("`picocalc.%s.%s(", module.Name, fname),
-			fmt.Sprintf(":%s(", fname),  // method syntax e.g. player:load(
+			fmt.Sprintf(":%s(", fname[strings.LastIndex(fname, ".")+1:]), // method syntax e.g. player:load(
 		}
 		found := false
 		for _, pattern := range searchPatterns {
@@ -430,36 +490,31 @@ func output(modules []Module) {
 				}
 			}
 
-			funcPct := 0
-			if len(module.Functions) > 0 {
-				funcPct = (docFuncs * 100) / len(module.Functions)
+			funcStr := fmt.Sprintf("%d (%s)", docFuncs, pct(docFuncs, len(module.Functions)))
+			if len(module.Functions) == 0 {
+				funcStr = "-"
 			}
-			constPct := 0
-			if len(module.Constants) > 0 {
-				constPct = (docConsts * 100) / len(module.Constants)
-			}
-
 			constStr := fmt.Sprintf("%d", len(module.Constants))
 			if len(module.Constants) == 0 {
 				constStr = "-"
-				constPct = 100
 			}
 
-			fmt.Fprintf(out, "| %s | %d | %d (%d%%) | %s | %d%% |\n",
-				module.Name, len(module.Functions), docFuncs, funcPct, constStr, constPct)
+			fmt.Fprintf(out, "| %s | %d | %s | %s | %s |\n",
+				module.Name, len(module.Functions), funcStr, constStr,
+				pct(docConsts, len(module.Constants)))
 		}
 
-		totalFuncPct := 0
-		if totalFuncs > 0 {
-			totalFuncPct = (totalDocFuncs * 100) / totalFuncs
-		}
-		totalConstPct := 0
-		if totalConsts > 0 {
-			totalConstPct = (totalDocConsts * 100) / totalConsts
-		}
-
-		fmt.Fprintf(out, "| **Total** | **%d** | **%d (%d%%)** | **%d** | **%d%%** |\n",
-			totalFuncs, totalDocFuncs, totalFuncPct, totalConsts, totalConstPct)
+		fmt.Fprintf(out, "| **Total** | **%d** | **%d (%s)** | **%d** | **%s** |\n",
+			totalFuncs, totalDocFuncs, pct(totalDocFuncs, totalFuncs), totalConsts,
+			pct(totalDocConsts, totalConsts))
 		fmt.Fprintln(out, "")
 	}
+}
+
+// pct formats n/total as a percentage, or "-" when there is nothing to count.
+func pct(n, total int) string {
+	if total == 0 {
+		return "-"
+	}
+	return fmt.Sprintf("%d%%", n*100/total)
 }

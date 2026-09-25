@@ -1,11 +1,22 @@
 #include "lua_bridge_internal.h"
+#include "app_identity.h"
 
-// ── picocalc.config.*
+// ── picocalc.sysconfig.*  (system-wide, /system/config.json)
+// NOTE: per-app config lives in lua_bridge_appconfig.c and is registered as
+// BOTH picocalc.config and picocalc.appconfig. Don't add to the confusion.
+//
+// Registered only for apps that declare the "sysconfig" requirement.  Even
+// then the WiFi password is write-only: an app (with "http") could otherwise
+// send it off the device.  A settings app may still set a new one.
 // ─────────────────────────────────────────────────────────
+
+static bool config_key_readable(const char *key) {
+  return strcmp(key, "wifi_pass") != 0;
+}
 
 static int l_config_get(lua_State *L) {
   const char *key = luaL_checkstring(L, 1);
-  const char *val = config_get(key);
+  const char *val = config_key_readable(key) ? config_get(key) : NULL;
   if (val)
     lua_pushstring(L, val);
   else
@@ -39,5 +50,6 @@ static const luaL_Reg l_config_lib[] = {{"get", l_config_get},
 
 
 void lua_bridge_config_init(lua_State *L) {
-    register_subtable(L, "sysconfig", l_config_lib);
+    if (app_identity_has_requirement("sysconfig"))
+        register_subtable(L, "sysconfig", l_config_lib);
 }

@@ -11,6 +11,17 @@ static inline void critical_section_init(critical_section_t* cs) {
     mutex_init(cs);
 }
 
+static inline void critical_section_init_with_lock_num(critical_section_t* cs, unsigned lock_num) {
+    (void)lock_num;
+    mutex_init(cs);
+}
+
+// hardware/sync.h's striped spin lock allocator (16-23 on the RP2350); the
+// number is unused here.
+static inline unsigned next_striped_spin_lock_num(void) {
+    return 16;
+}
+
 static inline void critical_section_deinit(critical_section_t* cs) {
     mutex_deinit(cs);
 }

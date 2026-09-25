@@ -16,6 +16,11 @@ typedef struct {
 // Returns NULL on failure.
 pc_image_t *image_load(const char *path);
 
+// Probe an image file's dimensions without decoding pixels.
+// Returns a static format string ("bmp", "jpeg", "png", "gif") and fills
+// *out_w/*out_h, or NULL if the file isn't a recognized image.
+const char *image_probe(const char *path, int *out_w, int *out_h);
+
 // Allocate a blank zeroed image (struct + data in PSRAM).
 // Returns NULL on OOM or invalid dimensions.
 pc_image_t *image_new_blank(int width, int height);

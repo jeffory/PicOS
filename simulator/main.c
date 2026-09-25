@@ -23,13 +23,24 @@
 #include "terminal.h"
 #include "launcher.h"
 #include "lua_psram_alloc.h"
+#include "stubs/umm_malloc.h"  // sim_umm_use_real (--real-umm)
 #include "splash_logo.h"
 #include "drivers/display.h"
 #include "drivers/sound.h"
 #include "drivers/fileplayer.h"
 #include "drivers/mp3_player.h"
 #include "drivers/http.h"
+#ifdef PICOS_SIM_FIRMWARE_NET
+#include "drivers/wifi.h"
+#include "net/sim_net.h"
+#endif
+#include "drivers/keyboard.h"
 #include "appconfig.h"
+#include "config.h"
+#include "clock.h"
+#include "idle_dim.h"
+#include "system_menu.h"
+#include "sim_test_control.h"
 
 // Simulator configuration
 #define SIM_WINDOW_TITLE "PicOS Simulator"
@@ -46,8 +57,10 @@ static char g_sd_card_path[512] = SIM_DEFAULT_SD_CARD;
 static char g_launch_app[128] = "";  // App to auto-launch
 static int g_auto_launch_done = 0;   // Flag to track if auto-launch was attempted
 static int g_show_splash = 0;        // Show boot splash screen
+static int g_virtual_time = 0;       // --virtual-time (needs --test-mode)
 static int g_tcp_port = 7878;        // TCP port for RPC socket
 static char g_instance_id[64] = "";  // Instance ID for unique socket paths
+static char g_unix_socket[256] = ""; // --unix-socket PATH|none ("" = default)
 // Per-process by default. A single shared path meant that under parallel test
 // runs (pytest -n auto) one crashing instance was reported as a crash by every
 // other instance's get_crash_log, and the file outlived the run so a crash in
@@ -81,6 +94,18 @@ static void force_exit_handler(int sig) {
     (void)!write(STDERR_FILENO, msg, sizeof(msg) - 1);
     _exit(1);
 }
+
+// ASan/TSan install their own fatal-signal handlers (PICOS_SIM_SANITIZE).
+#if defined(__SANITIZE_ADDRESS__) || defined(__SANITIZE_THREAD__)
+#define SIM_HAS_SANITIZER 1
+#elif defined(__has_feature)
+#if __has_feature(address_sanitizer) || __has_feature(thread_sanitizer)
+#define SIM_HAS_SANITIZER 1
+#endif
+#endif
+#ifndef SIM_HAS_SANITIZER
+#define SIM_HAS_SANITIZER 0
+#endif
 
 // Crash handler — writes backtrace to crash log file using only async-signal-safe calls
 static void crash_handler(int sig) {
@@ -118,9 +143,18 @@ static void print_usage(const char* program) {
     printf("  --launch APP         Auto-launch app on startup\n");
     printf("  --port PORT          TCP port for RPC socket (default: 7878, 0=auto)\n");
     printf("  --instance-id ID     Unique instance ID (for parallel simulators)\n");
-    printf("  --crash-log PATH     Crash log file path (default: /tmp/picos_sim_crash.log)\n");
+    printf("  --unix-socket PATH   UNIX control socket path, or 'none' to disable\n");
+    printf("  --crash-log PATH     Crash log file path (default: /tmp/picos_sim_crash_<pid>.log)\n");
     printf("  --show-splash        Show boot splash screen with delays\n");
+    printf("  --test-mode          Error screens return at once; idle dim off;\n"
+           "                       math.random seeded and the clock pinned to\n"
+           "                       2026-01-01T00:00:00Z at boot\n");
+    printf("  --virtual-time       (with --test-mode) virtual clock: Core 0 sleeps\n"
+           "                       advance it instead of waiting (step_time RPC)\n");
     printf("  --debug              Enable debug logging\n");
+    printf("  --real-umm           Run umm_* on the firmware's umm_malloc (device heap\n"
+           "                       size, 200 B blocks) instead of the counting allocator\n");
+    printf("  --build-info         Print build facts (sanitizers) and exit\n");
     printf("  --help               Show this help\n");
 }
 
@@ -129,6 +163,16 @@ static void parse_args(int argc, char** argv) {
     for (int i = 1; i < argc; i++) {
         if (strcmp(argv[i], "--help") == 0 || strcmp(argv[i], "-h") == 0) {
             print_usage(argv[0]);
+            exit(0);
+        } else if (strcmp(argv[i], "--build-info") == 0) {
+            // Read by the E2E harness (conftest) to enable asan_only tests.
+            printf("sanitize=%s\n", PICOS_SIM_SANITIZE_STR);
+#ifdef PICOS_SIM_FIRMWARE_NET
+            // test_network_firmware.py runs only against this build.
+            printf("firmware_net=1\n");
+#else
+            printf("firmware_net=0\n");
+#endif
             exit(0);
         } else if (strcmp(argv[i], "--sd-card") == 0 && i + 1 < argc) {
             strncpy(g_sd_card_path, argv[i + 1], sizeof(g_sd_card_path) - 1);
@@ -144,20 +188,40 @@ static void parse_args(int argc, char** argv) {
             strncpy(g_instance_id, argv[i + 1], sizeof(g_instance_id) - 1);
             g_instance_id[sizeof(g_instance_id) - 1] = '\0';
             i++;
+        } else if (strcmp(argv[i], "--unix-socket") == 0 && i + 1 < argc) {
+            snprintf(g_unix_socket, sizeof(g_unix_socket), "%s", argv[i + 1]);
+            i++;
         } else if (strcmp(argv[i], "--crash-log") == 0 && i + 1 < argc) {
             strncpy(g_crash_log_path, argv[i + 1], sizeof(g_crash_log_path) - 1);
             g_crash_log_path[sizeof(g_crash_log_path) - 1] = '\0';
             i++;
         } else if (strcmp(argv[i], "--show-splash") == 0) {
             g_show_splash = 1;
+        } else if (strcmp(argv[i], "--test-mode") == 0) {
+            sim_set_test_mode(true);
+        } else if (strcmp(argv[i], "--virtual-time") == 0) {
+            g_virtual_time = 1;
         } else if (strcmp(argv[i], "--debug") == 0) {
             hal_set_debug_mode(1);
+        } else if (strcmp(argv[i], "--real-umm") == 0) {
+            // Before anything allocates: every umm_* call from here on goes
+            // to the real umm heap.
+            if (!sim_umm_use_real()) {
+                fprintf(stderr, "--real-umm: cannot allocate the umm arena\n");
+                exit(1);
+            }
         } else {
             printf("Unknown option: %s\n", argv[i]);
             print_usage(argv[0]);
             exit(1);
         }
     }
+
+    if (g_virtual_time && !sim_test_mode()) {
+        fprintf(stderr, "--virtual-time requires --test-mode\n");
+        exit(1);
+    }
+    hal_timing_set_virtual(g_virtual_time != 0);
 
     // Default the crash log to a per-process path so parallel instances never
     // read each other's crashes, and a stale file cannot outlive the process.
@@ -234,6 +298,10 @@ static void show_boot_splash(void) {
 // Core 1 entry point (simulates the second core)
 static void* core1_thread(void* arg) {
     (void)arg;
+#ifdef PICOS_SIM_FIRMWARE_NET
+    // Firmware wifi_poll() only runs on Core 1 (get_core_num() == 1).
+    sim_net_core1_init();
+#endif
     printf("[Core1] Started (network/audio thread)\n");
     
     // Initialize audio
@@ -353,14 +421,18 @@ static void http_post_w(pchttp_t c, const char *path, const char *extra_hdrs, co
 static int http_read_w(pchttp_t c, uint8_t *buf, uint32_t len) { return (int)http_read((http_conn_t *)c, buf, len); }
 static uint32_t http_available_w(pchttp_t c) { return http_bytes_available((http_conn_t *)c); }
 static void http_close_w(pchttp_t c) { http_free((http_conn_t *)c); }
-static int http_getStatus_w(pchttp_t c) { return ((http_conn_t *)c)->status_code; }
-static const char *http_getError_w(pchttp_t c) { http_conn_t *hc = (http_conn_t *)c; return hc->err[0] ? hc->err : NULL; }
-static int http_getProgress_w(pchttp_t c, int *received, int *total) { http_conn_t *hc = (http_conn_t *)c; if (received) *received = (int)hc->body_received; if (total) *total = (int)hc->content_length; return (int)hc->content_length; }
+static int http_getStatus_w(pchttp_t c) { return http_get_status((http_conn_t *)c); }
+static const char *http_getError_w(pchttp_t c) { return http_get_error((http_conn_t *)c); }
+static int http_getProgress_w(pchttp_t c, int *received, int *total) { int r, t; http_get_progress((http_conn_t *)c, &r, &t); if (received) *received = r; if (total) *total = t; return t; }
 static void http_setKeepAlive_w(pchttp_t c, bool ka) { ((http_conn_t *)c)->keep_alive = ka; }
 static void http_setByteRange_w(pchttp_t c, int from, int to) { ((http_conn_t *)c)->range_from = from; ((http_conn_t *)c)->range_to = to; }
 static void http_setConnectTimeout_w(pchttp_t c, int s) { ((http_conn_t *)c)->connect_timeout_ms = (uint32_t)(s * 1000); }
 static void http_setReadTimeout_w(pchttp_t c, int s) { ((http_conn_t *)c)->read_timeout_ms = (uint32_t)(s * 1000); }
 static bool http_setReadBufferSize_w(pchttp_t c, int bytes) { return http_set_recv_buf((http_conn_t *)c, (uint32_t)bytes); }
+static bool http_isComplete_w(pchttp_t c) { return http_is_complete((http_conn_t *)c); }
+// The simulator's libcurl transport keeps its own TLS policy; the flag is
+// stored so the API behaves the same (see src/drivers/wifi.c for firmware).
+static void http_setInsecure_w(pchttp_t c, bool insecure) { ((http_conn_t *)c)->insecure = insecure; }
 
 static const picocalc_http_t s_http_impl = {
     .newConn = http_newConn_w, .get = http_get_w, .post = http_post_w,
@@ -369,6 +441,7 @@ static const picocalc_http_t s_http_impl = {
     .getProgress = http_getProgress_w, .setKeepAlive = http_setKeepAlive_w,
     .setByteRange = http_setByteRange_w, .setConnectTimeout = http_setConnectTimeout_w,
     .setReadTimeout = http_setReadTimeout_w, .setReadBufferSize = http_setReadBufferSize_w,
+    .isComplete = http_isComplete_w, .setInsecure = http_setInsecure_w,
 };
 
 // -- App config wrappers --
@@ -385,7 +458,7 @@ static void sim_wire_g_api(void) {
     g_api.soundplayer = &s_soundplayer_impl;
     g_api.http        = &s_http_impl;
     g_api.appconfig   = &s_appconfig_impl;
-    g_api.version     = 2;
+    g_api.version     = 8;  // 8 = http->setInsecure, tcp->connectEx; 7 = video seek/OSD; 6 = fonts (matches src/main.c)
 }
 
 int main(int argc, char** argv) {
@@ -405,11 +478,17 @@ int main(int argc, char** argv) {
     signal(SIGINT, signal_handler);
     signal(SIGTERM, signal_handler);
 
-    // Crash handlers — write backtrace to crash log on fatal signals
+    // Crash handlers — write backtrace to crash log on fatal signals. A
+    // sanitizer build leaves them to the sanitizer runtime, whose own handler
+    // prints the symbolised report the E2E harness scans stderr for.
+#if !SIM_HAS_SANITIZER
     signal(SIGSEGV, crash_handler);
     signal(SIGABRT, crash_handler);
     signal(SIGBUS, crash_handler);
     signal(SIGFPE, crash_handler);
+#else
+    (void)crash_handler;
+#endif
     
     // Initialize SDL
     if (SDL_Init(SDL_INIT_VIDEO | SDL_INIT_AUDIO | SDL_INIT_EVENTS) < 0) {
@@ -455,15 +534,56 @@ int main(int argc, char** argv) {
     
     hal_timing_init();
 
+    // --test-mode pins the wall clock to a fixed date (getClock, the header
+    // clock); it then runs with the sim clock. The SIM_FIRMWARE_NET build's
+    // SNTP stand-in may still re-sync it once the network is up.
+    if (sim_test_mode())
+        clock_sntp_set(SIM_TEST_EPOCH);
+
+    // Wire global API struct (required by Lua bridge modules)
+    sim_wire_g_api();
+
+    // Initialize Lua heap (required for Lua apps)
+    lua_psram_alloc_init();
+    printf("[Core0] Lua heap initialized\n");
+    fflush(stdout);
+
+    // ── Boot order below mirrors src/main.c: config, idle dim, network,
+    //    Core 1, system menu, launcher. ──
+
+    // Load persisted settings from /system/config.json
+    config_load();
+
+    // Idle screen dimming. The keyboard stub never polls it, so it stays
+    // inert in the simulator; --test-mode disables it outright.
+    {
+        uint32_t dim_timeout_s = 60;
+        const char *dt = config_get("dim_timeout_s");
+        if (dt)
+            dim_timeout_s = (uint32_t)atoi(dt);
+        if (sim_test_mode())
+            dim_timeout_s = 0;
+        uint8_t brightness = config_parse_brightness(config_get("brightness"));
+        kbd_set_backlight(brightness);
+        idle_dim_init(brightness, dim_timeout_s);
+    }
+
     // Initialize toast system and networking (before Core 1 starts)
     extern void toast_init(void);
     extern void http_init(void);
     extern void tcp_init(void);
     extern void wifi_init(void);
     toast_init();
+    wifi_init();
     http_init();
     tcp_init();
-    wifi_init();
+#ifdef PICOS_SIM_FIRMWARE_NET
+    // Firmware network stack (simulator/net): join the stand-in network now,
+    // as sim_wifi.c's mock is "always online", unless config.json's
+    // wifi_ssid already started the firmware's own boot auto-connect.
+    if (wifi_get_status() == WIFI_STATUS_DISCONNECTED)
+        wifi_connect("SimulatorWiFi", "");
+#endif
 
     // Start Core 1 thread (simulates second core)
     thread_t core1;
@@ -476,34 +596,23 @@ int main(int argc, char** argv) {
         SDL_Quit();
         return 1;
     }
-    
+
     printf("[Core0] Starting main loop...\n");
     fflush(stdout);
-    
+
     // Set up exit flag for keyboard stub
     set_simulator_exit_flag(&g_running);
-    
-    // Wire global API struct (required by Lua bridge modules)
-    sim_wire_g_api();
 
-    // Initialize Lua heap (required for Lua apps)
-    printf("[Core0] Initializing Lua heap...\n");
-    fflush(stdout);
-    lua_psram_alloc_init();
-    printf("[Core0] Lua heap initialized\n");
-    fflush(stdout);
-    
-    // Run the app launcher
-    // If --launch was specified, the launcher will handle it after scanning apps
-    printf("[Core0] About to start launcher...\n");
-    fflush(stdout);
+    system_menu_init();
+
     printf("[Core0] Starting launcher...\n");
     fflush(stdout);
 
     extern void dev_commands_init(void);
     dev_commands_init();
 
-    sim_socket_init(g_tcp_port, g_instance_id[0] ? g_instance_id : NULL);
+    sim_socket_init(g_tcp_port, g_instance_id[0] ? g_instance_id : NULL,
+                    g_unix_socket[0] ? g_unix_socket : NULL);
 
     launcher_run();
     printf("[Core0] Launcher exited, setting g_running=0\n");

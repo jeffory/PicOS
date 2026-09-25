@@ -70,3 +70,9 @@ bool crypto_rsa_verify(const uint8_t *pubkey, uint32_t pklen,
 bool crypto_ecdsa_p256_verify(const uint8_t *pubkey, uint32_t pklen,
                                const uint8_t *sig, uint32_t slen,
                                const uint8_t *hash, uint32_t hlen);
+
+// --- File hashing ------------------------------------------------------------
+
+// SHA-256 of a file on the SD card, streamed in 512-byte chunks (SRAM only).
+// Feeds the watchdog between chunks. Returns false if the file can't be read.
+bool crypto_sha256_file(const char *path, uint8_t out_hash[32]);

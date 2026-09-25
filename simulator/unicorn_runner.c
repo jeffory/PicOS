@@ -12,6 +12,9 @@
 
 // PicOS includes
 #include "os.h"
+#include "elf_plan.h"
+#include "crashlog.h"
+#include "sim_hooks.h"
 #include "hal/hal_display.h"
 #include "hal/hal_input.h"
 #include "hal/hal_sdcard.h"
@@ -49,86 +52,15 @@
 #define EMU_REVCALL_SIZE    (4u * 1024)           // 4KB for reverse-call stubs
 
 // Maximum number of trampoline slots (API functions)
-#define MAX_TRAMP_SLOTS     256
+#define MAX_TRAMP_SLOTS     512
 
 // Flag set when uc_emu_stop was called during nested emulation (SVC #254).
 // The outer emulation loop checks this to know it should restart.
 int g_emu_nested_stop = 0;
 
 // =============================================================================
-// Minimal ELF32 types (same as native_loader.c)
+// ELF validation/relocation: src/os/elf_plan.c (shared with the firmware loader)
 // =============================================================================
-
-typedef uint32_t Elf32_Addr;
-typedef uint16_t Elf32_Half;
-typedef uint32_t Elf32_Off;
-typedef uint32_t Elf32_Word;
-typedef int32_t  Elf32_Sword;
-
-#define EI_NIDENT 16
-
-typedef struct {
-    unsigned char e_ident[EI_NIDENT];
-    Elf32_Half    e_type;
-    Elf32_Half    e_machine;
-    Elf32_Word    e_version;
-    Elf32_Addr    e_entry;
-    Elf32_Off     e_phoff;
-    Elf32_Off     e_shoff;
-    Elf32_Word    e_flags;
-    Elf32_Half    e_ehsize;
-    Elf32_Half    e_phentsize;
-    Elf32_Half    e_phnum;
-    Elf32_Half    e_shentsize;
-    Elf32_Half    e_shnum;
-    Elf32_Half    e_shstrndx;
-} Elf32_Ehdr;
-
-typedef struct {
-    Elf32_Word p_type;
-    Elf32_Off  p_offset;
-    Elf32_Addr p_vaddr;
-    Elf32_Addr p_paddr;
-    Elf32_Word p_filesz;
-    Elf32_Word p_memsz;
-    Elf32_Word p_flags;
-    Elf32_Word p_align;
-} Elf32_Phdr;
-
-typedef struct {
-    Elf32_Sword d_tag;
-    union {
-        Elf32_Word d_val;
-        Elf32_Addr d_ptr;
-    } d_un;
-} Elf32_Dyn;
-
-typedef struct {
-    Elf32_Addr r_offset;
-    Elf32_Word r_info;
-} Elf32_Rel;
-
-typedef struct {
-    Elf32_Addr  r_offset;
-    Elf32_Word  r_info;
-    Elf32_Sword r_addend;
-} Elf32_Rela;
-
-#define ELFMAG0  0x7f
-#define ELFMAG1  'E'
-#define ELFMAG2  'L'
-#define ELFMAG3  'F'
-#define ET_DYN   3
-#define EM_ARM   40
-#define PT_LOAD  1
-#define PT_DYNAMIC 2
-#define DT_NULL  0
-#define DT_REL   17
-#define DT_RELSZ 18
-#define DT_RELA  7
-#define DT_RELASZ 8
-#define R_ARM_RELATIVE  23
-#define ELF32_R_TYPE(i) ((i) & 0xffu)
 
 // =============================================================================
 // Handle table: maps 32-bit emulated handles <-> 64-bit host pointers
@@ -304,15 +236,22 @@ static void trampoline_hook(uc_engine *uc, uint32_t intno, void *user_data) {
             return;
         }
 
-        uint32_t slot = insn & 0xFF;
-
-        // SVC #254: nested callback return sentinel. Stop emulation.
-        // Set flag so outer loop knows to restart after the trampoline returns.
-        if (slot == 254) {
+        // SVC #254 at REVCALL_BASE: nested callback return sentinel.
+        // (Checked by address, not SVC number, so slot 254 stays usable.)
+        if (pc == EMU_REVCALL_BASE) {
             g_emu_nested_stop = 1;
             uc_emu_stop(uc);
             return;
         }
+
+        // Derive the slot from the PC, not the SVC immediate: SVC #imm8
+        // wraps at 256, but slot count has grown past that.
+        if (pc < EMU_TRAMP_BASE || pc >= EMU_TRAMP_BASE + MAX_TRAMP_SLOTS * 4) {
+            fprintf(stderr, "[UNICORN] SVC outside trampoline region at 0x%08x\n", pc);
+            uc_emu_stop(uc);
+            return;
+        }
+        uint32_t slot = (pc - EMU_TRAMP_BASE) / 4;
 
         // Dispatch the API call
         unicorn_tramp_dispatch(uc, slot);
@@ -335,123 +274,107 @@ static void trampoline_hook(uc_engine *uc, uint32_t intno, void *user_data) {
 // ELF loader
 // =============================================================================
 
+// Name of the app being loaded, for load_refused().
+static const char *s_loading_app_name = NULL;
+
+// A load failure, reported like the firmware loader's show_error()
+// (native_loader.c): an "[UNICORN] ELF rejected" line on stderr, a
+// NATIVE ERROR entry in /system/error.log, and the test channel's outcome
+// (app.exited result "load_failed", error "<reason>[: <detail>]").
+static void load_refused(const char *reason, const char *detail) {
+    char msg[160];
+    if (detail && detail[0])
+        snprintf(msg, sizeof(msg), "%s: %s", reason, detail);
+    else
+        snprintf(msg, sizeof(msg), "%s", reason);
+    fprintf(stderr, "[UNICORN] ELF rejected: %s\n", msg);
+    crashlog_write("NATIVE ERROR", s_loading_app_name, reason, detail);
+    sim_app_outcome_set(SIM_APP_RESULT_LOAD_FAILED, msg);
+    sim_log_err("[NATIVE] %s: %s", s_loading_app_name ? s_loading_app_name : "?", msg);
+}
+
 static bool load_elf(uc_engine *uc, const char *path, uint32_t *out_entry) {
     // Resolve virtual SD card path to host filesystem path
-    extern char g_base_path[512];
     char full_path[1024];
-    if (path[0] == '/') {
-        snprintf(full_path, sizeof(full_path), "%s%s", g_base_path, path);
-    } else {
-        snprintf(full_path, sizeof(full_path), "%s/%s", g_base_path, path);
+    if (!hal_sdcard_resolve(path, full_path, sizeof(full_path))) {
+        load_refused("ELF: cannot open file", path);
+        return false;
     }
 
     FILE *f = fopen(full_path, "rb");
     if (!f) {
         fprintf(stderr, "[UNICORN] Failed to open ELF: %s (resolved: %s)\n", path, full_path);
+        load_refused("ELF: cannot open file", path);
         return false;
     }
 
     fseek(f, 0, SEEK_END);
     long file_len = ftell(f);
     fseek(f, 0, SEEK_SET);
+    if (file_len < 0 || file_len > 0x7FFFFFFFL) file_len = 0;
 
-    // Read ELF header
-    Elf32_Ehdr ehdr;
-    if (fread(&ehdr, sizeof(ehdr), 1, f) != 1) {
-        fprintf(stderr, "[UNICORN] Failed to read ELF header\n");
-        fclose(f);
-        return false;
-    }
-
-    // Validate
-    if (ehdr.e_ident[0] != ELFMAG0 || ehdr.e_ident[1] != ELFMAG1 ||
-        ehdr.e_ident[2] != ELFMAG2 || ehdr.e_ident[3] != ELFMAG3) {
-        fprintf(stderr, "[UNICORN] Bad ELF magic\n");
-        fclose(f);
-        return false;
-    }
-    if (ehdr.e_type != ET_DYN) {
-        fprintf(stderr, "[UNICORN] ELF must be PIE (ET_DYN)\n");
-        fclose(f);
-        return false;
-    }
-    if (ehdr.e_machine != EM_ARM) {
-        fprintf(stderr, "[UNICORN] ELF must be ARM\n");
+    // Same validation as the firmware loader (elf_plan.c): a malformed image
+    // is refused here, before anything reaches Unicorn.
+    uint8_t ehdr_buf[ELF_EHDR_SIZE];
+    size_t got = fread(ehdr_buf, 1, sizeof(ehdr_buf), f);
+    elf_plan_t plan;
+    elf_err_t eerr = elf_plan_header(ehdr_buf, (uint32_t)got,
+                                     (uint32_t)file_len, &plan);
+    if (eerr != ELF_OK) {
+        load_refused(elf_strerror(eerr), NULL);
         fclose(f);
         return false;
     }
 
-    // Read program headers
-    uint32_t phdr_table_size = (uint32_t)ehdr.e_phentsize * (uint32_t)ehdr.e_phnum;
-    Elf32_Phdr *phdrs = (Elf32_Phdr *)malloc(phdr_table_size);
+    uint8_t *phdrs = (uint8_t *)malloc(plan.phdrs_size);
     if (!phdrs) {
+        load_refused("ELF: out of memory for phdr", NULL);
         fclose(f);
         return false;
     }
-
-    fseek(f, ehdr.e_phoff, SEEK_SET);
-    if (fread(phdrs, phdr_table_size, 1, f) != 1) {
-        fprintf(stderr, "[UNICORN] Failed to read program headers\n");
+    if (fseek(f, (long)plan.phoff, SEEK_SET) != 0 ||
+        fread(phdrs, plan.phdrs_size, 1, f) != 1) {
+        load_refused("ELF: failed to read phdr table", NULL);
         free(phdrs);
         fclose(f);
         return false;
     }
 
-    // Find virtual address range
-    Elf32_Addr mem_min = 0xFFFFFFFFu;
-    Elf32_Addr mem_max = 0;
-    for (int i = 0; i < ehdr.e_phnum; i++) {
-        if (phdrs[i].p_type != PT_LOAD || phdrs[i].p_memsz == 0) continue;
-        if (phdrs[i].p_vaddr < mem_min) mem_min = phdrs[i].p_vaddr;
-        Elf32_Addr seg_end = phdrs[i].p_vaddr + phdrs[i].p_memsz;
-        if (seg_end > mem_max) mem_max = seg_end;
-    }
-
-    if (mem_max == 0) {
-        fprintf(stderr, "[UNICORN] No PT_LOAD segments\n");
+    eerr = elf_plan_segments(&plan, phdrs, plan.phdrs_size,
+                             (uint32_t)file_len, EMU_CODE_SIZE);
+    if (eerr != ELF_OK) {
+        char detail[48] = "";
+        if (eerr == ELF_ERR_IMAGE_TOO_LARGE)
+            snprintf(detail, sizeof(detail), "> %u byte code region",
+                     (uint32_t)EMU_CODE_SIZE);
+        load_refused(elf_strerror(eerr), detail[0] ? detail : NULL);
         free(phdrs);
         fclose(f);
         return false;
     }
 
-    uint32_t image_size = mem_max - mem_min;
+    uint32_t mem_min = plan.mem_min;
+    uint32_t image_size = plan.image_size;
     printf("[UNICORN] ELF image: %u bytes (vaddr 0x%08x..0x%08x)\n",
-           image_size, mem_min, mem_max);
-
-    if (image_size > EMU_CODE_SIZE) {
-        fprintf(stderr, "[UNICORN] ELF image too large (%u bytes > %u byte code region)\n",
-                image_size, (uint32_t)EMU_CODE_SIZE);
-        free(phdrs);
-        fclose(f);
-        return false;
-    }
-
-    // Load base: remap from original vaddr to our code region
-    uint32_t load_bias = EMU_CODE_BASE - mem_min;
+           image_size, mem_min, plan.mem_max);
 
     // Allocate a host-side buffer to build the image, then write it all at once
     uint8_t *image_buf = (uint8_t *)calloc(1, image_size);
     if (!image_buf) {
-        fprintf(stderr, "[UNICORN] Failed to allocate image buffer\n");
+        load_refused("ELF: out of memory for image", NULL);
         free(phdrs);
         fclose(f);
         return false;
     }
 
-    // Copy PT_LOAD segments into the buffer
-    for (int i = 0; i < ehdr.e_phnum; i++) {
-        if (phdrs[i].p_type != PT_LOAD || phdrs[i].p_filesz == 0) continue;
-        if (phdrs[i].p_offset + phdrs[i].p_filesz > (uint32_t)file_len) {
-            fprintf(stderr, "[UNICORN] Segment data out of bounds\n");
-            free(image_buf);
-            free(phdrs);
-            fclose(f);
-            return false;
-        }
-        fseek(f, phdrs[i].p_offset, SEEK_SET);
-        size_t off = phdrs[i].p_vaddr - mem_min;
-        if (fread(image_buf + off, phdrs[i].p_filesz, 1, f) != 1) {
-            fprintf(stderr, "[UNICORN] Failed to read segment %d\n", i);
+    // Copy PT_LOAD segments into the buffer (bounds proven by elf_plan)
+    for (uint16_t i = 0; i < plan.phnum; i++) {
+        elf32_phdr_t ph = elf_plan_phdr(phdrs, i);
+        if (ph.p_type != ELF_PT_LOAD || ph.p_filesz == 0) continue;
+        fseek(f, (long)ph.p_offset, SEEK_SET);
+        size_t off = ph.p_vaddr - mem_min;
+        if (fread(image_buf + off, ph.p_filesz, 1, f) != 1) {
+            load_refused("ELF: failed to read segment", NULL);
             free(image_buf);
             free(phdrs);
             fclose(f);
@@ -459,58 +382,22 @@ static bool load_elf(uc_engine *uc, const char *path, uint32_t *out_entry) {
         }
     }
 
-    // Apply R_ARM_RELATIVE relocations
-    for (int i = 0; i < ehdr.e_phnum; i++) {
-        if (phdrs[i].p_type != PT_DYNAMIC) continue;
-
-        Elf32_Dyn *dyn = (Elf32_Dyn *)(image_buf + (phdrs[i].p_vaddr - mem_min));
-        Elf32_Addr rel_addr = 0;  Elf32_Word rel_size = 0;
-        Elf32_Addr rela_addr = 0; Elf32_Word rela_size = 0;
-
-        for (Elf32_Dyn *d = dyn; d->d_tag != DT_NULL; d++) {
-            switch (d->d_tag) {
-                case DT_REL:    rel_addr  = d->d_un.d_ptr; break;
-                case DT_RELSZ:  rel_size  = d->d_un.d_val; break;
-                case DT_RELA:   rela_addr = d->d_un.d_ptr; break;
-                case DT_RELASZ: rela_size = d->d_un.d_val; break;
-                default: break;
-            }
-        }
-
-        if (rel_addr && rel_size) {
-            Elf32_Rel *rel = (Elf32_Rel *)(image_buf + (rel_addr - mem_min));
-            uint32_t count = rel_size / sizeof(Elf32_Rel);
-            for (uint32_t j = 0; j < count; j++) {
-                if (ELF32_R_TYPE(rel[j].r_info) == R_ARM_RELATIVE) {
-                    uint32_t off = rel[j].r_offset - mem_min;
-                    if (off + 4 <= image_size) {
-                        uint32_t *target = (uint32_t *)(image_buf + off);
-                        *target += load_bias;
-                    }
-                }
-            }
-        }
-
-        if (rela_addr && rela_size) {
-            Elf32_Rela *rela = (Elf32_Rela *)(image_buf + (rela_addr - mem_min));
-            uint32_t count = rela_size / sizeof(Elf32_Rela);
-            for (uint32_t j = 0; j < count; j++) {
-                if (ELF32_R_TYPE(rela[j].r_info) == R_ARM_RELATIVE) {
-                    uint32_t off = rela[j].r_offset - mem_min;
-                    if (off + 4 <= image_size) {
-                        uint32_t *target = (uint32_t *)(image_buf + off);
-                        *target = (uint32_t)rela[j].r_addend + load_bias;
-                    }
-                }
-            }
-        }
-        break;
+    // Apply R_ARM_RELATIVE relocations: the image runs at EMU_CODE_BASE.
+    elf_region_t region = {mem_min, image_size, image_buf, EMU_CODE_BASE};
+    elf_reloc_stats_t rstats;
+    eerr = elf_relocate(&plan, &region, 1, &rstats);
+    if (eerr != ELF_OK) {
+        load_refused(elf_strerror(eerr), NULL);
+        free(image_buf);
+        free(phdrs);
+        fclose(f);
+        return false;
     }
 
     // Write the relocated image into Unicorn memory
     uc_err err = uc_mem_write(uc, EMU_CODE_BASE, image_buf, image_size);
     if (err != UC_ERR_OK) {
-        fprintf(stderr, "[UNICORN] Failed to write ELF image: %s\n", uc_strerror(err));
+        load_refused("sim: failed to write ELF image", uc_strerror(err));
         free(image_buf);
         free(phdrs);
         fclose(f);
@@ -537,9 +424,8 @@ static bool load_elf(uc_engine *uc, const char *path, uint32_t *out_entry) {
         // Non-fatal if it fails (mem_error_hook will handle individual pages)
     }
 
-    // Compute entry point
-    uint32_t entry_voff = (ehdr.e_entry & ~1u) - mem_min;
-    *out_entry = EMU_CODE_BASE + entry_voff;
+    // Compute entry point (inside the image, checked by elf_plan)
+    *out_entry = EMU_CODE_BASE + plan.entry_off;
     // Set Thumb bit
     *out_entry |= 1u;
 
@@ -593,6 +479,7 @@ static bool mem_error_hook(uc_engine *uc, uc_mem_type type,
 bool unicorn_run_app(const char *elf_path, const char *app_dir,
                      const char *app_id, const char *app_name) {
     printf("[UNICORN] Loading native app: %s\n", elf_path);
+    s_loading_app_name = app_name;
 
     uc_engine *uc;
     uc_err err;
@@ -600,7 +487,7 @@ bool unicorn_run_app(const char *elf_path, const char *app_dir,
     // Create Unicorn instance (ARM Thumb mode, Cortex-M33)
     err = uc_open(UC_ARCH_ARM, UC_MODE_THUMB | UC_MODE_MCLASS, &uc);
     if (err != UC_ERR_OK) {
-        fprintf(stderr, "[UNICORN] uc_open failed: %s\n", uc_strerror(err));
+        load_refused("sim: uc_open failed", uc_strerror(err));
         return false;
     }
 
@@ -617,35 +504,35 @@ bool unicorn_run_app(const char *elf_path, const char *app_dir,
     // Code region
     err = uc_mem_map(uc, EMU_CODE_BASE, EMU_CODE_SIZE, UC_PROT_ALL);
     if (err != UC_ERR_OK) {
-        fprintf(stderr, "[UNICORN] Failed to map code region: %s\n", uc_strerror(err));
+        load_refused("sim: failed to map code region", uc_strerror(err));
         goto fail;
     }
 
     // Data region (for large ELFs that have data segments far from code)
     err = uc_mem_map(uc, EMU_DATA_BASE, EMU_DATA_SIZE, UC_PROT_ALL);
     if (err != UC_ERR_OK) {
-        fprintf(stderr, "[UNICORN] Failed to map data region: %s\n", uc_strerror(err));
+        load_refused("sim: failed to map data region", uc_strerror(err));
         goto fail;
     }
 
     // Stack (grows down from top)
     err = uc_mem_map(uc, EMU_STACK_BASE, EMU_STACK_SIZE, UC_PROT_ALL);
     if (err != UC_ERR_OK) {
-        fprintf(stderr, "[UNICORN] Failed to map stack: %s\n", uc_strerror(err));
+        load_refused("sim: failed to map stack", uc_strerror(err));
         goto fail;
     }
 
     // Heap
     err = uc_mem_map(uc, EMU_HEAP_BASE, EMU_HEAP_SIZE, UC_PROT_ALL);
     if (err != UC_ERR_OK) {
-        fprintf(stderr, "[UNICORN] Failed to map heap: %s\n", uc_strerror(err));
+        load_refused("sim: failed to map heap", uc_strerror(err));
         goto fail;
     }
 
     // String arena
     err = uc_mem_map(uc, EMU_ARENA_BASE, EMU_ARENA_SIZE, UC_PROT_ALL);
     if (err != UC_ERR_OK) {
-        fprintf(stderr, "[UNICORN] Failed to map arena: %s\n", uc_strerror(err));
+        load_refused("sim: failed to map arena", uc_strerror(err));
         goto fail;
     }
 
@@ -656,7 +543,7 @@ bool unicorn_run_app(const char *elf_path, const char *app_dir,
         uint32_t fb_map_size = (EMU_FB_SIZE + 0xFFF) & ~0xFFFu;
         err = uc_mem_map(uc, EMU_FB_BASE, fb_map_size, UC_PROT_ALL);
         if (err != UC_ERR_OK) {
-            fprintf(stderr, "[UNICORN] Failed to map framebuffer: %s\n", uc_strerror(err));
+            load_refused("sim: failed to map framebuffer", uc_strerror(err));
             goto fail;
         }
     }
@@ -664,14 +551,14 @@ bool unicorn_run_app(const char *elf_path, const char *app_dir,
     // API struct region
     err = uc_mem_map(uc, EMU_API_BASE, EMU_API_SIZE, UC_PROT_ALL);
     if (err != UC_ERR_OK) {
-        fprintf(stderr, "[UNICORN] Failed to map API region: %s\n", uc_strerror(err));
+        load_refused("sim: failed to map API region", uc_strerror(err));
         goto fail;
     }
 
     // Trampoline region
     err = uc_mem_map(uc, EMU_TRAMP_BASE, EMU_TRAMP_SIZE, UC_PROT_ALL);
     if (err != UC_ERR_OK) {
-        fprintf(stderr, "[UNICORN] Failed to map trampoline region: %s\n", uc_strerror(err));
+        load_refused("sim: failed to map trampoline region", uc_strerror(err));
         goto fail;
     }
 
@@ -679,7 +566,7 @@ bool unicorn_run_app(const char *elf_path, const char *app_dir,
     // Write a NOP at REVCALL_BASE so Unicorn's `until` address check fires before executing.
     err = uc_mem_map(uc, EMU_REVCALL_BASE, EMU_REVCALL_SIZE, UC_PROT_ALL);
     if (err != UC_ERR_OK) {
-        fprintf(stderr, "[UNICORN] Failed to map reverse-call region: %s\n", uc_strerror(err));
+        load_refused("sim: failed to map reverse-call region", uc_strerror(err));
         goto fail;
     }
     {
@@ -701,9 +588,10 @@ bool unicorn_run_app(const char *elf_path, const char *app_dir,
     // The interrupt hook dispatches the API call, then BX LR returns to caller.
     {
         for (uint32_t i = 0; i < MAX_TRAMP_SLOTS; i++) {
-            // SVC #imm8: encoding = 0xDF00 | (imm8 & 0xFF)
-            // For slots > 255, we use SVC #0 and encode the slot differently,
-            // but we have < 256 slots so this works.
+            // SVC #imm8: encoding = 0xDF00 | (imm8 & 0xFF). The immediate
+            // wraps past 255, but the hook derives the slot from the PC,
+            // so any slot count works — the encoding just needs to be an
+            // SVC. Keep imm = slot & 0xFF for debug readability.
             uint16_t svc = 0xDF00 | (i & 0xFF);  // SVC #i
             uint16_t bx_lr = 0x4770;              // BX LR
             uc_mem_write(uc, EMU_TRAMP_BASE + i * 4, &svc, 2);
@@ -718,7 +606,7 @@ bool unicorn_run_app(const char *elf_path, const char *app_dir,
                           (void *)trampoline_hook, NULL,
                           1, 0);  // range ignored for INTR hooks
         if (err != UC_ERR_OK) {
-            fprintf(stderr, "[UNICORN] Failed to add interrupt hook: %s\n", uc_strerror(err));
+            load_refused("sim: failed to add interrupt hook", uc_strerror(err));
             goto fail;
         }
     }

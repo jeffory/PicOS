@@ -2,6 +2,7 @@
 #include "../os/terminal.h"
 #include "../os/terminal_parser.h"
 #include "../os/terminal_render.h"
+#include "../fonts/font_scientifica.h"
 #include "../dev_commands.h"
 #include "umm_malloc.h"
 #include "pico/time.h"
@@ -17,12 +18,17 @@ typedef struct {
     terminal_parser_t parser;
 } lua_terminal_t;
 
+// The live terminal at idx, or a Lua error. term is NULL once __gc freed it
+// (reachable only from a later finaliser: __gc is not a method).
 static lua_terminal_t* check_terminal(lua_State* L, int idx) {
-    return (lua_terminal_t*)luaL_checkudata(L, idx, TERMINAL_MT);
+    lua_terminal_t* t = (lua_terminal_t*)luaL_checkudata(L, idx, TERMINAL_MT);
+    if (!t->term)
+        luaL_error(L, "attempt to use a destroyed terminal");
+    return t;
 }
 
 static int l_terminal_gc(lua_State* L) {
-    lua_terminal_t* t = check_terminal(L, 1);
+    lua_terminal_t* t = (lua_terminal_t*)luaL_checkudata(L, 1, TERMINAL_MT);
     if (t->term) {
 #ifdef PICOS_SIMULATOR
         if (sim_get_active_terminal() == t->term)
@@ -34,21 +40,36 @@ static int l_terminal_gc(lua_State* L) {
     return 0;
 }
 
+// The panel is 320x320; a terminal cell is FONT_SCI_WIDTH x FONT_SCI_HEIGHT.
+#define TERM_MAX_COLS (320 / FONT_SCI_WIDTH)   // 53
+#define TERM_MAX_ROWS (320 / FONT_SCI_HEIGHT)  // 26
+
 static int l_terminal_new(lua_State* L) {
-    int cols = luaL_optinteger(L, 1, TERM_DEFAULT_COLS);
-    int rows = luaL_optinteger(L, 2, TERM_DEFAULT_ROWS);
-    int scrollback = luaL_optinteger(L, 3, TERM_DEFAULT_SCROLLBACK);
+    lua_Integer cols = lb_optint(L, 1, TERM_DEFAULT_COLS);
+    lua_Integer rows = lb_optint(L, 2, TERM_DEFAULT_ROWS);
+    lua_Integer scrollback = lb_optint(L, 3, TERM_DEFAULT_SCROLLBACK);
+    if (cols < 1 || cols > TERM_MAX_COLS)
+        return luaL_argerror(L, 1, lua_pushfstring(L, "cols must be 1-%d",
+                                                   TERM_MAX_COLS));
+    if (rows < 1 || rows > TERM_MAX_ROWS)
+        return luaL_argerror(L, 2, lua_pushfstring(L, "rows must be 1-%d",
+                                                   TERM_MAX_ROWS));
+    // <= 0 keeps meaning "the default"; terminal_new caps the maximum.
+    if (scrollback > TERM_MAX_SCROLLBACK) scrollback = TERM_MAX_SCROLLBACK;
+    if (scrollback < 0) scrollback = 0;
 
-    terminal_t* term = terminal_new(cols, rows, scrollback);
+    // The userdata first, so a failure below leaves nothing to leak: its
+    // __gc ignores a NULL term.
+    lua_terminal_t* t = (lua_terminal_t*)lua_newuserdatauv(L, sizeof(lua_terminal_t), 0);
+    t->term = NULL;
+    luaL_setmetatable(L, TERMINAL_MT);
+
+    terminal_t* term = terminal_new((int)cols, (int)rows, (int)scrollback);
     if (!term) {
-        return luaL_error(L, "failed to create terminal");
+        return luaL_error(L, "failed to create terminal (out of memory)");
     }
-
-    lua_terminal_t* t = (lua_terminal_t*)lua_newuserdata(L, sizeof(lua_terminal_t));
     t->term = term;
     terminal_parser_init(&t->parser, term);
-
-    luaL_setmetatable(L, TERMINAL_MT);
 
 #ifdef PICOS_SIMULATOR
     sim_set_active_terminal(term);
@@ -73,8 +94,8 @@ static int l_terminal_clear(lua_State* L) {
 
 static int l_terminal_setCursor(lua_State* L) {
     lua_terminal_t* t = check_terminal(L, 1);
-    int x = (int)luaL_checkinteger(L, 2);
-    int y = (int)luaL_checkinteger(L, 3);
+    int x = (int)lb_checkint(L, 2);
+    int y = (int)lb_checkint(L, 3);
     terminal_setCursor(t->term, x, y);
     return 0;
 }
@@ -107,7 +128,7 @@ static int l_terminal_getColors(lua_State* L) {
 
 static int l_terminal_scroll(lua_State* L) {
     lua_terminal_t* t = check_terminal(L, 1);
-    int lines = (int)luaL_checkinteger(L, 2);
+    int lines = (int)lb_checkint(L, 2);
     terminal_scroll(t->term, lines);
     return 0;
 }
@@ -207,7 +228,7 @@ static int l_terminal_getScrollbackCount(lua_State* L) {
 
 static int l_terminal_getScrollbackLine(lua_State* L) {
     lua_terminal_t* t = check_terminal(L, 1);
-    int line = (int)luaL_checkinteger(L, 2) - 1;
+    int line = (int)lb_checkint(L, 2) - 1;
     
     int count = terminal_getScrollbackCount(t->term);
     if (line < 0 || line >= count) {
@@ -240,28 +261,15 @@ static int l_terminal_getScrollbackOffset(lua_State* L) {
 
 static int l_terminal_setScrollbackOffset(lua_State* L) {
     lua_terminal_t* t = check_terminal(L, 1);
-    int offset = (int)luaL_checkinteger(L, 2);
+    int offset = (int)lb_checkint(L, 2);
     terminal_setScrollbackOffset(t->term, offset);
     return 0;
 }
 
-// Service system hooks while waiting in a blocking C loop.
-// This mirrors what menu_lua_hook does so the system stays responsive
-// (system menu, screenshots, HTTP callbacks, dev commands, watchdog).
+// Service the system while waiting in a blocking C loop: the instruction
+// hook's own pass (lua_bridge_service), so the waits cannot drift from it.
 static void terminal_service_hooks(lua_State* L) {
-    watchdog_update();
-    http_lua_fire_pending(L);
-    tcp_lua_fire_pending(L);
-    dev_commands_poll();
-    dev_commands_process();
-    if (dev_commands_wants_exit()) {
-        dev_commands_clear_exit();
-        lua_bridge_raise_exit(L);
-    }
-    if (kbd_consume_menu_press())
-        system_menu_show(L);
-    if (kbd_consume_screenshot_press())
-        s_screenshot_pending = true;
+    lua_bridge_service(L);
 }
 
 // Resolve a key name string to a BTN_* mask. Returns 0 on unknown key.
@@ -378,14 +386,14 @@ static int l_terminal_setLineNumbers(lua_State* L) {
 
 static int l_terminal_setLineNumberStart(lua_State* L) {
     lua_terminal_t* t = check_terminal(L, 1);
-    int start = luaL_checkinteger(L, 2);
+    int start = lb_checkint(L, 2);
     terminal_setLineNumberStart(t->term, start);
     return 0;
 }
 
 static int l_terminal_setLineNumberCols(lua_State* L) {
     lua_terminal_t* t = check_terminal(L, 1);
-    int cols = luaL_checkinteger(L, 2);
+    int cols = lb_checkint(L, 2);
     terminal_setLineNumberCols(t->term, cols);
     return 0;
 }
@@ -422,15 +430,15 @@ static int l_terminal_setScrollbarColors(lua_State* L) {
 
 static int l_terminal_setScrollbarWidth(lua_State* L) {
     lua_terminal_t* t = check_terminal(L, 1);
-    int width = luaL_checkinteger(L, 2);
+    int width = lb_checkint(L, 2);
     terminal_setScrollbarWidth(t->term, width);
     return 0;
 }
 
 static int l_terminal_setScrollInfo(lua_State* L) {
     lua_terminal_t* t = check_terminal(L, 1);
-    int total_lines = luaL_checkinteger(L, 2);
-    int scroll_position = luaL_checkinteger(L, 3);
+    int total_lines = lb_checkint(L, 2);
+    int scroll_position = lb_checkint(L, 3);
     terminal_setScrollInfo(t->term, total_lines, scroll_position);
     return 0;
 }
@@ -438,8 +446,8 @@ static int l_terminal_setScrollInfo(lua_State* L) {
 // Render bounds
 static int l_terminal_setRenderBounds(lua_State* L) {
     lua_terminal_t* t = check_terminal(L, 1);
-    int y_start = luaL_checkinteger(L, 2);
-    int y_end = luaL_checkinteger(L, 3);
+    int y_start = lb_checkint(L, 2);
+    int y_end = lb_checkint(L, 3);
     terminal_setRenderBounds(t->term, y_start, y_end);
     return 0;
 }
@@ -454,7 +462,7 @@ static int l_terminal_setWordWrap(lua_State* L) {
 
 static int l_terminal_setWordWrapColumn(lua_State* L) {
     lua_terminal_t* t = check_terminal(L, 1);
-    int column = luaL_checkinteger(L, 2);
+    int column = lb_checkint(L, 2);
     terminal_setWordWrapColumn(t->term, column);
     return 0;
 }
@@ -481,8 +489,8 @@ static int l_terminal_getVisualRowCount(lua_State* L) {
 // Cell access (for syntax highlighting)
 static int l_terminal_setCell(lua_State* L) {
     lua_terminal_t* t = check_terminal(L, 1);
-    int x = (int)luaL_checkinteger(L, 2);
-    int y = (int)luaL_checkinteger(L, 3);
+    int x = (int)lb_checkint(L, 2);
+    int y = (int)lb_checkint(L, 3);
     const char* ch = luaL_checkstring(L, 4);
     if (x < 0 || x >= t->term->cols || y < 0 || y >= t->term->rows)
         return 0;
@@ -492,8 +500,8 @@ static int l_terminal_setCell(lua_State* L) {
 
 static int l_terminal_getCell(lua_State* L) {
     lua_terminal_t* t = check_terminal(L, 1);
-    int x = (int)luaL_checkinteger(L, 2);
-    int y = (int)luaL_checkinteger(L, 3);
+    int x = (int)lb_checkint(L, 2);
+    int y = (int)lb_checkint(L, 3);
     if (x < 0 || x >= t->term->cols || y < 0 || y >= t->term->rows) {
         lua_pushlstring(L, " ", 1);
         return 1;
@@ -507,8 +515,8 @@ static int l_terminal_getCell(lua_State* L) {
 
 static int l_terminal_setCellColors(lua_State* L) {
     lua_terminal_t* t = check_terminal(L, 1);
-    int x = (int)luaL_checkinteger(L, 2);
-    int y = (int)luaL_checkinteger(L, 3);
+    int x = (int)lb_checkint(L, 2);
+    int y = (int)lb_checkint(L, 3);
     uint16_t fg = (uint16_t)luaL_checkinteger(L, 4);
     uint16_t bg = (uint16_t)luaL_checkinteger(L, 5);
     if (x < 0 || x >= t->term->cols || y < 0 || y >= t->term->rows)
@@ -522,11 +530,11 @@ static int l_terminal_setCellColors(lua_State* L) {
 
 static int l_terminal_setRowColors(lua_State* L) {
     lua_terminal_t* t = check_terminal(L, 1);
-    int y = (int)luaL_checkinteger(L, 2);
+    int y = (int)lb_checkint(L, 2);
     luaL_checktype(L, 3, LUA_TTABLE);
     luaL_checktype(L, 4, LUA_TTABLE);
-    int start_x = (int)luaL_optinteger(L, 5, 0);
-    int count = (int)luaL_optinteger(L, 6, t->term->cols);
+    int start_x = (int)lb_optint(L, 5, 0);
+    int count = (int)lb_optint(L, 6, t->term->cols);
 
     if (y < 0 || y >= t->term->rows)
         return 0;
@@ -600,6 +608,10 @@ static const luaL_Reg terminal_methods[] = {
     {"getCell", l_terminal_getCell},
     {"setCellColors", l_terminal_setCellColors},
     {"setRowColors", l_terminal_setRowColors},
+    {NULL, NULL}
+};
+
+static const luaL_Reg terminal_meta[] = {
     {"__gc", l_terminal_gc},
     {NULL, NULL}
 };
@@ -610,11 +622,7 @@ static const luaL_Reg terminal_funcs[] = {
 };
 
 void lua_bridge_terminal_init(lua_State* L) {
-    luaL_newmetatable(L, TERMINAL_MT);
-    lua_pushvalue(L, -1);
-    lua_setfield(L, -2, "__index");
-    luaL_setfuncs(L, terminal_methods, 0);
-    lua_pop(L, 1);
+    lb_register_type(L, TERMINAL_MT, terminal_methods, terminal_meta);
 
     register_subtable(L, "terminal", terminal_funcs);
 }

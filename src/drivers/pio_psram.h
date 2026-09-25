@@ -23,6 +23,28 @@ extern "C" {
 #define PIO_PSRAM_VIDEO_SIZE       (256 * 1024)
 #define PIO_PSRAM_APP_BASE         (288 * 1024)
 
+// Apps (Lua sys.pioPsramRead/Write) may touch [PIO_PSRAM_APP_BASE, chip_size)
+// only: everything below it is the OS's (MP3 ring, video pool).  addr/len
+// come from Lua integers, so the test is done in 64 bits: addr + len cannot
+// wrap back into the reserved range or past the chip.
+typedef enum {
+    PIO_PSRAM_RANGE_OK = 0,
+    PIO_PSRAM_RANGE_OUT_OF_RANGE,   // negative, or past the end of the chip
+    PIO_PSRAM_RANGE_RESERVED,       // overlaps the OS region
+} pio_psram_range_t;
+
+static inline pio_psram_range_t pio_psram_app_range_check(int64_t addr,
+                                                          int64_t len,
+                                                          uint32_t chip_size) {
+    if (addr < 0 || len < 0)
+        return PIO_PSRAM_RANGE_OUT_OF_RANGE;
+    if (addr < PIO_PSRAM_APP_BASE)
+        return PIO_PSRAM_RANGE_RESERVED;
+    if (addr > (int64_t)chip_size || len > (int64_t)chip_size - addr)
+        return PIO_PSRAM_RANGE_OUT_OF_RANGE;
+    return PIO_PSRAM_RANGE_OK;
+}
+
 // Initialise PIO1 state machine, DMA channels, and reset the PSRAM chip.
 // Returns true on success.  Non-fatal if chip is not present.
 bool pio_psram_init(void);

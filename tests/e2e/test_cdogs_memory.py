@@ -4,39 +4,22 @@ Covers specs/2026-07-19-cdogs-asset-memory-design.md Stage 0 and Stage 1.
 
 Why this fixture doesn't look like a plain launch-and-wait
 ------------------------------------------------------------
-Two simulator-side gaps, previously latent because every other e2e
-fixture app is a Lua app, made the straightforward version of this test
-impossible to pass. Both are documented in full in task-1-report.md;
-summary:
+This module predates the simulator's test-control channel and was written
+around two gaps that have since been closed (Task 3 of the 2026-09-24 review
+remediation):
 
-1. App list is scanned once at boot. launcher_run() (src/os/launcher.c)
-   builds s_apps[] via scan_apps() once at startup; launch_app() over RPC
-   (simulator/sim_socket_handler.c:h_launch_app) just queues a name and
-   always returns {"ok": true} — the actual launcher_launch_by_name()
-   lookup against s_apps[] happens later on the OS's own poll loop and
-   silently does nothing if the name isn't in that list. So an app
-   staged onto the SD card *after* the simulator process has started is
-   invisible to launch_app(), even though the RPC call "succeeds". This
-   fixture therefore stages C-Dogs and starts its own simulator instance
-   (rather than reusing the shared `simulator` fixture, which is already
-   running by the time a dependent fixture's body executes) so the app
-   is present for the boot-time scan.
+1. The launcher used to scan /apps only at boot, so C-Dogs had to be staged
+   before the simulator started. launch_app now rescans on a miss, but the
+   fixture still stages before boot (it is module-scoped and costs nothing).
 
-2. Native-app log() calls never reach get_log_buffer(). A native ELF
-   app's sys->log() goes through simulator/unicorn_trampolines.c's
-   tramp_sys_log(), which prints straight to the simulator process's own
-   stdout and never calls sim_log_append() — unlike the Lua path
-   (src/os/lua_bridge_sys.c's l_sys_log(), which explicitly also calls
-   sim_log_append() when built with PICOS_SIMULATOR). get_log_buffer()
-   only ever returns what sim_log_append() recorded, so it can never see
-   a native app's log output, no matter how long wait_for_log() waits.
-   Fixing the simulator side would need a rebuild, which is out of scope
-   here (and the existing binary must not be rebuilt), so this test reads
-   the simulator subprocess's real stdout/stderr via the shared
-   PicosSimulator harness's own get_output() (backed by its
-   _start_pipe_drains() background threads, started automatically in
-   sim.start()) and searches that text for HEAPSTAT/GFXSTAT lines instead
-   of using get_log_buffer()/wait_for_log().
+2. Native sys->log() used to print to stdout only. It now reaches the log
+   buffer too (source "native", text prefixed "[APP] "). The stdout/stderr
+   reading below is still needed, though: HEAPSTAT, GFXSTAT, CHARSFMT and the
+   RenderPresent census are fprintf(stderr, ...) calls inside the app
+   (apps/cdogs/picos_heap.h, stubs.c), not sys->log calls, so only the
+   process output carries them. That output is read through the shared
+   PicosSimulator harness's get_output() (backed by its _start_pipe_drains()
+   background threads, started automatically in sim.start()).
 
 The one hazard get_output() doesn't remove on its own: its stdout/stderr
 tails are each bounded at 2000 lines (collections.deque(maxlen=2000) in
@@ -81,18 +64,41 @@ messages and thresholds, against that shared data — a real regression in
 any one of them still fails on its own, legibly. Only the drive itself is
 shared, not the pass/fail verdicts. See .superpowers/sdd/prereq-6-report.md
 for the before/after measurements.
+
+Reaching live gameplay (input-injection reliability plan, Task 3, 2026-07-23)
+------------------------------------------------------------
+Everything above this point only ever drives (or, per cdogs_quickplay_stats'
+own done predicate, may not even need to actually drive — see
+cdogs_gameplay_stats' comment for why) as far as a loaded campaign menu.
+That used to be as far as automation could reach at all: the numplayers and
+"Press Fire to join" screens are gated on C-Dogs' own per-player character
+keys (button1, 'x' by default), and until apps/cdogs' char-keyup-deferral
+fix (this plan's Task 2) those keys never registered as an edge a menu
+could observe, physical or injected alike — a permanent dead end for this
+kind of test, not a timing flake. With that fix (and this plan's Task 1
+OS/sim-side injected-button hold, closing the separate one-shot-eaten-by-
+an-extra-poll race), cdogs_gameplay_stats and test_quickplay_reaches_live_
+mission below now drive the SAME shared simulator instance the rest of
+this module already booted all the way through campaign/character/mission
+setup into an actual live mission — GFXSTAT tag=="missionstart", mission-
+specific art resident on top of the boot-time set, no HardFault. See
+_GAMEPLAY_KEY_STEPS' own comment for the full verified screen-by-screen
+path and _drive_to_mission_start's for why the final equip->mission step
+needs its own retry shape.
 """
+import os
 import re
-import shutil
 import time
 from pathlib import Path
 
 import pytest
 
-from picos_simulator import PicosSimulator
+from helpers import build_sd_card, new_simulator, stop_and_check
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
-CDOGS_SRC = PROJECT_ROOT / "apps" / "cdogs"
+# C-Dogs lives in its own repo (github.com/jeffory/picos-cdogs) since 2026-09-16.
+# Point PICOS_CDOGS_DIR at a checkout that has been built (`make`) to run this module.
+CDOGS_SRC = Path(os.environ.get("PICOS_CDOGS_DIR", Path.home() / "Projects" / "picos-cdogs"))
 
 HEAPSTAT_RE = re.compile(
     r"HEAPSTAT (\S+) watermark=(\d+) true=(\d+) arena=(\d+) used=(\d+) peak=(\d+)"
@@ -118,6 +124,58 @@ GFXSTAT_RE = re.compile(
     r"GFXSTAT (\S+) pics=(-?\d+) data=(\d+) tex=(\d+) total=(\d+) peak=(\d+) skipped=(-?\d+)"
 )
 
+CHARSFMT_RE = re.compile(
+    r"CHARSFMT (\S+) la8=(\d+) rgb565=(\d+) argb8888=(\d+)"
+)
+
+
+def parse_charsfmt(log_text):
+    """Return list of dicts for every CHARSFMT line in the log.
+
+    Logged exactly once per process, via fprintf(stderr, ...) in stubs.c's
+    picos_charsfmt_report (called from cdogs_picos.c's picos_main —
+    apps/cdogs's native PICOS entry point, NOT pic_manager.c's
+    PicManagerLoad — immediately after picos_gfx_report("picmanagerload") —
+    same call site, same "picmanagerload" tag — right after BOTH the
+    graphics/ and graphics_hd/ trees have been fully, recursively scanned).
+    picos_main calls PicManagerLoadDir directly for both trees and never
+    calls PicManagerLoad itself; PicManagerLoad has its own matching
+    #ifdef PICOS report call with the same tag; but it never runs on this
+    target since nothing calls PicManagerLoad here (see cdogs_picos.c's own
+    comment at that call site) — desktop never defines PICOS either, so that
+    copy is dead on both targets. Same per-run logging point as the
+    boot-time HEAPSTAT/GFXSTAT report, so it
+    is exposed to the exact same get_output() ring-buffer eviction hazard
+    the module docstring describes (a dense "[TRAMP] fs_*" burst from
+    campaign/map/sprite I/O can evict it before anything reads it). Must
+    be accumulated via the same poll-throughout-the-drive pattern as
+    HEAPSTAT/GFXSTAT/RENDERPRESENT (see _drive_quickplay/_accumulate) — a
+    single end-of-drive read is not safe against that eviction.
+
+    Its three counters can legitimately all read 0 with no bug involved:
+    confirmed directly while writing this test, this simulator's own
+    quick-play drive reports la8=0 rgb565=0 argb8888=0 even though
+    GFXSTAT's own pics=1960 (same report) proves plenty of pics loaded —
+    cross-checking the raw log showed chars/ LoadImg attempts being
+    skipped by the heap-reserve guard (e.g. "LoadImg SKIP #500 (heap
+    reserve): '.../chars/heads/seal_12x11.png'") before any of them ever
+    reached pic.c's PicLoadClassifyCharsFormat, which is the only place
+    these counters increment. Which categories the guard rejects wholesale
+    is load-order-dependent, and this simulator's host-filesystem
+    enumeration order is not guaranteed to match real hardware's FatFS/SD
+    order — see test_charsfmt_line_is_well_formed for why no test in this
+    module asserts any of these three fields is positive.
+    """
+    out = []
+    for m in CHARSFMT_RE.finditer(log_text):
+        out.append({
+            "tag": m.group(1),
+            "la8": int(m.group(2)),
+            "rgb565": int(m.group(3)),
+            "argb8888": int(m.group(4)),
+        })
+    return out
+
 
 def parse_gfxstats(log_text):
     """Return list of dicts for every GFXSTAT line in the log."""
@@ -131,6 +189,41 @@ def parse_gfxstats(log_text):
             "total": int(m.group(5)),
             "peak": int(m.group(6)),
             "skipped": int(m.group(7)),
+        })
+    return out
+
+
+# Pre-existing debug instrumentation in picos_sdl_impl.c's SDL_RenderPresent
+# (not added for this test): it fprintf(stderr, ...)s a per-frame pixel
+# census — how many of the just-presented framebuffer's pixels are non-zero
+# — for the first 8 SDL_RenderPresent calls of the process, then goes
+# silent. Reused here (see test_boot_loading_screen_is_not_blank) instead
+# of polling the display_stats RPC because it's synchronous with the exact
+# frame it describes: RPC-polling display_stats independently was tried
+# first and proved unreliable for this purpose — it can observe the
+# PicOS launcher's own leftover screen content from before C-Dogs ever
+# presented a frame (nothing has overwritten the panel yet at that point),
+# which reads as "non-blank" regardless of whether C-Dogs' own render path
+# is healthy. This log line has no such gap: it's computed from the exact
+# buffer C-Dogs itself just presented, at the moment it presented it.
+RENDERPRESENT_RE = re.compile(
+    r"RenderPresent #(\d+): (\d+)x(\d+) colored=(\d+)/(\d+) "
+    r"first@\((-?\d+),(-?\d+)\)=0x([0-9A-Fa-f]{4})"
+)
+
+
+def parse_renderpresents(log_text):
+    """Return list of dicts for every RenderPresent debug line in the log,
+    in the order SDL_RenderPresent was called (its numbering starts at 1
+    and is never reused within one process lifetime)."""
+    out = []
+    for m in RENDERPRESENT_RE.finditer(log_text):
+        out.append({
+            "num": int(m.group(1)),
+            "w": int(m.group(2)),
+            "h": int(m.group(3)),
+            "colored": int(m.group(4)),
+            "total": int(m.group(5)),
         })
     return out
 
@@ -173,50 +266,25 @@ def cdogs_simulator(simulator_binary, tmp_path_factory, request):
     file (see "Fixture structure" in the module docstring for why). Stages
     its own SD card via the session-scoped tmp_path_factory rather than
     conftest.py's function-scoped `test_sd_card` fixture, which a
-    module-scoped fixture cannot depend on (pytest scope mismatch) —
-    otherwise this mirrors test_sd_card's construction exactly (default SD
-    card contents + tests/e2e/apps/* fixture apps), plus C-Dogs on top.
+    module-scoped fixture cannot depend on (pytest scope mismatch). It uses
+    the same manifest (helpers.build_sd_card), plus C-Dogs on top.
 
     See the module docstring for why this doesn't reuse the shared
     `simulator` fixture and doesn't rely on get_log_buffer()/wait_for_log().
     """
     if not (CDOGS_SRC / "main.elf").exists():
-        pytest.skip("apps/cdogs/main.elf not built — run `make` in apps/cdogs")
+        pytest.skip(f"{CDOGS_SRC}/main.elf not built — clone jeffory/picos-cdogs, run `make`, or set PICOS_CDOGS_DIR")
     if not (CDOGS_SRC / "data" / "graphics").exists():
-        pytest.skip("apps/cdogs/data not prepared — run ./prepare_data.sh")
+        pytest.skip(f"{CDOGS_SRC}/data not prepared — run ./prepare_data.sh in the picos-cdogs checkout")
 
-    sd_path = tmp_path_factory.mktemp("cdogs_sd_card")
-
-    default_sd = Path(request.config.getoption("--sd-card-path"))
-    if default_sd.exists():
-        shutil.copytree(default_sd, sd_path, dirs_exist_ok=True)
-    (sd_path / "apps").mkdir(exist_ok=True)
-    (sd_path / "data").mkdir(exist_ok=True)
-    (sd_path / "system").mkdir(exist_ok=True)
-
-    fixture_apps = Path(__file__).parent / "apps"
-    if fixture_apps.exists():
-        for app_dir in fixture_apps.iterdir():
-            if app_dir.is_dir():
-                dest = sd_path / "apps" / app_dir.name
-                if not dest.exists():
-                    shutil.copytree(app_dir, dest)
-
-    dest = sd_path / "apps" / "cdogs"
-    dest.mkdir(parents=True, exist_ok=True)
-    for name in ("main.elf", "app.json"):
-        shutil.copy2(CDOGS_SRC / name, dest / name)
-    shutil.copytree(CDOGS_SRC / "data", dest / "data", dirs_exist_ok=True)
-
-    headless = request.config.getoption("--headless")
-    port = request.config.getoption("--port")
-    sim = PicosSimulator(
-        binary_path=str(simulator_binary),
-        sd_card_path=str(sd_path),
-        headless=headless,
-        tcp_port=port,
-    )
-    sim.start()
+    base = tmp_path_factory.mktemp("cdogs")
+    sd_path = build_sd_card(
+        base / "sd_card",
+        extra=[(CDOGS_SRC / "main.elf", "apps/cdogs/main.elf"),
+               (CDOGS_SRC / "app.json", "apps/cdogs/app.json"),
+               (CDOGS_SRC / "data", "apps/cdogs/data")])
+    sim = new_simulator(request.config, simulator_binary, sd_path,
+                        base / "crash.log", test_mode=False)
 
     # Wait for enough simulator uptime that the report cadence's first
     # eligible tick fires during C-Dogs' (fast) asset scan (see module
@@ -234,27 +302,11 @@ def cdogs_simulator(simulator_binary, tmp_path_factory, request):
 
     yield sim
 
-    # The autouse _check_crash_log fixture in conftest.py depends on the
-    # shared `simulator` fixture, not this one — every test in this module
-    # uses cdogs_simulator (via cdogs_quickplay_stats) instead, so that
-    # autouse check silently inspects a second, unused simulator instance
-    # and never looks at this one. This is the only native ELF app under
-    # e2e test, in exactly the memory-fragile regime this test module
-    # exists to cover, so check here explicitly before tearing down.
-    # try/finally so a crash (or a failed get_crash_log call) still lets
-    # sim.stop() run and reap the process. Module-scoped now means this
-    # runs once, after the last test in the module that needed this
-    # fixture, rather than once per test — a crash occurring after the
-    # single shared drive (during one test's own assertions, which only
-    # read already-collected data and touch nothing on the simulator) is
-    # exceedingly unlikely to surface only there and not already have
-    # broken the drive itself, but see prereq-6-report.md for the
-    # reasoning in full.
-    try:
-        crash = sim.call("get_crash_log", timeout=2.0).get("crash_log")
-        assert not crash, f"C-Dogs simulator crashed during test:\n{crash}"
-    finally:
-        sim.stop()
+    # Tests here reach the simulator through cdogs_quickplay_stats, so the
+    # per-test health hook in conftest.py sees it via the fixture closure;
+    # stopping it here also fails the module's last test if the process
+    # crashed or a sanitizer reported (stop_and_check).
+    stop_and_check(sim)
 
 
 def _combined_output(simulator):
@@ -433,7 +485,7 @@ def _learn_screen_baseline(simulator, poll_fn,
     return baseline
 
 
-def _drive_quickplay(simulator, streams, settle_s=45, done=None):
+def _drive_quickplay(simulator, streams, settle_s=45, done=None, soft_streams=None):
     """Launch C-Dogs, drive the quick-play menu flow, and return every
     requested diagnostic stream once navigation has demonstrably worked.
 
@@ -507,21 +559,41 @@ def _drive_quickplay(simulator, streams, settle_s=45, done=None):
     signal (e.g. "the heap peak has cleared a threshold") can supply
     their own so the loop breaks the moment that particular condition is
     satisfied rather than always waiting on report count.
+
+    soft_streams: optional list of (name, parse_fn) pairs polled and
+    accumulated exactly like `streams` (same eviction-avoidance via
+    _accumulate on every poll), but exempt from every assertion below that
+    gates on `streams` — the initial "instrumentation is wired up" wait,
+    and the final "quick-play navigation actually landed a second report"
+    sanity check. For a report that may legitimately be emitted exactly
+    once (or, depending on unrelated load-order effects, carry all-zero
+    fields) rather than growing into a real repeating stream, both of
+    those checks would misfire: "missing" would wait out its own deadline
+    for a second line that was never coming, and ">1 lines observed"
+    would fail permanently. CHARSFMT (Stage 2C) is exactly this shape —
+    see parse_charsfmt's docstring — so it is driven as a soft stream.
     """
     if done is None:
         done = lambda state: all(len(v) > 1 for v in state.values())  # noqa: E731
+    soft_streams = soft_streams or []
 
     # Accumulated across every poll for the rest of this drive, one set
     # of state per requested stream — see _accumulate's docstring for why
     # a single end-of-drive read of get_output() isn't safe against its
-    # bounded tails.
+    # bounded tails. soft_streams share the same accumulation (and the
+    # same eviction protection) but never participate in missing_streams()
+    # or the final per-stream ">1" sanity check below.
     seen = {name: set() for name, _ in streams}
     stats = {name: [] for name, _ in streams}
+    soft_seen = {name: set() for name, _ in soft_streams}
+    soft_stats = {name: [] for name, _ in soft_streams}
 
     def poll():
         text = _combined_output(simulator)
         for name, parse_fn in streams:
             _accumulate(text, parse_fn, seen[name], stats[name])
+        for name, parse_fn in soft_streams:
+            _accumulate(text, parse_fn, soft_seen[name], soft_stats[name])
         return text
 
     def missing_streams():
@@ -717,6 +789,14 @@ def _drive_quickplay(simulator, streams, settle_s=45, done=None):
             f"{'heap' if name == 'HEAPSTAT' else 'graphics'}-instrumentation bug"
         )
 
+    # One last poll so any soft_streams report that only just landed (e.g.
+    # CHARSFMT, emitted once right after the initial graphics tree scan,
+    # potentially well before quick-play's navigation even starts) is
+    # captured before returning — no assertions on soft_streams themselves;
+    # callers decide what (if anything) to require of them.
+    poll()
+    stats.update(soft_stats)
+
     return stats
 
 
@@ -758,15 +838,334 @@ def cdogs_quickplay_stats(cdogs_simulator):
     entry, so a plain launch-and-wait would see almost nothing on either
     stream. See _drive_quickplay for the full navigation rationale.
 
-    Returns {"HEAPSTAT": [...], "GFXSTAT": [...]} — see parse_heapstats /
-    parse_gfxstats for the shape of each entry. All four stats-consuming
-    tests below read from this dict; none of them re-drive the simulator.
+    Returns {"HEAPSTAT": [...], "GFXSTAT": [...], "RENDERPRESENT": [...],
+    "CHARSFMT": [...]} — see parse_heapstats / parse_gfxstats /
+    parse_renderpresents / parse_charsfmt for the shape of each entry.
+    RENDERPRESENT was added for test_boot_loading_screen_is_not_blank;
+    CHARSFMT (Stage 2C) was added for test_charsfmt_line_is_well_formed,
+    driven as a soft stream (see _drive_quickplay's soft_streams param) —
+    it is logged exactly once, before quick-play navigation even starts,
+    so it cannot be held to the same "more than one line" navigation-
+    sanity bar every other stream here is. Every other test below only
+    reads HEAPSTAT/GFXSTAT. None of them re-drive the simulator.
     """
     return _drive_quickplay(
         cdogs_simulator,
-        [("HEAPSTAT", parse_heapstats), ("GFXSTAT", parse_gfxstats)],
+        [("HEAPSTAT", parse_heapstats), ("GFXSTAT", parse_gfxstats),
+         ("RENDERPRESENT", parse_renderpresents)],
+        soft_streams=[("CHARSFMT", parse_charsfmt)],
         done=_quickplay_settled,
     )
+
+
+# ---------------------------------------------------------------------------
+# Driving all the way into a live mission (input-injection reliability plan,
+# Task 3, 2026-07-23).
+#
+# Why this needs its own drive rather than extending _drive_quickplay above:
+# _quickplay_settled (that drive's `done` predicate) is already satisfied by
+# the BOOT-TIME graphics scan alone — PicManagerLoadDir's recursive scan of
+# graphics/+graphics_hd/ at startup already emits a HEAPSTAT/GFXSTAT pair
+# whose peak clears LOADED_PEAK_FLOOR_BYTES (confirmed empirically: ~1.66MB
+# resident before a single menu Enter is ever sent, well past the 1.5MB
+# floor), so cdogs_quickplay_stats' nudge loop can (and, verified while
+# writing this, typically does) return with `confirmed_transitions == 0` —
+# it never actually has to prove 3-level menu navigation works, only that
+# instrumentation exists. That's fine for the 11 tests above (all boot-time
+# accounting properties), but means that drive was never real evidence of
+# reachable gameplay and must not be repurposed as if it were. This stage
+# drives BEYOND it instead of replacing it: cdogs_gameplay_stats below
+# depends on cdogs_quickplay_stats (guaranteeing it runs first and the app
+# is sitting at an input-ready main menu) and continues the SAME already-
+# booted simulator instance with its own explicit screen-by-screen sequence
+# and its own completion signal (GFXSTAT tag=="missionstart", not a peak
+# threshold that boot alone can satisfy).
+#
+# The real screen-by-screen path from the main menu into a live mission,
+# verified empirically THREE times against this exact codebase (Task 2's two
+# runs, see task-inj-2-report.md, plus one more scripted run while writing
+# this test, screenshotted at every step):
+#
+#   main menu:        enter -> "Start:" submenu (Campaign default-selected)
+#   Start: submenu:    enter -> "Select a campaign:" list. NOTE this list's
+#                      default-selected first entry is "custom" — a
+#                      DIRECTORY that sits alongside flat built-in campaign
+#                      files like "Sand (10)" — not a campaign file itself.
+#                      (_drive_quickplay's older docstring, "one entry per
+#                      campaign file", predates this nested structure and,
+#                      per the note above, was never actually exercised
+#                      this deep to notice.)
+#   custom/:           enter -> directory listing (Wuzzy/, techdemo/;
+#                      Wuzzy/ is alphabetically first and default-selected)
+#   Wuzzy/:            enter -> "Gun Game (25)" (default-selected)
+#   Gun Game (25):     enter -> loads the campaign -> "Gun Game by Wuzzy"
+#                      briefing text
+#   briefing:          'x' (player-1 button1, per the SD's own
+#                      com.picos.cdogsoptions.cnf — plain `enter` does not
+#                      advance this screen; this is the exact fix Task 2
+#                      shipped in apps/cdogs) -> "Select number of players"
+#                      (default "1")
+#   numplayers:        enter -> "Press Fire to choose input device and
+#                      join…"
+#   join:              'x' -> joins as player 1 -> customize/name screen
+#                      ("Jones", "Done" default-selected)
+#   customize:         enter -> "Continue / Level select / Start Campaign /
+#                      High Scores" menu (Start Campaign default-selected)
+#   continue menu:     enter -> game options screen ("Done" default)
+#   game options:      enter -> "Mission 1: Piecemarker Challenge" briefing,
+#                      partial text (still typewriter-revealing)
+#   mission briefing
+#   (partial text):    'x' -> same screen, full text now revealed
+#   mission briefing
+#   (full text):       'x' -> equip/weapon screen ("End")
+#
+# The final "equip -> live mission" transition is deliberately NOT one more
+# entry in this list: unlike every step above (a single keypress reliably
+# landed in all three verification runs), that specific transition triggers
+# a real campaign/character/mission-engine reload that can take several
+# seconds under this simulator's Unicorn CPU emulation, and Task 2 found it
+# can take 2-5 presses of 'x' (spaced seconds apart) to actually register
+# once the engine becomes responsive again — a different shape of wait than
+# "one dropped keypress, retry once". _drive_to_mission_start below handles
+# it separately, gated on the GFXSTAT missionstart line itself rather than
+# on screen-signature evidence.
+_GAMEPLAY_KEY_STEPS = [
+    ("enter", "main menu Start -> \"Start:\" submenu"),
+    ("enter", "\"Start:\" submenu Campaign -> \"Select a campaign:\" list"),
+    ("enter", "\"Select a campaign:\" custom/ -> directory listing"),
+    ("enter", "custom/ directory Wuzzy/ -> Wuzzy's own campaign list"),
+    ("enter", "Wuzzy/ \"Gun Game (25)\" -> loads campaign, briefing appears"),
+    ("x", "briefing -> \"Select number of players\" screen"),
+    ("enter", "numplayers (default 1) -> \"Press Fire to join\" screen"),
+    ("x", "join as player 1 (button1) -> customize/name screen"),
+    ("enter", "customize \"Done\" -> continue/level-select menu"),
+    ("enter", "continue menu \"Start Campaign\" -> game options screen"),
+    ("enter", "game options \"Done\" -> Mission 1 briefing (partial text)"),
+    ("x", "mission briefing -> full text revealed"),
+    ("x", "mission briefing (full text) -> equip/weapon screen"),
+]
+
+# Per-step retry knobs for _advance_through_screens. Deliberately NOT built
+# on the same dense _learn_screen_baseline/_screen_signature polling
+# _drive_quickplay's own nudge loop uses — see this function's own
+# docstring for why. Short version: a first version of this function DID
+# poll display_stats every _SCREEN_POLL_INTERVAL_S throughout the wait
+# (identical to _drive_quickplay's own approach) and it measurably broke
+# navigation on these deeper screens — verified directly, side by side,
+# with the simulator's own log as evidence: the exact same key sequence
+# via plain fixed delays (no display_stats calls in the wait at all)
+# reliably reached the customize screen every time, while the
+# dense-polling variant left the app stuck one screen earlier, repeatedly.
+# get_output() (this drive's `poll`) never showed this effect anywhere in
+# this module (every drive here leans on it throughout multi-second
+# waits) — it is a pure local read of an already-filled deque. display_stats
+# is a live JSON-RPC round trip that the simulator process itself must
+# service, competing with its own Unicorn CPU-emulation thread; this whole
+# plan's premise is that extra polling can perturb injected-input timing
+# (Amendment A's sim-side one-shot race), and this is that same class of
+# effect showing up one level up, in this test harness's own RPC traffic
+# rather than the app's internal poll() calls.
+_STEP_SETTLE_S = 3.0
+_STEP_MAX_ATTEMPTS = 4
+_STEPS_OVERALL_TIMEOUT_S = 120.0
+
+
+def _advance_through_screens(simulator, poll, steps,
+                              settle_s=_STEP_SETTLE_S,
+                              max_attempts=_STEP_MAX_ATTEMPTS,
+                              overall_timeout=_STEPS_OVERALL_TIMEOUT_S):
+    """Send each (key, description) in `steps` in order, confirming with a
+    SPARSE _screen_signature check (one sample before the key, one after)
+    that each one actually registered before sending the next — not a
+    polling loop threaded through the wait (see this function's own
+    trailing comment on _STEP_SETTLE_S for why a denser, poll-throughout
+    shape actively broke this specific sequence).
+
+    Evidence for one attempt: sample the screen once right before sending
+    the key (`before`), send it, wait `settle_s` doing nothing but the
+    passive log poll (cheap and RPC-free — see `poll`'s call site comment),
+    then sample ONCE more (`after`). `after` differing from `before` is
+    treated as a real transition. Deliberately NOT a "sample twice more and
+    require them to agree" confirmation (an earlier version of this
+    function did that): several of these screens keep visibly changing on
+    their own for a few seconds after they first appear (e.g. the mission
+    briefing's own typewriter-style text reveal, or the customize screen's
+    background name-preview regeneration — both observed directly while
+    writing this test), so requiring two post-wait samples to match can
+    keep failing for as long as that settling continues, for reasons that
+    have nothing to do with whether the keypress itself landed. A single
+    before/after difference does not have that failure mode: any point
+    during or after such a reveal already differs from the PRIOR screen's
+    own signature. Any _screen_signature call returning None (a transient
+    RPC hiccup) makes the attempt inconclusive rather than a false verdict
+    either way — it just costs this attempt a retry.
+
+    Retries (resending the SAME key, up to max_attempts) are the safety
+    net for an actual dropped keypress — see _drive_quickplay's own nudge
+    loop comment for why resending is safe here too: every step's key is
+    that screen's own already-default-selected confirm action, so a
+    repeat lands on either the same screen (harmless no-op re-select) or,
+    if the first press actually landed and this drive's own evidence check
+    merely mistimed it, the next screen's own valid confirm input.
+
+    Raises an AssertionError naming the exact step description (not just
+    "navigation failed") if a step's screen never settles into a new state
+    after exhausting its retries, or if the overall walk runs past
+    overall_timeout — both point straight at the failing screen rather
+    than requiring a log dive.
+    """
+    overall_deadline = time.time() + overall_timeout
+    for key, desc in steps:
+        transitioned = False
+        for attempt in range(max_attempts):
+            if time.time() >= overall_deadline:
+                break
+            before = _screen_signature(simulator)
+            simulator.keypress(key)
+
+            settle_deadline = min(time.time() + settle_s, overall_deadline)
+            while time.time() < settle_deadline:
+                poll()
+                time.sleep(_POLL_INTERVAL_S)
+
+            after = _screen_signature(simulator)
+
+            if after is not None and after != before:
+                transitioned = True
+                break
+        assert transitioned, (
+            f"screen never settled into a new state after sending {key!r} "
+            f"for step {desc!r} ({max_attempts} attempts x {settle_s}s "
+            "each) — either this keypress was dropped every single time "
+            "(unlikely; see this function's own docstring) or C-Dogs' menu "
+            "layout at this exact screen has drifted from what this drive "
+            "expects (see _GAMEPLAY_KEY_STEPS' comment for the full "
+            "expected path)"
+        )
+
+
+# Knobs for the equip -> live-mission transition. Generous relative to
+# _STEP_SETTLE_S/_STEP_MAX_ATTEMPTS above on purpose — this is a
+# real engine reload under Unicorn emulation, not a dropped-keypress retry
+# (see _GAMEPLAY_KEY_STEPS' trailing comment). Task 2 observed 2-5 presses
+# of 'x', several seconds apart; these ceilings sit comfortably above that
+# with room for slower host load.
+_MISSION_START_ATTEMPT_TIMEOUT_S = 12.0
+_MISSION_START_MAX_ATTEMPTS = 10
+_MISSION_START_OVERALL_TIMEOUT_S = 120.0
+
+
+def _mission_started(gfx_stats):
+    """True once a GFXSTAT missionstart line (mission.c's own instrumentation
+    call, right after a mission actually begins — see this module's search
+    for "missionstart" in apps/cdogs/src/src/cdogs/mission.c) has been
+    observed."""
+    return any(s["tag"] == "missionstart" for s in gfx_stats)
+
+
+def _drive_to_mission_start(simulator, poll, stats,
+                             attempt_timeout=_MISSION_START_ATTEMPT_TIMEOUT_S,
+                             max_attempts=_MISSION_START_MAX_ATTEMPTS,
+                             overall_timeout=_MISSION_START_OVERALL_TIMEOUT_S):
+    """From the equip/weapon screen, press 'x' (repeated, spaced seconds
+    apart) until GFXSTAT reports tag=="missionstart" or the retry budget is
+    exhausted. Returns True once observed, False otherwise (the caller
+    asserts — kept a plain bool return here so the caller can attach its
+    own diagnostic-rich message using `stats`).
+
+    Gated on the missionstart log line itself, not on _screen_signature:
+    unlike every earlier step, the live mission's own screen keeps changing
+    on its own once reached (a moving player, an animated minimap), so a
+    signature-outside-baseline check would fire on ordinary gameplay motion
+    just as readily as on the equip->mission transition itself. The log
+    line is unambiguous: it is only ever emitted once, from mission.c's
+    MissionBegin(), right as m->state is set to MISSION_STATE_PLAY — that
+    specific event, not merely "some screen changed".
+    """
+    overall_deadline = time.time() + overall_timeout
+    for _ in range(max_attempts):
+        if time.time() >= overall_deadline:
+            break
+        if _mission_started(stats.get("GFXSTAT", [])):
+            return True
+        simulator.keypress("x")
+        step_deadline = min(time.time() + attempt_timeout, overall_deadline)
+        while time.time() < step_deadline:
+            poll()
+            if _mission_started(stats.get("GFXSTAT", [])):
+                return True
+            time.sleep(_POLL_INTERVAL_S)
+    return _mission_started(stats.get("GFXSTAT", []))
+
+
+def _seed_stream_state(existing_stats, names):
+    """Build the (seen, stats) pair _accumulate expects, pre-populated from
+    an already-collected {name: [stats...]} dict (e.g. cdogs_quickplay_stats'
+    return value) rather than starting empty.
+
+    Lets cdogs_gameplay_stats below continue accumulating into the SAME
+    logical stream cdogs_quickplay_stats already started (so callers see
+    the full boot-through-mission history in one list, in first-seen
+    order) without double-counting any line the earlier drive already
+    recorded — the returned `seen` set is seeded with every existing
+    entry's field-tuple, exactly what _accumulate itself would have
+    inserted had it recorded them.
+    """
+    seen = {}
+    stats = {}
+    for name in names:
+        entries = list(existing_stats.get(name, []))
+        stats[name] = entries
+        seen[name] = {tuple(sorted(e.items())) for e in entries}
+    return seen, stats
+
+
+@pytest.fixture(scope="module")
+def cdogs_gameplay_stats(cdogs_simulator, cdogs_quickplay_stats):
+    """Continue the shared C-Dogs drive past the main menu into a LIVE
+    MISSION and return the full HEAPSTAT+GFXSTAT history (boot through
+    mission start).
+
+    Depends on cdogs_quickplay_stats (not just cdogs_simulator) so pytest
+    instantiates that fixture's own drive first regardless of test
+    collection order — guaranteeing the app is already sitting at an
+    input-ready main menu (MENU_READY_MARKER already observed) before this
+    fixture sends a single keypress of its own. Reuses the SAME simulator
+    process and never calls launch_app again (it's already running).
+
+    Module-scoped like cdogs_simulator/cdogs_quickplay_stats: this is by
+    far the most expensive drive in this file (a real campaign/mission
+    load under Unicorn emulation on top of everything cdogs_quickplay_stats
+    already paid for), so it is driven exactly once and shared with every
+    test that needs gameplay-time evidence, matching this module's existing
+    "Fixture structure" rationale (see the module docstring).
+    """
+    streams = [("HEAPSTAT", parse_heapstats), ("GFXSTAT", parse_gfxstats)]
+    seen, stats = _seed_stream_state(cdogs_quickplay_stats,
+                                      [name for name, _ in streams])
+
+    def poll():
+        text = _combined_output(cdogs_simulator)
+        for name, parse_fn in streams:
+            _accumulate(text, parse_fn, seen[name], stats[name])
+        return text
+
+    _advance_through_screens(cdogs_simulator, poll, _GAMEPLAY_KEY_STEPS)
+    reached = _drive_to_mission_start(cdogs_simulator, poll, stats)
+    assert reached, (
+        "GFXSTAT missionstart never appeared after driving through the "
+        "equip screen (see _drive_to_mission_start's retry budget) — every "
+        "earlier menu step registered (see _advance_through_screens' own "
+        "per-step assertion, which would have failed first and named the "
+        "actual stuck screen if one of THOSE had dropped), so this points "
+        "at the equip->mission engine-reload transition specifically, not "
+        "a menu-layout drift"
+    )
+    # One last poll so the very last mission-time report (and any trailing
+    # noise — see test_quickplay_reaches_live_mission's KNOWN NOISE comment)
+    # that landed right at the deadline is captured before returning.
+    poll()
+    return stats
 
 
 def _peak_gfx_entry(gfx_stats):
@@ -888,7 +1287,7 @@ def test_sd_payload_excludes_non_runtime_sources():
     """
     data_dir = CDOGS_SRC / "data"
     if not data_dir.exists():
-        pytest.skip("apps/cdogs/data not prepared — run ./prepare_data.sh")
+        pytest.skip(f"{CDOGS_SRC}/data not prepared — run ./prepare_data.sh in the picos-cdogs checkout")
 
     offenders = []
     for pattern in EXCLUDED_PATTERNS:
@@ -1051,3 +1450,354 @@ def test_render_pipeline_saving(cdogs_quickplay_stats):
         "buffers reverted to ARGB8888; a much larger figure would mean a "
         "per-pic texture-duplication path came back."
     )
+
+
+# Floor for a single RenderPresent frame's `colored` pixel count (see
+# test_boot_loading_screen_is_not_blank). A fully blank/black loading-screen
+# frame reads colored=0 (the RGB565-zero-is-opaque-black regression this
+# test exists to catch — reproduced directly while writing this test: every
+# one of RenderPresent #1-#4 read colored=0/76800 with the SDL_CreateTexture
+# fix reverted). A healthy first frame measured on this simulator reads
+# colored=138/76800 (panel art + logo + "Loading graphics..." text). The
+# floor sits comfortably above the blank figure (0) and comfortably below
+# the healthy one (138), so it fails hard on a blank frame without being
+# brittle to small pixel-count drift from font/logo asset changes.
+BOOT_FRAME_COLORED_FLOOR = 40
+
+
+def test_boot_loading_screen_is_not_blank(cdogs_quickplay_stats):
+    """C-Dogs' boot loading screens actually draw content, not solid black.
+
+    Regression test for the Critical finding in the RGB565-conversion final
+    review: SDL_CreateTexture relied on calloc's zero fill for a fresh
+    texture's "nothing drawn yet" state. That was correct for ARGB8888
+    (0x00000000 is alpha=0, transparent) but wrong for RGB565, which has no
+    alpha channel — 0x0000 is opaque black, not transparent, and isn't
+    PICOS_RGB565_CKEY either. g->screen (grafx.c's window texture, created
+    with SDL_BLENDMODE_BLEND) was never written before the first
+    LoadingScreenDraw() call, so every one of C-Dogs' boot loading screens
+    (LoadingScreenDraw, cdogs_picos.c) rendered as solid black — both on
+    real hardware and in this simulator.
+
+    Nothing else in this module would have caught this: the GFXSTAT/
+    HEAPSTAT assertions above only see byte counts, not pixel content, and
+    a check anchored to the main menu (post MENU_READY_MARKER) would pass
+    regardless of this bug, because the menu loop redraws g->screen every
+    single frame — only the loading screens that run BEFORE the first real
+    draw are exposed to a stale/zeroed buffer.
+
+    This does NOT poll the display_stats RPC the way the reviewer's manual
+    verification did (see the module's RENDERPRESENT_RE comment for why):
+    an independent RPC poll during boot turned out to be unreliable for
+    this specific purpose — it can observe the PicOS launcher's own
+    leftover screen content from before C-Dogs ever presented a single
+    frame, which reads as "non-blank" no matter what C-Dogs itself does,
+    producing a false pass. Confirmed directly: an RPC-polling version of
+    this test, tried first, PASSED even with the SDL_CreateTexture fix
+    reverted. Parsing the RENDERPRESENT stream instead — the shim's own
+    pre-existing fprintf(stderr, ...) census of each of the first 8
+    presented frames, computed synchronously from the exact buffer just
+    presented — has no such gap. RenderPresent numbering starts fresh at
+    process start and only C-Dogs' own boot sequence (font load, 4x
+    LoadingScreenDraw, first main-menu frame) produces the first 8, so
+    every entry here is unambiguously one of C-Dogs' own frames.
+
+    Verified directly against both states of this fix while writing it:
+    stashing just the SDL_CreateTexture fix and rebuilding reproduced
+    colored=0/76800 for every one of RenderPresent #1-#4 (all 4 boot
+    loading screens); restoring the fix reproduced colored=138/76800 on
+    #1 — see final-review-fix-report.md for both raw pytest runs.
+    """
+    frames = cdogs_quickplay_stats.get("RENDERPRESENT", [])
+    assert frames, (
+        "no RenderPresent debug lines found in the log — either the "
+        "instrumentation in picos_sdl_impl.c's SDL_RenderPresent was "
+        "removed, or C-Dogs never presented a frame at all"
+    )
+
+    # Only the boot-time frames are relevant here — MainMenu's own frames
+    # (drawn continuously once the menu is up, and eligible to be numbered
+    # anywhere from #5 up to the #8 cap depending on exactly how many
+    # LoadingScreenDraw calls preceded them) legitimately have real content
+    # regardless of this bug, so including them would dilute (not corrupt,
+    # since max() is used below and a blank max only comes from an
+    # all-blank set — but still worth being precise) what this test is
+    # actually checking. cdogs_picos.c calls LoadingScreenDraw exactly 4
+    # times before "Entering main menu loop", so #1-#4 are guaranteed to
+    # all be loading-screen frames.
+    boot_frames = [f for f in frames if f["num"] <= 4]
+    assert boot_frames, (
+        f"no RenderPresent frames numbered <= 4 in {frames!r} — expected "
+        "C-Dogs' 4 boot-time LoadingScreenDraw calls to have presented "
+        "frames #1-#4"
+    )
+
+    max_colored = max(f["colored"] for f in boot_frames)
+    assert max_colored > BOOT_FRAME_COLORED_FLOOR, (
+        f"every one of C-Dogs' boot loading-screen frames "
+        f"({boot_frames!r}) peaked at only {max_colored} colored pixels "
+        f"(floor {BOOT_FRAME_COLORED_FLOOR}) — this is what a solid-black "
+        "loading screen looks like, exactly the "
+        "zeroed-RGB565-texture-reads-as-opaque-black regression this test "
+        "guards against"
+    )
+
+
+# Stage 2C (pic pixel formats) ceilings, derived analytically rather than
+# pinned to one run's resident-pic set (see module docstring's "Amendment
+# C" precedent in test_textures_borrow_rather_than_duplicate: bytes-per-pic
+# was removed as a gate for exactly this reason — it isn't comparable
+# across a change that alters which assets load, since a resident set
+# skewed toward smaller or larger pics moves that ratio independently of
+# any format change at all; confirmed directly while writing this test —
+# an earlier draft estimated bytes/pic from a fixed average px/pic and it
+# was off by ~8x against this simulator's own actual resident set). The
+# one figure that stays meaningful regardless of which pics are resident
+# is an ABSOLUTE ceiling tied to the fixed, sourced total-pixel count of
+# the entire asset tree (2,412,051 px over 1683 files — see the stage
+# plan's "Format split" table) rather than to any particular subset of
+# it: `data` can never exceed what loading literally every file would
+# cost, no matter how many (or which) pics the reserve guard actually
+# admits in a given run/platform.
+FULL_ASSET_TREE_PIXELS = 2_412_051
+# 2 B/px (RGB565/LA8) for the full tree, +73_000 B ceiling for style pics'
+# packed 2-bit channel maps (plan's own estimate), +10% slack for the
+# Amendment B ARGB8888 stragglers (21 mixed chars/ files, "a few hundred
+# KB" per the plan) and any other per-pic struct overhead. A regression
+# that reverted a meaningful fraction of the tree to ARGB8888 (4 B/px)
+# would push data toward ~9.6M — comfortably clear of this ceiling even
+# with its slack.
+STAGE2C_DATA_CEILING_BYTES = int((FULL_ASSET_TREE_PIXELS * 2 + 73_000) * 1.10)
+
+# Pre-2C simulator baseline (recorded 2026-07-22, same quick-play drive,
+# prior submodule revision): pics=1173 data=1,214,938 skipped=1441 at the
+# equivalent "picmanagerload" report. Stage 2C's whole point is that
+# halving per-pixel storage lets the heap-reserve guard (utils.c's
+# IMG_LOAD_HEAP_RESERVE) admit a larger resident set for the same budget —
+# pics-resident should rise and skipped should fall relative to that
+# baseline. Directional only (not exact figures): the guard's admission
+# order depends on host filesystem enumeration order, which is not the
+# same across environments (see parse_charsfmt's docstring) — even the
+# post-2C simulator figure measured while writing this retune (pics=1960,
+# skipped=631) differs substantially from the post-2C device figure at the
+# analogous point (pics=1421, skipped=1438), so only the sign of the
+# change is asserted here, not a tight band.
+PRE_2C_SIM_PICS_RESIDENT = 1173
+PRE_2C_SIM_SKIPPED = 1441
+
+
+def test_gfxstat_data_bounded_by_2byte_full_tree_cost(cdogs_quickplay_stats):
+    """Resident pic data can never exceed what loading the ENTIRE asset
+    tree at Stage 2C's 2-byte formats would cost (Stage 2C direction gate).
+
+    Deliberately an absolute ceiling, not a ratio against pics-resident:
+    bytes-per-pic and bytes-per-estimated-pixel were both tried while
+    writing this test and both are resident-set-composition-dependent
+    (see STAGE2C_DATA_CEILING_BYTES's comment and the retired data/pics
+    gate in test_textures_borrow_rather_than_duplicate) — a subset
+    skewed toward smaller or larger pics shifts either ratio with no
+    format regression involved at all. Tying the ceiling instead to the
+    FULL, fixed asset tree's total pixel count sidesteps that: `data` is
+    bounded above by "every file, at 2 B/px" regardless of which/how many
+    of those files the reserve guard actually admits in any given run.
+    `data` is g_picos_pic_data_bytes (pic.c's PicPxBytes-sized accounting,
+    not g_picos_pic_tex_bytes — textures borrow Pic->Data per Stage 1, see
+    test_textures_borrow_rather_than_duplicate, so tex is deliberately
+    excluded here).
+    """
+    peak = _peak_gfx_entry(cdogs_quickplay_stats["GFXSTAT"])
+    assert peak["pics"] > 0, "no pics counted; accounting is broken"
+
+    assert peak["data"] <= STAGE2C_DATA_CEILING_BYTES, (
+        f"resident pic data ({peak['data']} B over {peak['pics']} pics) "
+        f"exceeds {STAGE2C_DATA_CEILING_BYTES} B — the cost of loading "
+        f"the ENTIRE {FULL_ASSET_TREE_PIXELS}-pixel asset tree at Stage "
+        "2C's 2-byte formats, with slack for channel maps and the "
+        "Amendment B ARGB8888 stragglers. A subset of that tree costing "
+        "MORE than the whole tree would at 2 B/px means pic storage is "
+        "not actually 2 bytes/pixel any more"
+    )
+
+
+def test_gfxstat_resident_set_grows_as_skips_shrink(cdogs_quickplay_stats):
+    """Stage 2C's actual payoff: halved per-pixel bytes let more distinct
+    pics fit the same heap-reserve budget (utils.c's IMG_LOAD_HEAP_RESERVE),
+    so pics-resident should rise and skipped-by-guard should fall relative
+    to the pre-2C baseline. Directional only — see PRE_2C_SIM_PICS_RESIDENT/
+    PRE_2C_SIM_SKIPPED for why an exact figure isn't asserted.
+    """
+    peak = _peak_gfx_entry(cdogs_quickplay_stats["GFXSTAT"])
+
+    assert peak["pics"] > PRE_2C_SIM_PICS_RESIDENT, (
+        f"pics-resident ({peak['pics']}) did not rise above the pre-2C "
+        f"baseline ({PRE_2C_SIM_PICS_RESIDENT}) — Stage 2C's halved "
+        "per-pixel storage should let the heap-reserve guard admit "
+        "strictly more pics for the same budget"
+    )
+    assert peak["skipped"] < PRE_2C_SIM_SKIPPED, (
+        f"skipped ({peak['skipped']}) did not fall below the pre-2C "
+        f"baseline ({PRE_2C_SIM_SKIPPED}) — Stage 2C's halved per-pixel "
+        "storage should leave more reserve headroom, so the guard should "
+        "reject strictly fewer images than before"
+    )
+
+
+def test_charsfmt_line_is_well_formed(cdogs_quickplay_stats):
+    """CHARSFMT instrumentation (Stage 2C, Amendment B) is wired up and its
+    three counters are internally consistent, without pinning any of them
+    to a specific value.
+
+    Deliberately loose, per this stage's own risk notes: which of la8/
+    rgb565/argb8888 end up non-zero is load-order-dependent (the
+    heap-reserve guard can reject an entire category — e.g. all of
+    chars/ — before any of its pics reach the classifier, if enough
+    reserve budget was already spent on categories scanned first), and
+    scan order itself differs between this simulator (host filesystem
+    enumeration order) and real hardware (FatFS/SD cluster order).
+    Verified directly while writing this test: this simulator's own
+    quick-play drive reports la8=0 rgb565=0 argb8888=0 (chars/ pics
+    entirely skipped by the guard before campaign load frees anything),
+    while a same-day hardware run of the equivalent report reads
+    la8=435 rgb565=10 argb8888=0. Asserting la8 > 0 here would fail on
+    this simulator for a reason that has nothing to do with whether
+    Stage 2C's chars/ format classification is correct — that correctness
+    is what the code-review/hardware-panel-color checks are for, not this
+    log-line gate. What CAN be asserted regardless of load order: the line
+    exists at all (the instrumentation itself is wired up and reachable),
+    every field is a non-negative count, and the tri-state classification
+    is mutually exclusive by construction (Amendment B's PicLoad — see
+    pic.c's PicLoadClassifyCharsFormat — increments exactly one of the
+    three counters per classified chars/ pic, never more than one), so
+    their sum can never be negative and each individually bounds the total.
+    """
+    lines = cdogs_quickplay_stats.get("CHARSFMT", [])
+    assert lines, (
+        "no CHARSFMT line found in the log — either picos_charsfmt_report "
+        "(stubs.c) was removed, or its call site right after picos_main's "
+        "own directory scan (cdogs_picos.c, not PicManagerLoad in "
+        "pic_manager.c — see parse_charsfmt's docstring) never ran"
+    )
+
+    entry = lines[-1]
+    for field in ("la8", "rgb565", "argb8888"):
+        assert entry[field] >= 0, (
+            f"CHARSFMT {field}={entry[field]} is negative — counter "
+            "underflow in pic.c's PicLoadClassifyCharsFormat bookkeeping"
+        )
+
+
+# KNOWN non-fatal noise on the equip->mission transition (input-injection
+# reliability plan, Task 3; first discovered by Task 2's own manual/scripted
+# verification — see task-inj-2-report.md's "Concerns" section, and
+# reproduced a third time, byte-for-byte at the same SP addresses, while
+# writing this test): up to two "[UNICORN] MEM_ERROR: WRITE unmapped" lines
+# and one "HEAP EXHAUSTED" line can appear during mission-engine load. Both
+# are the FIRST-EVER automated drive to exercise this code path (per project
+# memory, no prior automation reached gameplay at all) hitting a pre-existing
+# condition, not something this test or the input-injection fixes introduced:
+# HEAP EXHAUSTED is stubs.c's _sbrk() logging a bounded-heap allocation
+# failure through the same graceful ENOMEM path the reserve-guard/`skipped`
+# counter mechanism already exercises elsewhere in this module, and
+# MEM_ERROR is a Unicorn-emulation-level trap, not a HardFault — get_crash_log
+# returned None after every verification run. Root-causing exactly which
+# large-local-frame function traps is tracked as follow-on work, not this
+# task; this is deliberately just a comment, not a constant any assertion
+# below gates on — see test_quickplay_reaches_live_mission's own docstring
+# for why neither line's presence nor absence is asserted on.
+
+
+# Quarantined (2026-09-24): the gameplay drive (cdogs_gameplay_stats) takes
+# ~50 s and fails about 1 run in 5 even alone — "screen never settled ...
+# for step 'customize \"Done\" -> continue/level-select menu'" — with a
+# healthy simulator (no crash, no sanitizer output). The cause is the
+# screen-signature heuristic in _advance_through_screens (it infers a
+# dropped key from a display_stats change within 3 s), not PicOS. Fix: drive
+# the steps on input_seq consumption (wait_input_consumed) plus an in-app
+# marker per screen instead of screen signatures. The per-test timeout is
+# raised because the drive alone is close to the suite's 60 s default.
+@pytest.mark.flaky(reason="C-Dogs gameplay drive: screen-signature step "
+                          "detection misses ~1 in 5 runs")
+@pytest.mark.timeout(300)
+def test_quickplay_reaches_live_mission(cdogs_simulator, cdogs_gameplay_stats):
+    """The full quick-play drive (input-injection reliability plan, Task 3)
+    now reaches ACTUAL gameplay, not just a loaded campaign menu — this is
+    the plan's payoff gate, and the first automated test in this module (or,
+    per project memory, in this repo at all) to exercise anything past the
+    main-menu/campaign-selection screens.
+
+    Three independent things this asserts, each individually meaningful:
+
+    1. A GFXSTAT missionstart line was observed at all — direct proof
+       mission.c's MissionBegin() actually ran (see _mission_started),
+       not merely that some screen looked different.
+    2. Mission-time pics is strictly greater than the boot-time
+       (picmanagerload) pics count from the SAME run — proof the mission
+       load actually resulted in MORE resident graphics than a plain boot
+       does (mission-specific tile/sprite art), not just that the tag
+       string matched.
+    3. (Checked by test_gameplay_drive_did_not_crash, which is not
+       quarantined.) No HardFault and no crash log — the simulator process is still
+       alive and healthy after reaching gameplay, not merely that one log
+       line happened to appear before it died.
+
+    Deliberately does NOT assert, either way, on the up-to-two
+    "[UNICORN] MEM_ERROR: WRITE unmapped" lines or the one "HEAP EXHAUSTED"
+    line that can appear during mission-engine load (see the comment right
+    above this function) — asserting on either would make this test flaky
+    for a reason that has nothing to do with input injection reliability,
+    the actual subject of this plan.
+    """
+    gfx = cdogs_gameplay_stats["GFXSTAT"]
+
+    mission_entries = [s for s in gfx if s["tag"] == "missionstart"]
+    assert mission_entries, (
+        "no GFXSTAT missionstart line observed — the drive reached the "
+        "equip screen (see cdogs_gameplay_stats' own assertion, which "
+        "would have failed first and pointed at the exact stuck screen "
+        "otherwise) but the mission itself never actually started"
+    )
+
+    boot_entries = [s for s in gfx if s["tag"] == "picmanagerload"]
+    assert boot_entries, (
+        "no boot-time picmanagerload GFXSTAT line observed — needed as "
+        "this run's own baseline for the mission-pics growth check below"
+    )
+    boot_pics = boot_entries[0]["pics"]
+    mission_pics = mission_entries[-1]["pics"]
+    assert mission_pics > boot_pics, (
+        f"mission-time pics ({mission_pics}) did not exceed this run's own "
+        f"boot-time pics ({boot_pics}) — a live mission should always load "
+        "at least some mission-specific tile/sprite art on top of the "
+        "boot-time menu/UI set"
+    )
+
+    # The crash checks (point 3) live in test_gameplay_drive_did_not_crash,
+    # which is NOT quarantined: a crash must fail the run even when this
+    # flaky drive's own assertions are forgiven.
+
+
+@pytest.fixture(scope="module")
+def cdogs_drive_attempted(request, cdogs_simulator):
+    """Run (or reuse) the gameplay drive, tolerating its known step-detection
+    flake, so the crash checks below always see the simulator after it."""
+    try:
+        request.getfixturevalue("cdogs_gameplay_stats")
+    except Exception:  # the flaky drive failed; the crash check still runs
+        pass
+    return cdogs_simulator
+
+
+@pytest.mark.timeout(300)
+def test_gameplay_drive_did_not_crash(cdogs_drive_attempted):
+    """Not quarantined: after the gameplay drive (whether or not its flaky
+    screen detection reached a live mission) the simulator must have no
+    HardFault text, no crash log and no sanitizer report."""
+    sim = cdogs_drive_attempted
+    combined = _combined_output(sim)
+    assert "HardFault" not in combined, (
+        "'HardFault' text found in the simulator's own output during the "
+        "gameplay drive:\n" + combined[-2000:]
+    )
+    problems = sim.health_problems()
+    assert not problems, (
+        "C-Dogs simulator unhealthy after the gameplay drive:\n" + "\n".join(problems))

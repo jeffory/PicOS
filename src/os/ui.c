@@ -261,6 +261,11 @@ bool ui_text_input(const char *prompt, const char *default_val,
                     hint, DLG_DIM, DLG_BG);
   display_flush();
 
+  // Start from a clean keyboard: edges gathered by sys.sleep's background
+  // polls, or injections queued before this modal opened, were not typed
+  // at this dialog and must not accept/cancel it.
+  kbd_clear_state();
+
   // Input buffer
   const int MAX_CHARS = 127;
   char buf[128] = "";
@@ -316,9 +321,17 @@ bool ui_text_input(const char *prompt, const char *default_val,
   return accepted;
 }
 
+#define UI_CONFIRM_GRACE_MS 400u
+
 // ── ui_confirm ────────────────────────────────────────────────────────────────
 
 bool ui_confirm(const char *message) {
+  // Only input typed at THIS dialog may answer it.  Keys queued while the
+  // app was not polling (still in the STM32 FIFO, or decoded by sys.sleep's
+  // background polls) or injected earlier are discarded, input during a short grace
+  // period is ignored, and Enter must be a fresh press edge after it — so
+  // an app cannot pre-load a "yes" (sys.applyUpdate relies on this).
+  kbd_discard_pending();
   // Measure how many lines the message needs (up to 2)
   const int COLS = (DLG_W - 20) / 6;
   int msg_len = message ? strlen(message) : 0;
@@ -327,6 +340,11 @@ bool ui_confirm(const char *message) {
 
   const int DH = 44 + lines * 12 + 18; // border + text lines + hint
   const int DY = (FB_HEIGHT - DH) / 2;
+
+  // OS modals draw full-screen even if the app set a clip rect.
+  int saved_cx, saved_cy, saved_cw, saved_ch;
+  display_get_clip_rect(&saved_cx, &saved_cy, &saved_cw, &saved_ch);
+  display_clear_clip_rect();
 
   display_darken();
   display_fill_rect(DLG_X, DY, DLG_W, DH, DLG_BG);
@@ -341,16 +359,28 @@ bool ui_confirm(const char *message) {
                     hint, DLG_DIM, DLG_BG);
   display_flush();
 
+  const uint32_t shown_ms = to_ms_since_boot(get_absolute_time());
+  bool armed = false;  // grace over and Enter seen released
   while (true) {
     kbd_poll();
     dev_commands_poll();
     dev_commands_process();
     // Let a dev "exit" unwind this modal (cancel; the Lua hook handles exit).
-    if (dev_commands_wants_exit()) return false;
+    if (dev_commands_wants_exit()) { display_set_clip_rect(saved_cx, saved_cy, saved_cw, saved_ch); return false; }
     uint32_t btns = kbd_get_buttons_pressed();
     char c        = kbd_get_char();
-    if (btns & BTN_ESC || c == 'n' || c == 'N') return false;
-    if (c == '\n'       || c == 'y' || c == 'Y') return true;
+    if (!armed) {
+      // Consume (and ignore) everything until the grace period is over and
+      // Enter is up, so a held or queued Enter cannot count.
+      uint32_t now = to_ms_since_boot(get_absolute_time());
+      armed = (now - shown_ms >= UI_CONFIRM_GRACE_MS) &&
+              !(kbd_get_buttons() & BTN_ENTER);
+      watchdog_update();
+      sleep_ms(20);
+      continue;
+    }
+    if (btns & BTN_ESC || c == 'n' || c == 'N') { display_set_clip_rect(saved_cx, saved_cy, saved_cw, saved_ch); return false; }
+    if ((btns & BTN_ENTER) || c == 'y' || c == 'Y') { display_set_clip_rect(saved_cx, saved_cy, saved_cw, saved_ch); return true; }
     watchdog_update();
     sleep_ms(20);
   }

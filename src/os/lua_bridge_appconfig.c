@@ -1,20 +1,27 @@
 #include "lua_bridge_internal.h"
+#include "app_identity.h"
+
+// Per-app store: always the running app's own /data/<id>/config.json.  The id
+// comes from app_identity (C), never from the APP_ID global, and the store is
+// re-bound whenever it holds another id (app_identity unbinds it at every app
+// start and exit), so app B never reads or saves app A's config.
+static bool bind_current_app(void) {
+    const app_identity_t *me = app_identity_current();
+    if (!me)
+        return false;
+    const char *bound = g_api.appconfig->getAppId();
+    if (!bound || strcmp(bound, me->id) != 0)
+        g_api.appconfig->load(me->id);  // false = no file yet; still bound
+    return true;
+}
 
 static int l_config_get(lua_State *L) {
     const char *key = luaL_checkstring(L, 1);
     const char *fallback = lua_isnoneornil(L, 2) ? NULL : luaL_optstring(L, 2, NULL);
 
-    if (!g_api.appconfig->getAppId()) {
-        lua_getglobal(L, "APP_ID");
-        const char *app_id = lua_tostring(L, -1);
-        lua_pop(L, 1);
-
-        if (app_id && app_id[0]) {
-            g_api.appconfig->load(app_id);
-        } else {
-            lua_pushnil(L);
-            return 1;
-        }
+    if (!bind_current_app()) {
+        lua_pushnil(L);
+        return 1;
     }
 
     const char *val = g_api.appconfig->get(key, fallback);
@@ -29,16 +36,8 @@ static int l_config_set(lua_State *L) {
     const char *key = luaL_checkstring(L, 1);
     const char *val = lua_isnoneornil(L, 2) ? NULL : luaL_checkstring(L, 2);
 
-    if (!g_api.appconfig->getAppId()) {
-        lua_getglobal(L, "APP_ID");
-        const char *app_id = lua_tostring(L, -1);
-        lua_pop(L, 1);
-
-        if (!app_id || !app_id[0]) {
-            return 0;
-        }
-        g_api.appconfig->load(app_id);
-    }
+    if (!bind_current_app())
+        return 0;
 
     if (val)
         g_api.appconfig->set(key, val);
@@ -48,36 +47,26 @@ static int l_config_set(lua_State *L) {
 }
 
 static int l_config_save(lua_State *L) {
-    (void)L;
-    bool ok = g_api.appconfig->save();
-    lua_pushboolean(L, ok);
+    lua_pushboolean(L, bind_current_app() && g_api.appconfig->save());
     return 1;
 }
 
 static int l_config_clear(lua_State *L) {
     (void)L;
-    g_api.appconfig->clear();
+    if (bind_current_app())
+        g_api.appconfig->clear();
     return 0;
 }
 
 static int l_config_reset(lua_State *L) {
-    (void)L;
-    lua_pushboolean(L, g_api.appconfig->reset());
+    lua_pushboolean(L, bind_current_app() && g_api.appconfig->reset());
     return 1;
 }
 
+// Explicit reload from disk (drops unsaved changes).
 static int l_config_load(lua_State *L) {
-    (void)L;
-    lua_getglobal(L, "APP_ID");
-    const char *app_id = lua_tostring(L, -1);
-    lua_pop(L, 1);
-
-    if (!app_id || !app_id[0]) {
-        lua_pushboolean(L, false);
-        return 1;
-    }
-
-    lua_pushboolean(L, g_api.appconfig->load(app_id));
+    const app_identity_t *me = app_identity_current();
+    lua_pushboolean(L, me && g_api.appconfig->load(me->id));
     return 1;
 }
 
@@ -92,5 +81,9 @@ static const luaL_Reg l_config_lib[] = {
 };
 
 void lua_bridge_appconfig_init(lua_State *L) {
+    // Per-app config (/data/<APP_ID>/config.json). Registered twice:
+    // "config" is the historical name, "appconfig" matches the C API
+    // (g_api.appconfig) and the docs. Both names alias the same store.
     register_subtable(L, "config", l_config_lib);
+    register_subtable(L, "appconfig", l_config_lib);
 }

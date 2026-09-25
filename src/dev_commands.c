@@ -1,9 +1,13 @@
 #include "dev_commands.h"
+#include "dev_ops.h"
 #include "drivers/display.h"
 #include "drivers/keyboard.h"
 #include "drivers/mp3_player.h"
 #include "drivers/pio_psram.h"
 #include "drivers/sdcard.h"
+#include "drivers/wifi.h"
+#include "os/launcher.h"
+#include "os/app_stack.h"
 #include "os/os.h"
 #include "tusb.h"
 #include "pico/stdlib.h"
@@ -13,7 +17,8 @@
 #include <stdlib.h>
 #include <stdint.h>
 
-#define CMD_BUF_SIZE 64
+// Sized for two absolute SD paths on one line (e.g. "unzip <zip> <dest>").
+#define CMD_BUF_SIZE 300
 
 static char s_cmd_buf[CMD_BUF_SIZE];
 static size_t s_cmd_len = 0;
@@ -23,6 +28,7 @@ static bool s_cmd_exit = false;
 static bool s_cmd_usb = false;
 static bool s_cmd_reboot = false;
 static bool s_cmd_reboot_flash = false;
+static bool s_cmd_reboot_ota = false;
 static bool s_cmd_list = false;
 static const char* s_pending_launch = NULL;
 
@@ -46,6 +52,16 @@ static uint8_t s_b64_writebuf[B64_WRITE_BUF_SIZE];
 static uint32_t s_b64_writelen = 0;
 static uint32_t s_b64_hash = 2166136261u; // FNV-1a running hash
 static uint64_t s_b64_last_rx_us = 0;
+
+// True while a bulk transfer is streaming over serial.  Core 1's log sink
+// (wifi.c) checks this and drops its output: an async log line landing
+// mid-payload-line defeats the '~' line framing and corrupts the transfer.
+// volatile: written on Core 0, read on Core 1.
+static volatile bool s_transfer_quiet = false;
+
+bool dev_commands_transfer_active(void) {
+    return s_transfer_quiet;
+}
 
 // FNV-1a 32-bit — cheap integrity check for serial transfers (not
 // cryptographic; OTA does its own SHA-256 before touching flash).
@@ -120,6 +136,7 @@ void dev_commands_init(void) {
     s_cmd_usb = false;
     s_cmd_reboot = false;
     s_cmd_reboot_flash = false;
+    s_cmd_reboot_ota = false;
     s_cmd_list = false;
     s_pending_launch = NULL;
     s_file_recv_handle = NULL;
@@ -128,6 +145,7 @@ void dev_commands_init(void) {
     s_b64_recv_active = false;
     s_b64_group_len = 0;
     s_b64_writelen = 0;
+    s_transfer_quiet = false;
 }
 
 const char* dev_commands_get_device(void) {
@@ -159,6 +177,7 @@ void dev_commands_poll(void) {
                 printf("[DEV] Error writing file\n");
                 sdcard_fclose(s_file_recv_handle);
                 s_file_recv_handle = NULL;
+                s_transfer_quiet = false;
                 return;
             }
             s_file_recv_received += written;
@@ -166,12 +185,14 @@ void dev_commands_poll(void) {
         if (s_file_recv_received >= s_file_recv_expected) {
             sdcard_fclose(s_file_recv_handle);
             s_file_recv_handle = NULL;
+            s_transfer_quiet = false;
             printf("[DEV] File received: %s (%lu bytes)\n", s_file_recv_path, (unsigned long)s_file_recv_received);
         } else if (time_us_64() - s_b64_last_rx_us > B64_RECV_TIMEOUT_US) {
             // Stalled CDC transfer (e.g. host went away): abort so the console
             // does not stay captured in receive mode forever.
             sdcard_fclose(s_file_recv_handle);
             s_file_recv_handle = NULL;
+            s_transfer_quiet = false;
             printf("[DEV] Error: put timed out at %lu/%lu bytes\n",
                    (unsigned long)s_file_recv_received,
                    (unsigned long)s_file_recv_expected);
@@ -234,6 +255,7 @@ static void b64_recv_abort(const char *why) {
         s_file_recv_handle = NULL;
     }
     s_b64_recv_active = false;
+    s_transfer_quiet = false;
     printf("[DEV] Error: b64 receive aborted (%s) at %lu/%lu bytes\n",
            why, (unsigned long)s_file_recv_received,
            (unsigned long)s_file_recv_expected);
@@ -265,6 +287,7 @@ static void b64_recv_char(int c) {
                 sdcard_fclose(s_file_recv_handle);
                 s_file_recv_handle = NULL;
                 s_b64_recv_active = false;
+                s_transfer_quiet = false;
                 printf("[DEV] File received: %s (%lu bytes) fnv1a=%08lx\n",
                        s_file_recv_path, (unsigned long)s_file_recv_received,
                        (unsigned long)s_b64_hash);
@@ -330,8 +353,11 @@ void dev_commands_send_screenshot(void) {
     // Flush stdio so our raw CDC writes don't interleave with printf output
     stdio_flush();
 
-    if (!cdc_write_all(header, sizeof(header)) ||
-        !cdc_write_all((const uint8_t *)fb, FB_WIDTH * FB_HEIGHT * sizeof(uint16_t)))
+    s_transfer_quiet = true;
+    bool ok = cdc_write_all(header, sizeof(header)) &&
+              cdc_write_all((const uint8_t *)fb, FB_WIDTH * FB_HEIGHT * sizeof(uint16_t));
+    s_transfer_quiet = false;
+    if (!ok)
         printf("[DEV] Error: CDC write stalled\n");
 }
 
@@ -365,6 +391,7 @@ static void dev_send_file_b64(const char *path) {
         printf("[DEV] Failed to open file: %s\n", path);
         return;
     }
+    s_transfer_quiet = true;
     int size = sdcard_fsize_handle(f);
     printf("[DEV] B64 size=%d\n", size);
     uint8_t buf[B64_LINE_RAW * 4];
@@ -374,25 +401,74 @@ static void dev_send_file_b64(const char *path) {
         hash = b64_send_buf(buf, (uint32_t)nread, hash);
     sdcard_fclose(f);
     printf("[DEV] B64_END fnv1a=%08lx path=%s\n", (unsigned long)hash, path);
+    s_transfer_quiet = false;
 }
 
-bool dev_commands_process(void) {
-    if (!s_cmd_ready) return false;
-
+// Executes the line in s_cmd_buf. Runs on an app stack (see
+// dev_commands_process): the file commands below reach FatFs and miniz,
+// whose frames do not fit the 4 KB main stack.
+static void dev_command_run(void *arg) {
+    (void)arg;
     printf("[DEV] Command: %s\n", s_cmd_buf);
 
     if (strcmp(s_cmd_buf, "ping") == 0) {
         printf("[DEV] pong\n");
+    } else if (strcmp(s_cmd_buf, "stack") == 0) {
+        // Peak use of Core 0's 4 KB main stack since boot, and of the app
+        // runtime's PSP stack since launch (when an app is running).
+        printf("[DEV] Stack: msp_peak=%lu msp_size=%lu core1_peak=%lu "
+               "core1_size=%lu",
+               (unsigned long)app_stack_msp_high_water(),
+               (unsigned long)PICO_STACK_SIZE,
+               (unsigned long)app_stack_core1_high_water(),
+               (unsigned long)app_stack_core1_size());
+        // At the launcher this command itself runs on the OS command stack;
+        // report the app runtime's stack only while an app owns the PSP.
+        uint8_t *base = g_app_stack_base;
+        uint32_t size = g_app_stack_size;
+        if (base && g_app_stack_owner != APP_STACK_OS)
+            printf(" app=%s app_peak=%lu app_size=%lu",
+                   g_app_stack_owner == APP_STACK_LUA ? "lua" : "native",
+                   (unsigned long)app_stack_high_water(base, size),
+                   (unsigned long)size);
+        // Peak of the last launcher-side command on the OS command stack.
+        printf(" os_cmd_peak=%lu os_cmd_size=%lu\n",
+               (unsigned long)app_stack_os_last_peak(),
+               (unsigned long)APP_STACK_OS_SIZE);
     } else if (strcmp(s_cmd_buf, "ver") == 0) {
         printf("[DEV] PicOS build %s %s\n", __DATE__, __TIME__);
+    } else if (strcmp(s_cmd_buf, "status") == 0) {
+        static const char *wifi_names[] = {
+            "disconnected", "connecting", "connected", "failed", "online"};
+        wifi_status_t ws = wifi_get_status();
+        const char *wifi_str =
+            (ws <= WIFI_STATUS_ONLINE) ? wifi_names[ws] : "?";
+        const char *app = launcher_get_running_app_name();
+        printf("[DEV] Status: app=%s app_uptime_ms=%lu uptime_ms=%lu "
+               "wifi=%s sd=%s battery=%d\n",
+               (app && app[0]) ? app : "launcher",
+               (unsigned long)launcher_get_app_uptime_ms(),
+               (unsigned long)to_ms_since_boot(get_absolute_time()),
+               wifi_str,
+               sdcard_is_mounted() ? "mounted" : "absent",
+               kbd_get_battery_percent());
     } else if (strcmp(s_cmd_buf, "exit") == 0) {
-        s_cmd_exit = true;
+        char reply[DEV_OP_REPLY_MAX];
+        dev_op_exit(reply, sizeof(reply));
+        printf("[DEV] %s\n", reply);
     } else if (strcmp(s_cmd_buf, "usb") == 0) {
         s_cmd_usb = true;
+        printf("[DEV] USB MSC mode starting (USB re-enumerates; serial drops until exit)\n");
     } else if (strcmp(s_cmd_buf, "reboot") == 0) {
         s_cmd_reboot = true;
     } else if (strcmp(s_cmd_buf, "reboot-flash") == 0) {
         s_cmd_reboot_flash = true;
+    } else if (strcmp(s_cmd_buf, "reboot-ota") == 0) {
+        // Apply a staged /system/update.bin (+ .sha256/.sig): the launcher
+        // sets the OTA request token and reboots.  While an app runs it is
+        // dropped (lua_bridge / native sys_poll clear it), not deferred.
+        s_cmd_reboot_ota = true;
+        printf("[DEV] reboot-ota requested\n");
     } else if (strncmp(s_cmd_buf, "launch ", 7) == 0) {
         s_pending_launch = s_cmd_buf + 7;
         s_cmd_exit = true;  // Exit current app first
@@ -436,9 +512,7 @@ bool dev_commands_process(void) {
                 ch = key[0];
             } else {
                 printf("[DEV] Unknown key: %s\n", key);
-                s_cmd_buf[0] = '\0';
-                s_cmd_ready = false;
-                return true;
+                return;
             }
         }
 
@@ -461,22 +535,19 @@ bool dev_commands_process(void) {
         }
         if (size == 0 || strlen(args) == 0) {
             printf("[DEV] Usage: put <path> <size>\n");
-            s_cmd_buf[0] = '\0';
-            s_cmd_ready = false;
-            return true;
+            return;
         }
         strncpy(s_file_recv_path, args, sizeof(s_file_recv_path) - 1);
         s_file_recv_path[sizeof(s_file_recv_path) - 1] = '\0';
         s_file_recv_handle = sdcard_fopen(s_file_recv_path, "wb");
         if (!s_file_recv_handle) {
             printf("[DEV] Failed to open file for writing: %s\n", args);
-            s_cmd_buf[0] = '\0';
-            s_cmd_ready = false;
-            return true;
+            return;
         }
         s_file_recv_expected = size;
         s_file_recv_received = 0;
         s_b64_last_rx_us = time_us_64();
+        s_transfer_quiet = true;
         printf("[DEV] Ready to receive %lu bytes for %s\n", (unsigned long)size, args);
     } else if (strncmp(s_cmd_buf, "putb64 ", 7) == 0) {
         char *args = s_cmd_buf + 7;
@@ -488,18 +559,14 @@ bool dev_commands_process(void) {
         }
         if (size == 0 || strlen(args) == 0) {
             printf("[DEV] Usage: putb64 <path> <raw_size>\n");
-            s_cmd_buf[0] = '\0';
-            s_cmd_ready = false;
-            return true;
+            return;
         }
         strncpy(s_file_recv_path, args, sizeof(s_file_recv_path) - 1);
         s_file_recv_path[sizeof(s_file_recv_path) - 1] = '\0';
         s_file_recv_handle = sdcard_fopen(s_file_recv_path, "wb");
         if (!s_file_recv_handle) {
             printf("[DEV] Failed to open file for writing: %s\n", args);
-            s_cmd_buf[0] = '\0';
-            s_cmd_ready = false;
-            return true;
+            return;
         }
         s_file_recv_expected = size;
         s_file_recv_received = 0;
@@ -508,15 +575,18 @@ bool dev_commands_process(void) {
         s_b64_writelen = 0;
         s_b64_hash = 2166136261u;
         s_b64_last_rx_us = time_us_64();
+        s_transfer_quiet = true;
         printf("[DEV] Ready B64 %lu bytes for %s (chunk<=%u raw, newline-terminated, await ACK)\n",
                (unsigned long)size, args, (unsigned)B64_WRITE_BUF_SIZE);
     } else if (strncmp(s_cmd_buf, "getb64 ", 7) == 0) {
         dev_send_file_b64(s_cmd_buf + 7);
     } else if (strcmp(s_cmd_buf, "screenshot64") == 0) {
         const uint8_t *fb = (const uint8_t *)display_get_screen_buffer();
+        s_transfer_quiet = true;
         printf("[DEV] SCRN64 w=%u h=%u fmt=565\n", (unsigned)FB_WIDTH, (unsigned)FB_HEIGHT);
         uint32_t hash = b64_send_buf(fb, FB_WIDTH * FB_HEIGHT * 2u, 2166136261u);
         printf("[DEV] SCRN64_END fnv1a=%08lx\n", (unsigned long)hash);
+        s_transfer_quiet = false;
     } else if (strcmp(s_cmd_buf, "crashlog") == 0) {
         sdfile_t f = sdcard_fopen("/system/crashlog.txt", "rb");
         if (!f) {
@@ -540,27 +610,22 @@ bool dev_commands_process(void) {
         const char *path = s_cmd_buf + 4;
         if (strlen(path) == 0) {
             printf("[DEV] Usage: get <path>\n");
-            s_cmd_buf[0] = '\0';
-            s_cmd_ready = false;
-            return true;
+            return;
         }
         if (!tud_cdc_connected()) {
             printf("[DEV] Error: CDC not connected — use getb64\n");
-            s_cmd_buf[0] = '\0';
-            s_cmd_ready = false;
-            return true;
+            return;
         }
         sdfile_t f = sdcard_fopen(path, "rb");
         if (!f) {
             printf("[DEV] Failed to open file: %s\n", path);
-            s_cmd_buf[0] = '\0';
-            s_cmd_ready = false;
-            return true;
+            return;
         }
         int size = sdcard_fsize_handle(f);
         printf("FILE_DATA:\nSIZE:%d\n", size);
         stdio_flush();
 
+        s_transfer_quiet = true;
         uint8_t buf[256];
         int read;
         while ((read = sdcard_fread(f, buf, sizeof(buf))) > 0) {
@@ -570,7 +635,34 @@ bool dev_commands_process(void) {
             }
         }
         sdcard_fclose(f);
+        s_transfer_quiet = false;
         printf("[DEV] File sent: %s (%d bytes)\n", path, size);
+    } else if (strncmp(s_cmd_buf, "mkdir ", 6) == 0) {
+        const char *path = s_cmd_buf + 6;
+        if (path[0] != '/') {
+            printf("[DEV] Usage: mkdir /absolute/path\n");
+            return;
+        }
+        // Recursive create ("mkdir -p"): make each component in turn.
+        char tmp[CMD_BUF_SIZE];
+        strncpy(tmp, path, sizeof(tmp) - 1);
+        tmp[sizeof(tmp) - 1] = '\0';
+        size_t len = strlen(tmp);
+        while (len > 1 && tmp[len - 1] == '/')
+            tmp[--len] = '\0';
+        bool ok = true;
+        for (char *p = tmp + 1; *p && ok; p++) {
+            if (*p == '/') {
+                *p = '\0';
+                ok = sdcard_mkdir(tmp);
+                *p = '/';
+            }
+        }
+        if (ok) ok = sdcard_mkdir(tmp);
+        if (ok)
+            printf("[DEV] Created: %s\n", tmp);
+        else
+            printf("[DEV] Error: mkdir failed: %s\n", tmp);
     } else if (strncmp(s_cmd_buf, "ls ", 3) == 0) {
         const char *path = s_cmd_buf + 3;
         if (strlen(path) == 0) {
@@ -578,14 +670,25 @@ bool dev_commands_process(void) {
         }
         int count = sdcard_list_dir(path, dev_ls_callback, NULL);
         printf("[DEV] %d items in %s\n", count < 0 ? 0 : count, path);
+    } else if (strncmp(s_cmd_buf, "unzip ", 6) == 0) {
+        // unzip <zip> <dest> — extract an archive on-device (push_app).
+        char reply[DEV_OP_REPLY_MAX];
+        dev_op_unzip(s_cmd_buf + 6, reply, sizeof(reply));
+        printf("[DEV] %s\n", reply);
+    } else if (strncmp(s_cmd_buf, "rm ", 3) == 0) {
+        char reply[DEV_OP_REPLY_MAX];
+        dev_op_rm(s_cmd_buf + 3, reply, sizeof(reply));
+        printf("[DEV] %s\n", reply);
     } else if (strcmp(s_cmd_buf, "help") == 0) {
         printf("[DEV] Available commands:\n");
         printf("[DEV]   ping           - Check device is responding\n");
         printf("[DEV]   ver            - Show firmware build date/time\n");
-        printf("[DEV]   exit           - Signal current app to exit\n");
+        printf("[DEV]   stack          - Main, app and OS-command stack peak use\n");
+        printf("[DEV]   exit           - Signal current app to exit (error if none)\n");
         printf("[DEV]   usb            - Enable USB storage mode\n");
         printf("[DEV]   reboot         - Reboot device\n");
         printf("[DEV]   reboot-flash   - Reboot to BOOTSEL for flashing\n");
+        printf("[DEV]   reboot-ota     - Apply staged /system/update.bin (needs .sha256 + .sig)\n");
         printf("[DEV]   launch <arg>   - Launch app by ID or name\n");
         printf("[DEV]   list           - List installed apps\n");
         printf("[DEV]   screenshot     - Capture screen\n");
@@ -598,11 +701,29 @@ bool dev_commands_process(void) {
         printf("[DEV]   screenshot64   - Capture screen as base64 (any transport)\n");
         printf("[DEV]   crashlog       - Print /system/crashlog.txt ('crashlog clear' deletes)\n");
         printf("[DEV]   ls <dir>       - List directory contents\n");
+        printf("[DEV]   mkdir <path>   - Create directory (recursive)\n");
+        printf("[DEV]   unzip <zip> <dest> - Extract a ZIP archive on-device\n");
+        printf("[DEV]   rm <path>      - Delete a file or directory (recursive)\n");
+        printf("[DEV]   status         - Show app/uptime/wifi/sd/battery\n");
         printf("[DEV]   help           - Show this help\n");
         printf("[DEV] Valid keys: up, down, left, right, enter, esc, menu, f1-f10, backspace, tab, del, shift, a-z, A-Z, 0-9, punctuation\n");
     } else {
         printf("[DEV] Unknown command: %s\n", s_cmd_buf);
     }
+}
+
+bool dev_commands_process(void) {
+    if (!s_cmd_ready) return false;
+
+    // At the launcher this pump runs on Core 0's 4 KB main stack (with ~3 KB
+    // already used at peak), and `unzip` alone needs ~5 KB — miniz's central-
+    // directory read has a 4 KB local buffer — so it overflowed into MSPLIM
+    // and rebooted the device. Every command therefore runs on an app stack:
+    // a short-lived 32 KB PSRAM stack at the launcher, or inline on the
+    // running app's stack when pumped from inside an app.
+    if (!app_stack_run_os(dev_command_run, NULL))
+        printf("[DEV] Error: no memory for the command stack, dropped: %s\n",
+               s_cmd_buf);
 
     s_cmd_buf[0] = '\0';
     s_cmd_ready = false;
@@ -635,6 +756,14 @@ bool dev_commands_wants_reboot(void) {
 
 bool dev_commands_wants_reboot_flash(void) {
     return s_cmd_reboot_flash;
+}
+
+bool dev_commands_wants_reboot_ota(void) {
+    return s_cmd_reboot_ota;
+}
+
+void dev_commands_clear_reboot_ota(void) {
+    s_cmd_reboot_ota = false;
 }
 
 bool dev_commands_wants_list(void) {

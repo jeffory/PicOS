@@ -1,0 +1,7 @@
+{
+    "id": "com.test.mem_report",
+    "name": "Mem Report",
+    "description": "E2E fixture: logs PSRAM heap metrics and how many files it can open at once",
+    "version": "1.0",
+    "author": "PicOS E2E"
+}

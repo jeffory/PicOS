@@ -1,0 +1,8 @@
+{
+    "id": "com.test.cfg_a",
+    "name": "Cfg A",
+    "description": "E2E fixture: first app of the appconfig bleed pair",
+    "version": "1.0",
+    "author": "PicOS E2E",
+    "requirements": []
+}

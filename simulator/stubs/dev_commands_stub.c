@@ -7,7 +7,13 @@
 #include <stdlib.h>
 #include <unistd.h>
 #include <fcntl.h>
+#include <pthread.h>
+#include <time.h>
+#include <errno.h>
 #include "../../src/os/screenshot.h"
+#include "../../src/os/lua_bridge.h"
+#include "../../src/os/app_stack.h"
+#include "../../src/dev_ops.h"
 
 // Command state
 static bool s_cmd_exit = false;
@@ -74,11 +80,118 @@ void dev_commands_poll(void) {
     }
 }
 
+// ── Control-channel dev commands (the `dev_command` RPC) ─────────────────────
+// The socket thread queues one command line; Core 0 runs it from
+// dev_commands_process() — the launcher loop, or a running app's Lua hook /
+// sys.sleep pump — through app_stack_run_os() and the shared dev_ops
+// handlers, like a line typed on the firmware's serial console. One command
+// is in flight at a time (the socket thread dispatches serially).
+
+typedef enum { DC_IDLE, DC_QUEUED, DC_RUNNING, DC_DONE, DC_ABANDONED } dc_state_t;
+
+static pthread_mutex_t s_dc_mutex = PTHREAD_MUTEX_INITIALIZER;
+static pthread_cond_t s_dc_cond = PTHREAD_COND_INITIALIZER;
+static dc_state_t s_dc_state = DC_IDLE;
+static char s_dc_cmd[300];
+static char s_dc_reply[DEV_OP_REPLY_MAX];
+static bool s_dc_ok = false;
+
+typedef struct {
+    char cmd[300];
+    char reply[DEV_OP_REPLY_MAX];
+    bool ok;
+} dc_job_t;
+
+static void dc_run(void *arg) {
+    dc_job_t *job = (dc_job_t *)arg;
+    printf("[DEV] Command: %s\n", job->cmd);
+    if (strcmp(job->cmd, "ping") == 0) {
+        snprintf(job->reply, sizeof(job->reply), "pong");
+        job->ok = true;
+    } else if (strcmp(job->cmd, "exit") == 0) {
+        job->ok = dev_op_exit(job->reply, sizeof(job->reply));
+    } else if (strncmp(job->cmd, "unzip ", 6) == 0) {
+        job->ok = dev_op_unzip(job->cmd + 6, job->reply, sizeof(job->reply));
+    } else if (strncmp(job->cmd, "rm ", 3) == 0) {
+        job->ok = dev_op_rm(job->cmd + 3, job->reply, sizeof(job->reply));
+    } else {
+        snprintf(job->reply, sizeof(job->reply),
+                 "Unknown command: %s (simulator supports ping, exit, unzip, rm)",
+                 job->cmd);
+        job->ok = false;
+    }
+    printf("[DEV] %s\n", job->reply);
+    fflush(stdout);
+}
+
 bool dev_commands_process(void) {
-    // Process any pending commands
-    // For now, just return false (no command processed)
-    // Commands are set directly via dev_commands_set_exit() etc.
-    return false;
+    pthread_mutex_lock(&s_dc_mutex);
+    if (s_dc_state != DC_QUEUED) {
+        pthread_mutex_unlock(&s_dc_mutex);
+        return false;
+    }
+    s_dc_state = DC_RUNNING;
+    static dc_job_t job;  // Core 0 only; not re-entered (commands don't pump)
+    snprintf(job.cmd, sizeof(job.cmd), "%s", s_dc_cmd);
+    pthread_mutex_unlock(&s_dc_mutex);
+
+    job.reply[0] = '\0';
+    job.ok = false;
+    if (!app_stack_run_os(dc_run, &job))
+        snprintf(job.reply, sizeof(job.reply),
+                 "Error: no memory for the command stack");
+
+    pthread_mutex_lock(&s_dc_mutex);
+    if (s_dc_state == DC_RUNNING) {
+        snprintf(s_dc_reply, sizeof(s_dc_reply), "%s", job.reply);
+        s_dc_ok = job.ok;
+        s_dc_state = DC_DONE;
+        pthread_cond_broadcast(&s_dc_cond);
+    } else {
+        s_dc_state = DC_IDLE;  // the RPC gave up waiting
+    }
+    pthread_mutex_unlock(&s_dc_mutex);
+    return true;
+}
+
+bool dev_commands_sim_run(const char *cmd, int timeout_ms, char *reply,
+                          size_t reply_len, bool *ok) {
+    struct timespec deadline;
+    clock_gettime(CLOCK_REALTIME, &deadline);
+    deadline.tv_sec += timeout_ms / 1000;
+    deadline.tv_nsec += (long)(timeout_ms % 1000) * 1000000L;
+    if (deadline.tv_nsec >= 1000000000L) {
+        deadline.tv_sec++;
+        deadline.tv_nsec -= 1000000000L;
+    }
+
+    pthread_mutex_lock(&s_dc_mutex);
+    if (s_dc_state != DC_IDLE) {
+        pthread_mutex_unlock(&s_dc_mutex);
+        snprintf(reply, reply_len, "Error: a previous command is still running");
+        *ok = false;
+        return false;
+    }
+    snprintf(s_dc_cmd, sizeof(s_dc_cmd), "%s", cmd);
+    s_dc_state = DC_QUEUED;
+    lua_bridge_request_service();  // a running app's next hook pumps it
+    int rc = 0;
+    while (s_dc_state != DC_DONE && rc != ETIMEDOUT)
+        rc = pthread_cond_timedwait(&s_dc_cond, &s_dc_mutex, &deadline);
+    bool done = (s_dc_state == DC_DONE);
+    if (done) {
+        snprintf(reply, reply_len, "%s", s_dc_reply);
+        *ok = s_dc_ok;
+        s_dc_state = DC_IDLE;
+    } else {
+        // Not picked up (nothing is pumping dev commands) or still running:
+        // withdraw it, or let the runner drop the result when it finishes.
+        s_dc_state = (s_dc_state == DC_QUEUED) ? DC_IDLE : DC_ABANDONED;
+        snprintf(reply, reply_len, "Error: timed out waiting for Core 0");
+        *ok = false;
+    }
+    pthread_mutex_unlock(&s_dc_mutex);
+    return done;
 }
 
 void dev_commands_send_screenshot(void) {
@@ -98,6 +211,11 @@ void dev_commands_clear_exit(void) {
 
 void dev_commands_set_exit(void) {
     s_cmd_exit = true;
+}
+
+// Bulk-transfer quiet flag — no async log producers in the simulator.
+bool dev_commands_transfer_active(void) {
+    return false;
 }
 
 // USB command
@@ -126,6 +244,12 @@ bool dev_commands_wants_reboot(void) {
 bool dev_commands_wants_reboot_flash(void) {
     return s_cmd_reboot_flash;
 }
+
+bool dev_commands_wants_reboot_ota(void) {
+    return false;  // OTA flashing is firmware-only
+}
+
+void dev_commands_clear_reboot_ota(void) {}
 
 // Launch command
 const char* dev_commands_get_pending_launch(void) {

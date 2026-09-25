@@ -1,0 +1,7 @@
+{
+    "id": "com.picos.effects_test",
+    "name": "Effects Test",
+    "description": "display.applyEffect regression fixture",
+    "version": "1.0",
+    "author": "PicOS"
+}

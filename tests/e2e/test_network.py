@@ -9,8 +9,10 @@ Regression targets:
 - Graceful error handling when WiFi is disconnected
 """
 
-import time
 import pytest
+
+from helpers import (require_heap_metrics_live,
+                     lua_case_names, run_lua_app)
 
 
 class TestWifiStateManagement:
@@ -62,56 +64,32 @@ class TestWifiStateManagement:
         assert state["status"] != "disconnected"
 
 
+NETWORK_CASES = lua_case_names("network_test")
+
+
+@pytest.fixture(scope="module")
+def network_run(lua_suite):
+    return lua_suite("network_test")
+
+
 class TestNetworkLua:
-    """Test network operations via the network_test Lua app."""
+    """network_test (picotest kit): one pytest id per Lua case."""
 
-    def test_network_operations(self, simulator):
-        """Run the network_test app and verify all operations pass."""
-        simulator.clear_log()
-        simulator.launch_app("network_test")
+    @pytest.mark.parametrize("case", NETWORK_CASES)
+    def test_network_case(self, network_run, case):
+        network_run.check_case(case)
 
-        try:
-            simulator.wait_for_log("NETWORK_TESTS_DONE", timeout=15)
-        except TimeoutError:
-            logs = simulator.get_log_buffer()
-            pytest.fail(f"network_test did not complete in time. Logs: {logs}")
-
-        logs = simulator.get_log_buffer()
-        lines = [
-            (l if isinstance(l, str) else l.get("text", ""))
-            for l in logs.get("lines", [])
-        ]
-
-        results = [l for l in lines if l.startswith("PASS:") or l.startswith("FAIL:")]
-
-        failures = [r for r in results if r.startswith("FAIL:")]
-        assert not failures, f"Network test failures: {failures}"
-
-        # At minimum, getStatus should pass
-        passed = {r.split(":")[1] for r in results if r.startswith("PASS:")}
-        assert "getStatus" in passed, f"getStatus should pass. Got: {results}"
+    def test_network_suite_complete(self, network_run):
+        network_run.assert_all_passed(NETWORK_CASES)
 
     def test_network_no_heap_leak(self, simulator):
-        """Test that HTTP connection lifecycle doesn't leak memory."""
-        heap_before = simulator.call("get_heap_info")
-        free_before = heap_before.get("lua_heap_free_kb", 0)
-
-        simulator.clear_log()
-        simulator.launch_app("network_test")
-
-        try:
-            simulator.wait_for_log("NETWORK_TESTS_DONE", timeout=15)
-        except TimeoutError:
-            pass
-
-        time.sleep(1)
-
-        heap_after = simulator.call("get_heap_info")
-        free_after = heap_after.get("lua_heap_free_kb", 0)
-
-        if free_before > 0:
-            leak = free_before - free_after
-            assert leak < 50, (
-                f"Possible heap leak after network test: {leak}KB "
-                f"(before={free_before}KB, after={free_after}KB)"
-            )
+        """HTTP connection create/close leaves no more than 50 KB behind."""
+        require_heap_metrics_live(simulator)
+        free_before = simulator.call("get_heap_info")["lua_heap_free_kb"]
+        run_lua_app(simulator, "network_test", timeout=15).assert_all_passed(
+            NETWORK_CASES)
+        free_after = simulator.call("get_heap_info")["lua_heap_free_kb"]
+        leak = free_before - free_after
+        assert leak < 50, (
+            f"Possible heap leak after network test: {leak}KB "
+            f"(before={free_before}KB, after={free_after}KB)")

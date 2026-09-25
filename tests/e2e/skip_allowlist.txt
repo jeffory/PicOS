@@ -1,0 +1,6 @@
+# Tests allowed to skip (fnmatch patterns on the node id relative to tests/e2e/).
+# Any other skip fails the run: a skip hides a test that silently stopped running.
+# Tests marked @pytest.mark.hardware are always allowed.
+
+# Needs an external C-Dogs checkout (PICOS_CDOGS_DIR, jeffory/picos-cdogs).
+test_cdogs_memory.py::*

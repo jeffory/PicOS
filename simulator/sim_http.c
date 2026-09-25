@@ -614,7 +614,34 @@ void http_ev_fn(struct mg_connection *nc, int ev, void *ev_data) {
     (void)ev_data;
 }
 
-void http_build_and_send_request(struct mg_connection *nc, http_conn_t *c) {
-    (void)nc;
-    (void)c;
+// ── Core 0 views (http.h) ───────────────────────────────────────────────────
+// This libcurl layer frees slots synchronously, so there is nothing to
+// reap; the getters read the fields directly (the firmware's http.c reads
+// them race-free across its two cores).
+
+void http_reap(void) {}
+
+http_state_t http_get_state(http_conn_t *c) {
+    return c ? c->state : HTTP_STATE_IDLE;
+}
+
+const char *http_get_error(http_conn_t *c) {
+    return (c && c->err[0]) ? c->err : NULL;
+}
+
+bool http_headers_ready(http_conn_t *c) {
+    return c && c->headers_done;
+}
+
+int http_get_status(http_conn_t *c) {
+    return c ? c->status_code : 0;
+}
+
+void http_get_progress(http_conn_t *c, int *received, int *total) {
+    if (received) *received = c ? (int)c->body_received : 0;
+    if (total) *total = c ? (int)c->content_length : -1;
+}
+
+bool http_is_complete(http_conn_t *c) {
+    return c && (c->state == HTTP_STATE_DONE || c->state == HTTP_STATE_FAILED);
 }

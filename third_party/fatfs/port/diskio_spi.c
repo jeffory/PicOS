@@ -572,25 +572,23 @@ DRESULT disk_write(BYTE pdrv, const BYTE *buff, LBA_t sector, UINT count) {
       goto out;
     }
   } else {
-    /* CMD25: WRITE_MULTIPLE_BLOCK with CMD23 pre-erase optimization.
-     * CMD23 (SET_BLOCK_COUNT) is optional — if the card rejects it
-     * (e.g. still busy with internal housekeeping from prior writes),
-     * recover and retry before issuing CMD25. */
-    uint8_t r23 = sd_send_cmd(23, count);
-    if (r23 != 0x00) {
-      if (!usb_msc_is_active())
-        printf("[SD_WR] CMD23 fail: R1=0x%02x cnt=%u, recovering\n", r23, count);
-      if (sd_try_reinit(r23)) {
-        sd_cs_low();
-        sd_send_cmd(23, count); /* best-effort retry; CMD23 is optional */
-      }
-    }
+    /* ACMD23 (SET_WR_BLK_ERASE_COUNT): optional pre-erase hint before a
+     * multi-block write.  This was previously sent as bare CMD23, which is
+     * an MMC-only command that SD cards reject in SPI mode — and the
+     * failure path ran a full card re-init before EVERY multi-block write.
+     * Back-to-back reinit storms (FatFS dir_clear zeroing a new directory
+     * cluster in 64-block bursts) wedged the card into an R1=0x3f state
+     * that survives soft reboots (only a power cycle clears it) and
+     * starved the watchdog.  The hint is best-effort: if the card rejects
+     * it, just proceed — CMD25 terminates with the Stop Tran token
+     * regardless. */
+    sd_send_acmd(23, count);
 
     uint8_t r1 = sd_send_cmd(25, addr);
     if (r1 != 0x00) {
       if (sd_try_reinit(r1)) {
         sd_cs_low();
-        sd_send_cmd(23, count);
+        sd_send_acmd(23, count); /* best-effort pre-erase hint */
         r1 = sd_send_cmd(25, addr);
       }
       if (r1 != 0x00) {

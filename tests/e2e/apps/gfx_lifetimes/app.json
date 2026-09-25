@@ -1,0 +1,8 @@
+{
+    "id": "com.test.gfxlife",
+    "name": "Graphics Lifetimes",
+    "description": "E2E fixture: graphics object lifetimes, display list and raw-pointer acceptance",
+    "version": "1.0",
+    "author": "PicOS E2E",
+    "requirements": []
+}

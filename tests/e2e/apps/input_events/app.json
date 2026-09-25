@@ -1,0 +1,7 @@
+{
+    "id": "com.picos.input_events",
+    "name": "Input Events",
+    "description": "picocalc.input.pollEvent / isKeyDown verification for E2E testing",
+    "version": "1.0",
+    "author": "PicOS E2E"
+}

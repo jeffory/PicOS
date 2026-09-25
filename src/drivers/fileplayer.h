@@ -23,10 +23,19 @@ typedef struct {
     char path[256];
     fileplayer_state_t state;
     fileplayer_type_t type;
-    uint32_t position;
-    uint32_t length;
-    uint8_t volume;
+    uint32_t position;      // bytes of the data chunk consumed
+    uint32_t length;        // frames
+    uint8_t volume;         // left, 0-100
+    uint8_t volume_r;       // right, 0-100
     uint8_t channels;
+    bool in_use;            // slot handed out by fileplayer_create
+    // The loaded WAV, owned by this player (fileplayer.c's player lock
+    // guards it: Core 1 reads it, Core 0 opens and closes it).
+    void *file;             // sdfile_t
+    uint32_t sample_rate;
+    uint32_t data_offset;   // file offset of the data chunk
+    uint32_t data_size;     // bytes of sample data
+    uint16_t block_align;   // bytes per frame
     bool loop;
     uint32_t loop_start;
     uint32_t loop_end;

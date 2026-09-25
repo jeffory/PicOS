@@ -2,6 +2,7 @@
 // Bridges SDL2 input to PicOS keyboard driver interface
 
 #include "../../src/drivers/keyboard.h"
+#include "../../src/drivers/kbd_event_queue.h"
 #include "../hal/hal_input.h"
 #include "../../src/os/os.h"
 #include <SDL2/SDL.h>
@@ -31,6 +32,10 @@ static char s_last_char = 0;
 static uint8_t s_raw_key = 0;
 static bool s_menu_pressed = false;
 static bool s_screenshot_pressed = false;
+// The firmware's event queue + key-down set (kbd_event_queue.h). The HAL
+// stages events as keys are typed/injected; kbd_poll moves them in here, so
+// pollEvent sees them only after input.update(), as on hardware.
+static kbd_input_t s_in;
 
 // Key mapping from SDL to keyboard keycodes
 static struct {
@@ -103,6 +108,11 @@ void kbd_poll(void) {
         s_screenshot_pressed = true;
     }
     
+    // Staged key events, in order, into the app-facing queue.
+    kbd_event_t ev;
+    while (hal_input_pop_event(&ev))
+        kbd_input_accept(&s_in, ev);
+
     // Get character input
     s_last_char = hal_input_get_char();
     if (s_last_char) {
@@ -117,6 +127,25 @@ void kbd_poll(void) {
         }
     } else {
         s_raw_key = 0;
+    }
+}
+
+// sys.sleep's poll: keep SDL (window events, quit) serviced. Key edges stay
+// in the HAL until the app's next kbd_poll(), as on the device; injected
+// Sym presses set the menu flag directly (kbd_inject_buttons), and a host
+// F10 during a sleep takes effect at the next kbd_poll().
+void kbd_poll_background(void) {
+    SDL_PumpEvents();
+    SDL_Event event;
+    while (SDL_PollEvent(&event)) {
+        if (event.type == SDL_QUIT) {
+            extern void request_simulator_exit(void);
+            extern void dev_commands_set_exit(void);
+            request_simulator_exit();
+            dev_commands_set_exit();
+        } else {
+            hal_input_handle_event(&event);
+        }
     }
 }
 
@@ -144,6 +173,18 @@ uint32_t kbd_get_buttons_released(void) {
     return s_buttons_released;
 }
 
+bool kbd_poll_event(kbd_event_t *out) {
+    return kbd_evq_pop(&s_in.q, out);
+}
+
+bool kbd_is_key_down(uint8_t keycode) {
+    return kbd_keyset_test(&s_in.down, keycode);
+}
+
+void kbd_flush_events(void) {
+    kbd_evq_clear(&s_in.q);
+}
+
 int kbd_get_battery_percent(void) {
     return 100;  // Always full in simulator
 }
@@ -159,6 +200,7 @@ void kbd_apply_clock(void) {
 bool kbd_consume_menu_press(void) {
     if (s_menu_pressed) {
         s_menu_pressed = false;
+        hal_input_note_menu_consumed();
         return true;
     }
     return false;
@@ -178,6 +220,12 @@ void kbd_clear_state(void) {
     s_buttons_released = 0;
     s_last_char = 0;
     s_raw_key = 0;
+    kbd_input_clear(&s_in);
+}
+
+void kbd_discard_pending(void) {
+    hal_input_discard_pending();
+    kbd_clear_state();
 }
 
 void kbd_recover_i2c_bus(void) {
@@ -185,6 +233,17 @@ void kbd_recover_i2c_bus(void) {
 }
 
 void kbd_inject_buttons(uint32_t buttons) {
+    // Mirror the device driver: BTN_MENU is an OS-level trigger — set the
+    // menu flag here and strip the bit so it never enters the HAL's 80ms
+    // injected-click hold. (Pre-hold, kbd_poll's press-edge intercept caught
+    // it; with the hold, the bit would leak into s_buttons on the hold
+    // frames after the edge-only intercept stripped the first frame.)
+    if (buttons & BTN_MENU) {
+        s_menu_pressed = true;
+        buttons &= ~BTN_MENU;
+        hal_input_note_menu_injected();
+        if (!buttons) return;
+    }
     // Inject through HAL only — the next kbd_poll picks them up atomically.
     // (Writing s_buttons/s_buttons_pressed directly here would double-fire
     // the pressed edge and race with kbd_poll's assignment.)

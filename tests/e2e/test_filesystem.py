@@ -3,53 +3,39 @@
 Regression targets:
 - SD card flush on close/mkdir/delete/rename (commit 0965131)
 - Multi-block write reliability (commit 6143878)
-- File sandbox enforcement
 - Large file write/read roundtrip (exercises multi-block SD path)
 """
 
 import base64
-import time
+
 import pytest
+
+from helpers import lua_case_names, run_lua_app
+
+
+FS_CASES = lua_case_names("fs_test")
+
+
+@pytest.fixture(scope="module")
+def fs_run(lua_suite):
+    return lua_suite("fs_test")
 
 
 class TestFilesystemLua:
-    """Test filesystem operations via the fs_test Lua app."""
+    """fs_test (picotest kit, root-filesystem): one pytest id per Lua case."""
 
-    def test_fs_operations(self, simulator):
-        """Run the fs_test app and verify all FS operations pass."""
-        simulator.clear_log()
-        simulator.launch_app("fs_test")
+    @pytest.mark.parametrize("case", FS_CASES)
+    def test_fs_case(self, fs_run, case):
+        fs_run.check_case(case)
 
-        # Wait for the app to finish (it exits after all tests)
-        try:
-            simulator.wait_for_log("FS_TESTS_DONE", timeout=15)
-        except TimeoutError:
-            logs = simulator.get_log_buffer()
-            pytest.fail(f"fs_test did not complete in time. Logs: {logs}")
+    def test_fs_suite_complete(self, fs_run):
+        fs_run.assert_all_passed(FS_CASES)
 
-        # Collect results
-        logs = simulator.get_log_buffer()
-        lines = [
-            (l if isinstance(l, str) else l.get("text", ""))
-            for l in logs.get("lines", [])
-        ]
-
-        # Find all PASS/FAIL lines
-        results = [l for l in lines if l.startswith("PASS:") or l.startswith("FAIL:")]
-
-        expected_tests = [
-            "write_read", "readFile", "exists", "size", "seek_tell",
-            "mkdir", "delete", "rename", "listDir",
-            "large_write", "large_read", "diskInfo",
-        ]
-
-        failures = [r for r in results if r.startswith("FAIL:")]
-        assert not failures, f"FS test failures: {failures}"
-
-        # Verify we got results for all expected tests
-        passed = {r.split(":")[1] for r in results if r.startswith("PASS:")}
-        for name in expected_tests:
-            assert name in passed, f"Missing result for test '{name}'. Got: {results}"
+    def test_fs_suite_is_idempotent(self, simulator):
+        """fs_test passes on a second run against the same SD card (it used to
+        FAIL exists/mkdir because its files persisted)."""
+        for i in range(2):
+            run_lua_app(simulator, "fs_test", timeout=15).assert_all_passed(FS_CASES)
 
 
 class TestFilesystemRPC:

@@ -5,6 +5,9 @@ local Solver = require("calc_solver")
 
 local UISolve = {}
 
+-- PicOS Lua numbers are single-precision floats (~7 significant digits).
+local SIG_FMT = (2^24 + 1 == 2^24) and "%.7g" or "%.10g"
+
 -- Solver modes and their field definitions
 local MODES = {
     {id = "quad",  label = "Quad",  fields = {"a", "b", "c"},                 desc = "ax^2+bx+c=0"},
@@ -232,7 +235,7 @@ function UISolve.solve(engine, complex_mode, Complex_mod)
                     -- Complex root
                     parts[#parts + 1] = Complex_mod.format(r)
                 else
-                    parts[#parts + 1] = string.format("%.10g", r)
+                    parts[#parts + 1] = string.format(SIG_FMT, r)
                 end
             end
             results = "x=" .. table.concat(parts, ", ")
@@ -247,7 +250,7 @@ function UISolve.solve(engine, complex_mode, Complex_mod)
             results = err
             result_error = true
         else
-            results = string.format("x=%.10g, y=%.10g", sol[1], sol[2])
+            results = string.format("x=" .. SIG_FMT .. ", y=" .. SIG_FMT, sol[1], sol[2])
         end
 
     elseif m.id == "lin3" then
@@ -279,7 +282,7 @@ function UISolve.solve(engine, complex_mode, Complex_mod)
                 if type(r) == "table" and r.re ~= nil then
                     parts[#parts + 1] = Complex_mod.format(r)
                 else
-                    parts[#parts + 1] = string.format("%.10g", r)
+                    parts[#parts + 1] = string.format(SIG_FMT, r)
                 end
             end
             results = "x=" .. table.concat(parts, ", ")
@@ -304,7 +307,7 @@ function UISolve.solve(engine, complex_mode, Complex_mod)
             results = err
             result_error = true
         else
-            results = string.format("x=%.10g", root)
+            results = string.format("x=" .. SIG_FMT, root)
         end
     end
 end

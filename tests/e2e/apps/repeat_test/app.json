@@ -1,0 +1,7 @@
+{
+    "id": "com.picos.repeat_test",
+    "name": "Repeat Test",
+    "description": "input.setRepeat / getButtonsRepeated regression fixture",
+    "version": "1.0",
+    "author": "PicOS"
+}

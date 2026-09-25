@@ -2,6 +2,7 @@
 
 #include <stdint.h>
 #include <stdbool.h>
+#include <stddef.h>
 
 #include "../os/os.h"   // wifi_status_t
 #include "http.h"       // http_conn_t (for conn_req_t)
@@ -64,10 +65,17 @@ bool wifi_get_http_required(void);
 bool wifi_has_internet(void);
 
 // Returns true once the CYW43 hardware disconnect has actually completed on
-// Core 1. wifi_disconnect() is async (queue-based); this flag lets callers
-// wait for the radio to power down before performing voltage-sensitive
-// operations like SD flash programming.
+// Core 1: the station has left the network and Core 1 no longer polls the
+// chip (until the next wifi_connect). wifi_disconnect() is async
+// (queue-based); this flag lets callers wait before voltage- or
+// clock-sensitive operations (SD flash programming, a sysclk change).
 bool wifi_hw_disconnected(void);
+
+// How long a caller should wait for wifi_hw_disconnected() after
+// wifi_disconnect(): Core 1 drains the request on its next tick, but may be
+// inside a long mg_mgr_poll (a TLS handshake) first.  Bounded; the callers
+// that change sysclk (launcher, video) use this one value.
+#define WIFI_HW_DISCONNECT_WAIT_MS 2000
 
 // ── Core 0 → Core 1 request queue ────────────────────────────────────────────
 //
@@ -100,6 +108,26 @@ typedef struct {
 // On success, rings a doorbell to wake Core 1 immediately (<1us latency
 // vs. the previous 5ms polling interval).
 bool wifi_req_push(const conn_req_t *req);
+
+// ── TLS policy (Core 1) ──────────────────────────────────────────────────────
+// Every TLS connection (HTTPS and tls:// TCP) verifies the server certificate
+// against the root bundle in ca_bundle.c and the host name, unless the
+// connection opted out (setInsecure).  Verification needs the wall clock, so
+// a verifying handshake is refused until SNTP has set it.
+#define WIFI_TLS_ERR_CLOCK "clock not set: TLS needs the time from SNTP " \
+                           "(stay online a few seconds and retry)"
+
+// Parse the CA bundle once into the chain every verifying connection shares.
+// Call at boot, before Core 1 starts, on a large stack (x509 parsing of RSA-
+// 4096/P-384 roots is deep): main() runs it via app_stack_run_os.  False if
+// it failed; verifying TLS is then refused (insecure connections still work).
+bool wifi_tls_init(void);
+
+// If nc failed because the peer's certificate did not verify, write a
+// readable reason ("TLS: certificate not trusted ...") to out and return
+// true.  Call from MG_EV_ERROR, while nc->tls is still valid.
+struct mg_connection;
+bool wifi_tls_verify_error(struct mg_connection *nc, char *out, size_t n);
 
 // Doorbell number used for Core 0 → Core 1 IPC wake-up.
 // Claimed in wifi_init(); Core 1 registers the ISR in core1_entry().

@@ -1,0 +1,7 @@
+{
+  "id": "com.test.luaruntime",
+  "name": "LuaRuntime",
+  "description": "E2E fixture: Lua VM configuration (32-bit numbers, stack limit, stdlib, text-only load)",
+  "version": "1.0.0",
+  "author": "e2e"
+}

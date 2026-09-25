@@ -3,6 +3,8 @@
 #include <stdbool.h>
 #include <stdint.h>
 
+#include "../fonts/font.h"
+
 // =============================================================================
 // ST7365P Display Driver
 // 320x320 IPS LCD via PIO SPI on PicoCalc mainboard v2.0
@@ -69,19 +71,32 @@ void display_draw_textured_column(int x, int y0, int y1,
 void display_fill_vline_gradient(int x, int y0, int y1,
                                  uint16_t color_top, uint16_t color_bottom);
 
-// Text rendering using the active bitmap font (default: 6x8)
-// Returns pixel width of the rendered text
+// Text rendering using the active font (default: slot 0, 6x8).
+// Returns the pixel advance of the rendered text.
 int display_draw_text(int x, int y, const char *text, uint16_t fg, uint16_t bg);
+
+// Draws text leaving background pixels untouched.
+int display_draw_text_transparent(int x, int y, const char *text, uint16_t fg);
+
+// Horizontal counterpart to display_fill_vline (sugar over display_fill_rect).
+void display_fill_hline(int y, int x0, int x1, uint16_t color);
+
+// Render into a host-order offscreen buffer, clipped to its bounds.
 int display_draw_text_to_buffer(uint16_t *buf, int buf_w, int buf_h,
                                 int x, int y, const char *text,
                                 uint16_t fg, uint16_t bg);
+
+// Pixel width of `text` in the active font (proportional-aware).
 int display_text_width(const char *text);
 
-// Font selection: 0 = 6x8 (default), 1 = 8x12, 2 = scientifica 6x12, 3 = scientifica-bold 6x12
+// Font selection by registry id: 0 = 6x8, 1 = 8x12, 2 = scientifica,
+// 3 = scientifica-bold, >= 4 = fonts loaded via font_registry_load.
+// Ids the registry does not have are ignored.
 void display_set_font(int font_id);
 int display_get_font(void);
-int display_get_font_width(void);
+int display_get_font_width(void);    // max advance of the active font
 int display_get_font_height(void);
+const pc_font_t *display_get_active_font(void);
 
 // Blit raw RGB565 image data to the framebuffer at (x, y).
 // Pixel values must be in host byte order (same as the RGB565() macro).
@@ -173,10 +188,36 @@ uint16_t *display_get_back_buffer(void);
 // the actual displayed frame, not a buffer still being transferred.
 const uint16_t *display_get_screen_buffer(void);
 
-// Hardware vertical scroll (ST7365P VSCRDEF + VSCRSADD).
-// top_fixed + scroll_height + bottom_fixed must equal 320.
+// Hardware vertical scroll (ST7365P VSCRDEF + VSCRSADD).  Frame memory is
+// 480 lines (visible panel = lines 0..319): top_fixed + scroll_height +
+// bottom_fixed must sum to 480, e.g. (0, 320, 160) for a mod-320 ring over
+// the visible panel.  display_get_scroll_offset returns the last offset
+// written (register is write-only); the OS resets it to 0 on screen
+// takeovers, which apps detect by polling.
 void display_set_scroll_area(int top_fixed, int scroll_height, int bottom_fixed);
 void display_set_scroll_offset(int offset);
+int  display_get_scroll_offset(void);
+// Total display_set_scroll_offset calls — lets apps detect a register write
+// by someone else even when the value is unchanged (see the setter's docs).
+uint32_t display_get_scroll_offset_writes(void);
+
+// Clip rect. All pixel-writing primitives respect it EXCEPT display_clear(),
+// display_flush*(), the post-processing effects (whole-buffer by design), and
+// the tgx rotated-blit path (display_draw_image_scaled with angle).
+// Default is the full screen. set clamps to the framebuffer; an empty rect
+// blocks all writes.
+void display_set_clip_rect(int x, int y, int w, int h);
+void display_get_clip_rect(int *x, int *y, int *w, int *h);
+void display_clear_clip_rect(void);
+
+// Mode 7 perspective ground-plane render. Draws `tex` seen from a camera at
+// (cam_x, cam_y), cam_z units above the plane, facing `angle` radians
+// (0 = toward +Y in texture space). Rows below `horizon_y` are filled;
+// `scale` tunes the FOV (larger = further view). Power-of-two texture dims
+// wrap seamlessly; other sizes clamp at edges. Respects the clip rect.
+void display_draw_plane(const uint16_t *tex, int tex_w, int tex_h,
+                        float cam_x, float cam_y, float cam_z,
+                        float angle, int horizon_y, float scale);
 
 // =============================================================================
 // Framebuffer Effects (post-processing shaders)

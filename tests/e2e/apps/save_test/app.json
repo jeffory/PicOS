@@ -1,0 +1,8 @@
+{
+    "id": "com.test.save",
+    "name": "Save Test",
+    "description": "E2E fixture: game.save name handling",
+    "version": "1.0",
+    "author": "PicOS E2E",
+    "requirements": []
+}

@@ -5,79 +5,73 @@
 
 #include "../drivers/sdcard.h"
 #include "file_browser.h"
-#include "umm_malloc.h"
+#include "app_identity.h"
+#include "fs_path.h"
 
-// ── Filesystem sandbox
-// ──────────────────────────────────────────────────────── Apps are allowed to
-// access only two trees (unless "root-filesystem" requirement is granted):
-//   /apps/<dirname>/  — read-only (their own app bundle)
-//   /data/<dirname>/  — read + write (their own data directory)
-//
-// <dirname> is derived from the APP_DIR global set by launcher.c, e.g.
-//   APP_DIR = "/apps/editor"  → dirname = "editor"
-//
+#include <limits.h>
+
+// ── Filesystem sandbox ──────────────────────────────────────────────────────
+// Apps may touch only (unless "root-filesystem" is granted):
+//   /apps/<dir>/   — read-only (their own bundle)
+//   /data/<id>/    — read + write (their own data directory)
+//   /system/lib/   — read-only (shared libraries)
 // Relative paths and any path containing ".." are always rejected.
 //
-// Apps with the "root-filesystem" requirement can access the entire SD card.
+// The identity and grants come from app_identity (set in C by the runner),
+// never from the APP_DIR / APP_ID / APP_REQUIREMENTS globals, which the app
+// can overwrite.  The rules themselves are fs_path_allowed() (fs_path.c,
+// host-tested).
 
 bool fs_sandbox_check(lua_State *L, const char *path, bool write) {
-  if (!path || path[0] != '/')
-    return false; // require absolute paths
-  if (strstr(path, ".."))
-    return false; // reject traversal
-
-  // Allow read-only access to /system/lib/ for all apps (shared libraries)
-  if (!write && strncmp(path, "/system/lib/", 12) == 0)
-    return true;
-
-  // Check for root-filesystem requirement
-  lua_getglobal(L, "APP_REQUIREMENTS");
-  if (lua_istable(L, -1)) {
-    lua_getfield(L, -1, "root_filesystem");
-    bool has_root_fs = lua_toboolean(L, -1);
-    lua_pop(L, 2); // pop root_filesystem and APP_REQUIREMENTS
-    if (has_root_fs) {
-      return true; // full filesystem access granted
-    }
-  } else {
-    lua_pop(L, 1); // pop APP_REQUIREMENTS if not a table
-  }
-
-  lua_getglobal(L, "APP_DIR");
-  const char *app_dir = lua_tostring(L, -1);
-  lua_pop(L, 1);
-  if (!app_dir)
-    return false;
-
-  // Extract the directory name component from "/apps/<dirname>"
-  const char *dirname = strrchr(app_dir, '/');
-  if (!dirname || dirname[1] == '\0')
-    return false;
-  dirname++; // skip the '/'
-
-  // /data/<APP_ID> prefix — uses the app's declared identity, not its folder name
-  lua_getglobal(L, "APP_ID");
-  const char *app_id = lua_tostring(L, -1);
-  lua_pop(L, 1);
-  if (!app_id)
-    return false;
-  char data_prefix[128];
-  int dp_len = snprintf(data_prefix, sizeof(data_prefix), "/data/%s", app_id);
-  bool in_data = (strncmp(path, data_prefix, dp_len) == 0 &&
-                  (path[dp_len] == '\0' || path[dp_len] == '/'));
-
-  if (write)
-    return in_data;
-
-  // For reads also allow /apps/<dirname> itself and any path beneath it
-  char app_prefix[128];
-  int ap_len = snprintf(app_prefix, sizeof(app_prefix), "/apps/%s", dirname);
-  bool in_app = (strncmp(path, app_prefix, ap_len) == 0 &&
-                 (path[ap_len] == '\0' || path[ap_len] == '/'));
-
-  return in_data || in_app;
+  (void)L;
+  const app_identity_t *me = app_identity_current();
+  if (!me)
+    return fs_path_allowed(path, write, NULL, NULL, false);
+  return fs_path_allowed(path, write, me->dir, me->data_dir, me->root_fs);
 }
 
+// ── File handles ────────────────────────────────────────────────────────────
+// fs.open returns a full userdata (FS_FILE_MT) that owns the sdcard_fopen
+// handle; it is never a raw pointer in Lua's hands:
+//   - every handle function checks the type with luaL_checkudata, so nil, a
+//     light userdata or another module's userdata is a Lua error, not a FIL;
+//   - close sets f to NULL, so a second close is a no-op and any other use
+//     of a closed handle is a Lua error ("attempt to use a closed file");
+//   - __gc and __close close a handle the app dropped or scoped with
+//     `local f <close> = ...`;
+//   - each open file is also on the running app's open-file list
+//     (app_files_*), which lua_run sweeps after lua_close, so no handle
+//     outlives its app (FatFS has only FF_FS_LOCK = 16 slots).
+// The metatable is hidden (__metatable = false) and methods come from a
+// separate table through __index, so h:read(n) works and h:__gc() does not
+// exist.  fs.read(h, n) and h:read(n) are the same function.
+
+#define FS_FILE_MT "picocalc.fs.file"
+
+typedef struct {
+  sdfile_t f;  // NULL once closed
+} lua_fs_file_t;
+
+// The open handle at idx, or a Lua error (wrong type, or closed).
+static lua_fs_file_t *check_file(lua_State *L, int idx) {
+  lua_fs_file_t *h = (lua_fs_file_t *)luaL_checkudata(L, idx, FS_FILE_MT);
+  if (!h->f)
+    luaL_error(L, "attempt to use a closed file");
+  return h;
+}
+
+// Close h once.  The fclose belongs to whoever untracks the handle: if the
+// app-exit sweep (app_files_close_all) already closed it, do nothing.
+static void fs_file_release(lua_fs_file_t *h) {
+  sdfile_t f = h->f;
+  if (!f)
+    return;
+  h->f = NULL;
+  if (app_files_untrack(f))
+    sdcard_fclose(f);
+}
+
+// fs.open(path [, mode]) -> handle | nil, err
 static int l_fs_open(lua_State *L) {
   const char *path = luaL_checkstring(L, 1);
   const char *mode = luaL_optstring(L, 2, "r");
@@ -85,49 +79,118 @@ static int l_fs_open(lua_State *L) {
                       strchr(mode, '+') != NULL);
   if (!fs_sandbox_check(L, path, needs_write)) {
     lua_pushnil(L);
-    return 1;
+    lua_pushliteral(L, "permission denied");
+    return 2;
   }
+  // The userdata first: if it raises (out of memory) nothing is open yet.
+  lua_fs_file_t *h = (lua_fs_file_t *)lua_newuserdatauv(L, sizeof(*h), 0);
+  h->f = NULL;
+  luaL_setmetatable(L, FS_FILE_MT);
   sdfile_t f = sdcard_fopen(path, mode);
   if (!f) {
     lua_pushnil(L);
-    return 1;
+    lua_pushliteral(L, "cannot open file");
+    return 2;
   }
-  lua_pushlightuserdata(L, f);
+  if (!app_files_track(f)) {
+    sdcard_fclose(f);
+    lua_pushnil(L);
+    lua_pushliteral(L, "too many open files");
+    return 2;
+  }
+  h->f = f;
   return 1;
 }
 
+// fs.read(h, len) / h:read(len) -> string, or nil at end of file / on error.
+// len must be >= 0; it is clamped to the bytes left in the file, so an
+// absurd length never becomes an allocation.  Reads straight into a Lua
+// buffer (no temporary umm_malloc to leak if pushing the string fails).
 static int l_fs_read(lua_State *L) {
-  sdfile_t f = lua_touserdata(L, 1);
-  int len = (int)luaL_checkinteger(L, 2);
-  char *buf = (char *)umm_malloc(len);
-  if (!buf) {
+  lua_fs_file_t *h = check_file(L, 1);
+  lua_Integer want = luaL_checkinteger(L, 2);
+  luaL_argcheck(L, want >= 0, 2, "negative length");
+  int size = sdcard_fsize_handle(h->f);
+  if (size >= 0) {
+    uint32_t pos = sdcard_ftell(h->f);
+    lua_Integer left = (uint32_t)size > pos ? (lua_Integer)((uint32_t)size - pos) : 0;
+    if (want > left)
+      want = left;
+  }
+  if (want == 0 || want > INT_MAX) {
     lua_pushnil(L);
     return 1;
   }
-  int n = sdcard_fread(f, buf, len);
+  luaL_Buffer b;
+  char *buf = luaL_buffinitsize(L, &b, (size_t)want);
+  int n = sdcard_fread(h->f, buf, (int)want);
   if (n <= 0) {
-    umm_free(buf);
     lua_pushnil(L);
     return 1;
   }
-  lua_pushlstring(L, buf, n);
-  umm_free(buf);
+  luaL_pushresultsize(&b, (size_t)n);
   return 1;
 }
 
+// fs.write(h, data) / h:write(data) -> bytes written (-1 on error)
 static int l_fs_write(lua_State *L) {
-  sdfile_t f = lua_touserdata(L, 1);
+  lua_fs_file_t *h = check_file(L, 1);
   size_t len;
   const char *data = luaL_checklstring(L, 2, &len);
-  int n = sdcard_fwrite(f, data, (int)len);
-  lua_pushinteger(L, n);
+  luaL_argcheck(L, len <= INT_MAX, 2, "data too large");
+  lua_pushinteger(L, sdcard_fwrite(h->f, data, (int)len));
   return 1;
 }
 
+// fs.close(h) / h:close() — idempotent; fs.close(nil) is a no-op.
 static int l_fs_close(lua_State *L) {
-  sdfile_t f = lua_touserdata(L, 1);
-  sdcard_fclose(f);
+  if (lua_isnoneornil(L, 1))
+    return 0;
+  fs_file_release((lua_fs_file_t *)luaL_checkudata(L, 1, FS_FILE_MT));
   return 0;
+}
+
+static int l_fs_seek(lua_State *L) {
+  lua_fs_file_t *h = check_file(L, 1);
+  lua_Integer offset = luaL_checkinteger(L, 2);
+  luaL_argcheck(L, offset >= 0, 2, "negative offset");
+  lua_pushboolean(L, sdcard_fseek(h->f, (uint32_t)offset));
+  return 1;
+}
+
+static int l_fs_tell(lua_State *L) {
+  lua_fs_file_t *h = check_file(L, 1);
+  lua_pushinteger(L, (lua_Integer)sdcard_ftell(h->f));
+  return 1;
+}
+
+// __gc and __close: close a handle the app dropped or scoped.
+static int l_fs_file_gc(lua_State *L) {
+  fs_file_release((lua_fs_file_t *)luaL_checkudata(L, 1, FS_FILE_MT));
+  return 0;
+}
+
+static int l_fs_file_tostring(lua_State *L) {
+  lua_fs_file_t *h = (lua_fs_file_t *)luaL_checkudata(L, 1, FS_FILE_MT);
+  if (h->f)
+    lua_pushfstring(L, "file (%p)", (void *)h);
+  else
+    lua_pushliteral(L, "file (closed)");
+  return 1;
+}
+
+static const luaL_Reg l_fs_file_methods[] = {
+    {"read", l_fs_read},   {"write", l_fs_write}, {"close", l_fs_close},
+    {"seek", l_fs_seek},   {"tell", l_fs_tell},   {NULL, NULL}};
+
+static const luaL_Reg l_fs_file_meta[] = {
+    {"__gc", l_fs_file_gc},
+    {"__close", l_fs_file_gc},
+    {"__tostring", l_fs_file_tostring},
+    {NULL, NULL}};
+
+static void fs_file_register_mt(lua_State *L) {
+  lb_register_type(L, FS_FILE_MT, l_fs_file_methods, l_fs_file_meta);
 }
 
 static int l_fs_exists(lua_State *L) {
@@ -140,33 +203,34 @@ static int l_fs_exists(lua_State *L) {
   return 1;
 }
 
+// fs.readFile(path) -> string | nil.  The Lua buffer is sized before the
+// file is opened, so an out-of-memory error cannot leave the file open, and
+// the bytes are read straight into it (no umm_malloc copy to leak).
 static int l_fs_readFile(lua_State *L) {
   const char *path = luaL_checkstring(L, 1);
   if (!fs_sandbox_check(L, path, false)) {
     lua_pushnil(L);
     return 1;
   }
-  int len = 0;
-  char *buf = sdcard_read_file(path, &len);
-  if (!buf) {
+  int size = sdcard_fsize(path);
+  if (size < 0) {
     lua_pushnil(L);
     return 1;
   }
-  lua_pushlstring(L, buf, len);
-  umm_free(buf);
-  return 1;
-}
-
-static int l_fs_seek(lua_State *L) {
-  sdfile_t f = lua_touserdata(L, 1);
-  uint32_t offset = (uint32_t)luaL_checkinteger(L, 2);
-  lua_pushboolean(L, sdcard_fseek(f, offset));
-  return 1;
-}
-
-static int l_fs_tell(lua_State *L) {
-  sdfile_t f = lua_touserdata(L, 1);
-  lua_pushinteger(L, (lua_Integer)sdcard_ftell(f));
+  luaL_Buffer b;
+  char *buf = luaL_buffinitsize(L, &b, (size_t)size);
+  sdfile_t f = sdcard_fopen(path, "rb");
+  if (!f) {
+    lua_pushnil(L);
+    return 1;
+  }
+  int n = size > 0 ? sdcard_fread(f, buf, size) : 0;
+  sdcard_fclose(f);
+  if (n < 0) {
+    lua_pushnil(L);
+    return 1;
+  }
+  luaL_pushresultsize(&b, (size_t)n);
   return 1;
 }
 
@@ -241,52 +305,39 @@ static int l_fs_mkdir(lua_State *L) {
 static int l_fs_appPath(lua_State *L) {
   const char *name = luaL_checkstring(L, 1);
 
-  lua_getglobal(L, "APP_ID");
-  const char *app_id = lua_tostring(L, -1);
-  lua_pop(L, 1);
-  if (!app_id) {
+  const app_identity_t *me = app_identity_current();
+  if (!me) {
     lua_pushnil(L);
     return 1;
   }
 
-  // Auto-create /data/<APP_ID>/ on first call
-  char data_dir[128];
-  snprintf(data_dir, sizeof(data_dir), "/data/%s", app_id);
-  sdcard_mkdir(data_dir);
+  // Auto-create /data/<id>/ on first call
+  sdcard_mkdir(me->data_dir);
 
   char full_path[192];
-  snprintf(full_path, sizeof(full_path), "/data/%s/%s", app_id, name);
+  snprintf(full_path, sizeof(full_path), "%s/%s", me->data_dir, name);
   lua_pushstring(L, full_path);
   return 1;
 }
 
 // Open a file-browser panel overlay.
-// Optional arg: start directory (defaults to the app's /data/<dirname>/ dir).
+// Optional arg: start directory (defaults to the app's /data/<id>/ dir).
 // Returns the selected file path as a string, or nil if cancelled.
 static int l_fs_browse(lua_State *L) {
-  const char *start_path;
-  static char default_path[128];
-
-  // Always determine the app's data root for use as the browser root boundary.
-  lua_getglobal(L, "APP_ID");
-  const char *app_id = lua_tostring(L, -1);
-  lua_pop(L, 1);
-
-  const char *root_path;
-  static char root_buf[128];
-  if (app_id) {
-    snprintf(root_buf, sizeof(root_buf), "/data/%s", app_id);
-    sdcard_mkdir(root_buf);
-    root_path = root_buf;
-  } else {
-    root_path = "/data";
+  // The app's data root is the browser's root boundary.
+  const app_identity_t *me = app_identity_current();
+  const char *root_path = "/data";
+  if (me) {
+    sdcard_mkdir(me->data_dir);
+    root_path = me->data_dir;
   }
 
-  if (lua_isnoneornil(L, 1)) {
+  // The start directory is listed, so it needs read access: a sandboxed
+  // app asking for /system or another app's /data starts at its own root.
+  const char *start_path =
+      lua_isnoneornil(L, 1) ? root_path : luaL_checkstring(L, 1);
+  if (start_path != root_path && !fs_sandbox_check(L, start_path, false))
     start_path = root_path;
-  } else {
-    start_path = luaL_checkstring(L, 1);
-  }
 
   char selected[192];
   if (file_browser_show(start_path, root_path, selected, sizeof(selected))) {
@@ -362,7 +413,9 @@ static void copy_progress_trampoline(uint32_t done, uint32_t total, void *user) 
   lua_rawgeti(ctx->L, LUA_REGISTRYINDEX, ctx->fn_ref);
   lua_pushinteger(ctx->L, (lua_Integer)done);
   lua_pushinteger(ctx->L, (lua_Integer)total);
-  lua_pcall(ctx->L, 2, 0, 0);
+  if (lua_pcall(ctx->L, 2, 0, 0) != LUA_OK)
+    lua_pop(ctx->L, 1);  // errors in the callback are ignored (one per chunk
+                         // would otherwise pile up on the stack)
 }
 
 static int l_fs_copy(lua_State *L) {
@@ -511,5 +564,6 @@ static const luaL_Reg l_fs_lib[] = {
 
 
 void lua_bridge_fs_init(lua_State *L) {
+  fs_file_register_mt(L);
   register_subtable(L, "fs", l_fs_lib);
 }

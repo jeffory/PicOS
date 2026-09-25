@@ -43,6 +43,8 @@ bool usb_msc_is_active(void) { return s_msc_active; }
 // Declared in main.c - pauses Core 1's background tasks (WiFi, HTTP, audio)
 extern _Atomic bool g_core1_pause;
 extern _Atomic bool g_core1_paused;
+// Declared in main.c - feeds the watchdog and stamps Core 0's heartbeat.
+extern void core0_heartbeat(void);
 
 void usb_msc_enter_mode(void) {
   printf("[USB MSC] Entering USB Mass Storage mode\n");
@@ -64,6 +66,10 @@ void usb_msc_enter_mode(void) {
   if (!g_core1_paused)
     printf("[USB_MSC] Core 1 pause timeout (500ms)\n");
   printf("[USB MSC] Core 1 paused (WiFi/HTTP/audio halted)\n");
+  // f_getfree below scans the FAT (~3 s on a 256 GB card, longer on slow
+  // cards) with no watchdog kick; the heartbeat lets paused Core 1 relay
+  // the watchdog through it.
+  core0_heartbeat();
 
   // 2. Ensure FS Info has valid free cluster count, then unmount FatFS.
   //    Without this, the host scans the entire FAT (~16MB for a 256GB card)
@@ -90,6 +96,18 @@ void usb_msc_enter_mode(void) {
   s_msc_active = true;
   s_msc_ejected = false;  // Reset eject flag on entry
   s_media_changed = true;  // Signal UNIT ATTENTION on next TUR
+
+  // Force a USB re-enumeration so the host re-probes the medium.  The MSC
+  // interface enumerates at boot with no media (TUR: NOT READY), and Linux
+  // then stops polling ("[sda] Media removed, stopped polling") — without
+  // this, the UNIT ATTENTION armed above is never delivered and the host
+  // needs a manual rescan or replug to see the disk.  Cost: CDC serial
+  // drops and /dev/ttyACM* may renumber; hosts must reopen the port.
+  printf("[USB MSC] Re-enumerating USB so the host re-probes media...\n");
+  stdio_flush();
+  tud_disconnect();
+  sleep_ms(300);
+  tud_connect();
 
   // 2. Draw the splash screen
   ui_draw_splash("USB Mode", "Hold escape to exit");

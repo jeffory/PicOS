@@ -4,5 +4,5 @@
     "description": "Check for and install firmware updates",
     "version": "1.0",
     "author": "PicOS",
-    "requirements": ["http", "root-filesystem"]
+    "requirements": ["http", "root-filesystem", "system-update"]
 }

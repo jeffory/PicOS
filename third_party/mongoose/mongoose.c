@@ -4851,7 +4851,18 @@ void mg_multicast_restore(struct mg_connection *c, uint8_t *from) {
 #endif
 
 #define MG_TCPIP_ACK_MS 150    // Timeout for ACKing
+#ifndef MG_TCPIP_ARP_MS
 #define MG_TCPIP_ARP_MS 100    // Timeout for ARP response
+#endif
+// PicOS patch: resend an unanswered ARP request / IPv6 neighbour solicitation
+// this many times (MG_TCPIP_ARP_MS apart) before failing the connection with
+// "ARP timeout".  Upstream (through 7.23) sends ONE request and gives up after
+// 100 ms; over Wi-Fi a power-saving LAN peer often answers later than that, so
+// connections to hosts on the local network failed at random.  Default: 10
+// tries, ~1 s total.
+#ifndef MG_TCPIP_ARP_RETRIES
+#define MG_TCPIP_ARP_RETRIES 9
+#endif
 #define MG_TCPIP_SYN_MS 15000  // Timeout for connection establishment
 #define MG_TCPIP_FIN_MS 1000   // Timeout for closing connection
 
@@ -4876,6 +4887,7 @@ struct connstate {
   struct mg_iobuf raw;   // For TLS only. Incoming raw data
   bool fin_rcvd;         // We have received FIN from the peer
   bool twclosure;        // 3-way closure done
+  uint8_t arp_tries;     // PicOS patch: ARP/NS requests resent so far
 };
 
 #if defined(__DCC__)
@@ -6757,7 +6769,19 @@ static void mg_tcpip_poll(struct mg_tcpip_if *ifp, uint64_t now) {
     if ((c->is_udp && !c->is_arplooking) || c->is_listening || c->is_resolving)
       continue;
     if (ifp->now > s->timer) {
-      if (s->ttype == MIP_TTYPE_ARP) {
+      if (s->ttype == MIP_TTYPE_ARP && s->arp_tries < MG_TCPIP_ARP_RETRIES) {
+        // PicOS patch: ask again instead of failing (see MG_TCPIP_ARP_RETRIES)
+        s->arp_tries++;
+#if MG_ENABLE_IPV6
+        if (c->rem.is_ip6)
+          tx_ndp_ns(ifp, c->rem.addr.ip6, NULL);
+        else
+#endif
+          mg_tcpip_arp_request(ifp, c->rem.addr.ip4, NULL);
+        settmout(c, MIP_TTYPE_ARP);
+        continue;  // keep the ARP timer (the keep-alive re-arm below would
+                   // replace it with a 45 s one)
+      } else if (s->ttype == MIP_TTYPE_ARP) {
         mg_error(c, "ARP timeout");
       } else if (c->is_udp) {
         continue;

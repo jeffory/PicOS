@@ -48,6 +48,15 @@ void picos_main(const PicoCalcAPI *api,
         d->drawText(cx - 48, cy - 16, "Hello from C!", 0xFFFF, 0x0000);
         d->drawText(cx - 60, cy,       line2,           RGB565(12, 24, 20), 0x0000);
         d->drawText(cx - 52, cy + 16,  "Press any key...", RGB565(16, 32, 16), 0x0000);
+        if (api->version >= 6) {
+            // API v6: font selection, measurement, and transparent text.
+            d->setFont(PC_FONT_8X12);
+            const char *msg = "API v6 fonts";
+            int w = d->textWidth(msg);
+            d->fillRect(cx - w / 2 - 4, cy + 34, w + 8, d->getFontHeight() + 4, RGB565(4, 8, 16));
+            d->drawTextTransparent(cx - w / 2, cy + 36, msg, RGB565(31, 63, 0));
+            d->setFont(PC_FONT_6X8);
+        }
         d->flush();
 
         s->poll();

@@ -2,52 +2,65 @@ name: E2E Tests
 
 on:
   push:
-    branches: [main, develop]
+    branches: [master, develop]
   pull_request:
-    branches: [main]
+    branches: [master, develop]
+  schedule:
+    - cron: '17 3 * * *'   # nightly: the informational TSan leg
+  workflow_dispatch:
 
 jobs:
+  # release and ASan+UBSan builds of the simulator run the same suite. Both
+  # legs are meant to be required status checks on PRs (branch protection:
+  # "E2E (release)" and "E2E (asan-ubsan)"). Under ASan the asan_only tests run
+  # too, and any sanitizer report fails the test that triggered it.
   e2e:
+    name: E2E (${{ matrix.sim }})
     runs-on: ubuntu-latest
-    
+    strategy:
+      fail-fast: false
+      matrix:
+        sim: [release, asan-ubsan]
+        include:
+          - sim: release
+            target: simulator
+            build_dir: build_sim
+            expect_sanitize: ''
+            timeout: 10
+          - sim: asan-ubsan
+            target: simulator-asan
+            build_dir: build_sim_asan
+            expect_sanitize: address,undefined
+            timeout: 20
+
     steps:
       - uses: actions/checkout@v4
         with:
           submodules: recursive
-      
+
       - name: Install system dependencies
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y \
-            cmake \
-            build-essential \
-            libsdl2-dev \
-            libsdl2-image-dev \
-            libcurl4-openssl-dev \
-            libpthread-stubs0-dev \
-            python3-pip \
-            python3-venv
-      
+        run: scripts/ci/install-sim-deps.sh
+
       - name: Setup Python
         run: |
           python3 -m venv .venv
           source .venv/bin/activate
           pip install --upgrade pip
           pip install -r tests/e2e/requirements.txt
-      
+
       - name: Cache build
         uses: actions/cache@v4
         with:
-          path: build_sim
-          key: ${{ runner.os }}-simulator-${{ hashFiles('simulator/**/*.c', 'simulator/**/*.h', 'src/**/*.c', 'src/**/*.h') }}
-          restore-keys: |
-            ${{ runner.os }}-simulator-
-      
-      - name: Build simulator
+          path: ${{ matrix.build_dir }}
+          # The release key is the same as build-sim.yml's; no restore-keys
+          # (stale builds).
+          key: ${{ runner.os }}-simulator${{ matrix.sim != 'release' && format('-{0}', matrix.sim) || '' }}-${{ hashFiles('simulator/**', 'src/**', 'CMakeLists.txt', 'cmake/**', 'Makefile', 'scripts/ci/install-sim-deps.sh') }}
+
+      - name: Build simulator (${{ matrix.sim }})
         run: |
           source .venv/bin/activate
-          make simulator
-      
+          make ${{ matrix.target }}
+
       - name: Run E2E tests
         run: |
           source .venv/bin/activate
@@ -60,48 +73,172 @@ jobs:
           # last command, so a passing tee would mask a failing suite.
           set -o pipefail
           export SDL_VIDEODRIVER=dummy
+          # The harness asks the binary --build-info: asan_only tests run only
+          # against the ASan build. ASAN/UBSAN_OPTIONS come from
+          # tests/e2e/picos_simulator.py (every report is fatal).
+          export PICOS_SIM_BINARY=${{ matrix.build_dir }}/picos_simulator
+          # conftest refuses to run unless --build-info confirms these, so a
+          # failed probe can't quietly skip every asan_only test.
+          export PICOS_SIM_EXPECT_SANITIZE="${{ matrix.expect_sanitize }}"
+          # Symbolised stacks (the sanitizer self-test looks for a frame name).
+          export ASAN_SYMBOLIZER_PATH="$(command -v llvm-symbolizer || true)"
+          # Per-test timeout (60 s), strict xfail and the skip allow-list come
+          # from pytest.ini and tests/e2e/conftest.py. Each failing test's
+          # simulator stdout/stderr, log buffer, error.log and screenshot land
+          # under reports/failures/.
           pytest tests/e2e/ \
             -v \
             --tb=short \
+            --durations=20 \
             --html=reports/e2e-report.html \
             --self-contained-html \
             --junitxml=reports/junit.xml \
+            --artifacts-dir=reports/failures \
             -n auto 2>&1 | tee reports/test-output.txt
-        timeout-minutes: 10
-      
+        timeout-minutes: ${{ matrix.timeout }}
+
       - name: Upload test results
         uses: actions/upload-artifact@v4
         if: always()
         with:
-          name: e2e-results
-          path: |
-            reports/
-            tests/e2e/fixtures/
-      
-      - name: Update baseline screenshots
-        if: failure()
-        uses: actions/upload-artifact@v4
+          name: e2e-results-${{ matrix.sim }}
+          path: reports/
+
+  # The firmware network stack in the simulator (make simulator-net:
+  # src/drivers/wifi.c/http.c/tcp.c on Mongoose/POSIX, simulator/net/) against
+  # local servers: tests/e2e/test_network_firmware.py, including regression
+  # tests for the fixed Core 0/Core 1 close races from the code review
+  # (KNOWN_BUGS there is empty). Optional: not a required check. About
+  # 5 minutes (a ~1 min build locally at -j4 plus deps; the suite is ~15 s).
+  e2e-firmware-net:
+    name: E2E firmware-net (${{ matrix.sim }})
+    runs-on: ubuntu-latest
+    if: github.event_name != 'schedule'
+    strategy:
+      fail-fast: false
+      matrix:
+        sim: [release, asan-ubsan]
+        include:
+          - sim: release
+            target: simulator-net
+            build_dir: build_sim_net
+            expect_sanitize: ''
+          - sim: asan-ubsan
+            target: simulator-net-asan
+            build_dir: build_sim_net_asan
+            expect_sanitize: address,undefined
+    steps:
+      - uses: actions/checkout@v4
         with:
-          name: new-baselines
-          path: tests/e2e/fixtures/
+          submodules: recursive
+
+      - name: Install system dependencies
+        run: scripts/ci/install-sim-deps.sh
+
+      - name: Setup Python
+        run: |
+          python3 -m venv .venv
+          source .venv/bin/activate
+          pip install --upgrade pip
+          pip install -r tests/e2e/requirements.txt
+
+      - name: Build simulator (firmware-net, ${{ matrix.sim }})
+        run: make ${{ matrix.target }}
+
+      - name: Run firmware network tests
+        run: |
+          source .venv/bin/activate
+          mkdir -p reports
+          set -o pipefail
+          export SDL_VIDEODRIVER=dummy
+          export PICOS_SIM_BINARY=${{ matrix.build_dir }}/picos_simulator
+          export PICOS_SIM_EXPECT_SANITIZE="${{ matrix.expect_sanitize }}"
+          export PICOS_SIM_EXPECT_FIRMWARE_NET=1
+          export ASAN_SYMBOLIZER_PATH="$(command -v llvm-symbolizer || true)"
+          pytest tests/e2e/test_network_firmware.py tests/e2e/test_network.py \
+            -v --tb=short --artifacts-dir=reports/failures \
+            -n auto 2>&1 | tee reports/test-output.txt
+        timeout-minutes: 10
+
+      - name: Upload test results
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: e2e-results-firmware-net-${{ matrix.sim }}
+          path: reports/
+
+  # Nightly, informational: the simulator's own threads race (the RPC socket
+  # thread reads OS state the main thread owns, Core 1 audio globals are
+  # unsynchronised), so TSan reports on most tests. See tests/e2e/README.md.
+  e2e-tsan:
+    name: E2E (tsan, informational)
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Install system dependencies
+        run: scripts/ci/install-sim-deps.sh
+
+      - name: Setup Python
+        run: |
+          python3 -m venv .venv
+          source .venv/bin/activate
+          pip install --upgrade pip
+          pip install -r tests/e2e/requirements.txt
+
+      - name: Build simulator (tsan)
+        run: make simulator-tsan
+
+      - name: Run E2E tests under TSan
+        run: |
+          source .venv/bin/activate
+          mkdir -p reports/tsan
+          set -o pipefail
+          export SDL_VIDEODRIVER=dummy
+          export PICOS_SIM_BINARY=build_sim_tsan/picos_simulator
+          export PICOS_SIM_EXPECT_SANITIZE=thread
+          export TSAN_SYMBOLIZER_PATH="$(command -v llvm-symbolizer || true)"
+          # One report file per simulator process, for the artifact.
+          export TSAN_OPTIONS="halt_on_error=0:second_deadlock_stack=1:suppressions=$PWD/tests/e2e/tsan.supp:log_path=$PWD/reports/tsan/tsan"
+          pytest tests/e2e/ -q --tb=line -n auto \
+            --artifacts-dir=reports/failures 2>&1 | tee reports/test-output.txt
+        timeout-minutes: 30
+
+      - name: TSan summary
+        if: always()
+        run: |
+          echo "## TSan (informational)" >> $GITHUB_STEP_SUMMARY
+          grep -ho "WARNING: ThreadSanitizer: [a-z-]*" reports/tsan/* 2>/dev/null \
+            | sort | uniq -c >> $GITHUB_STEP_SUMMARY || true
+
+      - name: Upload TSan results
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: e2e-results-tsan
+          path: reports/
 
   summary:
     needs: e2e
     runs-on: ubuntu-latest
-    if: always()
-    
+    if: always() && github.event_name != 'schedule'
+
     steps:
       - name: Test Summary
         run: |
           echo "## E2E Test Results" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
-          
+
           if [ "${{ needs.e2e.result }}" == "success" ]; then
             echo "✅ All E2E tests passed" >> $GITHUB_STEP_SUMMARY
           elif [ "${{ needs.e2e.result }}" == "failure" ]; then
             echo "❌ E2E tests failed" >> $GITHUB_STEP_SUMMARY
             echo "" >> $GITHUB_STEP_SUMMARY
-            echo "Download the 'e2e-results' artifact for details." >> $GITHUB_STEP_SUMMARY
+            echo "Download the 'e2e-results-<sim>' artifact for details (reports/failures/ has per-test simulator diagnostics)." >> $GITHUB_STEP_SUMMARY
           else
             echo "⚠️ E2E tests were skipped or cancelled" >> $GITHUB_STEP_SUMMARY
           fi

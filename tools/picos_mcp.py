@@ -21,6 +21,7 @@ import argparse
 import asyncio
 import base64
 import hashlib
+import io
 import json
 import os
 import platform
@@ -34,7 +35,10 @@ import sys
 import tempfile
 import threading
 import time
-from pathlib import Path
+import zipfile
+from collections import deque
+from contextlib import contextmanager
+from pathlib import Path, PurePosixPath
 from typing import TYPE_CHECKING, Any, Optional
 
 try:
@@ -46,6 +50,7 @@ if TYPE_CHECKING:
     import serial
 
 from mcp.server.fastmcp import FastMCP
+from mcp.server.fastmcp import Image as MCPImage
 
 mcp = FastMCP("picos")
 
@@ -287,13 +292,34 @@ def get_connection() -> SimulatorConnection:
 
 # ── Simulator Lifecycle Management ────────────────────────────────────────────
 
+def _default_project_root() -> Path:
+    """Repo root used for simulator builds/launches.
+
+    PICOS_PROJECT_ROOT overrides the location of this file, so a session
+    working in a git worktree can point the server at that tree instead of
+    the main checkout.  start_simulator(project_root=...) overrides per call.
+    """
+    env = os.environ.get("PICOS_PROJECT_ROOT", "")
+    return Path(env).resolve() if env else Path(__file__).resolve().parent.parent
+
+
 class SimulatorManager:
     """Manages simulator process lifecycle."""
 
-    def __init__(self):
+    def __init__(self, project_root: Path | None = None):
         self.process: subprocess.Popen | None = None
         self.port: int = 0
-        self.project_root = Path(__file__).parent.parent
+        self.project_root = project_root or _default_project_root()
+        self.sd_card_path: str | None = None  # SD dir of the running sim
+        # Bounded tails of the child's stdout/stderr. The pipes MUST be
+        # drained continuously (see _start_pipe_drains) or the simulator
+        # deadlocks once the 64KB kernel pipe buffer fills — the sim's own
+        # host-side traces (e.g. "[TRAMP] fs_read" per file read) block in
+        # write() while holding the stdio lock, wedging the main thread.
+        # Same bug and fix as tests/e2e/picos_simulator.py.
+        self._stdout_tail: deque = deque(maxlen=2000)
+        self._stderr_tail: deque = deque(maxlen=2000)
+        self._drain_threads: list[threading.Thread] = []
 
     def ensure_running(self, port: int = 0, sd_card_path: str | None = None,
                        headless: bool = False) -> int:
@@ -328,6 +354,7 @@ class SimulatorManager:
             cmd += ["--sd-card", sd_card_path]
         else:
             cmd += ["--sd-card", str(self.project_root)]
+        self.sd_card_path = sd_card_path or str(self.project_root)
 
         env = os.environ.copy()
         if headless:
@@ -364,6 +391,11 @@ class SimulatorManager:
         if actual_port <= 0:
             raise RuntimeError("Failed to determine simulator TCP port")
 
+        # From here on nothing else reads the child's pipes, so they must be
+        # drained continuously or the simulator eventually deadlocks in
+        # write() — see __init__ for the mechanism.
+        self._start_pipe_drains()
+
         # Wait for port to be connectable
         start = time.monotonic()
         while time.monotonic() - start < 5.0:
@@ -373,6 +405,34 @@ class SimulatorManager:
 
         self.port = actual_port
         return actual_port
+
+    def _start_pipe_drains(self):
+        """Continuously drain the child's stdout/stderr into bounded tails.
+
+        The startup loop above reads stdout only until it finds the port
+        line; without these threads the sim wedges once either pipe fills
+        (64KB), which a single read-heavy app launch (C-Dogs asset load,
+        one "[TRAMP] fs_read" stderr line per read) achieves in seconds.
+        """
+        def drain(stream, tail):
+            try:
+                for line in iter(stream.readline, ""):
+                    tail.append(line.rstrip("\n"))
+            except (ValueError, OSError):
+                pass  # stream closed during shutdown
+            finally:
+                try:
+                    stream.close()
+                except Exception:
+                    pass
+
+        for stream, tail in ((self.process.stdout, self._stdout_tail),
+                             (self.process.stderr, self._stderr_tail)):
+            if stream is None:
+                continue
+            t = threading.Thread(target=drain, args=(stream, tail), daemon=True)
+            t.start()
+            self._drain_threads.append(t)
 
     def stop(self):
         """Stop managed simulator."""
@@ -522,10 +582,173 @@ class LineReader:
         raise TimeoutError(f"no response matching {ok_markers} within {timeout}s")
 
 
+# ── Hardware log monitor (persistent serial session) ──────────────────────────
+#
+# The per-command open→write→read→close pattern loses everything the device
+# prints between commands ([APP] logs especially) — nothing holds the port.
+# A HardwareMonitor keeps the port open and drains output into a ring
+# buffer; line commands route through it and bulk transfers park it for
+# exclusive port access, so the two never fight over bytes.
+
+class HardwareMonitor:
+    """Holds a serial port open, draining device output into a ring buffer."""
+
+    def __init__(self, port: str):
+        self.port = port
+        self.buffer: deque = deque(maxlen=5000)
+        self._ser = open_serial(port, timeout=0.2)
+        self._cmd_lock = threading.Lock()  # one command/suspend at a time
+        self._cmd_lines: deque | None = None
+        self._stop = threading.Event()
+        self._suspend_req = threading.Event()
+        self._parked = threading.Event()
+        self._linebuf = b""
+        self._thread = threading.Thread(target=self._reader_loop, daemon=True)
+        self._thread.start()
+
+    def _reader_loop(self) -> None:
+        while not self._stop.is_set():
+            if self._suspend_req.is_set():
+                self._parked.set()
+                time.sleep(0.05)
+                continue
+            self._parked.clear()
+            try:
+                chunk = self._ser.read(max(1, self._ser.in_waiting))
+            except Exception:
+                time.sleep(0.05)  # port closed for suspend, or unplugged
+                continue
+            if not chunk:
+                continue
+            self._linebuf += chunk
+            while b"\n" in self._linebuf:
+                raw, self._linebuf = self._linebuf.split(b"\n", 1)
+                line = raw.rstrip(b"\r").decode("utf-8", errors="replace")
+                self.buffer.append(line)
+                if self._cmd_lines is not None:
+                    self._cmd_lines.append(line)
+
+    def command(self, cmd: str, timeout: float = DEFAULT_TIMEOUT) -> list[str]:
+        """Send a line command; collect response lines (marker or idle end)."""
+        with self._cmd_lock:
+            self._cmd_lines = deque()
+            try:
+                self._ser.write(f"{cmd}\n".encode())
+                self._ser.flush()
+                lines: list[str] = []
+                deadline = time.monotonic() + timeout
+                last_data = time.monotonic()
+                while time.monotonic() < deadline:
+                    try:
+                        line = self._cmd_lines.popleft()
+                    except IndexError:
+                        if lines and time.monotonic() - last_data > 1.0:
+                            break
+                        time.sleep(0.02)
+                        continue
+                    last_data = time.monotonic()
+                    lines.append(line)
+                    if line.startswith("[DEV] ") and any(
+                        kw in line for kw in _CMD_END_MARKERS
+                    ):
+                        break
+                return lines
+            finally:
+                self._cmd_lines = None
+
+    @contextmanager
+    def suspend(self):
+        """Park the reader and release the port for exclusive use."""
+        with self._cmd_lock:
+            self._suspend_req.set()
+            self._parked.wait(timeout=2.0)
+            try:
+                self._ser.close()
+            except Exception:
+                pass
+            try:
+                yield
+            finally:
+                self._ser = open_serial(self.port, timeout=0.2)
+                self._suspend_req.clear()
+
+    def stop(self) -> None:
+        self._stop.set()
+        self._thread.join(timeout=2.0)
+        try:
+            self._ser.close()
+        except Exception:
+            pass
+
+
+# Response lines that terminate a dev command exchange.
+_CMD_END_MARKERS = ["pong", "Total:", "Error:", "Launching", "Rebooting",
+                    "Unknown", "Status:", "Created:", "Unzipped", "Deleted:"]
+
+_hw_monitors: dict[str, HardwareMonitor] = {}
+_hw_monitors_lock = threading.Lock()
+
+
+def _monitor_for(port: str) -> HardwareMonitor | None:
+    with _hw_monitors_lock:
+        return _hw_monitors.get(port)
+
+
+def _get_or_start_monitor(port: str) -> tuple[HardwareMonitor, bool]:
+    """Return (monitor, started_now) for a port, creating one if needed."""
+    with _hw_monitors_lock:
+        mon = _hw_monitors.get(port)
+        if mon:
+            return mon, False
+        mon = HardwareMonitor(port)
+        _hw_monitors[port] = mon
+        return mon, True
+
+
+@contextmanager
+def _exclusive_serial(port: str):
+    """Give callers that open the port directly (bulk transfers, binary
+    screenshot, key sequences) exclusive access: parks any active monitor
+    for the duration.  NOT re-entrant — never nest."""
+    mon = _monitor_for(port)
+    if mon:
+        with mon.suspend():
+            yield
+    else:
+        yield
+
+
+def _retry_transfer(fn, attempts: int = 3):
+    """Retry a serial bulk transfer on integrity/corruption failures.
+
+    A device log line interleaving mid-transfer surfaces as an fnv1a
+    mismatch or a corrupted base64 line; both are transient (the firmware
+    also mutes its log sink during transfers now), so a retry nearly
+    always succeeds.  Non-transient errors re-raise immediately.
+    """
+    for attempt in range(attempts):
+        try:
+            return fn()
+        except (RuntimeError, TimeoutError) as e:
+            msg = str(e)
+            transient = ("integrity" in msg or "corrupted" in msg
+                         or "mismatch" in msg or "stalled" in msg)
+            if not transient or attempt == attempts - 1:
+                raise
+            time.sleep(0.5)
+
+
 # ── Base64 file transfer (works on UART and CDC — stdio-based) ────────────────
 
 def do_get_file_b64(port: str, remote_path: str) -> bytes:
-    """Fetch a file via the firmware's getb64 command with integrity check."""
+    """Fetch a file via getb64: integrity-checked, with retry on corruption."""
+    def attempt() -> bytes:
+        with _exclusive_serial(port):
+            return _do_get_file_b64_once(port, remote_path)
+    return _retry_transfer(attempt)
+
+
+def _do_get_file_b64_once(port: str, remote_path: str) -> bytes:
     ser = open_serial(port, timeout=0.2)
     try:
         ser.write(f"getb64 {remote_path}\n".encode())
@@ -560,13 +783,35 @@ def do_get_file_b64(port: str, remote_path: str) -> bytes:
         ser.close()
 
 
-def do_put_file_b64(port: str, data: bytes, remote_path: str) -> str:
-    """Send bytes via the firmware's putb64 command (chunk + ACK pacing)."""
+def do_put_file_b64(port: str, data: bytes, remote_path: str,
+                    progress=None) -> str:
+    """Send bytes via the firmware's putb64 command (chunk + ACK pacing).
+
+    progress: optional callback(raw_bytes_sent, raw_bytes_total), invoked
+    after each ACKed chunk (used by tools/ota_flash.py)."""
+    with _exclusive_serial(port):
+        return _do_put_file_b64_once(port, data, remote_path, progress)
+
+
+def _do_put_file_b64_once(port: str, data: bytes, remote_path: str,
+                          progress=None) -> str:
     b64 = base64.b64encode(data)
     CHUNK = 512  # b64 chars per line → 384 raw bytes ≤ device write buffer
     ser = open_serial(port, timeout=0.2)
     try:
         reader = LineReader(ser)
+        # Create the parent directory first (firmware mkdir is recursive).
+        # Older firmware answers "Unknown command" — treat the whole step as
+        # best-effort and let putb64 surface any real failure.
+        parent = str((PurePosixPath("/") / remote_path.lstrip("/")).parent)
+        if parent not in ("/", ""):
+            ser.write(f"mkdir {parent}\n".encode())
+            ser.flush()
+            try:
+                reader.wait_marker([b"Created:", b"Unknown command"],
+                                   [b"mkdir failed"], 5.0)
+            except TimeoutError:
+                pass
         ser.write(f"putb64 {remote_path} {len(data)}\n".encode())
         ser.flush()
         reader.wait_marker([b"Ready B64"],
@@ -577,6 +822,8 @@ def do_put_file_b64(port: str, data: bytes, remote_path: str) -> str:
             ser.flush()
             line = reader.wait_marker([b"ACK ", b"File received"],
                                       [b"Error"], 15.0)
+            if progress:
+                progress(min(off + CHUNK, len(b64)) * 3 // 4, len(data))
             if b"File received" in line:
                 final = line
         if final is None:
@@ -592,6 +839,13 @@ def do_put_file_b64(port: str, data: bytes, remote_path: str) -> str:
 
 def do_screenshot_b64(port: str) -> bytes:
     """Capture the framebuffer via screenshot64 (slow on UART: ~25s)."""
+    def attempt() -> bytes:
+        with _exclusive_serial(port):
+            return _do_screenshot_b64_once(port)
+    return _retry_transfer(attempt)
+
+
+def _do_screenshot_b64_once(port: str) -> bytes:
     ser = open_serial(port, timeout=0.2)
     try:
         ser.write(b"screenshot64\n")
@@ -600,7 +854,12 @@ def do_screenshot_b64(port: str) -> bytes:
         w = h = 320
         for line in LineReader(ser).lines(idle_timeout=10.0):
             if line.startswith(b"~"):
-                raw += base64.b64decode(line[1:], validate=True)
+                try:
+                    raw += base64.b64decode(line[1:], validate=True)
+                except Exception:
+                    raise RuntimeError(
+                        "corrupted base64 line (a device log line may have "
+                        "interleaved mid-transfer) — retry the transfer")
             elif b"SCRN64 " in line:
                 for tok in line.split():
                     if tok.startswith(b"w="):
@@ -652,6 +911,9 @@ def rgb565be_to_png(data: bytes, width: int, height: int) -> bytes:
 # ── Hardware helpers ────────────────────────────────────────────────────────────
 
 def do_command_hardware(cmd: str, port: str, timeout: float = DEFAULT_TIMEOUT) -> list[str]:
+    mon = _monitor_for(port)
+    if mon:
+        return mon.command(cmd, timeout)
     ser = open_serial(port, timeout)
     try:
         ser.write(f"{cmd}\n".encode())
@@ -665,7 +927,7 @@ def do_command_hardware(cmd: str, port: str, timeout: float = DEFAULT_TIMEOUT) -
             line = raw.decode("utf-8", errors="replace").rstrip("\r\n")
             lines.append(line)
             if line.startswith("[DEV] ") and any(
-                kw in line for kw in ["pong", "Total:", "Error:", "Launching", "Rebooting", "Unknown"]
+                kw in line for kw in _CMD_END_MARKERS
             ):
                 break
         return lines
@@ -674,6 +936,11 @@ def do_command_hardware(cmd: str, port: str, timeout: float = DEFAULT_TIMEOUT) -
 
 
 def do_screenshot_hardware(port: str, timeout: float = DEFAULT_TIMEOUT) -> bytes:
+    with _exclusive_serial(port):
+        return _do_screenshot_hardware_once(port, timeout)
+
+
+def _do_screenshot_hardware_once(port: str, timeout: float = DEFAULT_TIMEOUT) -> bytes:
     ser = open_serial(port, timeout)
     try:
         ser.write(b"screenshot\n")
@@ -775,8 +1042,11 @@ async def ping(device: str | None = None) -> str:
 
 
 @mcp.tool()
-async def screenshot(device: str | None = None) -> list:
-    """Take a screenshot of the PicOS display. Returns PNG image.
+async def screenshot(device: str | None = None, save_path: str = "") -> list:
+    """Take a screenshot of the PicOS display. Returns a PNG image block.
+
+    save_path: optional host filesystem path — when given, the PNG is also
+    written there (useful for byte-diffing successive screenshots).
 
     Works on simulator and hardware (UART hardware uses a base64 transfer,
     ~25 seconds at 115200 baud)."""
@@ -789,20 +1059,25 @@ async def screenshot(device: str | None = None) -> list:
             else:
                 png_bytes = await asyncio.to_thread(do_screenshot_b64, port)
         except ImportError:
-            return [{"type": "text", "text": "Pillow not installed: pip install Pillow"}]
+            return ["Pillow not installed: pip install Pillow"]
         except Exception as e:
-            return [{"type": "text", "text": f"Error: {e}"}]
+            return [f"Error: {e}"]
     else:
         try:
             png_bytes = await asyncio.to_thread(do_screenshot_simulator)
         except Exception as e:
-            return [{"type": "text", "text": f"Error: {e}"}]
+            return [f"Error: {e}"]
 
-    png_b64 = base64.b64encode(png_bytes).decode("ascii")
-    return [
-        {"type": "image", "data": png_b64, "mimeType": "image/png"},
-        {"type": "text", "text": f"Screenshot (320x320 PNG)"},
-    ]
+    # MCPImage produces a real ImageContent block; returning raw dicts here
+    # made FastMCP JSON-dump them into unusable TextContent.
+    note = "Screenshot (320x320 PNG)"
+    if save_path:
+        try:
+            Path(save_path).write_bytes(png_bytes)
+            note += f", saved to {save_path}"
+        except OSError as e:
+            note += f" (save to {save_path} failed: {e})"
+    return [MCPImage(data=png_bytes, format="png"), note]
 
 
 @mcp.tool()
@@ -880,8 +1155,14 @@ async def wait_for_exit(app_name: str = "", timeout: float = 60.0, device: str |
         if notif:
             params = notif.get("params", {})
             name = params.get("name", "?")
-            ok = params.get("ok", False)
-            return f"App '{name}' exited (ok={ok})"
+            result = params.get("result", "?")
+            error = params.get("error")
+            msg = f"App '{name}' exited (result={result}"
+            if not params.get("found", True):
+                msg += ", not found"
+            if error:
+                msg += f", error={error}"
+            return msg + ")"
         return f"Timeout after {timeout}s — app still running"
     except Exception as e:
         return f"Error: {e}"
@@ -893,7 +1174,10 @@ async def exit_app(device: str | None = None) -> str:
     port = resolve_port(device)
     if port:
         try:
-            await asyncio.to_thread(do_command_hardware, "exit", port, timeout=2)
+            lines = await asyncio.to_thread(do_command_hardware, "exit", port, timeout=2)
+            # "Error: exit: no app running" at the launcher.
+            if any("no app running" in ln for ln in lines):
+                return "No app running (nothing to exit)."
             return "Exit signal sent."
         except Exception as e:
             return f"Error: {e}"
@@ -981,6 +1265,12 @@ def do_keysequence_hardware(keys: list[str], port: str, delay_ms: int,
 
     Combos ("ctrl+s") expand to keydown <mod> / keypress <key> / keyup <mod>.
     """
+    with _exclusive_serial(port):
+        return _do_keysequence_hardware_once(keys, port, delay_ms, timeout)
+
+
+def _do_keysequence_hardware_once(keys: list[str], port: str, delay_ms: int,
+                                  timeout: float = DEFAULT_TIMEOUT) -> list[str]:
     ser = open_serial(port, timeout)
 
     def send(cmd: str) -> str:
@@ -1129,10 +1419,24 @@ async def send_command(command: str, timeout: float = 5.0, device: str | None = 
 
 @mcp.tool()
 async def get_status(device: str | None = None) -> str:
-    """Get simulator status: running app, heap info, WiFi state."""
+    """Get device status: running app, uptime, WiFi state (and heap on the
+    simulator)."""
     port = resolve_port(device)
     if port:
-        return "(status not available in hardware mode)"
+        try:
+            lines = await asyncio.to_thread(do_command_hardware, "status", port)
+            for line in lines:
+                if "[DEV] Status:" in line:
+                    return line.split("[DEV] ", 1)[1]
+            # Older firmware without the status command: report the build.
+            lines = await asyncio.to_thread(do_command_hardware, "ver", port)
+            ver = next((l.split("[DEV] ", 1)[1] for l in lines
+                        if "PicOS build" in l), "unknown firmware")
+            return (f"{ver} — this firmware predates the `status` dev "
+                    "command; flash the current build for app/wifi/battery "
+                    "status.")
+        except Exception as e:
+            return f"Error: {e}"
     try:
         conn = get_connection()
         app = await asyncio.to_thread(conn.call, "get_running_app", timeout=5)
@@ -1159,36 +1463,80 @@ async def get_status(device: str | None = None) -> str:
 
 @mcp.tool()
 async def get_log_buffer(lines: int = 100, device: str | None = None) -> str:
-    """Retrieve recent log lines from the simulator."""
+    """Retrieve recent log lines from the simulator or hardware device.
+
+    Hardware: the first call starts a persistent serial capture — the port
+    stays open and everything the device prints ([APP] logs, [DEV] output,
+    crashes) accumulates in a 5000-line ring buffer. Subsequent calls
+    return the newest lines. Commands and file transfers coordinate with
+    the capture automatically; use stop_log_capture() to release the port.
+    """
     port = resolve_port(device)
     if port:
-        return "(log buffer not available in hardware mode)"
+        try:
+            mon, started = await asyncio.to_thread(_get_or_start_monitor, port)
+        except Exception as e:
+            return f"Error opening {port}: {e}"
+        if started:
+            return (f"Hardware log capture started on {port} — the ring "
+                    "buffer is filling from now on; call get_log_buffer "
+                    "again to read it.")
+        buf = list(mon.buffer)
+        if not buf:
+            return "(no log lines captured yet)"
+        return "\n".join(buf[-lines:])
     try:
         conn = get_connection()
-        result = await asyncio.to_thread(conn.call, "get_log_buffer", timeout=5)
-        log_lines = result.get("lines", [])
-        if isinstance(log_lines, str) and log_lines:
-            log_lines = log_lines.strip().split("\n")
+        result = await asyncio.to_thread(
+            conn.call, "get_log_buffer", {"tail": lines}, timeout=5)
+        # Entries are {seq, t_ms, src, text}; src is lua/native/os/err.
+        log_lines = [
+            l if isinstance(l, str)
+            else (l.get("text", "") if l.get("src") in ("lua", "native")
+                  else f"[{l.get('src')}] {l.get('text', '')}")
+            for l in result.get("lines", [])
+        ]
         if not log_lines:
             return "(no log lines)"
-        shown = log_lines[-lines:] if len(log_lines) > lines else log_lines
-        return "\n".join(shown)
+        return "\n".join(log_lines[-lines:])
     except Exception as e:
         return f"Error: {e}"
 
 
 @mcp.tool()
 async def clear_log_buffer(device: str | None = None) -> str:
-    """Clear the simulator log buffer."""
+    """Clear the simulator log buffer (or the hardware capture buffer)."""
     port = resolve_port(device)
     if port:
-        return "(not available in hardware mode)"
+        mon = _monitor_for(port)
+        if not mon:
+            return (f"No log capture running on {port} — call "
+                    "get_log_buffer first to start one.")
+        mon.buffer.clear()
+        return "Hardware log capture buffer cleared."
     try:
         conn = get_connection()
         await asyncio.to_thread(conn.call, "clear_log_buffer", timeout=5)
         return "Log buffer cleared."
     except Exception as e:
         return f"Error: {e}"
+
+
+@mcp.tool()
+async def stop_log_capture(device: str | None = None) -> str:
+    """Stop the persistent hardware log capture and release the serial port.
+
+    Use before handing the port to another program (minicom, a script), or
+    after a reboot/flash renumbers /dev/ttyACM*."""
+    port = resolve_port(device)
+    if not port:
+        return "(log capture applies to hardware only)"
+    with _hw_monitors_lock:
+        mon = _hw_monitors.pop(port, None)
+    if not mon:
+        return f"No active log capture on {port}."
+    await asyncio.to_thread(mon.stop)
+    return f"Log capture stopped on {port}; serial port released."
 
 
 @mcp.tool()
@@ -1276,6 +1624,10 @@ async def get_crash_log(device: str | None = None) -> str:
     port = resolve_port(device)
     if port:
         def _hw_crashlog() -> str:
+            with _exclusive_serial(port):
+                return _hw_crashlog_read()
+
+        def _hw_crashlog_read() -> str:
             ser = open_serial(port, timeout=0.2)
             try:
                 ser.write(b"crashlog\n")
@@ -1345,6 +1697,7 @@ async def start_simulator(
     port: int = 0,
     sd_card_path: str = "",
     headless: bool = True,
+    project_root: str = "",
 ) -> str:
     """Build (if needed) and start a PicOS simulator instance.
 
@@ -1352,12 +1705,22 @@ async def start_simulator(
         port: TCP port (0=auto-assign)
         sd_card_path: Path to SD card directory (empty=default)
         headless: Run without display (for CI/testing)
+        project_root: Repo or worktree root whose simulator sources and
+            build_sim/ are used. Defaults to the PICOS_PROJECT_ROOT env
+            var, else the repo containing this server. Pass your worktree
+            path here when the server was launched from the main checkout.
 
     Returns the TCP port of the started simulator.
     """
     global _sim_manager, _configured_port, _conn
+    root = Path(project_root).resolve() if project_root else None
     if _sim_manager is None:
-        _sim_manager = SimulatorManager()
+        _sim_manager = SimulatorManager(root)
+    elif root and _sim_manager.project_root != root:
+        # Different tree requested: manage it with a fresh manager. Any
+        # simulator from the old root stays tracked in _tracked_pids, so
+        # kill_simulators still reaps it.
+        _sim_manager = SimulatorManager(root)
     try:
         actual_port = await asyncio.to_thread(
             _sim_manager.ensure_running,
@@ -1374,7 +1737,8 @@ async def start_simulator(
                 except Exception:
                     pass
                 _conn = None
-        return f"Simulator running on port {actual_port}"
+        return (f"Simulator running on port {actual_port} "
+                f"(root: {_sim_manager.project_root})")
     except Exception as e:
         return f"Error starting simulator: {e}"
 
@@ -1524,11 +1888,16 @@ async def reboot(mode: str = "normal", device: str | None = None) -> str:
             return ("Reboot targets hardware. No serial device detected "
                     "(simulator is active); pass device= to force one.")
         cmd = "reboot-flash" if mode == "flash" else "reboot"
-        ser = open_serial(port, timeout=1)
-        ser.write(f"{cmd}\n".encode())
-        ser.flush()
-        time.sleep(0.1)
-        ser.close()
+
+        def _send_reboot() -> None:
+            with _exclusive_serial(port):
+                ser = open_serial(port, timeout=1)
+                ser.write(f"{cmd}\n".encode())
+                ser.flush()
+                time.sleep(0.1)
+                ser.close()
+
+        await asyncio.to_thread(_send_reboot)
         if mode == "flash":
             return "Reboot-to-flash sent. Device will appear as USB drive."
         return "Reboot sent."
@@ -1562,11 +1931,12 @@ async def flash(file: str, device: str | None = None) -> str:
         def _do_flash() -> str:
             do_put_file_b64(port, (sha + "\n").encode(), "/system/update.sha256")
             do_put_file_b64(port, data, "/system/update.bin")
-            ser = open_serial(port, timeout=1)
-            ser.write(b"reboot\n")
-            ser.flush()
-            time.sleep(0.1)
-            ser.close()
+            with _exclusive_serial(port):
+                ser = open_serial(port, timeout=1)
+                ser.write(b"reboot\n")
+                ser.flush()
+                time.sleep(0.1)
+                ser.close()
             return (f"Uploaded {len(data)} bytes (sha256 {sha[:12]}…) and "
                     "rebooted. The device verifies the hash and programs "
                     "flash on boot — watch its screen; do not power off.")
@@ -1623,6 +1993,105 @@ async def get_file(remote_path: str, local_path: str, device: str | None = None)
         data = await asyncio.to_thread(do_get_file_b64, port, remote_path)
         Path(local_path).write_bytes(data)
         return f"Downloaded {len(data)} bytes: {remote_path} -> {local_path}"
+    except Exception as e:
+        return f"Error: {e}"
+
+
+# Files never worth shipping to the device.
+_PUSH_APP_EXCLUDE = shutil.ignore_patterns(
+    ".git", ".git*", "__pycache__", "*.pyc", ".DS_Store")
+
+
+def _push_app_wanted(rel_posix: str, name: str) -> bool:
+    """Filter for the hardware ZIP: mirror _PUSH_APP_EXCLUDE."""
+    parts = rel_posix.split("/")
+    for p in parts:
+        if p == "__pycache__" or p == ".DS_Store" or p.startswith(".git"):
+            return False
+        if p.endswith(".pyc"):
+            return False
+    return True
+
+
+@mcp.tool()
+async def push_app(local_dir: str, app_name: str = "",
+                   device: str | None = None) -> str:
+    """Push a whole app directory to /apps/<name> in one operation.
+
+    Simulator: copies the tree into the simulated SD card.
+    Hardware: zips the directory in memory, uploads one file over serial,
+    extracts it on-device with the `unzip` dev command and deletes the
+    temporary archive — orders of magnitude faster than per-file transfers
+    for asset-heavy apps.
+
+    app_name defaults to the basename of local_dir.
+    """
+    src = Path(local_dir).expanduser().resolve()
+    if not src.is_dir():
+        return f"Error: {local_dir} is not a directory"
+    name = app_name or src.name
+    if "/" in name or name in (".", ".."):
+        return f"Error: invalid app name: {name}"
+    if not any((src / probe).exists()
+               for probe in ("app.json", "main.lua", "main.elf")):
+        return (f"Error: {src} has no app.json/main.lua/main.elf — "
+                "not an app directory")
+
+    try:
+        port = resolve_port(device)
+    except Exception as e:
+        return f"Error: {e}"
+
+    if port is None:
+        # Simulator: straight copy into the SD directory the sim is using.
+        sd = (_sim_manager.sd_card_path if _sim_manager else None) \
+            or os.environ.get("PICOS_SIMULATOR_SD", ".")
+        dest = Path(sd) / "apps" / name
+        try:
+            if dest.exists():
+                shutil.rmtree(dest)
+            shutil.copytree(src, dest, ignore=_PUSH_APP_EXCLUDE)
+            n = sum(1 for p in dest.rglob("*") if p.is_file())
+            return (f"Copied {n} files to simulator: {dest}\n"
+                    "Note: launch_app rescans /apps when the name is not "
+                    "found, so new apps launch without a restart; after "
+                    "changing an existing app's app.json, call the "
+                    "rescan_apps RPC.")
+        except Exception as e:
+            return f"Error: {e}"
+
+    if not HAS_SERIAL:
+        return "pyserial not installed: pip install pyserial"
+
+    # Hardware: single ZIP over serial + on-device extraction.
+    buf = io.BytesIO()
+    count = 0
+    with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as zf:
+        for p in sorted(src.rglob("*")):
+            if not p.is_file():
+                continue
+            rel = p.relative_to(src).as_posix()
+            if not _push_app_wanted(rel, p.name):
+                continue
+            zf.write(p, rel)
+            count += 1
+    if count == 0:
+        return f"Error: nothing to push from {src}"
+    data = buf.getvalue()
+
+    tmp_zip = "/data/tmp/push_app.zip"
+    try:
+        upload = await asyncio.to_thread(do_put_file_b64, port, data, tmp_zip)
+        # Extraction is SD-bound: allow generous headroom for slow cards.
+        timeout = max(30.0, 10.0 + count * 0.5 + len(data) / (64 * 1024))
+        lines = await asyncio.to_thread(
+            do_command_hardware, f"unzip {tmp_zip} /apps/{name}", port, timeout)
+        result = "\n".join(lines[-3:]) if lines else "(no response)"
+        await asyncio.to_thread(do_command_hardware, f"rm {tmp_zip}", port, 10.0)
+        if any("Unzipped" in ln for ln in lines):
+            return (f"Pushed {count} files ({len(data)} bytes zipped) to "
+                    f"/apps/{name}\n{result}")
+        return f"Error: extraction did not complete:\n{result}\n({upload})"
     except Exception as e:
         return f"Error: {e}"
 

@@ -1,0 +1,8 @@
+{
+    "id": "com.test.sandbox_root",
+    "name": "Sandbox Root Test",
+    "description": "E2E fixture: root-filesystem grant (sandbox control)",
+    "version": "1.0",
+    "author": "PicOS E2E",
+    "requirements": ["root-filesystem"]
+}

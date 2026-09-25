@@ -22,6 +22,10 @@ typedef struct {
     bool has_root_filesystem;      // "root-filesystem" requirement
     bool has_http;                 // "http" requirement
     bool has_audio;                // "audio" requirement
+    char requirements[128];        // every requirement name, folded and
+                                   // space-separated ("http audio ...")
     uint32_t system_clock_khz;     // Optional overclock (0 = use system default)
+    uint32_t min_psram_kb;         // Optional: largest contiguous PSRAM block the
+                                   // app needs to start (0 = no check)
     void *icon;                    // pc_image_t*, loaded from icon.png/bmp, NULL if absent
 } app_entry_t;

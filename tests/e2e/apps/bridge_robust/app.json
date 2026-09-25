@@ -1,0 +1,7 @@
+{
+    "id": "com.picos.bridge_robust",
+    "name": "Bridge Robust",
+    "description": "Lua bridge robustness fixture (Task 31)",
+    "version": "1.0",
+    "author": "PicOS"
+}

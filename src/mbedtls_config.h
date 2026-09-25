@@ -14,7 +14,9 @@ extern void umm_free(void *ptr);
 #define MBEDTLS_PLATFORM_CALLOC_MACRO      umm_calloc
 #define MBEDTLS_PLATFORM_EXIT_ALT
 #define MBEDTLS_NO_PLATFORM_ENTROPY        // disable /dev/urandom etc.
-#define MBEDTLS_ENTROPY_HARDWARE_ALT       // use pico_mbedtls mbedtls_hardware_poll (get_rand_64)
+// No MBEDTLS_ENTROPY_HARDWARE_ALT: pico_mbedtls's mbedtls_hardware_poll is
+// get_rand_64 (xoroshiro).  src/drivers/rng.c adds the RP2350 TRNG (health
+// tests on) as the entropy source of every DRBG it seeds.
 #define MBEDTLS_ENTROPY_C
 #define MBEDTLS_CTR_DRBG_C
 
@@ -47,6 +49,8 @@ extern void umm_free(void *ptr);
 #define MBEDTLS_OID_C
 #define MBEDTLS_PK_C
 #define MBEDTLS_PK_PARSE_C
+#define MBEDTLS_PEM_PARSE_C                // PEM CA bundle + OTA update public key
+#define MBEDTLS_BASE64_C                   // required by PEM_PARSE_C
 #define MBEDTLS_SHA224_C                   // SHA-224 (often needed alongside SHA-256)
 #define MBEDTLS_SHA256_C
 #define MBEDTLS_SHA384_C                   // Required for P-384 curve (Wikipedia)
@@ -69,8 +73,11 @@ extern void umm_free(void *ptr);
 // TLS SNI — sends server_name extension in ClientHello (required for shared-IP HTTPS hosts)
 #define MBEDTLS_SSL_SERVER_NAME_INDICATION
 
-// Time support
+// Time support.  HAVE_TIME_DATE makes X.509 verification check validity
+// dates, against time() — overridden in wifi.c to return the SNTP clock.
+// wifi.c refuses verifying handshakes until SNTP has set it.
 #define MBEDTLS_HAVE_TIME
+#define MBEDTLS_HAVE_TIME_DATE
 #define MBEDTLS_PLATFORM_MS_TIME_ALT
 
 // Memory tuning

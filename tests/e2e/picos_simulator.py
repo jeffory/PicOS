@@ -23,15 +23,106 @@ import time
 import threading
 from collections import deque
 from pathlib import Path
-from typing import Any, Optional, List
+from typing import Any, Optional, List, Sequence
+
+
+PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent
+
+# Sanitizer runtime options for sanitizer builds of the simulator (make
+# simulator-asan / simulator-tsan); ignored by a release build. These are the
+# audit's (§5.1 R4): every ASan/UBSan report is fatal (abort → the health hook
+# sees a dead sim plus the report on stderr), and leak checking stays off
+# until there is a suppressions file. TSan keeps going after a report: its
+# leg is informational (see tests/e2e/README.md).
+SANITIZER_ENV = {
+    "ASAN_OPTIONS": "abort_on_error=1:halt_on_error=1:detect_leaks=0",
+    "UBSAN_OPTIONS": "print_stacktrace=1:halt_on_error=1",
+    "TSAN_OPTIONS": "halt_on_error=0:second_deadlock_stack=1:suppressions="
+                    + str(PROJECT_ROOT / "tests" / "e2e" / "tsan.supp"),
+}
+
+
+def _merge_options(ours: str, theirs: str) -> str:
+    """Merge two k=v:k=v sanitizer option strings per key; `theirs` (the
+    caller's environment) wins on a clash."""
+    merged = {}
+    for opts in (ours, theirs):
+        for item in filter(None, opts.split(":")):
+            key, _, value = item.partition("=")
+            merged[key] = value
+    return ":".join(f"{k}={v}" for k, v in merged.items())
+
+
+def sanitizer_env(env: dict) -> dict:
+    """`env` with SANITIZER_ENV merged in per option key (options already in
+    `env` win, the rest of ours are kept)."""
+    for key, value in SANITIZER_ENV.items():
+        env[key] = _merge_options(value, env.get(key, ""))
+    return env
+
+
+def default_binary() -> Path:
+    """$PICOS_SIM_BINARY (relative to the cwd, else the repo root) or
+    build_sim/picos_simulator."""
+    override = os.environ.get("PICOS_SIM_BINARY")
+    if not override:
+        return PROJECT_ROOT / "build_sim" / "picos_simulator"
+    path = Path(override).expanduser()
+    if not path.is_absolute() and not path.exists():
+        path = PROJECT_ROOT / path
+    return path.resolve()
+
+
+_build_info_cache: dict = {}
+
+
+def binary_build_info(binary) -> Optional[dict]:
+    """`picos_simulator --build-info` as a dict of its key=value lines
+    (sanitize=..., firmware_net=0|1); None when the probe failed (missing
+    binary, crash, timeout, no sanitize= line), so callers can tell "no"
+    from "don't know"."""
+    key = str(binary)
+    if key not in _build_info_cache:
+        info = {}
+        try:
+            out = subprocess.run([key, "--build-info"], capture_output=True,
+                                 text=True, timeout=30,
+                                 env=sanitizer_env(os.environ.copy())).stdout
+            for line in out.splitlines():
+                k, sep, v = line.partition("=")
+                if sep:
+                    info[k.strip()] = v.strip()
+        except (OSError, subprocess.SubprocessError):
+            pass
+        if "sanitize" not in info:
+            return None  # not cached: the binary may be built later
+        _build_info_cache[key] = info
+    return _build_info_cache[key]
+
+
+def binary_sanitizers(binary) -> Optional[str]:
+    """The -fsanitize= list a simulator binary was built with ('' for a
+    release build), from `picos_simulator --build-info`; None when the probe
+    failed (missing binary, crash, timeout, no sanitize= line), so callers
+    can tell "not sanitized" from "don't know"."""
+    info = binary_build_info(binary)
+    return None if info is None else info["sanitize"]
+
+
+def binary_firmware_net(binary) -> Optional[bool]:
+    """True if the simulator runs the firmware network stack
+    (SIM_FIRMWARE_NET=ON, make simulator-net); None when the probe failed.
+    Binaries from before the option report no firmware_net line: False."""
+    info = binary_build_info(binary)
+    return None if info is None else info.get("firmware_net") == "1"
 
 
 class PicosSimulator:
     """Controls PicOS Simulator process for E2E testing via JSON-RPC 2.0."""
 
     # Project root (two levels up from tests/e2e/)
-    PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent
-    DEFAULT_BINARY = PROJECT_ROOT / "build_sim" / "picos_simulator"
+    PROJECT_ROOT = PROJECT_ROOT
+    DEFAULT_BINARY = default_binary()
     DEFAULT_SD_CARD = PROJECT_ROOT / "simulator" / "assets" / "sd_card"
 
     def __init__(
@@ -41,6 +132,11 @@ class PicosSimulator:
         headless: bool = True,
         tcp_port: int = 0,
         timeout: float = 10.0,
+        test_mode: bool = False,
+        virtual_time: Optional[bool] = None,
+        crash_log_path: Optional[str] = None,
+        unix_socket: Optional[str] = "none",
+        extra_args: Sequence[str] = (),
     ):
         self.binary_path = binary_path or str(self.DEFAULT_BINARY)
         self.sd_card_path = sd_card_path or str(self.DEFAULT_SD_CARD)
@@ -48,13 +144,52 @@ class PicosSimulator:
         self.requested_port = tcp_port
         self.tcp_port: Optional[int] = None  # actual port after start
         self.timeout = timeout
+        # --test-mode: Lua error screens and launch refusals return at once
+        # (their text goes to the log's "err" source) and idle dim is off.
+        self.test_mode = test_mode
+        # --virtual-time (needs test_mode): the clock the OS and apps see is
+        # virtual. sleep_ms(n) advances it by n instead of waiting (paced at
+        # set_time_multiplier x real time, default 50x; 0 pauses it for
+        # step_time). Off by default: audio playback and network I/O stay on
+        # real time, and apps with time-boxed input waits would expire before
+        # a test could type. None = $PICOS_SIM_VIRTUAL_TIME=1 turns it on for
+        # every test-mode simulator (a whole-suite experiment knob).
+        if virtual_time is None:
+            virtual_time = test_mode and os.environ.get(
+                "PICOS_SIM_VIRTUAL_TIME") == "1"
+        if virtual_time and not test_mode:
+            raise ValueError("virtual_time requires test_mode")
+        self.virtual_time = virtual_time
+        # --crash-log: where the sim's SIGSEGV/SIGABRT handler writes its
+        # backtrace. Read from disk after a crash (a dead sim can't answer
+        # get_crash_log). None = the sim's per-PID default under /tmp.
+        self.crash_log_path = crash_log_path
+        # --unix-socket: "none" (default) keeps parallel instances from
+        # binding ./picos_control in the cwd; None = the sim's default.
+        self.unix_socket = unix_socket
+        # More simulator flags, e.g. ["--real-umm"] (device-accurate heap).
+        self.extra_args = list(extra_args)
         self.process: Optional[subprocess.Popen] = None
+        # Exit status once the process has been reaped (stop() or crash).
+        self.returncode: Optional[int] = None
+        self._launch_id = 0
         self._sock: Optional[socket.socket] = None
         self._lock = threading.Lock()
         self._reader_thread: Optional[threading.Thread] = None
         self._reader_done = threading.Event()
+        # Notifications other than `log`, in arrival order, each tagged with
+        # a receive index ("_rx") so waits can ignore ones that predate a
+        # launch. `log` notifications go to _log_events.
         self._notifications: list[dict] = []
         self._notif_lock = threading.Lock()
+        self._notif_cond = threading.Condition(self._notif_lock)
+        self._rx_counter = 0
+        self._launch_rx = 0
+        self._log_events: deque = deque(maxlen=50000)
+        self._logs_subscribed = False
+        # Test hook: while set, the reader thread stops reading the socket
+        # (simulates a client that falls behind).
+        self._reader_pause = threading.Event()
         self._pending: dict[int, dict] = {}
         self._pending_lock = threading.Lock()
         self._id_counter = 0
@@ -66,6 +201,12 @@ class PicosSimulator:
         # diagnostics without growing without bound.
         self._stdout_tail: deque = deque(maxlen=2000)
         self._stderr_tail: deque = deque(maxlen=2000)
+        # A sanitizer report, captured from its first line by the stderr
+        # drain and kept apart from the tail, so later output (C-Dogs fills
+        # the tail in under a second; TSan keeps running) can't evict it.
+        # Bounded: the drain keeps reading past the cap, it just stops
+        # storing, so report volume can never back up the pipe.
+        self._sanitizer_report: list[str] = []
         self._drain_threads: list[threading.Thread] = []
 
     # ── Context Manager ──────────────────────────────────────────────────────
@@ -86,8 +227,17 @@ class PicosSimulator:
             "--sd-card", self.sd_card_path,
             "--port", str(self.requested_port),
         ]
+        if self.test_mode:
+            cmd.append("--test-mode")
+        if self.virtual_time:
+            cmd.append("--virtual-time")
+        if self.crash_log_path:
+            cmd += ["--crash-log", str(self.crash_log_path)]
+        if self.unix_socket:
+            cmd += ["--unix-socket", str(self.unix_socket)]
+        cmd += self.extra_args
 
-        env = os.environ.copy()
+        env = sanitizer_env(os.environ.copy())
         if self.headless:
             env["SDL_VIDEODRIVER"] = "dummy"
             env["SDL_AUDIODRIVER"] = "dummy"
@@ -99,12 +249,17 @@ class PicosSimulator:
             env=env,
         )
 
+        # stderr is drained from the first byte: a sanitizer build can write
+        # to it before the port line appears (TSan races at startup), and an
+        # undrained pipe deadlocks the sim (see _start_pipe_drains).
+        self._start_pipe_drains(stdout=False)
+
         # Parse the actual TCP port from simulator stdout
         self.tcp_port = self._parse_port()
 
-        # From here on nothing else reads these pipes, so they must be drained
-        # continuously — see _start_pipe_drains for why.
-        self._start_pipe_drains()
+        # From here on nothing else reads stdout, so it must be drained
+        # continuously too.
+        self._start_pipe_drains(stderr=False)
 
         # Connect and start reader
         self._connect()
@@ -122,15 +277,97 @@ class PicosSimulator:
 
         if self.process:
             try:
-                self.process.terminate()
-                self.process.wait(timeout=3)
-            except subprocess.TimeoutExpired:
-                self.process.kill()
+                # The shutdown RPC normally ends the process by itself; only
+                # signal it if it is still running after a grace period.
                 self.process.wait(timeout=2)
+            except subprocess.TimeoutExpired:
+                try:
+                    self.process.terminate()
+                    self.process.wait(timeout=3)
+                except subprocess.TimeoutExpired:
+                    self.process.kill()
+                    self.process.wait(timeout=2)
+            self.returncode = self.process.returncode
+            self._join_drains()
             self.process = None
 
-    def _start_pipe_drains(self):
-        """Continuously drain the child's stdout/stderr.
+    # ── Health ────────────────────────────────────────────────────────────────
+
+    # Sanitizer reports (a sanitizer build prints them to stderr).
+    SANITIZER_RE = re.compile(
+        r"AddressSanitizer|UndefinedBehaviorSanitizer|ThreadSanitizer|runtime error:")
+    # Exit statuses that mean the sim died rather than shut down: a fatal
+    # signal (negative), or the crash handler's _exit(128 + signal).
+    _FATAL = (signal.SIGSEGV, signal.SIGABRT, signal.SIGBUS, signal.SIGFPE,
+              signal.SIGILL)
+    CRASH_SIGNALS = {-s for s in _FATAL} | {128 + s for s in _FATAL}
+
+    def is_alive(self) -> bool:
+        return self.process is not None and self.process.poll() is None
+
+    def exit_code(self) -> Optional[int]:
+        """The process's exit status if it has exited, else None."""
+        if self.process is not None:
+            return self.process.poll()
+        return self.returncode
+
+    def read_crash_log(self) -> str:
+        """The crash handler's backtrace, read from disk ('' if none)."""
+        if not self.crash_log_path:
+            return ""
+        try:
+            return Path(self.crash_log_path).read_text(errors="replace")
+        except OSError:
+            return ""
+
+    # Lines of sanitizer report kept (a whole ASan report with its stacks
+    # is well under this; TSan may print many).
+    SANITIZER_REPORT_MAX = 600
+
+    def sanitizer_lines(self) -> list[str]:
+        """stderr lines that look like a sanitizer report."""
+        seen = [l for l in self._sanitizer_report if self.SANITIZER_RE.search(l)]
+        return seen or [l for l in list(self._stderr_tail)
+                        if self.SANITIZER_RE.search(l)]
+
+    def sanitizer_report(self) -> str:
+        """The captured sanitizer report (first line onwards, with stacks)."""
+        return "\n".join(self._sanitizer_report)
+
+    def _note_stderr_line(self, line: str):
+        """Stderr drain hook: start or extend the sticky sanitizer report."""
+        if self._sanitizer_report or self.SANITIZER_RE.search(line):
+            if len(self._sanitizer_report) < self.SANITIZER_REPORT_MAX:
+                self._sanitizer_report.append(line)
+
+    def health_problems(self) -> list[str]:
+        """Reasons this sim is unhealthy: the process exited without stop()
+        being called (or stop() reaped a crash status), it wrote a crash log,
+        or a sanitizer reported on stderr. [] = healthy."""
+        problems = []
+        if self.process is not None:
+            code = self.process.poll()
+            if code is not None:
+                problems.append(
+                    f"simulator process exited unexpectedly with status {code}")
+                self._join_drains()
+        elif self.returncode in self.CRASH_SIGNALS:
+            problems.append(f"simulator died with status {self.returncode}")
+        crash = self.read_crash_log()
+        if crash.strip():
+            problems.append("crash log:\n" + crash.strip())
+        san = self.sanitizer_lines()
+        if san:
+            report = self._sanitizer_report or san
+            problems.append("sanitizer report on stderr:\n" + "\n".join(report[:120]))
+        return problems
+
+    def _join_drains(self, timeout: float = 1.0):
+        for t in self._drain_threads:
+            t.join(timeout=timeout)
+
+    def _start_pipe_drains(self, stdout: bool = True, stderr: bool = True):
+        """Continuously drain the child's stdout and/or stderr.
 
         The simulator is spawned with stdout=PIPE and stderr=PIPE, but after
         _parse_port() nothing reads them again. Once the kernel pipe buffer
@@ -143,10 +380,13 @@ class PicosSimulator:
         This showed up as 'App hung on cycle 5/10' in the stress tests: it took
         about five app launches' worth of output to fill the pipe.
         """
-        def drain(stream, tail):
+        def drain(stream, tail, note=None):
             try:
                 for raw in iter(stream.readline, b""):
-                    tail.append(raw.decode("utf-8", errors="replace").rstrip("\n"))
+                    line = raw.decode("utf-8", errors="replace").rstrip("\n")
+                    tail.append(line)
+                    if note is not None:
+                        note(line)
             except (ValueError, OSError):
                 pass  # stream closed during shutdown
             finally:
@@ -155,11 +395,14 @@ class PicosSimulator:
                 except Exception:
                     pass
 
-        for stream, tail in ((self.process.stdout, self._stdout_tail),
-                             (self.process.stderr, self._stderr_tail)):
-            if stream is None:
+        for wanted, stream, tail, note in (
+                (stdout, self.process.stdout, self._stdout_tail, None),
+                (stderr, self.process.stderr, self._stderr_tail,
+                 self._note_stderr_line)):
+            if not wanted or stream is None:
                 continue
-            t = threading.Thread(target=drain, args=(stream, tail), daemon=True)
+            t = threading.Thread(target=drain, args=(stream, tail, note),
+                                 daemon=True)
             t.start()
             self._drain_threads.append(t)
 
@@ -178,7 +421,8 @@ class PicosSimulator:
         while time.time() < deadline:
             if self.process.poll() is not None:
                 stdout = self.process.stdout.read().decode() if self.process.stdout else ""
-                stderr = self.process.stderr.read().decode() if self.process.stderr else ""
+                self._join_drains()
+                stderr = "\n".join(self._stderr_tail)
                 raise RuntimeError(
                     f"Simulator exited early (code {self.process.returncode})\n"
                     f"stdout: {stdout}\nstderr: {stderr}"
@@ -189,6 +433,7 @@ class PicosSimulator:
             if not line:
                 time.sleep(0.05)
                 continue
+            self._stdout_tail.append(line.rstrip("\n"))
 
             m = port_re.search(line)
             if m:
@@ -251,6 +496,9 @@ class PicosSimulator:
         while not self._reader_done.is_set():
             if not self._sock:
                 break
+            if self._reader_pause.is_set():
+                time.sleep(0.01)
+                continue
             try:
                 self._sock.settimeout(0.2)
                 chunk = self._sock.recv(65536)
@@ -273,13 +521,26 @@ class PicosSimulator:
                                 entry["result"] = msg
                                 entry["event"].set()
                     else:
-                        with self._notif_lock:
-                            self._notifications.append(msg)
+                        with self._notif_cond:
+                            self._rx_counter += 1
+                            msg["_rx"] = self._rx_counter
+                            if msg.get("method") == "log":
+                                self._log_events.append(msg.get("params", {}))
+                            else:
+                                self._notifications.append(msg)
+                            self._notif_cond.notify_all()
             except socket.timeout:
                 continue
             except OSError:
                 break
+        # The simulator closed the connection (it exited or crashed): no reply
+        # will come, so fail the calls still waiting instead of letting each
+        # run out its timeout. call() registers under the same lock after
+        # checking _connected, so none can start waiting after this.
         self._connected = False
+        with self._pending_lock:
+            for entry in self._pending.values():
+                entry["event"].set()
 
     # ── JSON-RPC ──────────────────────────────────────────────────────────────
 
@@ -294,6 +555,8 @@ class PicosSimulator:
 
         event = threading.Event()
         with self._pending_lock:
+            if not self._connected:
+                raise RuntimeError("Not connected to simulator")
             self._pending[req_id] = {"event": event, "result": None}
 
         payload = json.dumps({
@@ -316,7 +579,8 @@ class PicosSimulator:
             entry = self._pending.pop(req_id, None)
 
         if not entry or not entry["result"]:
-            raise RuntimeError(f"No response for {method}")
+            raise RuntimeError(
+                f"No response for {method}: the simulator closed the connection")
 
         msg = entry["result"]
         if "error" in msg:
@@ -333,17 +597,20 @@ class PicosSimulator:
             self._notifications.clear()
         return notifs
 
-    def wait_for_notification(self, method: str, timeout: Optional[float] = None) -> dict:
-        """Wait until a notification with the given method arrives."""
+    def wait_for_notification(self, method: str, timeout: Optional[float] = None,
+                              after_rx: int = 0) -> dict:
+        """Wait for (and consume) the first `method` notification received
+        after receive index `after_rx`."""
         deadline = time.time() + (timeout or self.timeout)
-        while time.time() < deadline:
-            with self._notif_lock:
+        with self._notif_cond:
+            while True:
                 for i, n in enumerate(self._notifications):
-                    if n.get("method") == method:
-                        self._notifications.pop(i)
-                        return n
-            time.sleep(0.05)
-        raise TimeoutError(f"Notification '{method}' not received within timeout")
+                    if n.get("method") == method and n.get("_rx", 0) > after_rx:
+                        return self._notifications.pop(i)
+                remaining = deadline - time.time()
+                if remaining <= 0:
+                    raise TimeoutError(f"Notification '{method}' not received within timeout")
+                self._notif_cond.wait(remaining)
 
     # ── High-Level Helpers ────────────────────────────────────────────────────
 
@@ -370,16 +637,64 @@ class PicosSimulator:
         return [e["name"] for e in entries if e.get("is_dir")]
 
     def launch_app(self, name: str) -> dict:
-        """Launch an app by name. Returns result dict."""
-        return self.call("launch_app", {"name": name})
+        """Queue an app launch. Returns {"queued": True, "busy": bool}.
+
+        The launch runs when the launcher loop next runs (after any running
+        app exits). An app staged after boot is found by the sim's rescan-on-
+        miss. Use wait_for_exit() for the outcome.
+        """
+        with self._notif_cond:
+            self._launch_rx = self._rx_counter
+        result = self.call("launch_app", {"name": name})
+        self._launch_id = result.get("launch_id", 0)
+        return result
+
+    def get_last_outcome(self) -> dict:
+        """app.exited params of the last finished launch ({"launch_id": 0}
+        before any)."""
+        return self.call("get_last_outcome")
+
+    def rescan_apps(self) -> dict:
+        """Ask the launcher to rescan /apps (e.g. after changing an app.json)."""
+        return self.call("rescan_apps")
 
     def exit_app(self) -> dict:
         """Exit the currently running app."""
         return self.call("exit_app")
 
     def wait_for_exit(self, timeout: Optional[float] = None) -> dict:
-        """Wait for the current app to exit."""
-        return self.call("wait_for_exit", timeout=timeout or 30.0)
+        """Wait for the app from the last launch_app() to finish.
+
+        Returns the app.exited params:
+        {name, id, found, result, error, runtime_ms, launch_id} where result
+        is "returned" | "error" | "exit_sentinel" | "load_failed".
+
+        The server drops a notification whole when this client's buffer is
+        full (e.g. mid-way through a large response), so while waiting this
+        also polls get_last_outcome, which keeps the last app.exited params.
+        """
+        deadline = time.time() + (timeout or 30.0)
+        want = self._launch_id
+        while True:
+            remaining = deadline - time.time()
+            try:
+                notif = self.wait_for_notification(
+                    "app.exited", timeout=max(0.01, min(remaining, 0.5)),
+                    after_rx=self._launch_rx)
+                params = notif.get("params", {})
+                # Ignore an exit that belongs to an earlier launch.
+                if params.get("launch_id", want) >= want:
+                    return params
+                continue
+            except TimeoutError:
+                pass
+            last = self.get_last_outcome()
+            if want and last.get("launch_id", 0) >= want:
+                return last
+            if time.time() >= deadline:
+                raise TimeoutError(
+                    f"app.exited for launch {want} not received within timeout "
+                    f"(last outcome: {last})")
 
     # Named buttons recognized by inject_button
     _BUTTONS = {
@@ -402,6 +717,40 @@ class PicosSimulator:
         else:
             return self.call("inject_button", {"button": key, "action": "click"})
 
+    def get_input_state(self) -> dict:
+        """{issued_seq, consumed_seq}: every injection with seq <= consumed_seq
+        has been read by the OS input layer."""
+        return self.call("get_input_state")
+
+    def wait_input_consumed(self, seq: int, timeout: Optional[float] = None) -> dict:
+        """Wait until the injection with `seq` (the input_seq returned by
+        keypress/inject_*) has been read by the OS."""
+        deadline = time.time() + (timeout or self.timeout)
+        while True:
+            state = self.get_input_state()
+            if state.get("consumed_seq", 0) >= seq:
+                return state
+            if time.time() >= deadline:
+                raise TimeoutError(f"input seq {seq} not consumed: {state}")
+            time.sleep(0.01)
+
+    def present_count(self) -> int:
+        """Frames presented to the (simulated) panel since boot."""
+        return self.call("display_stats").get("present_count", 0)
+
+    def wait_frames(self, n: int = 1, timeout: Optional[float] = None) -> int:
+        """Wait until `n` more frames have been presented. Returns the new
+        present_count."""
+        target = self.present_count() + n
+        deadline = time.time() + (timeout or self.timeout)
+        while True:
+            count = self.present_count()
+            if count >= target:
+                return count
+            if time.time() >= deadline:
+                raise TimeoutError(f"only {count - target + n} of {n} frames presented")
+            time.sleep(0.01)
+
     def keypress_sequence(self, keys: list[str], delay_ms: int = 100):
         """Send a sequence of keypresses with delays."""
         for key in keys:
@@ -420,32 +769,107 @@ class PicosSimulator:
         png_data = self.screenshot()
         return Image.open(io.BytesIO(png_data))
 
-    def get_log_buffer(self, since_seq: int = 0) -> dict:
-        """Get the simulator log buffer. Returns {lines: [...], next_seq: int}."""
-        return self.call("get_log_buffer", {"since_seq": since_seq})
+    def get_log_buffer(self, since_seq: int = 0, tail: int = 0) -> dict:
+        """Log entries with seq >= since_seq (0 = everything still held).
+
+        Returns {lines: [{seq, t_ms, src, text}], next_seq, dropped, more}.
+        src is "lua" | "native" | "os" | "err". Pass next_seq back as
+        since_seq to read only newer entries; "more" means the response was
+        paged. tail > 0 returns only the newest `tail` entries.
+        """
+        params = {"since_seq": since_seq}
+        if tail:
+            params["tail"] = tail
+        return self.call("get_log_buffer", params)
+
+    def get_log_lines(self, since_seq: int = 0) -> list[dict]:
+        """Every held entry with seq >= since_seq, following pages."""
+        return self._read_log(since_seq)[0]
+
+    def _read_log(self, since_seq: int) -> tuple[list[dict], int]:
+        out: list[dict] = []
+        seq = since_seq
+        while True:
+            page = self.get_log_buffer(since_seq=seq)
+            out.extend(page.get("lines", []))
+            seq = page.get("next_seq", seq)
+            if not page.get("more"):
+                return out, seq
 
     def clear_log(self) -> dict:
-        """Clear the simulator log buffer."""
+        """Clear the simulator log buffer (sequence numbers keep counting)."""
         return self.call("clear_log_buffer")
 
-    def wait_for_log(self, pattern: str, timeout: Optional[float] = None,
-                     since_seq: int = 0) -> str:
-        """Wait until a log line matching the regex pattern appears.
+    def subscribe_logs(self, on: bool = True) -> dict:
+        """Receive every new log entry as a `log` notification."""
+        result = self.call("subscribe", {"logs": on})
+        self._logs_subscribed = on
+        return result
 
-        Returns the matching log line.
+    def wait_for_log(self, pattern: str, timeout: Optional[float] = None,
+                     since_seq: int = 0, src: Optional[str] = None) -> str:
+        """Wait until a log entry matching the regex appears (optionally only
+        from source `src`) and return its text.
+
+        Event-driven: subscribes to log notifications, then checks the entries
+        already held from since_seq on (0 = all), then waits for new ones.
         """
         regex = re.compile(pattern)
+
+        def match(entry: dict) -> bool:
+            if src is not None and entry.get("src") != src:
+                return False
+            return bool(regex.search(entry.get("text", "")))
+
+        if not self._logs_subscribed:
+            self.subscribe_logs(True)
         deadline = time.time() + (timeout or self.timeout)
-        seq = since_seq
-        while time.time() < deadline:
-            result = self.get_log_buffer(since_seq=seq)
-            for line in result.get("lines", []):
-                text = line if isinstance(line, str) else line.get("text", "")
-                if regex.search(text):
-                    return text
-            seq = result.get("next_seq", seq)
-            time.sleep(0.1)
-        raise TimeoutError(f"Log pattern '{pattern}' not found within timeout")
+        # Held entries first; later ones arrive as notifications (the
+        # subscription is already active, so nothing falls in between).
+        held, cursor = self._read_log(since_seq)
+        for entry in held:
+            if match(entry):
+                return entry.get("text", "")
+
+        while True:
+            timed_out = False
+            with self._notif_cond:
+                fresh = self._log_events_since(cursor)
+                if not fresh:
+                    remaining = deadline - time.time()
+                    if remaining <= 0:
+                        timed_out = True
+                    else:
+                        self._notif_cond.wait(remaining)
+                        fresh = self._log_events_since(cursor)
+            # The server drops `log` notifications whole when this client's
+            # write buffer is full, so a seq gap means entries were missed:
+            # backfill them from the ring (outside the lock — the RPC reply
+            # is delivered by the reader thread). Also backfill once before
+            # giving up, in case the matching line's notification was lost.
+            seqs = [e.get("seq", 0) for e in fresh]
+            gap = bool(fresh) and (seqs[0] != cursor or
+                                   any(b - a != 1 for a, b in zip(seqs, seqs[1:])))
+            if gap or timed_out:
+                fresh, cursor = self._read_log(cursor)
+            elif fresh:
+                cursor = seqs[-1] + 1
+            for entry in fresh:
+                if match(entry):
+                    return entry.get("text", "")
+            if timed_out:
+                raise TimeoutError(f"Log pattern '{pattern}' not found within timeout")
+
+    def _log_events_since(self, cursor: int) -> list[dict]:
+        """Pushed log entries with seq >= cursor, oldest first. Scans from the
+        newest end only as far as needed. Caller holds _notif_cond."""
+        out = []
+        for entry in reversed(self._log_events):
+            if entry.get("seq", 0) < cursor:
+                break
+            out.append(entry)
+        out.reverse()
+        return out
 
     def get_terminal_buffer(self) -> dict:
         """Get the active terminal's text buffer."""
@@ -456,8 +880,23 @@ class PicosSimulator:
         return self.call("get_heap_info")
 
     def set_time_multiplier(self, multiplier: float) -> dict:
-        """Set time multiplier for simulation speed."""
+        """Set the speed of simulated time.
+
+        With --virtual-time: virtual time runs at `multiplier` x real time
+        while the OS sleeps (sleep_ms(n) advances the clock by n and waits
+        n / multiplier real ms; default 50), stretches without a sleep past
+        50 ms advance it at min(multiplier, 1) x real time, and 0 pauses the
+        clock: sleeps then return only as step_time() moves it.
+
+        Without --virtual-time: it only scales hal_sleep_ms() delays; the
+        clock Lua sees (sys.sleep, getTimeMs) stays the wall clock."""
         return self.call("set_time_multiplier", {"multiplier": multiplier})
+
+    def step_time(self, ms: int) -> dict:
+        """Advance the virtual clock by `ms` (--virtual-time only; the sim
+        refuses it on the wall clock). Returns {"now_ms": N}, the clock
+        after the step; step_time(0) reads it."""
+        return self.call("step_time", {"ms": int(ms)})
 
     # ── Build Helper ──────────────────────────────────────────────────────────
 

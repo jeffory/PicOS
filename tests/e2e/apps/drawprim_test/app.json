@@ -1,0 +1,7 @@
+{
+    "id": "com.picos.drawprim_test",
+    "name": "Draw Primitives Test",
+    "description": "transparent text, fillHLine, fillTriangle regression fixture",
+    "version": "1.0",
+    "author": "PicOS"
+}

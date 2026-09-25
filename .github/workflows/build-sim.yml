@@ -1,4 +1,4 @@
-name: Build Simulator
+name: Build
 
 on:
   push:
@@ -16,30 +16,18 @@ jobs:
           submodules: recursive
 
       - name: Install dependencies
-        run: |
-          sudo apt-get update -q
-          sudo apt-get install -y \
-            cmake \
-            build-essential \
-            libsdl2-dev \
-            libsdl2-image-dev \
-            libcurl4-openssl-dev
-
-      - name: Fetch Lua
-        run: |
-          mkdir -p third_party/lua-5.4
-          curl -fL https://www.lua.org/ftp/lua-5.4.7.tar.gz \
-            | tar -xz --strip-components=1 -C third_party/lua-5.4/
+        run: scripts/ci/install-sim-deps.sh
 
       - name: Cache simulator build
         uses: actions/cache@v4
         with:
           path: build_sim
-          key: ${{ runner.os }}-simulator-${{ hashFiles('simulator/**/*.c', 'simulator/**/*.h', 'src/**/*.c', 'src/**/*.h') }}
-          restore-keys: |
-            ${{ runner.os }}-simulator-
+          # Any build-config change invalidates the cache outright; no
+          # restore-keys, so a stale build_sim is never restored.
+          key: ${{ runner.os }}-simulator-${{ hashFiles('simulator/**', 'src/**', 'CMakeLists.txt', 'cmake/**', 'Makefile', 'scripts/ci/install-sim-deps.sh') }}
 
       - name: Build simulator
+        # `make simulator` fetches and patches Lua (download-lua) itself.
         run: make simulator
 
       - name: Upload simulator binary
@@ -48,3 +36,61 @@ jobs:
           name: picos-simulator-linux
           path: build_sim/picos_simulator
           retention-days: 7
+
+  # Firmware compile check on every push and PR, so a firmware-only build
+  # break is caught before a release tag (release.yml was the only firmware
+  # build before).
+  build-firmware:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Toolchain, Pico SDK and third-party sources
+        run: scripts/ci/fetch-firmware-deps.sh
+
+      - name: Configure
+        run: |
+          cmake -S . -B build \
+            -DPICO_SDK_PATH=$HOME/pico-sdk \
+            -DPICO_BOARD=pimoroni_pico_plus2_w_rp2350 \
+            -DCMAKE_BUILD_TYPE=Release
+
+      - name: Build
+        run: cmake --build build --parallel
+
+      - name: Size
+        run: arm-none-eabi-size build/picocalc_os.elf
+
+  # The native app ABI exists three times: src/os/os.h, sdk/native/os.h and
+  # the simulator's trampoline tables. A drift shifts every later field and
+  # api->version reads as garbage, so: build the SDK sample and the E2E probe
+  # against sdk/native/os.h, then compare the copies (tools/check_native_abi.py:
+  # member lists, compiled sizeof/offsetof, g_api.version vs the trampolines).
+  # The per-table trampoline slot counts are checked at run time by
+  # tests/e2e/test_native.py (E2E workflow).
+  native-sdk:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: ARM toolchain
+        # Same packages as release.yml / fetch-firmware-deps.sh.
+        run: |
+          sudo apt-get update -q
+          sudo apt-get install -y gcc-arm-none-eabi libnewlib-arm-none-eabi \
+            libstdc++-arm-none-eabi-newlib
+
+      - name: Build the SDK sample (sdk/native/main.c)
+        run: make -C sdk/native
+
+      - name: Build the E2E API probe (tests/e2e/native/api_probe.c)
+        run: make -C tests/e2e/native OUT="$RUNNER_TEMP/native_api_probe"
+
+      - name: Compare the ABI copies
+        run: python3 tools/check_native_abi.py --cc arm-none-eabi-gcc

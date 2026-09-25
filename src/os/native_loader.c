@@ -1,13 +1,31 @@
 #include "native_loader.h"
 #include "launcher_types.h"
+#include "app_identity.h"
 #include "app_abi.h"
 #include "../drivers/audio.h"
 #include "../drivers/display.h"
+#include "../drivers/http.h"
 #include "../drivers/keyboard.h"
 #include "../drivers/sdcard.h"
+#include "../drivers/tcp.h"
+#include "../drivers/sound.h"
+#include "../drivers/fileplayer.h"
+#include "../drivers/mp3_player.h"
+#include "../drivers/image_api.h"
+#include "../drivers/video_player.h"
+#include "../drivers/mod_player.h"
+#include "../dev_commands.h"
 #include "../os/os.h"
+#include "terminal.h"
+#ifndef PICOS_SIMULATOR
+#include "crypto.h"
+#endif
 
 #include "umm_malloc.h"
+#include "crashlog.h"
+#include "app_stack.h"
+#include "elf_plan.h"
+#include "lua_psram_alloc.h"
 #include "pico/stdlib.h"
 #include "hardware/watchdog.h"
 #include "hardware/xip_cache.h"
@@ -37,83 +55,10 @@
 #define NATIVE_MAX_IMAGE_SIZE (7u * 1024u * 1024u)
 
 // =============================================================================
-// Minimal ELF32 type definitions
-// (newlib-arm headers don't always ship <elf.h>)
+// ELF validation and relocation live in elf_plan.c (pure, host-tested and
+// fuzzed under tests/unit and tests/fuzz); this file does the I/O, placement
+// and cache maintenance around them.
 // =============================================================================
-
-typedef uint32_t Elf32_Addr;
-typedef uint16_t Elf32_Half;
-typedef uint32_t Elf32_Off;
-typedef uint32_t Elf32_Word;
-typedef int32_t  Elf32_Sword;
-
-#define EI_NIDENT 16
-
-typedef struct {
-    unsigned char e_ident[EI_NIDENT];
-    Elf32_Half    e_type;
-    Elf32_Half    e_machine;
-    Elf32_Word    e_version;
-    Elf32_Addr    e_entry;
-    Elf32_Off     e_phoff;
-    Elf32_Off     e_shoff;
-    Elf32_Word    e_flags;
-    Elf32_Half    e_ehsize;
-    Elf32_Half    e_phentsize;
-    Elf32_Half    e_phnum;
-    Elf32_Half    e_shentsize;
-    Elf32_Half    e_shnum;
-    Elf32_Half    e_shstrndx;
-} Elf32_Ehdr;
-
-typedef struct {
-    Elf32_Word p_type;
-    Elf32_Off  p_offset;
-    Elf32_Addr p_vaddr;
-    Elf32_Addr p_paddr;
-    Elf32_Word p_filesz;
-    Elf32_Word p_memsz;
-    Elf32_Word p_flags;
-    Elf32_Word p_align;
-} Elf32_Phdr;
-
-typedef struct {
-    Elf32_Sword d_tag;
-    union {
-        Elf32_Word d_val;
-        Elf32_Addr d_ptr;
-    } d_un;
-} Elf32_Dyn;
-
-typedef struct {
-    Elf32_Addr r_offset;
-    Elf32_Word r_info;
-} Elf32_Rel;
-
-typedef struct {
-    Elf32_Addr  r_offset;
-    Elf32_Word  r_info;
-    Elf32_Sword r_addend;
-} Elf32_Rela;
-
-// ELF constants
-#define ELFMAG0  0x7fu
-#define ELFMAG1  'E'
-#define ELFMAG2  'L'
-#define ELFMAG3  'F'
-#define ET_DYN   3
-#define EM_ARM   40
-#define PT_LOAD  1
-#define PT_DYNAMIC 2
-#define PF_X     0x1u   // Executable segment flag
-#define DT_NULL  0
-#define DT_REL   17
-#define DT_RELSZ 18
-#define DT_RELA  7
-#define DT_RELASZ 8
-// R_ARM_RELATIVE (type 23): *target += load_base_offset
-#define R_ARM_RELATIVE  23
-#define ELF32_R_TYPE(i) ((i) & 0xffu)
 
 // =============================================================================
 // Helpers
@@ -123,24 +68,37 @@ typedef struct {
 
 extern PicoCalcAPI g_api;
 
+// Name of the app currently being loaded, for error records.
+static const char *s_loading_app_name = NULL;
+
+// Loader failure: show it with the heap state, log it to /system/error.log,
+// and pause so it can be read before the launcher repaints.
 static void show_error(const char *line1, const char *line2) {
+  char heap[96];
+  crashlog_describe_heap(heap, sizeof(heap));
+  crashlog_write("NATIVE ERROR", s_loading_app_name, line1, line2);
+
   display_clear(C_BG);
   display_draw_text(8, 8, line1, COLOR_RED, C_BG);
   if (line2)
     display_draw_text(8, 20, line2, COLOR_WHITE, C_BG);
+  display_draw_text(8, 36, heap, COLOR_GRAY, C_BG);
   display_flush();
-  watchdog_update();
-  sleep_ms(3000);
+  for (int i = 0; i < 30; i++) {
+    watchdog_update();
+    sleep_ms(100);
+  }
 }
 
 // =============================================================================
 // App stack (PSP-based isolation)
 // =============================================================================
 
-// Native apps run on the PSP (Process Stack Pointer).  Interrupt handlers
-// always use the MSP (Main Stack Pointer) regardless of SPSEL, so the two
-// stacks are completely independent: app stack pressure and interrupt stacking
-// do not interfere with each other.
+// Native apps run on the PSP (Process Stack Pointer) through app_stack_run()
+// (app_stack.c, shared with the Lua runner).  Interrupt handlers always use
+// the MSP (Main Stack Pointer) regardless of SPSEL, so the two stacks are
+// completely independent: app stack pressure and interrupt stacking do not
+// interfere with each other.
 //
 // 64 KB is allocated from PSRAM (via umm_malloc) at launch time, giving
 // plenty of headroom for deep recursion (e.g. Doom's BSP tree traversal).
@@ -150,11 +108,6 @@ static void show_error(const char *line1, const char *line2) {
 // allocation site).  Double the 8 KB static SRAM stack all native apps
 // originally ran on (Doom included), so it is not a regression for depth.
 #define NATIVE_STACK_SRAM_SIZE (16 * 1024)
-
-// Pointer to the dynamically-allocated stack buffer.  Read by the HardFault
-// handler (main.c) to detect PSP stack overflow.  NULL when no native app
-// is running.
-uint8_t *g_native_stack_base = NULL;
 
 // Where the running native app's image landed, read by the HardFault handler
 // (main.c) to report crash PC/LR as ELF-relative offsets so they can be
@@ -181,76 +134,91 @@ const uint8_t     *g_code_watch_live = NULL;   // uncached alias
 uint32_t           g_code_watch_size = 0;
 _Atomic(bool)      g_code_watch_active = false;
 
-// Stack canary: the bottom NATIVE_STACK_GUARD_WORDS words are filled with a
-// sentinel before launch and checked afterwards.  If the stack overflows into
-// this guard zone the corruption is detected and reported.  The stack grows
-// downward from the top of the buffer, so the bottom is the last area to be
-// reached by overflow.
-#define NATIVE_STACK_CANARY      0xDEADBEEFu
-#define NATIVE_STACK_GUARD_WORDS 8   // 32 bytes
+// Trampoline for app_stack_run(): unpacks the native entry point's four
+// arguments (app_stack_run passes a single pointer).
+typedef struct {
+  picos_app_entry_t fn;
+  const PicoCalcAPI *api;
+  const char *app_dir, *app_id, *app_name;
+} native_launch_t;
 
-// launch_on_psp() — naked trampoline that:
-//   1. Saves r4-r7 + LR onto the current MSP (OS stack).
-//   2. Loads the two extra args (app_id, app_name) before switching stacks.
-//   3. Sets PSP = psp_top and sets CONTROL.SPSEL=1 so Thread mode uses PSP.
-//   4. Calls fn(api, app_dir, app_id, app_name) — runs entirely on PSP.
-//   5. Clears CONTROL.SPSEL=0 to restore Thread mode to MSP.
-//   6. Pops r4-r7 + PC from MSP and returns to native_run normally.
-//
-// Signature (AAPCS):
-//   r0  = psp_top   (top of app stack buffer)
-//   r1  = fn        (Thumb entry point, bit-0 = 1)
-//   r2  = api       (1st app arg)
-//   r3  = app_dir   (2nd app arg)
-//   [sp+0]  = app_id   (3rd app arg, on caller's stack before this push)
-//   [sp+4]  = app_name (4th app arg)
+static void __attribute__((unused)) native_launch_thunk(void *p) {
+  const native_launch_t *l = (const native_launch_t *)p;
+  l->fn(l->api, l->app_dir, l->app_id, l->app_name);
+}
+
+// =============================================================================
+// Per-launch resource tracking (native_loader.h)
+// =============================================================================
+
+void native_res_release(int kind, void *h) {
+  switch (kind) {
+  case NATIVE_RES_IMAGE:      image_free((pc_image_t *)h); break;
+  case NATIVE_RES_SAMPLE:     sound_sample_destroy((sound_sample_t *)h); break;
+  case NATIVE_RES_PLAYER:     sound_player_destroy((sound_player_t *)h); break;
+  case NATIVE_RES_FILEPLAYER: fileplayer_destroy((fileplayer_t *)h); break;
+  case NATIVE_RES_MP3:        mp3_player_destroy((mp3_player_t *)h); break;
+  case NATIVE_RES_VIDEO:      video_player_destroy((video_player_t *)h); break;
+  case NATIVE_RES_MOD:        mod_player_destroy((mod_player_t *)h); break;
+  case NATIVE_RES_TERMINAL:   terminal_free((terminal_t *)h); break;
 #ifndef PICOS_SIMULATOR
-__attribute__((naked, noinline))
-static void launch_on_psp(uint32_t psp_top, picos_app_entry_t fn,
-                          const PicoCalcAPI *api, const char *app_dir,
-                          const char *app_id, const char *app_name)
-{
-    __asm__ (
-        "push   {r4-r7, lr}     \n\t"   /* save callee-saved + LR on MSP     */
-        "ldr    r4, [sp, #20]   \n\t"   /* load app_id   (was [sp+0] pre-push)*/
-        "ldr    r5, [sp, #24]   \n\t"   /* load app_name (was [sp+4] pre-push)*/
-        "mov    r6, r1          \n\t"   /* save fn before r1 is clobbered     */
-        "mrs    r7, control     \n\t"   /* save original CONTROL register     */
-        /* ── switch Thread mode to PSP ──────────────────────────────── */
-        "msr    psp, r0         \n\t"   /* PSP = psp_top                      */
-        "orr    r0, r7, #2      \n\t"   /* CONTROL | SPSEL                    */
-        "msr    control, r0     \n\t"   /* SPSEL = 1 → Thread uses PSP        */
-        "isb                    \n\t"   /* sync pipeline after CONTROL write  */
-        /* ── call fn(api, app_dir, app_id, app_name) ────────────────── */
-        "mov    r0, r2          \n\t"
-        "mov    r1, r3          \n\t"
-        "mov    r2, r4          \n\t"
-        "mov    r3, r5          \n\t"
-        "blx    r6              \n\t"   /* app runs here on PSP               */
-        /* r4-r7 are callee-saved so entry_fn has restored them         */
-        /* ── restore Thread mode to MSP ─────────────────────────────── */
-        "mrs    r0, control     \n\t"
-        "bic    r0, r0, #2      \n\t"   /* clear SPSEL                        */
-        "msr    control, r0     \n\t"   /* SPSEL = 0 → Thread uses MSP again  */
-        "isb                    \n\t"
-        "pop    {r4-r7, pc}     \n\t"   /* restore from MSP, return           */
-    );
-}
-#else
-// Simulator stub - native apps not supported on PC
-static void launch_on_psp(uint32_t psp_top, picos_app_entry_t fn,
-                          const PicoCalcAPI *api, const char *app_dir,
-                          const char *app_id, const char *app_name)
-{
-    (void)psp_top;
-    (void)fn;
-    (void)api;
-    (void)app_dir;
-    (void)app_id;
-    (void)app_name;
-    printf("[NATIVE] Native apps are not supported in the simulator\n");
-}
+  // The simulator has no crypto, and its qmiAlloc is the emulator's own
+  // heap (gone with the Unicorn instance): neither is ever tracked there.
+  case NATIVE_RES_QMI:        umm_free(h); break;
+  case NATIVE_RES_AES:        crypto_aes_free((crypto_aes_t *)h); break;
+  case NATIVE_RES_ECDH:       crypto_ecdh_free((crypto_ecdh_t *)h); break;
 #endif
+  default:
+    printf("[NATIVE] BUG: release of unknown handle kind %d\n", kind);
+    break;
+  }
+}
+
+void *native_res_adopt(int kind, void *h) {
+  if (h && !app_res_track(kind, h)) {
+    printf("[NATIVE] out of PSRAM tracking handle (kind %d): refused\n", kind);
+    native_res_release(kind, h);
+    return NULL;
+  }
+  return h;
+}
+
+void native_res_drop(int kind, void *h) {
+  if (app_res_untrack(kind, h))
+    native_res_release(kind, h);
+}
+
+void *native_file_adopt(void *f) {
+  if (f && !app_files_track(f)) {
+    sdcard_fclose((sdfile_t)f);
+    return NULL;
+  }
+  return f;
+}
+
+void native_file_drop(void *f) {
+  if (app_files_untrack(f))
+    sdcard_fclose((sdfile_t)f);
+}
+
+void native_res_release_all(const char *app_name) {
+  int n = app_res_release_all(native_res_release);
+  int files = app_files_close_all();
+  if (n || files)
+    printf("[NATIVE] '%s' exited holding %d handle(s) and %d file(s): "
+           "released\n", app_name, n, files);
+}
+
+// Everything the app may have left behind that the OS can reclaim without
+// Core 1 paused: its handles, then the audio engines' per-app state (as the
+// Lua runner does after lua_close).  The pool-wide HTTP/TCP close and the
+// tone/stream stop are the caller's (their order differs per build).
+static void native_teardown(const app_entry_t *app) {
+  native_res_release_all(app->name);
+  fileplayer_reset();
+  sound_init();
+  mp3_player_reset();
+}
 
 // =============================================================================
 // ELF loader
@@ -264,15 +232,168 @@ extern _Atomic bool g_core1_paused;
 // Simulator: use Unicorn Engine to emulate the ARM ELF binary
 #include "unicorn_runner.h"
 
-static bool native_run(const app_entry_t *app) {
+static bool native_run_app(const app_entry_t *app) {
   printf("[NATIVE] Loading '%s' via Unicorn Engine\n", app->name);
   char elf_path[256];
   snprintf(elf_path, sizeof(elf_path), "%s/main.elf", app->path);
-  return unicorn_run_app(elf_path, app->path, app->id, app->name);
+  bool ok = unicorn_run_app(elf_path, app->path, app->id, app->name);
+  // Same teardown as firmware (below), minus the Core 1 pause.
+  atomic_store(&g_native_audio_callback, NULL);
+  native_teardown(app);
+  http_close_all(NULL);
+  tcp_close_all();
+  audio_stop_stream();
+  audio_stop_tone();
+  return ok;
 }
 #else
-static bool native_run(const app_entry_t *app) {
+// Declared in main.c — feeds the watchdog and stamps Core 0's heartbeat.
+extern void core0_heartbeat(void);
+
+// ── The app's API: g_api with tracking create/free entries ──────────────────
+// A per-launch copy (PSRAM, ~1 KB) of g_api and of the sub-tables that hand
+// out objects; every other entry and table is g_api's own, so the layout and
+// all other behaviour are identical.  Creators go through g_api and adopt the
+// result; frees untrack first (native_res_drop), so a double free or a stray
+// pointer from the app is ignored instead of corrupting the heap.
+typedef struct {
+  PicoCalcAPI api;
+  picocalc_fs_t fs;
+  picocalc_psram_t psram;
+  picocalc_graphics_t graphics;
+  picocalc_soundplayer_t soundplayer;
+  picocalc_video_t video;
+  picocalc_modplayer_t modplayer;
+  picocalc_terminal_t terminal;
+  picocalc_crypto_t crypto;
+} native_api_t;
+
+static pcfile_t napi_fs_open(const char *path, const char *mode) {
+  return native_file_adopt(g_api.fs->open(path, mode));
+}
+static void napi_fs_close(pcfile_t f) { native_file_drop(f); }
+
+static void *napi_qmi_alloc(uint32_t size) {
+  return native_res_adopt(NATIVE_RES_QMI, g_api.psram->qmiAlloc(size));
+}
+static void napi_qmi_free(void *p) { native_res_drop(NATIVE_RES_QMI, p); }
+
+static pcimage_t napi_gfx_load(const char *path) {
+  return native_res_adopt(NATIVE_RES_IMAGE, g_api.graphics->load(path));
+}
+static pcimage_t napi_gfx_new_blank(int w, int h) {
+  return native_res_adopt(NATIVE_RES_IMAGE, g_api.graphics->newBlank(w, h));
+}
+static void napi_gfx_free(pcimage_t img) { native_res_drop(NATIVE_RES_IMAGE, img); }
+
+static pcsound_sample_t napi_sample_load(const char *path) {
+  return native_res_adopt(NATIVE_RES_SAMPLE, g_api.soundplayer->sampleLoad(path));
+}
+static void napi_sample_free(pcsound_sample_t s) {
+  native_res_drop(NATIVE_RES_SAMPLE, s);
+}
+static pcsound_player_t napi_player_new(void) {
+  return native_res_adopt(NATIVE_RES_PLAYER, g_api.soundplayer->playerNew());
+}
+static void napi_player_free(pcsound_player_t p) {
+  native_res_drop(NATIVE_RES_PLAYER, p);
+}
+static pcfileplayer_t napi_fileplayer_new(void) {
+  return native_res_adopt(NATIVE_RES_FILEPLAYER,
+                          g_api.soundplayer->filePlayerNew());
+}
+static void napi_fileplayer_free(pcfileplayer_t fp) {
+  native_res_drop(NATIVE_RES_FILEPLAYER, fp);
+}
+static pcmp3player_t napi_mp3_new(void) {
+  return native_res_adopt(NATIVE_RES_MP3, g_api.soundplayer->mp3PlayerNew());
+}
+static void napi_mp3_free(pcmp3player_t mp) { native_res_drop(NATIVE_RES_MP3, mp); }
+
+static pcvideo_t napi_video_new(void) {
+  return native_res_adopt(NATIVE_RES_VIDEO, g_api.video->newPlayer());
+}
+static void napi_video_free(pcvideo_t vp) { native_res_drop(NATIVE_RES_VIDEO, vp); }
+
+static pcmodplayer_t napi_mod_create(void) {
+  return native_res_adopt(NATIVE_RES_MOD, g_api.modplayer->create());
+}
+static void napi_mod_destroy(pcmodplayer_t mp) { native_res_drop(NATIVE_RES_MOD, mp); }
+
+static terminal_t *napi_term_create(int cols, int rows, int scrollback) {
+  return (terminal_t *)native_res_adopt(
+      NATIVE_RES_TERMINAL, g_api.terminal->create(cols, rows, scrollback));
+}
+static void napi_term_free(terminal_t *t) { native_res_drop(NATIVE_RES_TERMINAL, t); }
+
+static pccrypto_aes_t napi_aes_new(const uint8_t *key, uint32_t klen,
+                                   const uint8_t *nonce) {
+  return native_res_adopt(NATIVE_RES_AES, g_api.crypto->aesNew(key, klen, nonce));
+}
+static void napi_aes_free(pccrypto_aes_t ctx) { native_res_drop(NATIVE_RES_AES, ctx); }
+static pccrypto_ecdh_t napi_ecdh_x25519(void) {
+  return native_res_adopt(NATIVE_RES_ECDH, g_api.crypto->ecdhX25519());
+}
+static pccrypto_ecdh_t napi_ecdh_p256(void) {
+  return native_res_adopt(NATIVE_RES_ECDH, g_api.crypto->ecdhP256());
+}
+static void napi_ecdh_free(pccrypto_ecdh_t ctx) { native_res_drop(NATIVE_RES_ECDH, ctx); }
+
+// NULL when PSRAM has no ~1 KB block.  Free with umm_free after the app's
+// handles have been released.
+static native_api_t *native_api_new(void) {
+  native_api_t *n = (native_api_t *)umm_malloc(sizeof(*n));
+  if (!n)
+    return NULL;
+  n->api = g_api;
+  n->fs = *g_api.fs;
+  n->fs.open = napi_fs_open;
+  n->fs.close = napi_fs_close;
+  n->api.fs = &n->fs;
+  n->psram = *g_api.psram;
+  n->psram.qmiAlloc = napi_qmi_alloc;
+  n->psram.qmiFree = napi_qmi_free;
+  n->api.psram = &n->psram;
+  n->graphics = *g_api.graphics;
+  n->graphics.load = napi_gfx_load;
+  n->graphics.newBlank = napi_gfx_new_blank;
+  n->graphics.free = napi_gfx_free;
+  n->api.graphics = &n->graphics;
+  n->soundplayer = *g_api.soundplayer;
+  n->soundplayer.sampleLoad = napi_sample_load;
+  n->soundplayer.sampleFree = napi_sample_free;
+  n->soundplayer.playerNew = napi_player_new;
+  n->soundplayer.playerFree = napi_player_free;
+  n->soundplayer.filePlayerNew = napi_fileplayer_new;
+  n->soundplayer.filePlayerFree = napi_fileplayer_free;
+  n->soundplayer.mp3PlayerNew = napi_mp3_new;
+  n->soundplayer.mp3PlayerFree = napi_mp3_free;
+  n->api.soundplayer = &n->soundplayer;
+  n->video = *g_api.video;
+  n->video.newPlayer = napi_video_new;
+  n->video.free = napi_video_free;
+  n->api.video = &n->video;
+  n->modplayer = *g_api.modplayer;
+  n->modplayer.create = napi_mod_create;
+  n->modplayer.destroy = napi_mod_destroy;
+  n->api.modplayer = &n->modplayer;
+  n->terminal = *g_api.terminal;
+  n->terminal.create = napi_term_create;
+  n->terminal.free = napi_term_free;
+  n->api.terminal = &n->terminal;
+  n->crypto = *g_api.crypto;
+  n->crypto.aesNew = napi_aes_new;
+  n->crypto.aesFree = napi_aes_free;
+  n->crypto.ecdhX25519 = napi_ecdh_x25519;
+  n->crypto.ecdhP256 = napi_ecdh_p256;
+  n->crypto.ecdhFree = napi_ecdh_free;
+  n->api.crypto = &n->crypto;
+  return n;
+}
+
+static bool native_run_app(const app_entry_t *app) {
   printf("[NATIVE] Loading '%s'\n", app->name);
+  s_loading_app_name = app->name;
 
   // Pause Core 1 to eliminate PSRAM heap contention during ELF loading.
   // Core 1 runs umm_malloc/umm_free every 5ms for Mongoose; those allocations
@@ -297,7 +418,8 @@ static bool native_run(const app_entry_t *app) {
   uint8_t *stack_buf = NULL;
   bool stack_in_sram = false;
   sdfile_t f = NULL;
-  Elf32_Phdr *phdr_table = NULL;
+  uint8_t *phdr_table = NULL;
+  native_api_t *napi = NULL;
 
   f = sdcard_fopen(elf_path, "rb");
   if (!f) {
@@ -309,102 +431,67 @@ static bool native_run(const app_entry_t *app) {
   printf("[NATIVE] ELF: %d bytes (streaming)\n", file_len);
 
   // ── 2. Validate ELF header ────────────────────────────────────────────────
-  if (file_len < (int)sizeof(Elf32_Ehdr)) {
+  uint8_t ehdr_buf[ELF_EHDR_SIZE];
+  if (file_len < (int)sizeof(ehdr_buf)) {
     show_error("ELF: file too small", NULL);
     goto out;
   }
-
-  Elf32_Ehdr ehdr;
-  if (sdcard_fread(f, &ehdr, sizeof(ehdr)) != sizeof(ehdr)) {
+  if (sdcard_fread(f, ehdr_buf, sizeof(ehdr_buf)) != (int)sizeof(ehdr_buf)) {
     show_error("ELF: failed to read header", NULL);
     goto out;
   }
 
-  if (ehdr.e_ident[0] != ELFMAG0 || ehdr.e_ident[1] != ELFMAG1 ||
-      ehdr.e_ident[2] != ELFMAG2 || ehdr.e_ident[3] != ELFMAG3) {
-    show_error("ELF: bad magic", NULL);
-    goto out;
-  }
-  if (ehdr.e_type != ET_DYN) {
-    show_error("ELF: must be PIE (ET_DYN)", NULL);
-    goto out;
-  }
-  if (ehdr.e_machine != EM_ARM) {
-    show_error("ELF: must be ARM", NULL);
+  elf_plan_t plan;
+  elf_err_t elf_err = elf_plan_header(ehdr_buf, sizeof(ehdr_buf),
+                                      (uint32_t)file_len, &plan);
+  if (elf_err != ELF_OK) {
+    show_error(elf_strerror(elf_err), NULL);
     goto out;
   }
 
-  // ── 3. Measure PT_LOAD virtual address range ──────────────────────────────
-  uint32_t phdr_table_size = (uint32_t)ehdr.e_phentsize * (uint32_t)ehdr.e_phnum;
-  if (ehdr.e_phoff + phdr_table_size > (uint32_t)file_len) {
-    show_error("ELF: phdr table out of bounds", NULL);
-    goto out;
-  }
-
-  phdr_table = (Elf32_Phdr *)umm_malloc(phdr_table_size);
+  // ── 3. Validate program headers, measure the PT_LOAD range ────────────────
+  phdr_table = (uint8_t *)umm_malloc(plan.phdrs_size);
   if (!phdr_table) {
     show_error("ELF: out of memory for phdr", NULL);
     goto out;
   }
 
-  if (!sdcard_fseek(f, ehdr.e_phoff) ||
-      sdcard_fread(f, phdr_table, phdr_table_size) != (int)phdr_table_size) {
+  if (!sdcard_fseek(f, plan.phoff) ||
+      sdcard_fread(f, phdr_table, plan.phdrs_size) != (int)plan.phdrs_size) {
     show_error("ELF: failed to read phdr table", NULL);
     goto out;
   }
 
-  Elf32_Addr mem_min = 0xFFFFFFFFu;
-  Elf32_Addr mem_max = 0;
-  bool found_load = false;
-
-  // Also identify code vs data segments for split loading
-  int code_seg_idx = -1;  // PT_LOAD with PF_X
-  Elf32_Addr code_vaddr = 0, code_vend = 0;
-  uint32_t code_memsz = 0;
-
-  for (int i = 0; i < ehdr.e_phnum; i++) {
-    const Elf32_Phdr *ph = &phdr_table[i];
-    if (ph->p_type != PT_LOAD || ph->p_memsz == 0)
-      continue;
-    if (ph->p_vaddr < mem_min)
-      mem_min = ph->p_vaddr;
-    Elf32_Addr seg_end = ph->p_vaddr + ph->p_memsz;
-    if (seg_end < ph->p_vaddr) {
-      show_error("ELF: segment vaddr overflow", NULL);
-      goto out;
-    }
-    if (seg_end > mem_max)
-      mem_max = seg_end;
-    found_load = true;
-
-    if ((ph->p_flags & PF_X) && code_seg_idx < 0) {
-      code_seg_idx = i;
-      code_vaddr = ph->p_vaddr;
-      code_vend  = seg_end;
-      code_memsz = ph->p_memsz;
-    }
-  }
-
-  if (!found_load) {
-    show_error("ELF: no PT_LOAD segments", NULL);
+  // Proves every PT_LOAD's file range and memory range (p_filesz <= p_memsz,
+  // no wrap), the entry point and PT_DYNAMIC lie inside the file / image.
+  elf_err = elf_plan_segments(&plan, phdr_table, plan.phdrs_size,
+                              (uint32_t)file_len, NATIVE_MAX_IMAGE_SIZE);
+  if (elf_err != ELF_OK) {
+    show_error(elf_strerror(elf_err), elf_err == ELF_ERR_IMAGE_TOO_LARGE
+                                          ? "limit is 7MB" : NULL);
     goto out;
   }
 
-  uint32_t image_size = mem_max - mem_min;
+  const uint32_t mem_min = plan.mem_min;
+  const uint32_t image_size = plan.image_size;
+  // Code segment for split loading (PT_LOAD with PF_X).
+  const int code_seg_idx = plan.code_idx;
+  const uint32_t code_vaddr = plan.code_vaddr;
+  const uint32_t code_memsz = plan.code_memsz;
+  const uint32_t code_vend = code_vaddr + code_memsz;
+
   printf("[NATIVE] Image: %lu bytes (vaddr 0x%08lx..0x%08lx)\n",
          (unsigned long)image_size,
-         (unsigned long)mem_min, (unsigned long)mem_max);
-
-  if (image_size > NATIVE_MAX_IMAGE_SIZE) {
-    show_error("ELF: image too large (>7MB)", NULL);
-    goto out;
-  }
+         (unsigned long)mem_min, (unsigned long)plan.mem_max);
 
   // ── 4. Split allocation: code in SRAM, data/BSS in PSRAM ────────────────
   bool split_mode = false;
 
   #define MAX_SRAM_CODE_SIZE  (16u * 1024)
-  if (code_seg_idx >= 0 && code_memsz > 0 && code_memsz <= MAX_SRAM_CODE_SIZE) {
+  // Split mode assumes the code segment is the lowest PT_LOAD and all other
+  // segments sit above it (data offsets are taken from its end).
+  if (code_seg_idx >= 0 && plan.code_first && code_memsz > 0 &&
+      code_memsz <= MAX_SRAM_CODE_SIZE) {
     code_buf = malloc(code_memsz);
     if (code_buf) {
       split_mode = true;
@@ -418,13 +505,17 @@ static bool native_run(const app_entry_t *app) {
 
   // PSRAM allocation: in split mode, only data/BSS; otherwise entire image
   uint32_t psram_size = split_mode ? (image_size - code_memsz) : image_size;
-  Elf32_Addr data_vaddr_start = split_mode ? code_vend : mem_min;
+  uint32_t data_vaddr_start = split_mode ? code_vend : mem_min;
 
   if (psram_size > 0) {
     load_base = (uint8_t *)umm_malloc(psram_size);
     if (!load_base) {
       if (split_mode) { free(code_buf); code_buf = NULL; }
-      show_error("ELF: out of PSRAM", NULL);
+      char detail[80];
+      snprintf(detail, sizeof(detail), "image needs %luK, largest free block %luK",
+               (unsigned long)(psram_size / 1024u),
+               (unsigned long)(lua_psram_alloc_largest_block() / 1024u));
+      show_error("ELF: out of PSRAM", detail);
       goto out;
     }
   }
@@ -455,11 +546,14 @@ static bool native_run(const app_entry_t *app) {
     memset(exec_base, 0, image_size);
   }
 
-  for (int i = 0; i < ehdr.e_phnum; i++) {
-    const Elf32_Phdr *ph = &phdr_table[i];
-    if (ph->p_type != PT_LOAD || ph->p_filesz == 0)
+  for (uint16_t i = 0; i < plan.phnum; i++) {
+    const elf32_phdr_t seg = elf_plan_phdr(phdr_table, i);
+    const elf32_phdr_t *ph = &seg;
+    if (ph->p_type != ELF_PT_LOAD || ph->p_filesz == 0)
       continue;
-    watchdog_update(); // kick per segment — large ELFs (e.g. DOOM) take seconds to read
+    // Heartbeat per segment: a large segment (e.g. DOOM) takes seconds to
+    // read, and Core 1 (paused) relays the watchdog only while it is fresh.
+    core0_heartbeat();
     if (ph->p_offset + ph->p_filesz > (uint32_t)file_len) {
       show_error("ELF: segment data out of bounds", NULL);
       goto out;
@@ -508,120 +602,41 @@ static bool native_run(const app_entry_t *app) {
       show_error("ELF: invalid segment layout", NULL);
       goto out;
     }
-    if (split_mode && data_vaddr_start > (uint32_t)(uintptr_t)load_base) {
+    // (An image that is all code has no PSRAM part: load_base stays NULL and
+    // there is no data region to check.  This guard used to fire for it, so
+    // every native app of 16 KB or less - hello_c, the SDK template - failed
+    // with "invalid segment layout" on hardware.)
+    if (split_mode && psram_size > 0 &&
+        data_vaddr_start > (uint32_t)(uintptr_t)load_base) {
       show_error("ELF: invalid segment layout", NULL);
       goto out;
     }
 
-    uint32_t code_bias = split_mode ? (uint32_t)code_buf - code_vaddr : 0;
-    uint32_t data_bias = split_mode ? (uint32_t)load_base - data_vaddr_start
-                                    : (uint32_t)load_base - mem_min;
-    uint32_t fallback_bias = split_mode ? 0 : (uint32_t)load_base - mem_min;
-
-    for (int i = 0; i < ehdr.e_phnum; i++) {
-      const Elf32_Phdr *ph = &phdr_table[i];
-      if (ph->p_type != PT_DYNAMIC)
-        continue;
-
-      const Elf32_Dyn *dyn;
-      if (split_mode && ph->p_vaddr >= code_vaddr && ph->p_vaddr < code_vend) {
-        dyn = (const Elf32_Dyn *)(code_buf + (ph->p_vaddr - code_vaddr));
-      } else if (split_mode) {
-        dyn = (const Elf32_Dyn *)(exec_base + (ph->p_vaddr - data_vaddr_start));
-      } else {
-        dyn = (const Elf32_Dyn *)(exec_base + (ph->p_vaddr - mem_min));
-      }
-
-      Elf32_Addr rel_addr = 0;  Elf32_Word rel_size = 0;
-      Elf32_Addr rela_addr = 0; Elf32_Word rela_size = 0;
-
-      for (const Elf32_Dyn *d = dyn; d->d_tag != DT_NULL; d++) {
-        switch (d->d_tag) {
-          case DT_REL:    rel_addr  = d->d_un.d_ptr; break;
-          case DT_RELSZ:  rel_size  = d->d_un.d_val; break;
-          case DT_RELA:   rela_addr = d->d_un.d_ptr; break;
-          case DT_RELASZ: rela_size = d->d_un.d_val; break;
-          default: break;
-        }
-      }
-
-      #define RESOLVE_TARGET(vaddr, write_ptr, target_ok) do { \
-        if (split_mode) { \
-          if ((vaddr) >= code_vaddr && (vaddr) < code_vend) { \
-            uint32_t _off = (vaddr) - code_vaddr; \
-            if (_off + sizeof(uint32_t) <= code_memsz) { \
-              write_ptr = (uint32_t *)(code_buf + _off); \
-              target_ok = true; \
-            } \
-          } else { \
-            uint32_t _off = (vaddr) - data_vaddr_start; \
-            if (_off + sizeof(uint32_t) <= psram_size) { \
-              write_ptr = (uint32_t *)(exec_base + _off); \
-              target_ok = true; \
-            } \
-          } \
-        } else { \
-          uint32_t _off = (vaddr) - mem_min; \
-          if (_off + sizeof(uint32_t) <= image_size) { \
-            write_ptr = (uint32_t *)(exec_base + _off); \
-            target_ok = true; \
-          } \
-        } \
-      } while(0)
-
-      #define SELECT_BIAS(pointed_vaddr) \
-        (split_mode ? ((pointed_vaddr) >= code_vaddr && (pointed_vaddr) < code_vend \
-                       ? code_bias : data_bias) \
-                    : fallback_bias)
-
-      if (rel_addr && rel_size) {
-        const Elf32_Rel *rel;
-        if (split_mode && rel_addr >= code_vaddr && rel_addr < code_vend)
-          rel = (const Elf32_Rel *)(code_buf + (rel_addr - code_vaddr));
-        else if (split_mode)
-          rel = (const Elf32_Rel *)(exec_base + (rel_addr - data_vaddr_start));
-        else
-          rel = (const Elf32_Rel *)(exec_base + (rel_addr - mem_min));
-
-        uint32_t count = rel_size / sizeof(Elf32_Rel);
-        for (uint32_t j = 0; j < count; j++) {
-          if (ELF32_R_TYPE(rel[j].r_info) == R_ARM_RELATIVE) {
-            uint32_t *target = NULL;
-            bool target_ok = false;
-            RESOLVE_TARGET(rel[j].r_offset, target, target_ok);
-            if (!target_ok) continue;
-            uint32_t pointed_vaddr = *target;
-            *target = pointed_vaddr + SELECT_BIAS(pointed_vaddr);
-          }
-        }
-      }
-
-      if (rela_addr && rela_size) {
-        const Elf32_Rela *rela;
-        if (split_mode && rela_addr >= code_vaddr && rela_addr < code_vend)
-          rela = (const Elf32_Rela *)(code_buf + (rela_addr - code_vaddr));
-        else if (split_mode)
-          rela = (const Elf32_Rela *)(exec_base + (rela_addr - data_vaddr_start));
-        else
-          rela = (const Elf32_Rela *)(exec_base + (rela_addr - mem_min));
-
-        uint32_t count = rela_size / sizeof(Elf32_Rela);
-        for (uint32_t j = 0; j < count; j++) {
-          if (ELF32_R_TYPE(rela[j].r_info) == R_ARM_RELATIVE) {
-            uint32_t *target = NULL;
-            bool target_ok = false;
-            RESOLVE_TARGET(rela[j].r_offset, target, target_ok);
-            if (!target_ok) continue;
-            uint32_t pointed_vaddr = (uint32_t)rela[j].r_addend;
-            *target = pointed_vaddr + SELECT_BIAS(pointed_vaddr);
-          }
-        }
-      }
-
-      #undef RESOLVE_TARGET
-      #undef SELECT_BIAS
-      break; 
+    // Writes go through exec_base (the uncached alias); relocated pointers
+    // use the address the region runs at.  A pointer outside both split
+    // regions takes the data bias (the last region), as before; an all-code
+    // image has only the code region.
+    elf_region_t regions[2];
+    int nregions = 0;
+    if (split_mode) {
+      regions[nregions++] = (elf_region_t){code_vaddr, code_memsz, code_buf,
+                                           (uint32_t)(uintptr_t)code_buf};
+      if (psram_size > 0)
+        regions[nregions++] = (elf_region_t){data_vaddr_start, psram_size,
+                                             exec_base,
+                                             (uint32_t)(uintptr_t)load_base};
+    } else {
+      regions[nregions++] = (elf_region_t){mem_min, image_size, exec_base,
+                                           (uint32_t)(uintptr_t)load_base};
     }
+    elf_reloc_stats_t rstats;
+    elf_err = elf_relocate(&plan, regions, nregions, &rstats);
+    if (elf_err != ELF_OK) {
+      show_error(elf_strerror(elf_err), NULL);
+      goto out;
+    }
+    printf("[NATIVE] Relocations: %lu applied, %lu symbolic left as-is\n",
+           (unsigned long)rstats.applied, (unsigned long)rstats.symbolic);
   }
 
   // ── 7. Invalidate XIP cache for the app image, compute entry point ──────
@@ -654,7 +669,7 @@ static bool native_run(const app_entry_t *app) {
     }
   }
 
-  uintptr_t entry_voff_raw = ehdr.e_entry & ~1u;
+  uintptr_t entry_voff_raw = plan.entry & ~1u;
   uintptr_t entry_addr;
   if (split_mode && entry_voff_raw >= code_vaddr && entry_voff_raw < code_vend) {
     entry_addr = (uintptr_t)code_buf + (entry_voff_raw - code_vaddr);
@@ -766,34 +781,47 @@ static bool native_run(const app_entry_t *app) {
     stack_buf = (uint8_t *)umm_malloc(NATIVE_STACK_SIZE);
   }
   if (!stack_buf) {
-    show_error("Out of memory for app stack", NULL);
+    char detail[64];
+    snprintf(detail, sizeof(detail), "no %luK SRAM and no %luK PSRAM block",
+             (unsigned long)(8u), (unsigned long)(NATIVE_STACK_SIZE / 1024u));
+    show_error("Out of memory for app stack", detail);
     goto out;
   }
+  napi = native_api_new();
+  if (!napi) {
+    show_error("Out of memory for the app's API table", NULL);
+    goto out;
+  }
+
   printf("[NATIVE] App stack: %lu KB in %s @ %p\n",
          (unsigned long)(stack_size / 1024), stack_in_sram ? "SRAM" : "PSRAM",
          (void *)stack_buf);
-  g_native_stack_base = stack_buf;
-
-  uint32_t *guard = (uint32_t *)stack_buf;
-  for (int i = 0; i < NATIVE_STACK_GUARD_WORDS; i++)
-    guard[i] = NATIVE_STACK_CANARY;
-
-  uint32_t stack_top = (uint32_t)(stack_buf + stack_size);
-
   g_core1_pause = false;
 
-  launch_on_psp(stack_top, entry_fn,
-                (const PicoCalcAPI *)&g_api, app->path, app->id, app->name);
+  // app_stack_run paints the stack, arms PSPLIM just above its 32-byte guard
+  // (an app push past it faults with CFSR.STKOF, recorded as a stack
+  // overflow, instead of silently running into whatever lies below) and
+  // runs the entry point on the PSP.
+  native_launch_t launch = {entry_fn, &napi->api, app->path, app->id,
+                            app->name};
+  app_stack_run(stack_buf, stack_size, APP_STACK_NATIVE, native_launch_thunk,
+                &launch);
 
   ok = true;
-  for (int i = 0; i < NATIVE_STACK_GUARD_WORDS; i++) {
-    if (guard[i] != NATIVE_STACK_CANARY) {
-      printf("[NATIVE] ERROR: stack overflow detected in '%s' "
-             "(canary[%d] = 0x%08lx)\n",
-             app->name, i, (unsigned long)guard[i]);
-      ok = false;
-      break;
-    }
+  printf("[NATIVE] Stack high-water: %lu of %lu bytes\n",
+         (unsigned long)app_stack_high_water(stack_buf, stack_size),
+         (unsigned long)stack_size);
+  if (!app_stack_guard_intact(stack_buf)) {
+    printf("[NATIVE] ERROR: stack overflow detected in '%s' (guard words "
+           "overwritten)\n", app->name);
+    char detail[96];
+    snprintf(detail, sizeof(detail),
+             "stack guard overwritten after return (%luK %s stack)",
+             (unsigned long)(stack_size / 1024u),
+             stack_in_sram ? "SRAM" : "PSRAM");
+    crashlog_write("NATIVE ERROR", app->name,
+                   "stack overflow detected after app returned", detail);
+    ok = false;
   }
 
   printf("[NATIVE] App '%s' returned%s\n", app->name,
@@ -804,10 +832,17 @@ out:
   __dmb(); // ensure all app writes visible before clearing callback
   atomic_store(&g_native_audio_callback, NULL);
   atomic_store(&g_code_watch_active, false);
-  g_native_stack_base = NULL;
   g_native_code_base = g_native_code_limit = 0;
   g_native_data_base = g_native_data_limit = 0;
   g_native_code_vaddr = g_native_data_vaddr = 0;
+  // Free what the app left open (its own cleanup, if any, has run: it
+  // returned), then the audio engines' per-app state.  Core 1 still runs:
+  // the players' locks are what make this safe against its updates.
+  native_teardown(app);
+  // Release the app's HTTP/TCP connections while Core 1 still runs: it has
+  // to acknowledge each close before the slot can be reclaimed.
+  http_close_all(NULL);
+  tcp_close_all();
   g_core1_pause = true;
   for (int i = 0; i < 200 && !g_core1_paused; i++)
     sleep_ms(1);
@@ -835,6 +870,8 @@ out:
     umm_free(load_base);
   if (phdr_table)
     umm_free(phdr_table);
+  if (napi)
+    umm_free(napi);
   if (f)
     sdcard_fclose(f);
   g_core1_pause = false;
@@ -842,6 +879,26 @@ out:
   return ok;
 }
 #endif  // !PICOS_SIMULATOR
+
+// Same identity lifecycle as Lua apps: installed before the ELF is loaded,
+// cleared after the app has returned and been torn down.
+static bool native_run(const app_entry_t *app) {
+  if (!app_identity_begin(app)) {
+    // The launcher refuses invalid ids first; this is the backstop.
+    crashlog_write("NATIVE ERROR", app->name, "Failed to start app:",
+                   "invalid app id (or out of PSRAM)");
+    return false;
+  }
+  bool ok = native_run_app(app);
+  // sys->poll drops a reboot-ota that arrives while an app runs; an app that
+  // never polls leaves it latched for the launcher, so drop it here too.
+  if (dev_commands_wants_reboot_ota()) {
+    dev_commands_clear_reboot_ota();
+    printf("[DEV] reboot-ota ignored: it arrived while an app was running\n");
+  }
+  app_identity_end();
+  return ok;
+}
 
 static bool native_can_handle(const app_entry_t *app) {
   return app->type == APP_TYPE_NATIVE;

@@ -50,10 +50,12 @@ uint32_t hal_input_get_buttons(void);
 uint32_t hal_input_get_buttons_pressed(void);
 
 // Atomically snapshot held+pressed buttons and clear edge state.
-// Injected buttons auto-release here, so one inject = press edge + one
-// frame of held + release edge on the following frame. Taking the mutex
-// once for the whole read+clear closes the race where an RPC inject
-// landing between the old separate read/clear calls was dropped.
+// Injected one-shot clicks stay asserted for at least HAL_INJECT_HOLD_MS
+// (80ms) of wall-clock time before auto-release. A guaranteed released
+// read-cycle separates repeated same-button injections, enforced by
+// retire_and_publish_injected_click_locked(). Taking the mutex once for
+// the whole operation closes the race where an RPC inject landing between
+// separate read/clear calls was dropped.
 void hal_input_read_buttons(uint32_t* out_buttons, uint32_t* out_pressed);
 
 // Get character input (for text entry)
@@ -73,5 +75,28 @@ void hal_input_release_buttons(uint32_t buttons);
 
 // Inject a typed character into the char ring buffer (for RPC control)
 void hal_input_inject_char(char c);
+
+// Pop the oldest staged key event (down/up/char, in the order the keys were
+// typed or injected). keyboard_stub.c's kbd_poll drains these into the event
+// queue behind picocalc.input.pollEvent.
+struct kbd_event_s;  // kbd_event_t, src/drivers/keyboard.h
+bool hal_input_pop_event(struct kbd_event_s *out);
+
+// Drop queued chars and pending/active one-shot button injections (the
+// counterpart of keyboard.c's kbd_discard_pending FIFO drain).
+void hal_input_discard_pending(void);
+
+// ── Injection sequence numbers (test sync) ─────────────────────────────────
+// Every injection (click/press/release/char, and the menu click, which the
+// keyboard stub handles outside the button state) gets the next seq. An
+// injection is consumed once the OS has read it: a button event when
+// hal_input_read_buttons() returns with it published, a char when
+// hal_input_get_char()/hal_input_poll_char() hands it out, the menu click
+// when kbd_consume_menu_press() takes it.
+uint32_t hal_input_last_issued_seq(void);
+// consumed: highest seq such that it and every earlier seq are consumed.
+void hal_input_get_seq_state(uint32_t *issued, uint32_t *consumed);
+void hal_input_note_menu_injected(void);
+void hal_input_note_menu_consumed(void);
 
 #endif // HAL_INPUT_H

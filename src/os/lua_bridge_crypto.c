@@ -1,4 +1,7 @@
 #include "lua_bridge_internal.h"
+#include "crypto.h"
+#include "../drivers/rng.h"
+#include "mbedtls/platform_util.h"
 
 // ── AES-CTR cipher userdata ─────────────────────────────────────────────────
 #define AES_CTR_MT "picocalc.crypto.aes_ctr"
@@ -18,19 +21,19 @@ static int l_aes_ctr_update(lua_State *L) {
     size_t len;
     const char *input = luaL_checklstring(L, 2, &len);
 
-    uint8_t *output = umm_malloc(len);
-    if (!output) return luaL_error(L, "aes_ctr: out of memory");
+    // Straight into the result string's buffer: no temporary allocation to
+    // leak if an error unwinds (the result is still copied once into the
+    // string).
+    luaL_Buffer b;
+    uint8_t *output = (uint8_t *)luaL_buffinitsize(L, &b, len);
 
     int ret = g_api.crypto->aesUpdate(ud->ctx,
                                       (const uint8_t *)input, output,
                                       (uint32_t)len);
-    if (ret != 0) {
-        umm_free(output);
+    if (ret != 0)
         return luaL_error(L, "aes_ctr: encrypt/decrypt failed (%d)", ret);
-    }
 
-    lua_pushlstring(L, (const char *)output, len);
-    umm_free(output);
+    luaL_pushresultsize(&b, len);
     return 1;
 }
 
@@ -81,15 +84,22 @@ static int l_ecdh_compute_shared(lua_State *L) {
     const char *peer_pub = luaL_checklstring(L, 2, &peer_len);
 
     uint8_t secret[66]; // up to P-256 (65 bytes) or X25519 (32 bytes)
-    uint32_t olen = 0;
+    // In/out: capacity in, secret length out. Passing 0 made the callee copy
+    // nothing yet report the full length, so Lua received stack garbage.
+    uint32_t olen = sizeof(secret);
     int ret = g_api.crypto->ecdhComputeShared(ud->ctx,
                                                (const uint8_t *)peer_pub,
                                                (uint32_t)peer_len,
                                                secret, &olen);
-    if (ret != 0)
-        return luaL_error(L, "ecdh: compute_shared failed (%d)", ret);
+    if (ret != 0 || olen == 0 || olen > sizeof(secret)) {
+        mbedtls_platform_zeroize(secret, sizeof(secret));
+        lua_pushnil(L);
+        lua_pushfstring(L, "ecdh: compute_shared failed (%d)", ret);
+        return 2;
+    }
 
     lua_pushlstring(L, (const char *)secret, (size_t)olen);
+    mbedtls_platform_zeroize(secret, sizeof(secret));
     return 1;
 }
 
@@ -116,13 +126,18 @@ static int l_crypto_random_bytes(lua_State *L) {
     if (n <= 0 || n > 4096)
         return luaL_error(L, "randomBytes: n must be 1-4096");
 
-    uint8_t *buf = umm_malloc((size_t)n);
-    if (!buf) return luaL_error(L, "randomBytes: out of memory");
+    // No TRNG-seeded DRBG on this core: raise rather than hand back zeros.
+    if (!rng_ready())
+        return luaL_error(L, "randomBytes: no cryptographic RNG "
+                             "(TRNG seeding failed)");
 
+    luaL_Buffer b;
+    uint8_t *buf = (uint8_t *)luaL_buffinitsize(L, &b, (size_t)n);
     g_api.crypto->randomBytes(buf, (uint32_t)n);
+    if (!rng_ready())  // the DRBG failed during this request (buf zeroed)
+        return luaL_error(L, "randomBytes: cryptographic RNG failed");
 
-    lua_pushlstring(L, (const char *)buf, (size_t)n);
-    umm_free(buf);
+    luaL_pushresultsize(&b, (size_t)n);
     return 1;
 }
 
@@ -145,6 +160,29 @@ static int l_crypto_sha1(lua_State *L) {
     g_api.crypto->sha1((const uint8_t *)data, (uint32_t)len, hash);
 
     lua_pushlstring(L, (const char *)hash, 20);
+    return 1;
+}
+
+// sha256File(path) → lowercase hex string | nil, err
+// Streams the file in 512-byte chunks (no whole-file read); hex because the
+// main consumer is comparison against catalog / release checksums.
+static int l_crypto_sha256File(lua_State *L) {
+    const char *path = luaL_checkstring(L, 1);
+    uint8_t hash[32];
+    if (!fs_sandbox_check(L, path, false)) {
+        lua_pushnil(L);
+        lua_pushstring(L, "access denied");
+        return 2;
+    }
+    if (!crypto_sha256_file(path, hash)) {
+        lua_pushnil(L);
+        lua_pushstring(L, "cannot read file");
+        return 2;
+    }
+    char hex[65];
+    for (int i = 0; i < 32; i++)
+        snprintf(&hex[i * 2], 3, "%02x", hash[i]);
+    lua_pushlstring(L, hex, 64);
     return 1;
 }
 
@@ -212,39 +250,39 @@ static int l_crypto_aes_ctr_new(lua_State *L) {
     if (iv_len != 16)
         return luaL_error(L, "aes_ctr_new: iv must be 16 bytes");
 
-    pccrypto_aes_t ctx = g_api.crypto->aesNew((const uint8_t *)key, (uint32_t)key_len,
-                                               (const uint8_t *)iv);
-    if (!ctx)
+    // The userdata first (its __gc ignores a NULL ctx), so an out-of-memory
+    // error while creating it cannot leak a context.
+    aes_ctr_ud_t *ud = (aes_ctr_ud_t *)lua_newuserdatauv(L, sizeof(aes_ctr_ud_t), 0);
+    ud->ctx = NULL;
+    luaL_setmetatable(L, AES_CTR_MT);
+    ud->ctx = g_api.crypto->aesNew((const uint8_t *)key, (uint32_t)key_len,
+                                   (const uint8_t *)iv);
+    if (!ud->ctx)
         return luaL_error(L, "aes_ctr_new: failed to create AES context");
-
-    aes_ctr_ud_t *ud = (aes_ctr_ud_t *)lua_newuserdata(L, sizeof(aes_ctr_ud_t));
-    ud->ctx = ctx;
-    luaL_getmetatable(L, AES_CTR_MT);
-    lua_setmetatable(L, -2);
     return 1;
 }
 
-static int l_crypto_ecdh_x25519_new(lua_State *L) {
-    pccrypto_ecdh_t ctx = g_api.crypto->ecdhX25519();
-    if (!ctx)
-        return luaL_error(L, "ecdh_x25519_new: failed to create ECDH context");
+// An ECDH userdata holding no context yet (__gc ignores NULL).
+static ecdh_ud_t *new_ecdh_ud(lua_State *L) {
+    ecdh_ud_t *ud = (ecdh_ud_t *)lua_newuserdatauv(L, sizeof(ecdh_ud_t), 0);
+    ud->ctx = NULL;
+    luaL_setmetatable(L, ECDH_MT);
+    return ud;
+}
 
-    ecdh_ud_t *ud = (ecdh_ud_t *)lua_newuserdata(L, sizeof(ecdh_ud_t));
-    ud->ctx = ctx;
-    luaL_getmetatable(L, ECDH_MT);
-    lua_setmetatable(L, -2);
+static int l_crypto_ecdh_x25519_new(lua_State *L) {
+    ecdh_ud_t *ud = new_ecdh_ud(L);  // before the context: nothing to leak
+    ud->ctx = g_api.crypto->ecdhX25519();
+    if (!ud->ctx)
+        return luaL_error(L, "ecdh_x25519_new: failed to create ECDH context");
     return 1;
 }
 
 static int l_crypto_ecdh_p256_new(lua_State *L) {
-    pccrypto_ecdh_t ctx = g_api.crypto->ecdhP256();
-    if (!ctx)
+    ecdh_ud_t *ud = new_ecdh_ud(L);  // before the context: nothing to leak
+    ud->ctx = g_api.crypto->ecdhP256();
+    if (!ud->ctx)
         return luaL_error(L, "ecdh_p256_new: failed to create ECDH context");
-
-    ecdh_ud_t *ud = (ecdh_ud_t *)lua_newuserdata(L, sizeof(ecdh_ud_t));
-    ud->ctx = ctx;
-    luaL_getmetatable(L, ECDH_MT);
-    lua_setmetatable(L, -2);
     return 1;
 }
 
@@ -292,6 +330,7 @@ static const luaL_Reg l_crypto_lib[] = {
     {"randomBytes",     l_crypto_random_bytes},
     {"sha256",          l_crypto_sha256},
     {"sha1",            l_crypto_sha1},
+    {"sha256File",      l_crypto_sha256File},
     {"hmacSHA256",      l_crypto_hmac_sha256},
     {"hmacSHA1",        l_crypto_hmac_sha1},
     {"deriveKey",       l_crypto_derive_key},
@@ -305,22 +344,14 @@ static const luaL_Reg l_crypto_lib[] = {
 
 void lua_bridge_crypto_init(lua_State *L) {
     // AES-CTR metatable
-    luaL_newmetatable(L, AES_CTR_MT);
-    lua_pushvalue(L, -1);
-    lua_setfield(L, -2, "__index");
-    luaL_setfuncs(L, l_aes_ctr_methods, 0);
-    lua_pushcfunction(L, l_aes_ctr_free);
-    lua_setfield(L, -2, "__gc");
-    lua_pop(L, 1);
+    static const luaL_Reg aes_ctr_meta[] = {{"__gc", l_aes_ctr_free},
+                                            {NULL, NULL}};
+    lb_register_type(L, AES_CTR_MT, l_aes_ctr_methods, aes_ctr_meta);
 
     // ECDH metatable
-    luaL_newmetatable(L, ECDH_MT);
-    lua_pushvalue(L, -1);
-    lua_setfield(L, -2, "__index");
-    luaL_setfuncs(L, l_ecdh_methods, 0);
-    lua_pushcfunction(L, l_ecdh_free);
-    lua_setfield(L, -2, "__gc");
-    lua_pop(L, 1);
+    static const luaL_Reg ecdh_meta[] = {{"__gc", l_ecdh_free},
+                                         {NULL, NULL}};
+    lb_register_type(L, ECDH_MT, l_ecdh_methods, ecdh_meta);
 
     // Register crypto subtable
     register_subtable(L, "crypto", l_crypto_lib);

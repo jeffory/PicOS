@@ -34,6 +34,31 @@ else()
 endif()
 message(STATUS "PicOS version: ${PICOS_VERSION}")
 
+# ── OTA update signing key (public half, embedded in flash) ──────────────────
+# The firmware flashes /system/update.bin only if /system/update.sig verifies
+# against this P-256 key (src/os/ota_verify.c).  The default is the TEST key
+# in tests/keys, whose private half is in the repo: fine for local builds and
+# `make flash-ota` (tools/ota_flash.py signs with it), never for a release.
+# Release builds pass the real key and PICOS_REQUIRE_RELEASE_UPDATE_KEY=ON.
+include(cmake/picos_update_key.cmake)
+set(PICOS_UPDATE_PUBKEY_PEM "${PICOS_TEST_UPDATE_PUBKEY}" CACHE FILEPATH
+    "P-256 public key (PEM) that OTA images must be signed with")
+option(PICOS_REQUIRE_RELEASE_UPDATE_KEY
+       "Refuse to build with the TEST update key (release builds)" OFF)
+file(READ "${PICOS_UPDATE_PUBKEY_PEM}" _picos_key_text)
+file(READ "${PICOS_TEST_UPDATE_PUBKEY}" _picos_test_key_text)
+if(_picos_key_text STREQUAL _picos_test_key_text)
+    if(PICOS_REQUIRE_RELEASE_UPDATE_KEY)
+        message(FATAL_ERROR "PICOS_REQUIRE_RELEASE_UPDATE_KEY is ON but "
+            "PICOS_UPDATE_PUBKEY_PEM is the TEST key (${PICOS_UPDATE_PUBKEY_PEM})")
+    endif()
+    message(STATUS "OTA update key: TEST key (dev build — its private key is public)")
+else()
+    message(STATUS "OTA update key: ${PICOS_UPDATE_PUBKEY_PEM}")
+endif()
+picos_generate_update_pubkey(${CMAKE_BINARY_DIR}/generated/ota_pubkey.c
+                             ${PICOS_UPDATE_PUBKEY_PEM})
+
 # ── Lua 5.4 ──────────────────────────────────────────────────────────────────
 # Lua is added as a git submodule or downloaded into third_party/lua-5.4/
 # See README.md for setup instructions.
@@ -76,13 +101,12 @@ set(LUA_SOURCES
 add_library(lua STATIC ${LUA_SOURCES})
 target_include_directories(lua PUBLIC ${LUA_DIR})
 
-# Lua config overrides for embedded target
-target_compile_definitions(lua PRIVATE
-    LUA_32BITS=1           # Use 32-bit integers (saves memory on RP2350)
-    LUA_USE_LONGJMP=1      # Use setjmp/longjmp instead of C++ exceptions
-    LUAI_MAXSTACK=500      # Reduce stack depth from 1000000 to 500
-    LUA_IDSIZE=60          # Smaller error source IDs
-)
+# Lua config (shared with the simulator). luaconf.h is patched so these
+# -D values actually take effect; PUBLIC so the bridge sees the same types.
+include(${CMAKE_SOURCE_DIR}/cmake/picos_lua.cmake)
+picos_patch_luaconf(${LUA_DIR})
+target_compile_definitions(lua PUBLIC ${PICOS_LUA_DEFINITIONS})
+target_sources(lua PRIVATE ${PICOS_LUA_SOURCES})  # picos_lua_sprintf (float formatting)
 # No signals, no OS-level stuff
 target_compile_options(lua PRIVATE -Os)
 
@@ -117,6 +141,11 @@ set(JPEGDEC_DIR ${CMAKE_SOURCE_DIR}/third_party/JPEGDEC)
 set(PNGDEC_DIR ${CMAKE_SOURCE_DIR}/third_party/PNGdec)
 set(GIF_DIR ${CMAKE_SOURCE_DIR}/third_party/AnimatedGIF)
 
+# PNGdec's zlib with its unaligned word copies made alignment-safe (patched
+# copies in the build tree; the submodule stays pristine). See the module.
+include(${CMAKE_SOURCE_DIR}/cmake/picos_pngdec.cmake)
+picos_pngdec_sources(PICOS_PNGDEC_SOURCES ${PNGDEC_DIR}/src)
+
 # JPEGDEC as separate lib with -O2 for faster decode loops (IDCT, Huffman VLC,
 # pixel conversion).  Code grows from ~17KB (-Os) to ~24KB (-O2), but it already
 # exceeded the 16KB XIP cache at -Os, so the extra size doesn't meaningfully
@@ -130,14 +159,7 @@ add_library(image_decoders STATIC
     ${TGX_DIR}/src/Color.cpp
     ${TGX_DIR}/src/Fonts.cpp
     ${TGX_DIR}/src/Renderer3D.cpp
-    ${PNGDEC_DIR}/src/PNGdec.cpp
-    ${PNGDEC_DIR}/src/adler32.c
-    ${PNGDEC_DIR}/src/crc32.c
-    ${PNGDEC_DIR}/src/infback.c
-    ${PNGDEC_DIR}/src/inffast.c
-    ${PNGDEC_DIR}/src/inflate.c
-    ${PNGDEC_DIR}/src/inftrees.c
-    ${PNGDEC_DIR}/src/zutil.c
+    ${PICOS_PNGDEC_SOURCES}
     ${GIF_DIR}/src/AnimatedGIF.cpp
 )
 
@@ -215,9 +237,15 @@ pico_generate_pio_header(pio_psram_lib ${PIO_PSRAM_DIR}/psram_spi.pio)
 add_executable(picocalc_os
     src/main.c
     src/dev_commands.c
+    src/dev_ops.c
     src/os/launcher.c
     src/os/lua_runner.c
+    src/os/app_stack.c
     src/os/native_loader.c
+    src/os/elf_plan.c
+    src/os/fs_path.c
+    src/os/app_identity.c
+    src/os/app_manifest.c
     src/os/lua_bridge.c
     src/os/lua_bridge_display.c
     src/os/lua_bridge_input.c
@@ -245,6 +273,7 @@ add_executable(picocalc_os
     src/os/lua_bridge_game_scene.c
     src/os/lua_bridge_game_save.c
     src/os/lua_psram_alloc.c
+    src/os/small_alloc.c
     src/os/core1_alloc.c
     src/os/system_menu.c
     src/os/idle_dim.c
@@ -257,8 +286,17 @@ add_executable(picocalc_os
     src/os/lua_bridge_crypto.c
     src/os/lua_bridge_mod.c
     src/os/lua_bridge_zip.c
+    src/os/zip_archive.c
+    src/os/zip_util.c
+    src/os/zip_name.c
+    src/os/lua_bridge_json.c
     src/os/ota_update.c
-    src/fonts/font_6x11.c
+    src/os/ota_verify.c
+    ${CMAKE_BINARY_DIR}/generated/ota_pubkey.c
+    src/fonts/font.c
+    src/fonts/font_registry.c
+    src/fonts/font_6x8.c
+    src/fonts/font_8x12.c
     src/fonts/font_scientifica.c
     src/os/text_input.c
     src/os/file_browser.c
@@ -276,11 +314,14 @@ add_executable(picocalc_os
     src/drivers/audio.c
     src/drivers/sound.c
     src/drivers/fileplayer.c
+    src/drivers/wav.c
     src/drivers/mp3_player.c
     src/drivers/video_player.cpp
     src/drivers/keyboard.c
     src/drivers/sdcard.c
     src/drivers/wifi.c
+    src/drivers/rng.c
+    src/drivers/ca_bundle.c
     src/drivers/http.c
     src/drivers/tcp.c
     src/drivers/mod_player.c
@@ -305,6 +346,7 @@ target_include_directories(picocalc_os PRIVATE
     third_party/mongoose/
     third_party/umm_malloc/src/
     third_party/miniz/
+    ${CMAKE_BINARY_DIR}/generated/miniz/
     third_party/libmad/
     third_party/pocketmod/
     data/
@@ -334,9 +376,11 @@ target_link_libraries(picocalc_os
 )
 
 # ── Generate miniz_export.h stub (miniz's own CMake does this, but we
-#    compile sources directly so we need to create it ourselves) ─────────────
-if(NOT EXISTS "${CMAKE_SOURCE_DIR}/third_party/miniz/miniz_export.h")
-    file(WRITE "${CMAKE_SOURCE_DIR}/third_party/miniz/miniz_export.h"
+#    compile sources directly so we need to create it ourselves). Written to
+#    the build tree — never into third_party/miniz, which would dirty the
+#    submodule. The generated dir is on the include path above. ─────────────
+if(NOT EXISTS "${CMAKE_BINARY_DIR}/generated/miniz/miniz_export.h")
+    file(WRITE "${CMAKE_BINARY_DIR}/generated/miniz/miniz_export.h"
         "#ifndef MINIZ_EXPORT_H\n"
         "#define MINIZ_EXPORT_H\n"
         "#define MINIZ_EXPORT\n"
@@ -422,6 +466,9 @@ target_compile_definitions(picocalc_os PRIVATE
     PICO_RP2350=1
     PICO_MALLOC_PANIC=0   # Return NULL on SRAM OOM instead of HardFault
     PICO_STACK_SIZE=4096  # Reduced to 4KB to fit in SCRATCH_X/Y
+    # MSPLIM on both cores; main.c supplies the hook to add a margin.
+    PICO_USE_STACK_GUARDS=1
+    PICO_RUNTIME_NO_INIT_PER_CORE_INSTALL_STACK_GUARD=1
     MG_ENABLE_MBEDTLS=1
     # Re-enable pico_stdio_usb features that get auto-disabled when
     # tinyusb_device is linked directly. We provide our own descriptors

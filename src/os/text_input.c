@@ -44,6 +44,16 @@ bool text_input_show(const char *title, const char *prompt,
 
     display_darken();
 
+    // OS modals draw full-screen even if the app set a clip rect.
+    int saved_cx, saved_cy, saved_cw, saved_ch;
+    display_get_clip_rect(&saved_cx, &saved_cy, &saved_cw, &saved_ch);
+    display_clear_clip_rect();
+
+    // Start from a clean keyboard: edges gathered by sys.sleep's background
+    // polls, or injections queued before this modal opened, were not typed
+    // at this dialog and must not accept/cancel it.
+    kbd_clear_state();
+
     int  scroll      = 0;
     bool running     = true;
     bool confirmed   = false;
@@ -148,5 +158,6 @@ bool text_input_show(const char *title, const char *prompt,
         out[out_len - 1] = '\0';
     }
 
+    display_set_clip_rect(saved_cx, saved_cy, saved_cw, saved_ch);
     return confirmed;
 }

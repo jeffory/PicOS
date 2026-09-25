@@ -1,0 +1,7 @@
+{
+    "id": "com.picos.blit_test",
+    "name": "Blit Test",
+    "description": "image blit clipping, colour key + flip, PNG decode, off-screen shape rejection",
+    "version": "1.0",
+    "author": "PicOS"
+}

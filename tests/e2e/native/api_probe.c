@@ -1,0 +1,58 @@
+// native_api_probe — logs the PicoCalcAPI layout it was compiled against
+// (sdk/native/os.h) next to what the loader actually handed it.
+//
+// Built by tests/e2e/native/Makefile into tests/e2e/apps/native_api_probe/
+// main.elf (committed, so the E2E job needs no ARM toolchain). Read by
+// tests/e2e/test_native.py::test_api_layout_matches_os_h, which compares:
+//   - api->version with g_api.version in src/main.c;
+//   - the compiled sizeof()s with the struct layout in src/os/os.h (so a
+//     stale probe, or an sdk/native/os.h that drifted, fails);
+//   - the gap between consecutive sub-tables with their sizeof(): the
+//     simulator lays its trampoline tables out back to back
+//     (unicorn_build_api_struct), so gap != sizeof means its slot count
+//     drifted from os.h, which shifts every later table and `version`.
+#include "app_abi.h"
+#include "os.h"
+
+#include <stddef.h>
+#include <stdint.h>
+
+#define TABLES(X)                                                        \
+    X(input, picocalc_input_t) X(display, picocalc_display_t)            \
+    X(fs, picocalc_fs_t) X(sys, picocalc_sys_t)                          \
+    X(audio, picocalc_audio_t) X(wifi, picocalc_wifi_t)                  \
+    X(tcp, picocalc_tcp_t) X(ui, picocalc_ui_t)                          \
+    X(psram, picocalc_psram_t) X(perf, picocalc_perf_t)                  \
+    X(terminal, picocalc_terminal_t) X(http, picocalc_http_t)            \
+    X(soundplayer, picocalc_soundplayer_t)                               \
+    X(appconfig, picocalc_appconfig_t) X(crypto, picocalc_crypto_t)      \
+    X(graphics, picocalc_graphics_t) X(video, picocalc_video_t)          \
+    X(modplayer, picocalc_modplayer_t) X(zip, picocalc_zip_t)
+
+typedef struct {
+    const char *name;
+    uintptr_t addr;
+    uint32_t size;
+} table_t;
+
+void picos_main(const PicoCalcAPI *api, const char *app_dir,
+                const char *app_id, const char *app_name) {
+    (void)app_dir; (void)app_id; (void)app_name;
+    void (*log)(const char *, ...) = api->sys->log;
+
+#define ROW(field, type) {#field, (uintptr_t)api->field, (uint32_t)sizeof(type)},
+    const table_t t[] = {TABLES(ROW)};
+#undef ROW
+    const unsigned n = sizeof(t) / sizeof(t[0]);
+
+    log("PROBE version=%u", (unsigned)api->version);
+    log("PROBE api size=%u version_off=%u tables=%u",
+        (unsigned)sizeof(PicoCalcAPI),
+        (unsigned)offsetof(PicoCalcAPI, version), n);
+    for (unsigned i = 0; i < n; i++) {
+        uint32_t gap = i + 1 < n ? (uint32_t)(t[i + 1].addr - t[i].addr) : 0;
+        log("PROBE table %s size=%u gap=%u", t[i].name, (unsigned)t[i].size,
+            (unsigned)gap);
+    }
+    log("PROBE done");
+}

@@ -7,6 +7,16 @@ project(picos_simulator C CXX)
 set(CMAKE_C_STANDARD 11)
 set(CMAKE_CXX_STANDARD 17)
 
+# SIM_FIRMWARE_NET (see "Simulator Network Library" below) changes what
+# hardware/sync.h means for every translation unit (real spinlocks instead of
+# no-ops, simulator/stubs/hardware/sync.h), so the define is global.
+option(SIM_FIRMWARE_NET
+       "Simulator runs the firmware network stack (wifi.c/http.c/tcp.c on Mongoose/POSIX)"
+       OFF)
+if(SIM_FIRMWARE_NET)
+    add_compile_definitions(PICOS_SIM_FIRMWARE_NET=1)
+endif()
+
 # Parent directory (PicOS root)
 set(PICOS_ROOT ${CMAKE_CURRENT_SOURCE_DIR}/..)
 
@@ -67,13 +77,19 @@ set(LUA_SOURCES
 
 add_library(lua_sim STATIC ${LUA_SOURCES})
 target_include_directories(lua_sim PUBLIC ${LUA_DIR})
-target_compile_definitions(lua_sim PRIVATE
-    LUA_32BITS=1
-    LUA_USE_LONGJMP=1
-    LUAI_MAXSTACK=500
-    PICOS_SIMULATOR=1
-)
+# Same Lua config as the firmware (cmake/picos_lua.cmake) so the simulator VM
+# has identical numeric semantics and stack limit. PUBLIC so the bridge agrees.
+include(${PICOS_ROOT}/cmake/picos_lua.cmake)
+picos_patch_luaconf(${LUA_DIR})
+target_compile_definitions(lua_sim PUBLIC ${PICOS_LUA_DEFINITIONS})
+target_sources(lua_sim PRIVATE ${PICOS_LUA_SOURCES})  # picos_lua_sprintf (float formatting)
+target_compile_definitions(lua_sim PRIVATE PICOS_SIMULATOR=1)
 target_compile_options(lua_sim PRIVATE -O2 -Wall)
+# The string hash seed comes from sim_test_control.c (sim_lua_seed.h): fixed
+# under --test-mode so pairs() order over string keys repeats run to run
+# (simulator only; the firmware keeps stock luai_makeseed).
+set_source_files_properties(${LUA_DIR}/lstate.c PROPERTIES
+    COMPILE_OPTIONS "-include;${CMAKE_CURRENT_SOURCE_DIR}/sim_lua_seed.h")
 
 # ── libmad (MP3 decoder) ──────────────────────────────────────────────────
 set(LIBMAD_DIR ${PICOS_ROOT}/third_party/libmad)
@@ -109,20 +125,26 @@ set(JPEGDEC_DIR ${PICOS_ROOT}/third_party/JPEGDEC)
 set(PNGDEC_DIR ${PICOS_ROOT}/third_party/PNGdec)
 set(GIF_DIR ${PICOS_ROOT}/third_party/AnimatedGIF)
 
+# PNGdec's zlib with its unaligned word copies made alignment-safe (patched
+# copies in the build tree; the submodule stays pristine). Shared with the
+# firmware build — see the module for why.
+include(${PICOS_ROOT}/cmake/picos_pngdec.cmake)
+picos_pngdec_sources(PICOS_PNGDEC_SOURCES ${PNGDEC_DIR}/src)
+
 add_library(image_decoders_sim STATIC
     ${TGX_DIR}/src/Color.cpp
     ${TGX_DIR}/src/Fonts.cpp
     ${TGX_DIR}/src/Renderer3D.cpp
     ${JPEGDEC_DIR}/src/JPEGDEC.cpp
-    ${PNGDEC_DIR}/src/PNGdec.cpp
-    ${PNGDEC_DIR}/src/adler32.c
-    ${PNGDEC_DIR}/src/crc32.c
-    ${PNGDEC_DIR}/src/infback.c
-    ${PNGDEC_DIR}/src/inffast.c
-    ${PNGDEC_DIR}/src/inflate.c
-    ${PNGDEC_DIR}/src/inftrees.c
-    ${PNGDEC_DIR}/src/zutil.c
+    ${PICOS_PNGDEC_SOURCES}
     ${GIF_DIR}/src/AnimatedGIF.cpp
+)
+
+# PNGdec bundles its own zlib, whose crc32() clashes with Unicorn's crc32c.c.
+# Rename it on every PNGdec source so the two never meet at link time.
+set_source_files_properties(
+    ${PICOS_PNGDEC_SOURCES}
+    PROPERTIES COMPILE_DEFINITIONS "crc32=pngdec_crc32"
 )
 
 target_include_directories(image_decoders_sim PUBLIC
@@ -147,6 +169,7 @@ add_library(sim_hal STATIC
     stubs/pico_sdk_stubs.c
     stubs/hardware_stubs.c
     stubs/driver_stubs.c
+    stubs/sim_real_umm.c
     stubs/keyboard_stub.c
 )
 
@@ -175,12 +198,70 @@ target_compile_definitions(sim_hal PUBLIC
     SIMULATOR_BUILD=1
 )
 
-# ── Simulator Network Library (libcurl-based) ──────────────────────────────
-add_library(sim_network STATIC
-    sim_wifi.c
-    sim_http.c
-    sim_tcp.c
-)
+# ── Simulator Network Library ───────────────────────────────────────────────
+# Default: the simulator's own libcurl/POSIX layer (sim_wifi.c, sim_http.c,
+# sim_tcp.c) behind the firmware's http.h/tcp.h/wifi.h API.
+#
+# SIM_FIRMWARE_NET=ON (make simulator-net): the firmware's own
+# src/drivers/wifi.c, http.c and tcp.c instead, on the vendored Mongoose
+# built for the host (MG_ARCH_UNIX: BSD sockets, no built-in TCP/IP stack, no
+# TLS), with Core 0 = the main thread and Core 1 = the sim's core1_thread.
+# The host shims live in simulator/net/ (see sim_net_shim.c); the firmware
+# files carry only PICOS_SIM_FIRMWARE_NET guards. This is the build that can
+# reproduce the Core 0/Core 1 close races (specs/test-audit-2026-09-24.md
+# R13); tests/e2e/test_network_firmware.py runs only against it.
+if(SIM_FIRMWARE_NET)
+    add_library(sim_network STATIC
+        ${PICOS_ROOT}/src/drivers/wifi.c
+        ${PICOS_ROOT}/src/drivers/http.c
+        ${PICOS_ROOT}/src/drivers/tcp.c
+        ${PICOS_ROOT}/third_party/mongoose/mongoose.c
+        net/sim_net_shim.c
+    )
+    # net/include first: its mongoose.h shadows the real one for the firmware
+    # sources (stand-in Wi-Fi interface) and it carries pico/multicore.h.
+    target_include_directories(sim_network BEFORE PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}/net/include
+        ${CMAKE_CURRENT_SOURCE_DIR}/net
+    )
+    target_include_directories(sim_network PRIVATE
+        ${PICOS_ROOT}/third_party/mongoose
+    )
+    # Mongoose as the firmware configures it, minus what a host build can't
+    # have (third_party/mongoose/mongoose_config.h): mg_calloc/mg_free come
+    # from http.c (core1_calloc → host calloc), mg_random from the shim, and
+    # the same 8 KB IO granularity.
+    target_compile_definitions(sim_network PRIVATE
+        MG_ENABLE_CUSTOM_CALLOC=1
+        MG_ENABLE_CUSTOM_RANDOM=1
+        MG_IO_SIZE=8192
+        # The same loopback stand-ins for wifi.c's SNTP server and
+        # connectivity-check target (net/include/mongoose.h).
+        "WIFI_SNTP_URL=sim_net_sntp_url()"
+        "WIFI_CHECK_URL=sim_net_check_url()"
+        # http.c/tcp.c reach rx_buf through the RP2350's uncached PSRAM alias
+        # (+0x04000000); the host heap has none.
+        PSRAM_UNCACHED_OFFSET=0
+    )
+    # -g: crash-log backtraces from Core 1 then name the firmware lines.
+    target_compile_options(sim_network PRIVATE -Wall -Wextra -Wno-unused-parameter -g)
+    set_source_files_properties(${PICOS_ROOT}/third_party/mongoose/mongoose.c
+        PROPERTIES COMPILE_OPTIONS "-w")
+    # wifi.c prints an int64_t with %lld: right on the ARM target (long long),
+    # a -Wformat warning on LP64 hosts (long). Firmware code stays untouched.
+    set_source_files_properties(${PICOS_ROOT}/src/drivers/wifi.c
+        PROPERTIES COMPILE_OPTIONS "-Wno-format")
+    # http.c includes mbedtls/platform.h (declarations only); wifi.c reaches
+    # lua.h through os/system_menu.h and needs the project's Lua and its
+    # config (lua_sim), never a host's /usr/include/lua.h.
+    target_link_libraries(sim_network PRIVATE picos_host_mbedtls lua_sim)
+else()
+    add_library(sim_network STATIC
+        sim_wifi.c
+        sim_http.c
+        sim_tcp.c
+    )
+endif()
 target_include_directories(sim_network PUBLIC
     ${CMAKE_CURRENT_SOURCE_DIR}
     ${CMAKE_CURRENT_SOURCE_DIR}/stubs
@@ -208,9 +289,11 @@ set(BUILD_SHARED_LIBS OFF CACHE BOOL "" FORCE)
 FetchContent_MakeAvailable(unicorn)
 
 # ── Generate miniz_export.h stub (miniz's own CMake does this, but we
-#    compile sources directly so we need to create it ourselves) ─────────────
-if(NOT EXISTS "${PICOS_ROOT}/third_party/miniz/miniz_export.h")
-    file(WRITE "${PICOS_ROOT}/third_party/miniz/miniz_export.h"
+#    compile sources directly so we need to create it ourselves). Written to
+#    the build tree — never into third_party/miniz, which would dirty the
+#    submodule. The generated dir is on picos_simulator's include path. ──────
+if(NOT EXISTS "${CMAKE_BINARY_DIR}/generated/miniz/miniz_export.h")
+    file(WRITE "${CMAKE_BINARY_DIR}/generated/miniz/miniz_export.h"
         "#ifndef MINIZ_EXPORT_H\n"
         "#define MINIZ_EXPORT_H\n"
         "#define MINIZ_EXPORT\n"
@@ -222,7 +305,12 @@ endif()
 set(PICOS_CORE_SOURCES
     ${PICOS_ROOT}/src/os/launcher.c
     ${PICOS_ROOT}/src/os/lua_runner.c
+    ${PICOS_ROOT}/src/os/app_stack.c
     ${PICOS_ROOT}/src/os/native_loader.c
+    ${PICOS_ROOT}/src/os/elf_plan.c
+    ${PICOS_ROOT}/src/os/fs_path.c
+    ${PICOS_ROOT}/src/os/app_identity.c
+    ${PICOS_ROOT}/src/os/app_manifest.c
     ${PICOS_ROOT}/src/os/lua_bridge.c
     ${PICOS_ROOT}/src/os/lua_bridge_display.c
     ${PICOS_ROOT}/src/os/lua_bridge_input.c
@@ -248,6 +336,8 @@ set(PICOS_CORE_SOURCES
     ${PICOS_ROOT}/src/os/lua_bridge_game_scene.c
     ${PICOS_ROOT}/src/os/lua_bridge_game_save.c
     ${PICOS_ROOT}/src/os/lua_psram_alloc.c
+    ${PICOS_ROOT}/src/os/small_alloc.c
+    ${PICOS_ROOT}/src/os/crashlog.c
     ${PICOS_ROOT}/src/os/system_menu.c
     ${PICOS_ROOT}/src/os/idle_dim.c
     ${PICOS_ROOT}/src/os/screenshot.c
@@ -258,7 +348,13 @@ set(PICOS_CORE_SOURCES
     ${PICOS_ROOT}/src/os/lua_bridge_crypto.c
     ${PICOS_ROOT}/src/os/lua_bridge_mod.c
     ${PICOS_ROOT}/src/os/lua_bridge_zip.c
+    ${PICOS_ROOT}/src/os/zip_archive.c
+    ${PICOS_ROOT}/src/os/zip_util.c
+    ${PICOS_ROOT}/src/os/zip_name.c
+    ${PICOS_ROOT}/src/os/lua_bridge_json.c
     ${PICOS_ROOT}/src/drivers/mod_player.c
+    ${PICOS_ROOT}/src/drivers/fileplayer.c
+    ${PICOS_ROOT}/src/drivers/wav.c
     ${PICOS_ROOT}/third_party/miniz/miniz.c
     ${PICOS_ROOT}/third_party/miniz/miniz_tinfl.c
     ${PICOS_ROOT}/third_party/miniz/miniz_tdef.c
@@ -272,7 +368,11 @@ set(PICOS_CORE_SOURCES
     ${PICOS_ROOT}/src/os/ui_widgets.c
     ${PICOS_ROOT}/src/os/text_wrap.c
     ${CMAKE_CURRENT_SOURCE_DIR}/stubs/dev_commands_stub.c
-    ${PICOS_ROOT}/src/fonts/font_6x11.c
+    ${PICOS_ROOT}/src/dev_ops.c
+    ${PICOS_ROOT}/src/fonts/font.c
+    ${PICOS_ROOT}/src/fonts/font_registry.c
+    ${PICOS_ROOT}/src/fonts/font_6x8.c
+    ${PICOS_ROOT}/src/fonts/font_8x12.c
     ${PICOS_ROOT}/src/fonts/font_scientifica.c
     ${PICOS_ROOT}/src/os/image_decoders.cpp
     ${PICOS_ROOT}/src/drivers/image_api.c
@@ -286,10 +386,23 @@ list(REMOVE_ITEM PICOS_CORE_SOURCES
     ${PICOS_ROOT}/src/os/lua_bridge_crypto.c
 )
 
+# OTA image checks (sys.applyUpdate): the firmware's own ota_verify.c against a
+# host mbedTLS and the TEST update key, so the simulator refuses exactly what
+# the device refuses (flashing itself stays firmware-only).
+include(${PICOS_ROOT}/cmake/picos_host_mbedtls.cmake)
+include(${PICOS_ROOT}/cmake/picos_update_key.cmake)
+picos_generate_update_pubkey(${CMAKE_BINARY_DIR}/generated/ota_pubkey.c
+                             ${PICOS_TEST_UPDATE_PUBKEY})
+list(APPEND PICOS_CORE_SOURCES
+    ${PICOS_ROOT}/src/os/ota_verify.c
+    ${CMAKE_BINARY_DIR}/generated/ota_pubkey.c
+)
+
 add_executable(picos_simulator
     main.c
     sim_socket.c
     sim_socket_handler.c
+    sim_test_control.c
     unicorn_runner.c
     unicorn_trampolines.c
     ${PICOS_CORE_SOURCES}
@@ -305,6 +418,7 @@ target_include_directories(picos_simulator PRIVATE
     ${PICOS_ROOT}/src/usb
     ${PICOS_ROOT}/third_party/umm_malloc/src
     ${PICOS_ROOT}/third_party/miniz
+    ${CMAKE_BINARY_DIR}/generated/miniz
     ${PICOS_ROOT}/third_party/stb
     ${PICOS_ROOT}/third_party/pocketmod
     ${unicorn_SOURCE_DIR}/include
@@ -320,6 +434,7 @@ target_link_libraries(picos_simulator PRIVATE
     SDL2_image::SDL2_image
     Threads::Threads
     CURL::libcurl
+    picos_host_mbedtls
 )
 
 target_compile_definitions(picos_simulator PRIVATE
@@ -348,9 +463,49 @@ set_source_files_properties(
     "MINIZ_NO_STDIO;MINIZ_NO_ARCHIVE_WRITING_APIS;MINIZ_NO_ZLIB_COMPATIBLE_NAMES"
 )
 
-# Unicorn Engine's crc32c.c and PNGdec's crc32.c both define crc32 —
-# they are unrelated implementations; allow the linker to pick the first one.
-target_link_options(picos_simulator PRIVATE -Wl,--allow-multiple-definition)
+# No --allow-multiple-definition: it silently let simulator stubs win over
+# the real implementations (audio_ring_free, image_*), so a duplicate symbol
+# must now be a link error. The one legitimate clash — Unicorn's crc32c.c and
+# PNGdec's bundled zlib both defining crc32 — is resolved by renaming
+# PNGdec's copy on its sources (the set_source_files_properties on the PNGdec sources).
+
+# ── Sanitizer builds (make simulator-asan / simulator-tsan) ─────────────────
+# PICOS_SIM_SANITIZE is a list of -fsanitize= kinds, e.g. "address;undefined"
+# or "thread". It instruments the simulator and everything it compiles from
+# the PicOS tree (OS, bridge, Lua, decoders, HAL, network) but NOT Unicorn,
+# which is third-party JIT code and only slows the run down. Since the sim maps
+# umm_* and the Lua heap onto malloc, ASan sees every bridge allocation.
+set(PICOS_SIM_SANITIZE "" CACHE STRING
+    "Sanitizers for the simulator: '' (off), 'address;undefined' or 'thread'")
+set(_picos_san "")
+if(PICOS_SIM_SANITIZE)
+    string(REPLACE ";" "," _picos_san "${PICOS_SIM_SANITIZE}")
+    set(_picos_san_flags -fsanitize=${_picos_san} -fno-omit-frame-pointer -g)
+    if("undefined" IN_LIST PICOS_SIM_SANITIZE)
+        # Every UB report is fatal, so the harness sees it as a dead sim.
+        list(APPEND _picos_san_flags -fno-sanitize-recover=undefined)
+    endif()
+    foreach(_t picos_simulator sim_hal sim_network lua_sim libmad_sim image_decoders_sim)
+        target_compile_options(${_t} PRIVATE ${_picos_san_flags})
+    endforeach()
+    if("undefined" IN_LIST PICOS_SIM_SANITIZE)
+        # libmad's polyphase synthesis reads a row of D[17][32] through a
+        # pointer offset back from the row start (synth.c synth_full: ptr =
+        # *Dptr - po; ptr[31 - n]): inside D, outside the row that
+        # -fsanitize=bounds checks. Decoding any MP3 tripped it.
+        set_source_files_properties(${LIBMAD_DIR}/synth.c PROPERTIES
+            COMPILE_OPTIONS -fno-sanitize=bounds)
+    endif()
+    target_link_options(picos_simulator PRIVATE -fsanitize=${_picos_san})
+    message(STATUS "  - Sanitizers: ${_picos_san}")
+endif()
+# Reported by `picos_simulator --build-info` so the E2E harness can tell a
+# sanitizer build from a release one (asan_only tests).
+target_compile_definitions(picos_simulator PRIVATE
+    PICOS_SIM_SANITIZE_STR="${_picos_san}")
+if(SIM_FIRMWARE_NET)
+    message(STATUS "  - Network: firmware wifi.c/http.c/tcp.c on Mongoose/POSIX (SIM_FIRMWARE_NET)")
+endif()
 
 # ── Install / Run ───────────────────────────────────────────────────────────
 set_target_properties(picos_simulator PROPERTIES
@@ -371,5 +526,9 @@ message(STATUS "  - Display: 960x960 (3x scale)")
 message(STATUS "  - Audio: SDL2 enabled")
 message(STATUS "  - Threading: Dual-core simulation")
 message(STATUS "  - SD Card: Host filesystem")
-message(STATUS "  - WiFi: Mock (always connected)")
-message(STATUS "  - HTTP/TCP: libcurl")
+if(SIM_FIRMWARE_NET)
+    message(STATUS "  - WiFi/HTTP/TCP: firmware drivers on Mongoose/POSIX (TLS off)")
+else()
+    message(STATUS "  - WiFi: Mock (always connected)")
+    message(STATUS "  - HTTP/TCP: libcurl")
+endif()

@@ -95,6 +95,12 @@ typedef struct {
 #define BTN_ALT       (1 << 21)   // Alt modifier
 #define BTN_FN        (1 << 22)   // Fn/Symbol modifier
 
+// Built-in font ids for display->setFont (API version 6)
+#define PC_FONT_6X8               0
+#define PC_FONT_8X12              1
+#define PC_FONT_SCIENTIFICA       2
+#define PC_FONT_SCIENTIFICA_BOLD  3
+
 typedef struct {
     // Returns current bitmask of held buttons (BTN_* flags)
     uint32_t (*getButtons)(void);
@@ -157,6 +163,38 @@ typedef struct {
                                int tex_x, int tex_y0, int tex_y1);
     void (*fillVLineGradient)(int x, int y0, int y1,
                               uint16_t color_top, uint16_t color_bottom);
+    // --- API version 4 additions ---
+    // Clip rect: all pixel-writing primitives respect it except clear(),
+    // flush*(), and the whole-buffer effects. Default is full screen.
+    void (*setClipRect)(int x, int y, int w, int h);
+    void (*getClipRect)(int *x, int *y, int *w, int *h);
+    void (*clearClipRect)(void);
+    // Extra primitives (previously Lua-only)
+    void (*fillHLine)(int y, int x0, int x1, uint16_t color);
+    void (*fillTriangle)(int x0, int y0, int x1, int y1,
+                         int x2, int y2, uint16_t color);
+    // Hardware vertical scroll (ST7365P VSCRDEF/VSCRSADD).
+    // top_fixed + scroll_height + bottom_fixed must equal 320.
+    void (*setScrollArea)(int top_fixed, int scroll_height, int bottom_fixed);
+    void (*setScrollOffset)(int offset);
+    // Mode 7 perspective ground-plane render. Power-of-two texture dims wrap
+    // seamlessly; other sizes clamp. Respects the clip rect.
+    void (*drawPlane)(const uint16_t *tex, int tex_w, int tex_h,
+                      float cam_x, float cam_y, float cam_z,
+                      float angle, int horizon_y, float scale);
+    // --- API version 6 additions: fonts ---------------------------------
+    // Font ids: PC_FONT_6X8 .. PC_FONT_SCIENTIFICA_BOLD are built in;
+    // loadFont returns ids >= 4. Every loaded font is freed when the app
+    // exits. setFont ignores ids that are not live.
+    void (*setFont)(int font_id);
+    int  (*getFont)(void);
+    int  (*getFontWidth)(void);            // max advance of the active font
+    int  (*getFontHeight)(void);
+    int  (*textWidth)(const char *text);   // real width, proportional-aware
+    int  (*loadFont)(const char *path);    // slot id, or -1 on failure
+    void (*unloadFont)(int font_id);
+    // Draw text leaving background pixels untouched.
+    int  (*drawTextTransparent)(int x, int y, const char *text, uint16_t fg);
 } picocalc_display_t;
 
 // --- Filesystem (SD card) ---------------------------------------------------
@@ -283,6 +321,12 @@ typedef enum {
     TCP_CB_FAILED   = (1 << 4),
 } tcp_event_t;
 
+// connectEx() flags (API version 8).
+#define PCTCP_TLS          (1u << 0)  // TLS; the server certificate is verified
+                                      // against the OS root bundle + host name
+#define PCTCP_TLS_INSECURE (1u << 1)  // with PCTCP_TLS: skip verification
+                                      // (self-signed dev servers only)
+
 typedef struct {
     // Open a TCP connection to host:port. Non-blocking.
     pctcp_t (*connect)(const char *host, uint16_t port, bool use_ssl);
@@ -290,7 +334,8 @@ typedef struct {
     int     (*write)(pctcp_t c, const void *buf, int len);
     // Read data from the connection. Returns bytes read or 0 if none available.
     int     (*read)(pctcp_t c, void *buf, int len);
-    // Close the connection.
+    // Close the connection and release it; the handle is invalid afterwards
+    // (the slot returns to the pool once Core 1 has let go of it).
     void    (*close)(pctcp_t c);
     // Returns number of bytes available for reading.
     int     (*available)(pctcp_t c);
@@ -298,6 +343,11 @@ typedef struct {
     const char * (*getError)(pctcp_t c);
     // Returns bitmask of pending events (TCP_CB_*).
     uint32_t (*getEvents)(pctcp_t c);
+    // --- API version 8 ---
+    // connect() with PCTCP_* flags. A TLS socket reports TCP_CB_CONNECT only
+    // once the handshake (and certificate check) has succeeded; a TLS
+    // connect before SNTP has set the clock fails with "clock not set".
+    pctcp_t (*connectEx)(const char *host, uint16_t port, uint32_t flags);
 } picocalc_tcp_t;
 
 // --- UI Widgets -------------------------------------------------------------
@@ -382,6 +432,12 @@ typedef struct {
     // Returns true when the request has completed (success or failure).
     // Use getStatus()/getError() to determine outcome.
     bool  (*isComplete)(pchttp_t c);
+    // --- API version 8 ---
+    // HTTPS verifies the server certificate (OS root bundle + host name) and
+    // refuses to connect until SNTP has set the clock ("clock not set").
+    // setInsecure(c, true) before get()/post() skips both — for self-signed
+    // development servers only.
+    void  (*setInsecure)(pchttp_t c, bool insecure);
 } picocalc_http_t;
 
 // --- Sound Player -----------------------------------------------------------
@@ -398,7 +454,7 @@ typedef struct {
     // Load a sample from a file. Returns NULL on failure.
     pcsound_sample_t (*sampleLoad)(const char *path);
     // Free a loaded sample.
-    void  (*sampleFree)(pcsound_sample_t s);
+    void  (*sampleFree)(pcsound_sample_t s);   // stops + detaches any player using it
 
     // --- Sample player ---
     // Create a new player instance. Returns NULL on OOM.
@@ -408,9 +464,9 @@ typedef struct {
     void     (*playerStop)(pcsound_player_t p);
     bool     (*playerIsPlaying)(pcsound_player_t p);
     uint8_t  (*playerGetVolume)(pcsound_player_t p);
-    void     (*playerSetVolume)(pcsound_player_t p, uint8_t vol);   // 0–255
+    void     (*playerSetVolume)(pcsound_player_t p, uint8_t vol);   // 0–100
     void     (*playerSetLoop)(pcsound_player_t p, bool loop);
-    void     (*playerFree)(pcsound_player_t p);
+    void     (*playerFree)(pcsound_player_t p);   // never frees the player's sample
 
     // --- File player (streaming from SD card) ---
     pcfileplayer_t (*filePlayerNew)(void);
@@ -420,7 +476,7 @@ typedef struct {
     void     (*filePlayerPause)(pcfileplayer_t fp);
     void     (*filePlayerResume)(pcfileplayer_t fp);
     bool     (*filePlayerIsPlaying)(pcfileplayer_t fp);
-    void     (*filePlayerSetVolume)(pcfileplayer_t fp, uint8_t vol);  // sets both L/R channels to same value
+    void     (*filePlayerSetVolume)(pcfileplayer_t fp, uint8_t vol);  // 0-100 (clamped), both L/R channels
     uint8_t  (*filePlayerGetVolume)(pcfileplayer_t fp);
     uint32_t (*filePlayerGetOffset)(pcfileplayer_t fp);
     void     (*filePlayerSetOffset)(pcfileplayer_t fp, uint32_t pos);
@@ -435,7 +491,7 @@ typedef struct {
     void     (*mp3PlayerPause)(pcmp3player_t mp);
     void     (*mp3PlayerResume)(pcmp3player_t mp);
     bool     (*mp3PlayerIsPlaying)(pcmp3player_t mp);
-    void     (*mp3PlayerSetVolume)(pcmp3player_t mp, uint8_t vol);
+    void     (*mp3PlayerSetVolume)(pcmp3player_t mp, uint8_t vol);  // 0-100 (clamped)
     uint8_t  (*mp3PlayerGetVolume)(pcmp3player_t mp);
     void     (*mp3PlayerSetLoop)(pcmp3player_t mp, bool loop);
     void     (*mp3PlayerFree)(pcmp3player_t mp);
@@ -443,11 +499,14 @@ typedef struct {
 
 // --- App Config -------------------------------------------------------------
 // Per-app key/value config persisted at /data/<APP_ID>/config.json.
-// load() is called by the launcher before app start. Max 4 keys, 32-char keys,
+// Nothing loads it for a native app: the store is unbound at every app start
+// and exit, so call load() with your own id first. Max 4 keys, 32-char keys,
 // 256-char values.
 
 typedef struct {
-    // Load config for the given app_id. Called by launcher automatically.
+    // Bind and load the running app's own config. Only the running app's id
+    // is accepted (case-insensitive); another app's id returns false and
+    // leaves the binding unchanged. Not called for you by the launcher.
     bool        (*load)(const char *app_id);
     // Save in-memory config to /data/<APP_ID>/config.json.
     bool        (*save)(void);
@@ -478,8 +537,11 @@ typedef struct {
                        const uint8_t *data, uint32_t dlen, uint8_t out[32]);
     void (*hmacSha1)(const uint8_t *key, uint32_t klen,
                      const uint8_t *data, uint32_t dlen, uint8_t out[20]);
-    // Fill buf with cryptographically random bytes.
-    void (*randomBytes)(uint8_t *buf, uint32_t len);
+    // Fill buf with cryptographically random bytes.  False (buf zeroed) when
+    // there is no seeded, working DRBG: never use the bytes then.  (Returned
+    // since 2026-09; the slot and calling convention are unchanged, so older
+    // apps that ignore the result still link and run.)
+    bool (*randomBytes)(uint8_t *buf, uint32_t len);
     // SSH session-key derivation (RFC 4253 §7.2). letter = 'A'–'F'.
     // K = shared secret mpint, H = exchange hash, session_id = initial H.
     void (*deriveKey)(char letter,
@@ -568,6 +630,24 @@ typedef struct {
     bool      (*getMuted)(pcvideo_t vp);
     uint32_t  (*getDroppedFrames)(pcvideo_t vp);
     void      (*resetStats)(pcvideo_t vp);
+
+    // --- API version 7 additions -------------------------------------------
+    // Time-based position/seek (ms).  Seeks clamp to the file and never wrap;
+    // a seek while paused presents the target frame; a seek after the end
+    // restarts playback.  With loop off the player holds the last frame and
+    // hasEnded() turns true (isPlaying() false); play() or resume() replays.
+    uint32_t  (*getFrameCount)(pcvideo_t vp);
+    uint32_t  (*getDurationMs)(pcvideo_t vp);
+    uint32_t  (*getPositionMs)(pcvideo_t vp);
+    void      (*seekMs)(pcvideo_t vp, uint32_t ms);
+    void      (*seekRelativeMs)(pcvideo_t vp, int32_t delta_ms);
+    bool      (*hasEnded)(pcvideo_t vp);
+    // Built-in progress OSD (bar + elapsed/total) drawn over the bottom of
+    // the video.  On by default; shown on play/pause/seek, hides after the
+    // timeout (default 3000 ms) while playing, stays while paused/ended.
+    void      (*setOSD)(pcvideo_t vp, bool enabled);
+    void      (*showOSD)(pcvideo_t vp);
+    void      (*setOSDTimeout)(pcvideo_t vp, uint32_t ms);
 } picocalc_video_t;
 
 // --- MOD Music Player -------------------------------------------------------
@@ -591,10 +671,35 @@ typedef struct {
 
 // --- ZIP Archive Extraction ------------------------------------------------
 
+// Opaque read-in-place archive handle (API version 5).
+typedef void *pczip_t;
+
+typedef struct {
+    char     name[256];   // entry name, NUL-terminated
+    uint32_t size;        // uncompressed bytes
+    uint32_t comp_size;   // compressed bytes
+    bool     is_dir;
+} pczip_stat_t;
+
 typedef struct {
     bool (*extract)(const char *zip_path, const char *dest_dir);
     // Returns number of files in archive, -1 on error.
     int  (*list)(const char *zip_path);
+    // --- API version 5 additions: read-in-place archive handles ------------
+    // Open an archive for random access without extracting it. At most 4
+    // archives may be open at once; handles are force-closed when the app
+    // exits. Returns NULL on error.
+    pczip_t (*open)(const char *zip_path);
+    void    (*close)(pczip_t z);
+    int     (*numEntries)(pczip_t z);                 // files + dirs, -1 on error
+    int     (*locate)(pczip_t z, const char *name);   // entry index, -1 if absent
+    bool    (*statIndex)(pczip_t z, int idx, pczip_stat_t *out);
+    // Decompress entry idx into a caller-supplied buffer. Returns bytes
+    // written, or -1 on error (including "entry larger than buf_cap" —
+    // statIndex first to size the buffer).
+    int     (*read)(pczip_t z, int idx, void *buf, uint32_t buf_cap);
+    // Stream entry idx to dest_path on the SD card (constant memory).
+    bool    (*extractEntry)(pczip_t z, int idx, const char *dest_path);
 } picocalc_zip_t;
 
 // --- The complete OS API struct ---------------------------------------------
@@ -622,7 +727,12 @@ typedef struct PicoCalcAPI {
     const picocalc_video_t       *video;       // MJPEG video playback
     const picocalc_modplayer_t   *modplayer;   // MOD tracker music
     const picocalc_zip_t         *zip;         // ZIP extraction
-    uint32_t                      version;     // 1=Phase1, 2=Phase2, 3=fs->browse
+    uint32_t                      version;     // 1=Phase1, 2=Phase2, 3=fs->browse,
+                                             // 4=clip rect + mode-7 plane + display parity
+                                             // 5=zip read-in-place handles
+                                             // 7=video time seek/position, OSD, hasEnded
+                                             // 8=TLS verification: http->setInsecure,
+                                             //   tcp->connectEx
 } PicoCalcAPI;
 
 // The global API instance, populated during os_init()

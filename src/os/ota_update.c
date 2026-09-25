@@ -1,12 +1,16 @@
 // ota_update.c — SD-staged OTA firmware updater
 //
 // Flow:
-//   1. Lua app downloads .bin to /system/update.bin
-//   2. Lua calls picocalc.sys.applyUpdate(path) → ota_trigger_update()
-//   3. ota_trigger_update() validates the file, sets scratch[1]=OTA_MAGIC, reboots
+//   1. Lua app downloads .bin to /system/update.bin, plus update.sha256 and
+//      update.sig (ECDSA P-256 signature, see ota_verify.h)
+//   2. Lua calls picocalc.sys.applyUpdate(path) → ota_prepare_update (size,
+//      vector table, checksum, signature) → ui_confirm → ota_trigger_update()
+//   3. ota_trigger_update() sets the one-shot token (scratch[1]=OTA_MAGIC), reboots
 //   4. On next boot, main() calls ota_check_pending() + ota_apply_update()
-//   5. ota_apply_update() pre-reads .bin into PSRAM, then an SRAM-resident
+//   5. ota_apply_update() pre-reads .bin into PSRAM, re-checks the checksum and
+//      signature over the bytes it is about to write, then an SRAM-resident
 //      function erases+programs all flash sectors and reboots.
+//   A refused image is renamed to *.rejected (never retried) and logged.
 //
 // Safety:
 //   - Flash writer runs BEFORE Core 1 launch (no Mongoose, no audio ISRs)
@@ -24,6 +28,8 @@
 //     locked to CS0 during flash operations, making PSRAM on CS1 inaccessible)
 
 #include "ota_update.h"
+#include "app_stack.h"
+#include "crashlog.h"
 
 #include <stdio.h>
 #include <string.h>
@@ -39,20 +45,6 @@
 #include "../drivers/sdcard.h"
 #include "umm_malloc.h"
 #include "ui.h"
-
-// Maximum firmware size: 2MB (flash is 4MB, but leave headroom)
-#define OTA_MAX_SIZE (2u * 1024u * 1024u)
-
-// Minimum firmware size: must have at least the vector table (256 bytes)
-#define OTA_MIN_SIZE 256u
-
-// RP2350 vector table validation:
-// Word 0 = initial SP (should be in SRAM: 0x20000000–0x20082000)
-// Word 1 = reset vector (should be in flash: 0x10000000–0x10400000)
-#define SRAM_BASE_ADDR  0x20000000u
-#define SRAM_END_ADDR   0x20082000u
-#define FLASH_BASE_ADDR 0x10000000u
-#define FLASH_END_ADDR  0x10400000u
 
 // SHA-256 verification via mbedTLS (already linked for HTTPS)
 #include "mbedtls/sha256.h"
@@ -92,108 +84,10 @@ static void ota_show_status(const char *line1, const char *line2, uint16_t color
     display_flush();
 }
 
-// ── SHA-256 file verification ───────────────────────────────────────────────
-
-// Compute SHA-256 of a file on SD card. Returns true on success.
-static bool ota_sha256_file(const char *path, uint8_t out_hash[32]) {
-    sdfile_t f = sdcard_fopen(path, "r");
-    if (!f) return false;
-
-    mbedtls_sha256_context ctx;
-    mbedtls_sha256_init(&ctx);
-    mbedtls_sha256_starts(&ctx, 0); // 0 = SHA-256 (not SHA-224)
-
-    // Use a stack buffer for hashing — SRAM only, no PSRAM
-    uint8_t buf[512];
-    int n;
-    while ((n = sdcard_fread(f, buf, sizeof(buf))) > 0) {
-        mbedtls_sha256_update(&ctx, buf, (size_t)n);
-        watchdog_update();
-    }
-
-    sdcard_fclose(f);
-    mbedtls_sha256_finish(&ctx, out_hash);
-    mbedtls_sha256_free(&ctx);
-    return true;
-}
-
-// Parse a hex SHA-256 hash file (64 hex chars). Returns true on success.
-static bool ota_parse_hash_file(const char *path, uint8_t out_hash[32]) {
-    sdfile_t f = sdcard_fopen(path, "r");
-    if (!f) return false;
-
-    char hex[65];
-    int n = sdcard_fread(f, hex, 64);
-    sdcard_fclose(f);
-    if (n < 64) return false;
-    hex[64] = '\0';
-
-    for (int i = 0; i < 32; i++) {
-        unsigned int byte;
-        if (sscanf(&hex[i * 2], "%02x", &byte) != 1) return false;
-        out_hash[i] = (uint8_t)byte;
-    }
-    return true;
-}
-
-// Verify .bin against .sha256 hash file. Returns true if hash matches.
-static bool ota_verify_hash(const char *bin_path, const char *hash_path) {
-    uint8_t file_hash[32], expected_hash[32];
-
-    if (!ota_parse_hash_file(hash_path, expected_hash)) {
-        printf("[OTA] No valid hash file at %s, skipping verification\n", hash_path);
-        return true; // No hash file = skip verification (hash is optional)
-    }
-
-    ota_show_status("Verifying firmware...", "Computing SHA-256", COLOR_WHITE);
-
-    if (!ota_sha256_file(bin_path, file_hash)) {
-        printf("[OTA] Failed to read %s for hashing\n", bin_path);
-        return false;
-    }
-
-    if (memcmp(file_hash, expected_hash, 32) != 0) {
-        printf("[OTA] SHA-256 mismatch!\n");
-        return false;
-    }
-
-    printf("[OTA] SHA-256 verified OK\n");
-    return true;
-}
-
-// ── Vector table validation ─────────────────────────────────────────────────
-
-static bool ota_validate_header(const uint8_t *data, int len) {
-    if (len < 256) return false;
-
-    printf("[OTA] Header dump: ");
-    for (int i = 0; i < 32 && i < len; i++) {
-        printf("%02x ", data[i]);
-    }
-    printf("\n");
-
-    if (memcmp(data, "UF2\n", 4) == 0) {
-        printf("[OTA] Error: File is UF2 format, not .bin!\n");
-        return false;
-    }
-
-    uint32_t sp, reset_vec;
-    memcpy(&sp, data, 4);
-    memcpy(&reset_vec, data + 4, 4);
-
-    if (sp < SRAM_BASE_ADDR || sp > SRAM_END_ADDR) {
-        printf("[OTA] Invalid SP: 0x%08lx (expected 0x20000000-0x20082000)\n", (unsigned long)sp);
-        return false;
-    }
-
-    uint32_t rv = reset_vec & ~1u;
-    if (rv < FLASH_BASE_ADDR || rv >= FLASH_END_ADDR) {
-        printf("[OTA] Invalid reset vector: 0x%08lx (expected 0x10000000-0x10400000)\n", (unsigned long)reset_vec);
-        return false;
-    }
-
-    return true;
-}
+// ── Image authentication ────────────────────────────────────────────────────
+// Checksum + signature checks live in ota_verify.c (shared with the simulator
+// and the host unit tests).
+#include "ota_verify.h"
 
 // ── SRAM-resident flash writer ──────────────────────────────────────────────
 // This function runs entirely from SRAM and NEVER calls back into flash.
@@ -282,6 +176,53 @@ static void __no_inline_not_in_flash_func(ota_write_and_reboot)(
     while (1) { /* wait for reset */ }
 }
 
+// ── Boot-time image check (runs on the OS stack) ────────────────────────────
+
+typedef struct {
+    const uint8_t *data;
+    uint32_t len;
+    const char *err;
+    bool ok;
+} ota_image_check_t;
+
+static void ota_check_image_buf(void *arg) {
+    ota_image_check_t *chk = (ota_image_check_t *)arg;
+    uint8_t digest[32];
+    mbedtls_sha256_context sha;
+    mbedtls_sha256_init(&sha);
+    mbedtls_sha256_starts(&sha, 0);
+    for (uint32_t off = 0; off < chk->len; off += 64u * 1024u) {
+        uint32_t n = chk->len - off < 64u * 1024u ? chk->len - off : 64u * 1024u;
+        mbedtls_sha256_update(&sha, chk->data + off, n);
+        watchdog_update();
+    }
+    mbedtls_sha256_finish(&sha, digest);
+    mbedtls_sha256_free(&sha);
+    chk->ok = ota_check_digest(digest, OTA_HASH_PATH, OTA_SIG_PATH, &chk->err);
+}
+
+// ── Staged-file bookkeeping ─────────────────────────────────────────────────
+
+// Rename the staged image and its .sha256/.sig to <name><suffix>, replacing
+// older files of that name; a file that cannot be renamed is deleted so it is
+// never picked up again.
+static void ota_rename_one(const char *path, const char *suffix) {
+    if (sdcard_fsize(path) < 0) return;
+    char dst[48];
+    snprintf(dst, sizeof(dst), "%s%s", path, suffix);
+    sdcard_delete(dst);
+    if (!sdcard_rename(path, dst)) {
+        printf("[OTA] Rename failed, deleting %s\n", path);
+        sdcard_delete(path);
+    }
+}
+
+static void ota_rename_set(const char *suffix) {
+    ota_rename_one(OTA_BIN_PATH, suffix);
+    ota_rename_one(OTA_HASH_PATH, suffix);
+    ota_rename_one(OTA_SIG_PATH, suffix);
+}
+
 // ── Public API ──────────────────────────────────────────────────────────────
 
 bool ota_check_pending(void) {
@@ -291,22 +232,17 @@ bool ota_check_pending(void) {
 bool ota_apply_update(void) {
     printf("[OTA] Applying firmware update from %s\n", OTA_BIN_PATH);
 
-    // Verify hash if hash file exists
-    if (!ota_verify_hash(OTA_BIN_PATH, OTA_HASH_PATH)) {
-        ota_show_status("Update failed!", "SHA-256 hash mismatch", COLOR_RED);
-        printf("[OTA] Hash verification failed\n");
-        goto fail;
-    }
+    const char *reason = NULL;
 
     // Open the firmware file
     int file_size = sdcard_fsize(OTA_BIN_PATH);
     if (file_size <= 0 || (uint32_t)file_size < OTA_MIN_SIZE) {
-        ota_show_status("Update failed!", "Firmware file too small", COLOR_RED);
+        reason = "Firmware file too small";
         printf("[OTA] File too small: %d bytes\n", file_size);
         goto fail;
     }
     if ((uint32_t)file_size > OTA_MAX_SIZE) {
-        ota_show_status("Update failed!", "Firmware file too large", COLOR_RED);
+        reason = "Firmware file too large";
         printf("[OTA] File too large: %d bytes\n", file_size);
         goto fail;
     }
@@ -321,14 +257,14 @@ bool ota_apply_update(void) {
 
     uint8_t *fw_buf = (uint8_t *)umm_malloc((uint32_t)file_size);
     if (!fw_buf) {
-        ota_show_status("Update failed!", "Not enough memory", COLOR_RED);
+        reason = "Not enough memory";
         printf("[OTA] umm_malloc(%d) failed\n", file_size);
         goto fail;
     }
 
     sdfile_t f = sdcard_fopen(OTA_BIN_PATH, "r");
     if (!f) {
-        ota_show_status("Update failed!", "Cannot open firmware file", COLOR_RED);
+        reason = "Cannot open firmware file";
         printf("[OTA] Cannot open %s\n", OTA_BIN_PATH);
         umm_free(fw_buf);
         goto fail;
@@ -347,7 +283,7 @@ bool ota_apply_update(void) {
     sdcard_fclose(f);
 
     if (bytes_read < total) {
-        ota_show_status("Update failed!", "SD card read error", COLOR_RED);
+        reason = "SD card read error";
         printf("[OTA] Read only %lu of %lu bytes\n",
                (unsigned long)bytes_read, (unsigned long)total);
         umm_free(fw_buf);
@@ -355,10 +291,29 @@ bool ota_apply_update(void) {
     }
 
     // Validate vector table from the pre-read buffer
-    if (!ota_validate_header(fw_buf, (int)total)) {
-        ota_show_status("Update failed!", "Invalid firmware header", COLOR_RED);
+    if (!ota_image_header_ok(fw_buf, total)) {
+        reason = "Invalid firmware header";
         umm_free(fw_buf);
         goto fail;
+    }
+
+    // Authenticate the exact bytes that will be written: checksum pre-check,
+    // then the ECDSA signature against the key embedded in this firmware.
+    // On the 32 KB OS stack (PSRAM): PEM + ECDSA are too deep for the 4 KB
+    // MSP.  Only the check runs there — the flash writer below must stay on
+    // the MSP (SRAM), since PSRAM is unreachable while flash is written.
+    ota_show_status("Verifying firmware...", "Checking signature", COLOR_WHITE);
+    {
+        ota_image_check_t chk = {fw_buf, total, NULL, false};
+        if (!app_stack_run_os(ota_check_image_buf, &chk))
+            chk.err = "Not enough memory to verify";
+        if (!chk.ok) {
+            reason = chk.err;
+            printf("[OTA] Refusing image: %s\n", reason);
+            umm_free(fw_buf);
+            goto fail;
+        }
+        printf("[OTA] SHA-256 and signature verified\n");
     }
 
     printf("[OTA] Firmware loaded into PSRAM: %lu bytes\n", (unsigned long)total);
@@ -366,15 +321,7 @@ bool ota_apply_update(void) {
     // ── Rename update files BEFORE flash writes ─────────────────────────────
     // After flash writes begin, SD card functions (flash-resident) can't be
     // called.  Rename now so the file doesn't re-trigger on next boot.
-    sdcard_delete(OTA_BIN_PATH ".flashed");
-    sdcard_delete(OTA_HASH_PATH ".flashed");
-    if (!sdcard_rename(OTA_BIN_PATH, OTA_BIN_PATH ".flashed")) {
-        printf("[OTA] Rename failed, deleting %s\n", OTA_BIN_PATH);
-        sdcard_delete(OTA_BIN_PATH);
-    }
-    if (!sdcard_rename(OTA_HASH_PATH, OTA_HASH_PATH ".flashed")) {
-        sdcard_delete(OTA_HASH_PATH);
-    }
+    ota_rename_set(".flashed");
 
     // ── Write firmware to flash ─────────────────────────────────────────────
     // Point of no return — this function does not return.  It writes all
@@ -395,45 +342,35 @@ bool ota_apply_update(void) {
     while (1) tight_loop_contents();
 
 fail:
-    // Clear the OTA flag so we don't loop on failed updates
+    // Clear the OTA flag so we don't loop on failed updates, and move the
+    // image aside so it is neither retried nor mistaken for an unrequested
+    // one at the next boot.  tools/ota_flash.py looks for update.bin.rejected.
     watchdog_hw->scratch[OTA_SCRATCH_IDX] = 0;
+    ota_show_status("Update failed!", reason ? reason : "unknown error",
+                    COLOR_RED);
+    crashlog_write("OTA REJECTED", "system", reason ? reason : "unknown error",
+                   OTA_BIN_PATH " renamed to update.bin.rejected");
+    ota_rename_set(".rejected");
     return false;
 }
 
+void ota_discard_unrequested(void) {
+    printf("[OTA] %s present without an update request: not flashing, "
+           "renaming to .stale\n", OTA_BIN_PATH);
+    crashlog_write("OTA IGNORED", "system",
+                   "firmware staged without an update request",
+                   OTA_BIN_PATH " renamed to update.bin.stale");
+    ota_rename_set(".stale");
+}
+
+bool ota_prepare_update(const char *bin_path, const char **out_err) {
+    return ota_prepare_check(bin_path, OTA_HASH_PATH, OTA_SIG_PATH, out_err);
+}
+
 bool ota_trigger_update(const char *bin_path, const char **out_err) {
+    if (!ota_prepare_update(bin_path, out_err))
+        return false;
     int size = sdcard_fsize(bin_path);
-    printf("[OTA] Triggering update from %s, size=%d\n", bin_path, size);
-    if (size < 0) {
-        *out_err = "Firmware file not found";
-        return false;
-    }
-    if ((uint32_t)size < OTA_MIN_SIZE) {
-        *out_err = "Firmware file too small";
-        return false;
-    }
-    if ((uint32_t)size > OTA_MAX_SIZE) {
-        *out_err = "Firmware file too large (max 2MB)";
-        return false;
-    }
-
-    sdfile_t f = sdcard_fopen(bin_path, "r");
-    if (!f) {
-        *out_err = "Cannot open firmware file";
-        return false;
-    }
-    uint8_t header[256];
-    int n = sdcard_fread(f, header, sizeof(header));
-    sdcard_fclose(f);
-
-    if (n < (int)sizeof(header)) {
-        *out_err = "Cannot read firmware header";
-        return false;
-    }
-
-    if (!ota_validate_header(header, n)) {
-        *out_err = "Invalid firmware (bad vector table)";
-        return false;
-    }
 
     // If the file is not already at the standard path, it needs to be there
     // for the boot-time updater to find it.

@@ -28,6 +28,9 @@
 #include "terminal.h"
 #include "appconfig.h"
 #include "image_api.h"
+#include "font_registry.h"
+#include "app_identity.h"
+#include "native_loader.h"
 
 // From unicorn_runner.c
 extern uc_engine *g_uc;
@@ -67,6 +70,24 @@ extern int  display_draw_text(int x, int y, const char *text, uint16_t fg, uint1
 extern void display_flush(void);
 extern void display_set_brightness(uint8_t brightness);
 extern uint16_t *display_get_back_buffer(void);
+extern void display_draw_image_nn(int x, int y, const uint16_t *data, int src_w, int src_h, int scale);
+extern void display_fill_vline(int x, int y0, int y1, uint16_t color);
+extern void display_fill_hline(int y, int x0, int x1, uint16_t color);
+extern void display_fill_triangle(int x0, int y0, int x1, int y1, int x2, int y2, uint16_t color);
+extern void display_draw_textured_column(int x, int y0, int y1, const uint16_t *tex, int tex_w, int tex_h, int tex_x, int tex_y0, int tex_y1);
+extern void display_fill_vline_gradient(int x, int y0, int y1, uint16_t color_top, uint16_t color_bottom);
+extern void display_set_clip_rect(int x, int y, int w, int h);
+extern void display_get_clip_rect(int *x, int *y, int *w, int *h);
+extern void display_clear_clip_rect(void);
+extern void display_set_scroll_area(int top_fixed, int scroll_height, int bottom_fixed);
+extern void display_set_scroll_offset(int offset);
+extern void display_draw_plane(const uint16_t *tex, int tex_w, int tex_h, float cam_x, float cam_y, float cam_z, float angle, int horizon_y, float scale);
+extern void display_set_font(int font_id);
+extern int  display_get_font(void);
+extern int  display_get_font_width(void);
+extern int  display_get_font_height(void);
+extern int  display_text_width(const char *text);
+extern int  display_draw_text_transparent(int x, int y, const char *text, uint16_t fg);
 
 // Input functions (from keyboard stub)
 extern uint32_t kbd_get_buttons(void);
@@ -82,16 +103,9 @@ extern uint64_t hal_get_time_us(void);
 extern void system_menu_add_item(const char *label, void (*cb)(void *user), void *user);
 extern void system_menu_clear_items(void);
 
-// FS functions (from stubs)
-extern void *sdcard_fopen(const char *path, const char *mode);
-extern int   sdcard_fread(void *f, void *buf, int len);
-extern int   sdcard_fwrite(void *f, const void *buf, int len);
-extern void  sdcard_fclose(void *f);
-extern bool  sdcard_fexists(const char *path);
-extern size_t sdcard_fsize(const char *path);
-extern size_t sdcard_fsize_handle(void *f);
-extern int   sdcard_fseek(void *f, long offset, int whence);
-extern long  sdcard_ftell(void *f);
+// FS functions — real driver header (stub implementations in driver_stubs.c
+// share these exact signatures; "pico/mutex.h" resolves to the sim stub).
+#include "sdcard.h"
 
 // Audio functions
 extern void audio_play_tone(uint32_t freq, uint32_t dur);
@@ -296,7 +310,7 @@ static uint32_t read_stack_arg(uc_engine *uc, int index) {
 // Each sub-table's first slot. Slots within a sub-table are sequential.
 // The offsets here define the struct layout in emulated memory.
 enum {
-    // picocalc_display_t (25 functions)
+    // picocalc_display_t (45 functions incl. API v6 font slots)
     SLOT_DISPLAY_CLEAR = 0,
     SLOT_DISPLAY_SET_PIXEL,
     SLOT_DISPLAY_FILL_RECT,
@@ -323,6 +337,28 @@ enum {
     SLOT_DISPLAY_EFFECT_DITHER,
     SLOT_DISPLAY_EFFECT_SCANLINE,
     SLOT_DISPLAY_EFFECT_POSTERIZE,
+    // Raycasting primitives (must match picocalc_display_t order)
+    SLOT_DISPLAY_FILL_VLINE,
+    SLOT_DISPLAY_DRAW_TEXTURED_COLUMN,
+    SLOT_DISPLAY_FILL_VLINE_GRADIENT,
+    // API v4 additions
+    SLOT_DISPLAY_SET_CLIP_RECT,
+    SLOT_DISPLAY_GET_CLIP_RECT,
+    SLOT_DISPLAY_CLEAR_CLIP_RECT,
+    SLOT_DISPLAY_FILL_HLINE,
+    SLOT_DISPLAY_FILL_TRIANGLE,
+    SLOT_DISPLAY_SET_SCROLL_AREA,
+    SLOT_DISPLAY_SET_SCROLL_OFFSET,
+    SLOT_DISPLAY_DRAW_PLANE,
+    // API v6 fonts — order must match picocalc_display_t in src/os/os.h
+    SLOT_DISPLAY_SET_FONT,
+    SLOT_DISPLAY_GET_FONT,
+    SLOT_DISPLAY_GET_FONT_WIDTH,
+    SLOT_DISPLAY_GET_FONT_HEIGHT,
+    SLOT_DISPLAY_TEXT_WIDTH,
+    SLOT_DISPLAY_LOAD_FONT,
+    SLOT_DISPLAY_UNLOAD_FONT,
+    SLOT_DISPLAY_DRAW_TEXT_TRANSPARENT,
     SLOT_DISPLAY_END,
 
     // picocalc_input_t (4 functions)
@@ -390,6 +426,7 @@ enum {
     SLOT_TCP_AVAILABLE,
     SLOT_TCP_GET_ERROR,
     SLOT_TCP_GET_EVENTS,
+    SLOT_TCP_CONNECT_EX,
     SLOT_TCP_END,
 
     // picocalc_ui_t (3 functions) — stub
@@ -465,7 +502,7 @@ enum {
     SLOT_TERM_PAD1, SLOT_TERM_PAD2, SLOT_TERM_PAD3, SLOT_TERM_PAD4, SLOT_TERM_PAD5,
     SLOT_TERMINAL_END,
 
-    // picocalc_http_t (15 functions)
+    // picocalc_http_t (16 functions)
     SLOT_HTTP_NEW_CONN = SLOT_TERMINAL_END,
     SLOT_HTTP_GET,
     SLOT_HTTP_POST,
@@ -481,6 +518,7 @@ enum {
     SLOT_HTTP_SET_READ_TIMEOUT,
     SLOT_HTTP_SET_READ_BUFFER_SIZE,
     SLOT_HTTP_IS_COMPLETE,
+    SLOT_HTTP_SET_INSECURE,
     SLOT_HTTP_END,
 
     // picocalc_soundplayer_t (35 functions)
@@ -563,7 +601,7 @@ enum {
     SLOT_GFX_DRAW_SCALED,
     SLOT_GRAPHICS_END,
 
-    // picocalc_video_t (22 functions)
+    // picocalc_video_t (31 functions)
     SLOT_VIDEO_NEW_PLAYER = SLOT_GRAPHICS_END,
     SLOT_VIDEO_FREE,
     SLOT_VIDEO_LOAD,
@@ -586,6 +624,16 @@ enum {
     SLOT_VIDEO_GET_MUTED,
     SLOT_VIDEO_GET_DROPPED_FRAMES,
     SLOT_VIDEO_RESET_STATS,
+    // API v7 additions (stubs: the sim has no video decoder)
+    SLOT_VIDEO_GET_FRAME_COUNT,
+    SLOT_VIDEO_GET_DURATION_MS,
+    SLOT_VIDEO_GET_POSITION_MS,
+    SLOT_VIDEO_SEEK_MS,
+    SLOT_VIDEO_SEEK_RELATIVE_MS,
+    SLOT_VIDEO_HAS_ENDED,
+    SLOT_VIDEO_SET_OSD,
+    SLOT_VIDEO_SHOW_OSD,
+    SLOT_VIDEO_SET_OSD_TIMEOUT,
     SLOT_VIDEO_END,
 
     // picocalc_modplayer_t (11 functions) — stubs only; MOD playback is not
@@ -605,9 +653,16 @@ enum {
     SLOT_MODPLAYER_SET_LOOP,
     SLOT_MODPLAYER_END,
 
-    // picocalc_zip_t (2 functions) — stub only, same rationale as above.
+    // picocalc_zip_t (9 functions) — order MUST match the struct in os.h.
     SLOT_ZIP_EXTRACT = SLOT_MODPLAYER_END,
     SLOT_ZIP_LIST,
+    SLOT_ZIP_OPEN,
+    SLOT_ZIP_CLOSE,
+    SLOT_ZIP_NUM_ENTRIES,
+    SLOT_ZIP_LOCATE,
+    SLOT_ZIP_STAT_INDEX,
+    SLOT_ZIP_READ,
+    SLOT_ZIP_EXTRACT_ENTRY,
     SLOT_ZIP_END,
 
     SLOT_TOTAL_COUNT = SLOT_ZIP_END,
@@ -702,6 +757,42 @@ static void tramp_display_draw_text(uc_engine *uc) {
     s_back_buffer_dirty = 1;
 }
 
+// --- API v6 font trampolines ---
+// uc_read_string() returns a pointer into a rotating static buffer in
+// unicorn_runner.c; it must not be freed (see tramp_display_draw_text).
+static void tramp_display_set_font(uc_engine *uc) {
+    display_set_font((int)read_reg(uc, UC_ARM_REG_R0));
+}
+static void tramp_display_get_font(uc_engine *uc) {
+    write_reg(uc, UC_ARM_REG_R0, (uint32_t)display_get_font());
+}
+static void tramp_display_get_font_width(uc_engine *uc) {
+    write_reg(uc, UC_ARM_REG_R0, (uint32_t)display_get_font_width());
+}
+static void tramp_display_get_font_height(uc_engine *uc) {
+    write_reg(uc, UC_ARM_REG_R0, (uint32_t)display_get_font_height());
+}
+static void tramp_display_text_width(uc_engine *uc) {
+    char *text = uc_read_string(uc, read_reg(uc, UC_ARM_REG_R0));
+    write_reg(uc, UC_ARM_REG_R0, (uint32_t)display_text_width(text ? text : ""));
+}
+static void tramp_display_load_font(uc_engine *uc) {
+    char *path = uc_read_string(uc, read_reg(uc, UC_ARM_REG_R0));
+    write_reg(uc, UC_ARM_REG_R0, (uint32_t)font_registry_load(path ? path : ""));
+}
+static void tramp_display_unload_font(uc_engine *uc) {
+    font_registry_unload((int)read_reg(uc, UC_ARM_REG_R0));
+}
+static void tramp_display_draw_text_transparent(uc_engine *uc) {
+    int x = (int)read_reg(uc, UC_ARM_REG_R0);
+    int y = (int)read_reg(uc, UC_ARM_REG_R1);
+    char *text = uc_read_string(uc, read_reg(uc, UC_ARM_REG_R2));
+    uint16_t fg = (uint16_t)read_reg(uc, UC_ARM_REG_R3);
+    int result = display_draw_text_transparent(x, y, text ? text : "", fg);
+    write_reg(uc, UC_ARM_REG_R0, (uint32_t)result);
+    s_back_buffer_dirty = 1;
+}
+
 // Native ARM apps write big-endian RGB565 (matching the ST7365P display).
 // The simulator's SDL2 expects host-byte-order (little-endian on x86/ARM64).
 // Byte-swap after copying from emulated memory to host back buffer.
@@ -774,19 +865,8 @@ static void tramp_display_draw_image_nn(uc_engine *uc) {
     // to the panel). The SDL back buffer is also host-order, so no
     // conversion is needed here — unlike the EMU_FB_BASE paths below,
     // which read the emulated (big-endian, panel-format) framebuffer.
-
-    // Use drawImage with nearest-neighbor scaling
-    // The simulator doesn't have display_draw_image_nn, so implement it inline
-    uint16_t *fb = display_get_back_buffer();
-    for (int dy = 0; dy < src_h * scale && y + dy < 320; dy++) {
-        for (int dx = 0; dx < src_w * scale && x + dx < 320; dx++) {
-            int px = x + dx;
-            int py = y + dy;
-            if (px >= 0 && py >= 0) {
-                fb[py * 320 + px] = buf[(dy / scale) * src_w + (dx / scale)];
-            }
-        }
-    }
+    // Same clip-once blitter as the firmware (display_clip.h).
+    display_draw_image_nn(x, y, buf, src_w, src_h, scale);
     free(buf);
     s_back_buffer_dirty = 1;  // Tell flush() not to overwrite from EMU_FB_BASE
 }
@@ -823,6 +903,129 @@ static void tramp_display_effect_stub(uc_engine *uc) {
     // Effect stubs — most display effects are non-critical
 }
 
+// Helper: reinterpret a 32-bit register/stack value as float (softfp ABI)
+static float u32_as_float(uint32_t v) { float f; memcpy(&f, &v, 4); return f; }
+
+static void tramp_display_fill_vline(uc_engine *uc) {
+    int x = (int)read_reg(uc, UC_ARM_REG_R0);
+    int y0 = (int)read_reg(uc, UC_ARM_REG_R1);
+    int y1 = (int)read_reg(uc, UC_ARM_REG_R2);
+    uint16_t color = (uint16_t)read_reg(uc, UC_ARM_REG_R3);
+    display_fill_vline(x, y0, y1, color);
+    s_back_buffer_dirty = 1;
+}
+
+static void tramp_display_fill_hline(uc_engine *uc) {
+    int y = (int)read_reg(uc, UC_ARM_REG_R0);
+    int x0 = (int)read_reg(uc, UC_ARM_REG_R1);
+    int x1 = (int)read_reg(uc, UC_ARM_REG_R2);
+    uint16_t color = (uint16_t)read_reg(uc, UC_ARM_REG_R3);
+    display_fill_hline(y, x0, x1, color);
+    s_back_buffer_dirty = 1;
+}
+
+static void tramp_display_fill_triangle(uc_engine *uc) {
+    int x0 = (int)read_reg(uc, UC_ARM_REG_R0);
+    int y0 = (int)read_reg(uc, UC_ARM_REG_R1);
+    int x1 = (int)read_reg(uc, UC_ARM_REG_R2);
+    int y1 = (int)read_reg(uc, UC_ARM_REG_R3);
+    int x2 = (int)read_stack_arg(uc, 0);
+    int y2 = (int)read_stack_arg(uc, 1);
+    uint16_t color = (uint16_t)read_stack_arg(uc, 2);
+    display_fill_triangle(x0, y0, x1, y1, x2, y2, color);
+    s_back_buffer_dirty = 1;
+}
+
+static void tramp_display_draw_textured_column(uc_engine *uc) {
+    int x = (int)read_reg(uc, UC_ARM_REG_R0);
+    int y0 = (int)read_reg(uc, UC_ARM_REG_R1);
+    int y1 = (int)read_reg(uc, UC_ARM_REG_R2);
+    uint32_t tex_addr = read_reg(uc, UC_ARM_REG_R3);
+    int tex_w = (int)read_stack_arg(uc, 0);
+    int tex_h = (int)read_stack_arg(uc, 1);
+    int tex_x = (int)read_stack_arg(uc, 2);
+    int tex_y0 = (int)read_stack_arg(uc, 3);
+    int tex_y1 = (int)read_stack_arg(uc, 4);
+
+    int pixels = tex_w * tex_h;
+    if (pixels <= 0 || pixels > 2048 * 2048) return;
+    uint16_t *buf = (uint16_t *)malloc((size_t)pixels * 2);
+    if (!buf) return;
+    uc_mem_read(uc, tex_addr, buf, (size_t)pixels * 2);
+    display_draw_textured_column(x, y0, y1, buf, tex_w, tex_h, tex_x, tex_y0, tex_y1);
+    free(buf);
+    s_back_buffer_dirty = 1;
+}
+
+static void tramp_display_fill_vline_gradient(uc_engine *uc) {
+    int x = (int)read_reg(uc, UC_ARM_REG_R0);
+    int y0 = (int)read_reg(uc, UC_ARM_REG_R1);
+    int y1 = (int)read_reg(uc, UC_ARM_REG_R2);
+    uint16_t color_top = (uint16_t)read_reg(uc, UC_ARM_REG_R3);
+    uint16_t color_bottom = (uint16_t)read_stack_arg(uc, 0);
+    display_fill_vline_gradient(x, y0, y1, color_top, color_bottom);
+    s_back_buffer_dirty = 1;
+}
+
+static void tramp_display_set_clip_rect(uc_engine *uc) {
+    int x = (int)read_reg(uc, UC_ARM_REG_R0);
+    int y = (int)read_reg(uc, UC_ARM_REG_R1);
+    int w = (int)read_reg(uc, UC_ARM_REG_R2);
+    int h = (int)read_reg(uc, UC_ARM_REG_R3);
+    display_set_clip_rect(x, y, w, h);
+}
+
+static void tramp_display_get_clip_rect(uc_engine *uc) {
+    uint32_t px = read_reg(uc, UC_ARM_REG_R0);
+    uint32_t py = read_reg(uc, UC_ARM_REG_R1);
+    uint32_t pw = read_reg(uc, UC_ARM_REG_R2);
+    uint32_t ph = read_reg(uc, UC_ARM_REG_R3);
+    int x, y, w, h;
+    display_get_clip_rect(&x, &y, &w, &h);
+    if (px) uc_mem_write(uc, px, &x, 4);
+    if (py) uc_mem_write(uc, py, &y, 4);
+    if (pw) uc_mem_write(uc, pw, &w, 4);
+    if (ph) uc_mem_write(uc, ph, &h, 4);
+}
+
+static void tramp_display_clear_clip_rect(uc_engine *uc) {
+    (void)uc;
+    display_clear_clip_rect();
+}
+
+static void tramp_display_set_scroll_area(uc_engine *uc) {
+    int top_fixed = (int)read_reg(uc, UC_ARM_REG_R0);
+    int scroll_height = (int)read_reg(uc, UC_ARM_REG_R1);
+    int bottom_fixed = (int)read_reg(uc, UC_ARM_REG_R2);
+    display_set_scroll_area(top_fixed, scroll_height, bottom_fixed);
+}
+
+static void tramp_display_set_scroll_offset(uc_engine *uc) {
+    int offset = (int)read_reg(uc, UC_ARM_REG_R0);
+    display_set_scroll_offset(offset);
+}
+
+static void tramp_display_draw_plane(uc_engine *uc) {
+    uint32_t tex_addr = read_reg(uc, UC_ARM_REG_R0);
+    int tex_w = (int)read_reg(uc, UC_ARM_REG_R1);
+    int tex_h = (int)read_reg(uc, UC_ARM_REG_R2);
+    float cam_x = u32_as_float(read_reg(uc, UC_ARM_REG_R3));
+    float cam_y = u32_as_float(read_stack_arg(uc, 0));
+    float cam_z = u32_as_float(read_stack_arg(uc, 1));
+    float angle = u32_as_float(read_stack_arg(uc, 2));
+    int horizon_y = (int)read_stack_arg(uc, 3);
+    float scale = u32_as_float(read_stack_arg(uc, 4));
+
+    int pixels = tex_w * tex_h;
+    if (pixels <= 0 || pixels > 2048 * 2048) return;
+    uint16_t *buf = (uint16_t *)malloc((size_t)pixels * 2);
+    if (!buf) return;
+    uc_mem_read(uc, tex_addr, buf, (size_t)pixels * 2);
+    display_draw_plane(buf, tex_w, tex_h, cam_x, cam_y, cam_z, angle, horizon_y, scale);
+    free(buf);
+    s_back_buffer_dirty = 1;
+}
+
 // =============================================================================
 // Input trampoline handlers
 // =============================================================================
@@ -844,6 +1047,24 @@ static void tramp_input_get_char(uc_engine *uc) {
 }
 
 // =============================================================================
+// Per-app handle tracking (src/os/native_loader.h)
+// =============================================================================
+// Objects the app creates are tracked against it, as the firmware's per-launch
+// API table does, so the loader frees whatever the app leaks when it returns.
+// An app-side free of an untracked object (double free, stray handle) is a
+// no-op.
+
+static uint32_t wrap_tracked(int kind, void *obj) {
+    return handle_wrap(native_res_adopt(kind, obj));
+}
+
+static void drop_tracked(int kind, uint32_t handle) {
+    void *obj = handle_unwrap(handle);
+    if (obj) native_res_drop(kind, obj);
+    handle_free(handle);
+}
+
+// =============================================================================
 // Filesystem trampoline handlers
 // =============================================================================
 
@@ -852,7 +1073,7 @@ static void tramp_fs_open(uc_engine *uc) {
     uint32_t mode_addr = read_reg(uc, UC_ARM_REG_R1);
     char *path = uc_read_string(uc, path_addr);
     char *mode = uc_read_string(uc, mode_addr);
-    void *f = sdcard_fopen(path ? path : "", mode ? mode : "r");
+    void *f = native_file_adopt(sdcard_fopen(path ? path : "", mode ? mode : "r"));
     uint32_t handle = f ? handle_wrap(f) : 0;
     fprintf(stderr, "[TRAMP] fs_open('%s', '%s') -> %s (handle=%u)\n",
             path ? path : "(null)", mode ? mode : "(null)",
@@ -907,7 +1128,7 @@ static void tramp_fs_close(uc_engine *uc) {
     uint32_t handle = read_reg(uc, UC_ARM_REG_R0);
     void *f = handle_unwrap(handle);
     if (f) {
-        sdcard_fclose(f);
+        native_file_drop(f);
         handle_free(handle);
     }
 }
@@ -922,14 +1143,14 @@ static void tramp_fs_exists(uc_engine *uc) {
 static void tramp_fs_size(uc_engine *uc) {
     uint32_t path_addr = read_reg(uc, UC_ARM_REG_R0);
     char *path = uc_read_string(uc, path_addr);
-    int sz = (int)sdcard_fsize(path ? path : "");
+    int sz = sdcard_fsize(path ? path : "");
     write_reg(uc, UC_ARM_REG_R0, (uint32_t)sz);
 }
 
 static void tramp_fs_fsize(uc_engine *uc) {
     uint32_t handle = read_reg(uc, UC_ARM_REG_R0);
     void *f = handle_unwrap(handle);
-    int sz = f ? (int)sdcard_fsize_handle(f) : 0;
+    int sz = f ? sdcard_fsize_handle(f) : -1;
     fprintf(stderr, "[TRAMP] fs_fsize(handle=%u) -> %d\n", handle, sz);
     write_reg(uc, UC_ARM_REG_R0, (uint32_t)sz);
 }
@@ -938,14 +1159,14 @@ static void tramp_fs_seek(uc_engine *uc) {
     uint32_t handle = read_reg(uc, UC_ARM_REG_R0);
     uint32_t offset = read_reg(uc, UC_ARM_REG_R1);
     void *f = handle_unwrap(handle);
-    bool ok = f ? (sdcard_fseek(f, (long)offset, 0) == 0) : false;
+    bool ok = f ? sdcard_fseek(f, offset) : false;
     write_reg(uc, UC_ARM_REG_R0, ok ? 1 : 0);
 }
 
 static void tramp_fs_tell(uc_engine *uc) {
     uint32_t handle = read_reg(uc, UC_ARM_REG_R0);
     void *f = handle_unwrap(handle);
-    uint32_t pos = f ? (uint32_t)sdcard_ftell(f) : 0;
+    uint32_t pos = f ? sdcard_ftell(f) : 0;
     write_reg(uc, UC_ARM_REG_R0, pos);
 }
 
@@ -974,17 +1195,17 @@ static void tramp_fs_list_dir(uc_engine *uc) {
         uint32_t size;
     } entry_info_t;
 
-    #define MAX_ENTRIES 128
+    /* Must cover the largest game directory: C-Dogs' data/graphics has 344
+     * top-level entries. At the old cap of 128 the excess entries were
+     * silently dropped — two thirds of the sprite set never even appeared
+     * in directory listings. Matches MAX_DIR_ENTRIES in the C-Dogs port's
+     * dirent shim (stubs.c in jeffory/picos-cdogs), which hit the same bug app-side. */
+    #define MAX_ENTRIES 512
     static entry_info_t entries[MAX_ENTRIES];
 
     // Use host filesystem directly (avoids sdcard_list_dir callback mismatch)
     char full_path[1024];
-    extern char g_base_path[512];
-    if (path[0] == '/') {
-        snprintf(full_path, sizeof(full_path), "%s%s", g_base_path, path);
-    } else {
-        snprintf(full_path, sizeof(full_path), "%s/%s", g_base_path, path);
-    }
+    if (!hal_sdcard_resolve(path, full_path, sizeof(full_path))) full_path[0] = '\0';
 
     // Use POSIX opendir/readdir
     DIR *dir = opendir(full_path);
@@ -1011,6 +1232,10 @@ static void tramp_fs_list_dir(uc_engine *uc) {
             entries[count].size = 0;
         }
         count++;
+    }
+    if (count >= MAX_ENTRIES && readdir(dir) != NULL) {
+        fprintf(stderr, "[TRAMP] fs_list_dir: TRUNCATED '%s' at %d entries — "
+                "raise MAX_ENTRIES\n", path ? path : "(null)", MAX_ENTRIES);
     }
     closedir(dir);
     fprintf(stderr, "[TRAMP] fs_list_dir: found %d entries, calling callbacks\n", count);
@@ -1072,9 +1297,7 @@ static void tramp_fs_list_dir(uc_engine *uc) {
 }
 
 // Forward declarations for FS operations (implemented in driver_stubs.c)
-extern bool sdcard_mkdir(const char *path);
-extern bool sdcard_delete(const char *path);
-extern bool sdcard_rename(const char *oldpath, const char *newpath);
+// sdcard_mkdir / sdcard_delete / sdcard_rename declared by sdcard.h above.
 
 static void tramp_fs_mkdir(uc_engine *uc) {
     uint32_t path_addr = read_reg(uc, UC_ARM_REG_R0);
@@ -1102,15 +1325,10 @@ static void tramp_fs_rename_file(uc_engine *uc) {
 static void tramp_fs_is_dir(uc_engine *uc) {
     uint32_t path_addr = read_reg(uc, UC_ARM_REG_R0);
     char *path = uc_read_string(uc, path_addr);
-    extern char g_base_path[512];
     char full_path[1024];
-    if (path && path[0] == '/') {
-        snprintf(full_path, sizeof(full_path), "%s%s", g_base_path, path);
-    } else {
-        snprintf(full_path, sizeof(full_path), "%s/%s", g_base_path, path ? path : "");
-    }
     struct stat st;
-    bool is_dir = (stat(full_path, &st) == 0 && S_ISDIR(st.st_mode));
+    bool is_dir = hal_sdcard_resolve(path ? path : "", full_path, sizeof(full_path)) &&
+                  stat(full_path, &st) == 0 && S_ISDIR(st.st_mode);
     write_reg(uc, UC_ARM_REG_R0, is_dir ? 1 : 0);
 }
 
@@ -1401,10 +1619,10 @@ static void tramp_sys_log(uc_engine *uc) {
     // Also route into the MCP log ring buffer (get_log_buffer) — this was
     // dead-wired before: sim_log_append() existed but nothing ever called
     // it for native-app logs, so get_log_buffer() always returned empty.
-    extern void sim_log_append(const char *line);
+    extern void sim_log_append_src(const char *src, const char *text);
     char log_line[1040];
     snprintf(log_line, sizeof(log_line), "[APP] %s", output);
-    sim_log_append(log_line);
+    sim_log_append_src("native", log_line);
 }
 
 static void tramp_sys_poll(uc_engine *uc) {
@@ -1601,6 +1819,19 @@ static void tramp_tcp_connect(uc_engine *uc) {
     write_reg(uc, UC_ARM_REG_R0, handle_wrap(c));
 }
 
+static void tramp_tcp_connect_ex(uc_engine *uc) {
+    uint32_t host_addr = read_reg(uc, UC_ARM_REG_R0);
+    uint16_t port = (uint16_t)read_reg(uc, UC_ARM_REG_R1);
+    uint32_t flags = read_reg(uc, UC_ARM_REG_R2);
+    char *host = uc_read_string(uc, host_addr);
+    tcp_conn_t *c = tcp_alloc();
+    if (c && host) {
+        c->insecure = (flags & PCTCP_TLS_INSECURE) != 0;
+        tcp_connect(c, host, port, (flags & PCTCP_TLS) != 0);
+    }
+    write_reg(uc, UC_ARM_REG_R0, handle_wrap(c));
+}
+
 static void tramp_tcp_write(uc_engine *uc) {
     uint32_t handle = read_reg(uc, UC_ARM_REG_R0);
     uint32_t buf_addr = read_reg(uc, UC_ARM_REG_R1);
@@ -1632,7 +1863,7 @@ static void tramp_tcp_read(uc_engine *uc) {
 static void tramp_tcp_close(uc_engine *uc) {
     uint32_t handle = read_reg(uc, UC_ARM_REG_R0);
     tcp_conn_t *c = handle_unwrap(handle);
-    if (c) { tcp_close(c); tcp_free(c); }
+    if (c) tcp_free(c);  // releases the slot (firmware: asynchronously)
     handle_free(handle);
 }
 
@@ -1748,20 +1979,20 @@ static void tramp_http_available(uc_engine *uc) {
 static void tramp_http_close(uc_engine *uc) {
     uint32_t handle = read_reg(uc, UC_ARM_REG_R0);
     http_conn_t *c = handle_unwrap(handle);
-    if (c) { http_close(c); http_free(c); }
+    if (c) http_free(c);  // releases the slot (firmware: asynchronously)
     handle_free(handle);
 }
 
 static void tramp_http_get_status(uc_engine *uc) {
     uint32_t handle = read_reg(uc, UC_ARM_REG_R0);
     http_conn_t *c = handle_unwrap(handle);
-    write_reg(uc, UC_ARM_REG_R0, c ? (uint32_t)c->status_code : 0);
+    write_reg(uc, UC_ARM_REG_R0, c ? (uint32_t)http_get_status(c) : 0);
 }
 
 static void tramp_http_get_error(uc_engine *uc) {
     uint32_t handle = read_reg(uc, UC_ARM_REG_R0);
     http_conn_t *c = handle_unwrap(handle);
-    const char *err = (c && c->err[0]) ? c->err : NULL;
+    const char *err = c ? http_get_error(c) : NULL;
     write_reg(uc, UC_ARM_REG_R0, err ? arena_write_string(uc, err) : 0);
 }
 
@@ -1771,10 +2002,8 @@ static void tramp_http_get_progress(uc_engine *uc) {
     uint32_t total_addr = read_reg(uc, UC_ARM_REG_R2);
     http_conn_t *c = handle_unwrap(handle);
     int received = 0, total = 0;
-    if (c) {
-        received = (int)c->body_received;
-        total = (int)c->content_length;
-    }
+    if (c)
+        http_get_progress(c, &received, &total);
     if (recv_addr) uc_mem_write(uc, recv_addr, &received, 4);
     if (total_addr) uc_mem_write(uc, total_addr, &total, 4);
     write_reg(uc, UC_ARM_REG_R0, (uint32_t)total);
@@ -1819,8 +2048,15 @@ static void tramp_http_set_read_buffer_size(uc_engine *uc) {
 static void tramp_http_is_complete(uc_engine *uc) {
     uint32_t handle = read_reg(uc, UC_ARM_REG_R0);
     http_conn_t *c = handle_unwrap(handle);
-    bool complete = c && (c->state == HTTP_STATE_DONE || c->state == HTTP_STATE_FAILED);
+    bool complete = c && http_is_complete(c);
     write_reg(uc, UC_ARM_REG_R0, complete ? 1 : 0);
+}
+
+static void tramp_http_set_insecure(uc_engine *uc) {
+    uint32_t handle = read_reg(uc, UC_ARM_REG_R0);
+    bool insecure = read_reg(uc, UC_ARM_REG_R1) != 0;
+    http_conn_t *c = handle_unwrap(handle);
+    if (c) c->insecure = insecure;
 }
 
 // =============================================================================
@@ -1838,20 +2074,17 @@ static void tramp_snd_sample_load(uc_engine *uc) {
             s = NULL;
         }
     }
-    write_reg(uc, UC_ARM_REG_R0, handle_wrap(s));
+    write_reg(uc, UC_ARM_REG_R0, wrap_tracked(NATIVE_RES_SAMPLE, s));
 }
 
 static void tramp_snd_sample_free(uc_engine *uc) {
-    uint32_t handle = read_reg(uc, UC_ARM_REG_R0);
-    sound_sample_t *s = handle_unwrap(handle);
-    if (s) sound_sample_destroy(s);
-    handle_free(handle);
+    drop_tracked(NATIVE_RES_SAMPLE, read_reg(uc, UC_ARM_REG_R0));
 }
 
 // --- Sample player ---
 static void tramp_snd_player_new(uc_engine *uc) {
     sound_player_t *p = sound_player_create();
-    write_reg(uc, UC_ARM_REG_R0, handle_wrap(p));
+    write_reg(uc, UC_ARM_REG_R0, wrap_tracked(NATIVE_RES_PLAYER, p));
 }
 
 static void tramp_snd_player_set_sample(uc_engine *uc) {
@@ -1900,16 +2133,13 @@ static void tramp_snd_player_set_loop(uc_engine *uc) {
 }
 
 static void tramp_snd_player_free(uc_engine *uc) {
-    uint32_t handle = read_reg(uc, UC_ARM_REG_R0);
-    sound_player_t *p = handle_unwrap(handle);
-    if (p) sound_player_destroy(p);
-    handle_free(handle);
+    drop_tracked(NATIVE_RES_PLAYER, read_reg(uc, UC_ARM_REG_R0));
 }
 
 // --- File player ---
 static void tramp_snd_fp_new(uc_engine *uc) {
     fileplayer_t *fp = fileplayer_create();
-    write_reg(uc, UC_ARM_REG_R0, handle_wrap(fp));
+    write_reg(uc, UC_ARM_REG_R0, wrap_tracked(NATIVE_RES_FILEPLAYER, fp));
 }
 
 static void tramp_snd_fp_load(uc_engine *uc) {
@@ -1987,16 +2217,13 @@ static void tramp_snd_fp_did_underrun(uc_engine *uc) {
 }
 
 static void tramp_snd_fp_free(uc_engine *uc) {
-    uint32_t handle = read_reg(uc, UC_ARM_REG_R0);
-    fileplayer_t *fp = handle_unwrap(handle);
-    if (fp) fileplayer_destroy(fp);
-    handle_free(handle);
+    drop_tracked(NATIVE_RES_FILEPLAYER, read_reg(uc, UC_ARM_REG_R0));
 }
 
 // --- MP3 player ---
 static void tramp_snd_mp3_new(uc_engine *uc) {
     mp3_player_t *mp = mp3_player_create();
-    write_reg(uc, UC_ARM_REG_R0, handle_wrap(mp));
+    write_reg(uc, UC_ARM_REG_R0, wrap_tracked(NATIVE_RES_MP3, mp));
 }
 
 static void tramp_snd_mp3_load(uc_engine *uc) {
@@ -2059,10 +2286,7 @@ static void tramp_snd_mp3_set_loop(uc_engine *uc) {
 }
 
 static void tramp_snd_mp3_free(uc_engine *uc) {
-    uint32_t handle = read_reg(uc, UC_ARM_REG_R0);
-    mp3_player_t *mp = handle_unwrap(handle);
-    if (mp) mp3_player_destroy(mp);
-    handle_free(handle);
+    drop_tracked(NATIVE_RES_MP3, read_reg(uc, UC_ARM_REG_R0));
 }
 
 // =============================================================================
@@ -2072,7 +2296,8 @@ static void tramp_snd_mp3_free(uc_engine *uc) {
 static void tramp_appconfig_load(uc_engine *uc) {
     uint32_t id_addr = read_reg(uc, UC_ARM_REG_R0);
     char *app_id = uc_read_string(uc, id_addr);
-    write_reg(uc, UC_ARM_REG_R0, appconfig_load(app_id ? app_id : "") ? 1 : 0);
+    // Own id only, as on firmware (src/main.c appconfig impl).
+    write_reg(uc, UC_ARM_REG_R0, app_config_load_own(app_id) ? 1 : 0);
 }
 
 static void tramp_appconfig_save(uc_engine *uc) {
@@ -2119,14 +2344,11 @@ static void tramp_term_create(uc_engine *uc) {
     int rows = (int)read_reg(uc, UC_ARM_REG_R1);
     int scrollback = (int)read_reg(uc, UC_ARM_REG_R2);
     terminal_t *t = terminal_new(cols, rows, scrollback);
-    write_reg(uc, UC_ARM_REG_R0, handle_wrap(t));
+    write_reg(uc, UC_ARM_REG_R0, wrap_tracked(NATIVE_RES_TERMINAL, t));
 }
 
 static void tramp_term_free(uc_engine *uc) {
-    uint32_t handle = read_reg(uc, UC_ARM_REG_R0);
-    terminal_t *t = handle_unwrap(handle);
-    if (t) terminal_free(t);
-    handle_free(handle);
+    drop_tracked(NATIVE_RES_TERMINAL, read_reg(uc, UC_ARM_REG_R0));
 }
 
 static void tramp_term_clear(uc_engine *uc) {
@@ -2422,24 +2644,18 @@ static void tramp_gfx_load(uc_engine *uc) {
     uint32_t path_addr = read_reg(uc, UC_ARM_REG_R0);
     char *path = uc_read_string(uc, path_addr);
     pc_image_t *img = path ? image_load(path) : NULL;
-    write_reg(uc, UC_ARM_REG_R0, handle_wrap(img));
+    write_reg(uc, UC_ARM_REG_R0, wrap_tracked(NATIVE_RES_IMAGE, img));
 }
 
 static void tramp_gfx_new_blank(uc_engine *uc) {
     int w = (int)read_reg(uc, UC_ARM_REG_R0);
     int h = (int)read_reg(uc, UC_ARM_REG_R1);
     pc_image_t *img = image_new_blank(w, h);
-    write_reg(uc, UC_ARM_REG_R0, handle_wrap(img));
+    write_reg(uc, UC_ARM_REG_R0, wrap_tracked(NATIVE_RES_IMAGE, img));
 }
 
 static void tramp_gfx_free(uc_engine *uc) {
-    uint32_t handle = read_reg(uc, UC_ARM_REG_R0);
-    pc_image_t *img = handle_unwrap(handle);
-    if (img) {
-        extern void image_free(pc_image_t *);
-        image_free(img);
-    }
-    handle_free(handle);
+    drop_tracked(NATIVE_RES_IMAGE, read_reg(uc, UC_ARM_REG_R0));
 }
 
 static void tramp_gfx_width(uc_engine *uc) {
@@ -2504,13 +2720,10 @@ static void tramp_gfx_draw_scaled(uc_engine *uc) {
 
 static void tramp_video_new_player(uc_engine *uc) {
     void *vp = video_player_create();
-    write_reg(uc, UC_ARM_REG_R0, handle_wrap(vp));
+    write_reg(uc, UC_ARM_REG_R0, wrap_tracked(NATIVE_RES_VIDEO, vp));
 }
 static void tramp_video_free(uc_engine *uc) {
-    uint32_t h = read_reg(uc, UC_ARM_REG_R0);
-    void *vp = handle_unwrap(h);
-    if (vp) video_player_destroy(vp);
-    handle_free(h);
+    drop_tracked(NATIVE_RES_VIDEO, read_reg(uc, UC_ARM_REG_R0));
 }
 static void tramp_video_load(uc_engine *uc) {
     uint32_t h = read_reg(uc, UC_ARM_REG_R0);
@@ -2602,30 +2815,39 @@ static void tramp_video_reset_stats(uc_engine *uc) {
     void *vp = handle_unwrap(read_reg(uc, UC_ARM_REG_R0));
     if (vp) video_player_reset_stats(vp);
 }
+// API v7: returns 0 / false / no-op on the sim (video_player_create is NULL).
+static void tramp_video_ret_zero(uc_engine *uc) {
+    write_reg(uc, UC_ARM_REG_R0, 0);
+}
+static void tramp_video_noop(uc_engine *uc) {
+    (void)uc;
+}
 
 // =============================================================================
 // Crypto trampoline handlers (stubs — crypto not yet in simulator)
 // =============================================================================
 
+// bool randomBytes(buf, len): host /dev/urandom, in 4 KB chunks.  Fails
+// closed like firmware (src/main.c): no randomness -> buf zeroed, false.
 static void tramp_crypto_random_bytes(uc_engine *uc) {
     uint32_t buf_addr = read_reg(uc, UC_ARM_REG_R0);
     uint32_t len = read_reg(uc, UC_ARM_REG_R1);
-    if (buf_addr && len > 0 && len <= 4096) {
-        // Use /dev/urandom for host-side random bytes
-        uint8_t *buf = malloc(len);
-        if (buf) {
-            FILE *f = fopen("/dev/urandom", "rb");
-            if (f) {
-                fread(buf, 1, len, f);
-                fclose(f);
-            } else {
-                // Fallback: fill with rand()
-                for (uint32_t i = 0; i < len; i++) buf[i] = (uint8_t)rand();
-            }
-            uc_mem_write(uc, buf_addr, buf, len);
-            free(buf);
+    bool ok = buf_addr != 0 || len == 0;
+    FILE *f = (ok && len) ? fopen("/dev/urandom", "rb") : NULL;
+    if (len && !f) ok = false;
+    uint8_t chunk[4096];
+    for (uint32_t off = 0; buf_addr && off < len; off += sizeof(chunk)) {
+        uint32_t n = len - off < sizeof(chunk) ? len - off : (uint32_t)sizeof(chunk);
+        if (!ok || fread(chunk, 1, n, f) != n) {
+            ok = false;
+            memset(chunk, 0, sizeof(chunk));
         }
+        uc_mem_write(uc, buf_addr + off, chunk, n);
     }
+    if (f) fclose(f);
+    if (!ok && len)
+        fprintf(stderr, "[TRAMP] crypto.randomBytes(%u): no randomness, buffer zeroed\n", len);
+    write_reg(uc, UC_ARM_REG_R0, ok ? 1u : 0u);
 }
 
 // =============================================================================
@@ -2641,6 +2863,145 @@ static void tramp_stub(uc_engine *uc, uint32_t slot) {
         printf("[UNICORN] STUB: unknown slot %u called\n", slot);
     }
     write_reg(uc, UC_ARM_REG_R0, 0);
+}
+
+// =============================================================================
+// MOD player trampoline handlers (host mod_player_* compiled into the sim)
+// =============================================================================
+#include "../src/drivers/mod_player.h"
+#include "../src/os/zip_archive.h"
+
+static void tramp_modplayer_create(uc_engine *uc) {
+    mod_player_init();  // idempotent; sim main.c never calls it
+    void *p = mod_player_create();
+    write_reg(uc, UC_ARM_REG_R0, wrap_tracked(NATIVE_RES_MOD, p));
+}
+static void tramp_modplayer_destroy(uc_engine *uc) {
+    drop_tracked(NATIVE_RES_MOD, read_reg(uc, UC_ARM_REG_R0));
+}
+static void tramp_modplayer_load(uc_engine *uc) {
+    void *p = handle_unwrap(read_reg(uc, UC_ARM_REG_R0));
+    char *path = uc_read_string(uc, read_reg(uc, UC_ARM_REG_R1));
+    write_reg(uc, UC_ARM_REG_R0, (p && path) ? (uint32_t)mod_player_load(p, path) : 0);
+}
+static void tramp_modplayer_play(uc_engine *uc) {
+    void *p = handle_unwrap(read_reg(uc, UC_ARM_REG_R0));
+    bool loop = (bool)read_reg(uc, UC_ARM_REG_R1);
+    if (p) mod_player_play(p, loop);
+}
+static void tramp_modplayer_stop(uc_engine *uc) {
+    void *p = handle_unwrap(read_reg(uc, UC_ARM_REG_R0));
+    if (p) mod_player_stop(p);
+}
+static void tramp_modplayer_pause(uc_engine *uc) {
+    void *p = handle_unwrap(read_reg(uc, UC_ARM_REG_R0));
+    if (p) mod_player_pause(p);
+}
+static void tramp_modplayer_resume(uc_engine *uc) {
+    void *p = handle_unwrap(read_reg(uc, UC_ARM_REG_R0));
+    if (p) mod_player_resume(p);
+}
+static void tramp_modplayer_is_playing(uc_engine *uc) {
+    void *p = handle_unwrap(read_reg(uc, UC_ARM_REG_R0));
+    write_reg(uc, UC_ARM_REG_R0, (p && mod_player_is_playing(p)) ? 1u : 0u);
+}
+static void tramp_modplayer_set_volume(uc_engine *uc) {
+    void *p = handle_unwrap(read_reg(uc, UC_ARM_REG_R0));
+    uint8_t vol = (uint8_t)read_reg(uc, UC_ARM_REG_R1);
+    if (p) mod_player_set_volume(p, vol);
+}
+static void tramp_modplayer_get_volume(uc_engine *uc) {
+    void *p = handle_unwrap(read_reg(uc, UC_ARM_REG_R0));
+    write_reg(uc, UC_ARM_REG_R0, p ? (uint32_t)mod_player_get_volume(p) : 0u);
+}
+static void tramp_modplayer_set_loop(uc_engine *uc) {
+    void *p = handle_unwrap(read_reg(uc, UC_ARM_REG_R0));
+    bool loop = (bool)read_reg(uc, UC_ARM_REG_R1);
+    if (p) mod_player_set_loop(p, loop);
+}
+
+// =============================================================================
+// ZIP trampoline handlers (shared zip_archive.c, miniz + host FS)
+// =============================================================================
+
+static void tramp_zip_extract(uc_engine *uc) {
+    char *zip_path = uc_read_string(uc, read_reg(uc, UC_ARM_REG_R0));
+    char *dest_dir = uc_read_string(uc, read_reg(uc, UC_ARM_REG_R1));
+    write_reg(uc, UC_ARM_REG_R0,
+              (zip_path && dest_dir && zip_archive_extract(zip_path, dest_dir)) ? 1u : 0u);
+}
+static void tramp_zip_list(uc_engine *uc) {
+    char *zip_path = uc_read_string(uc, read_reg(uc, UC_ARM_REG_R0));
+    write_reg(uc, UC_ARM_REG_R0,
+              zip_path ? (uint32_t)zip_archive_list(zip_path) : (uint32_t)-1);
+}
+
+// Read-in-place handles (API v5). Host-side pczip_t pointers travel to the
+// emulated app as opaque uint32 handles via handle_wrap/handle_unwrap.
+
+static void tramp_zip_open(uc_engine *uc) {
+    char *zip_path = uc_read_string(uc, read_reg(uc, UC_ARM_REG_R0));
+    pczip_t z = zip_path ? zip_archive_open(zip_path) : NULL;
+    write_reg(uc, UC_ARM_REG_R0, handle_wrap(z));
+}
+
+static void tramp_zip_close(uc_engine *uc) {
+    uint32_t h = read_reg(uc, UC_ARM_REG_R0);
+    zip_archive_close(handle_unwrap(h));
+    handle_free(h);
+}
+
+static void tramp_zip_num_entries(uc_engine *uc) {
+    pczip_t z = handle_unwrap(read_reg(uc, UC_ARM_REG_R0));
+    write_reg(uc, UC_ARM_REG_R0, (uint32_t)zip_archive_num_entries(z));
+}
+
+static void tramp_zip_locate(uc_engine *uc) {
+    pczip_t z = handle_unwrap(read_reg(uc, UC_ARM_REG_R0));
+    char *name = uc_read_string(uc, read_reg(uc, UC_ARM_REG_R1));
+    write_reg(uc, UC_ARM_REG_R0,
+              name ? (uint32_t)zip_archive_locate(z, name) : (uint32_t)-1);
+}
+
+static void tramp_zip_stat_index(uc_engine *uc) {
+    pczip_t z = handle_unwrap(read_reg(uc, UC_ARM_REG_R0));
+    int idx = (int)read_reg(uc, UC_ARM_REG_R1);
+    uint32_t out_addr = read_reg(uc, UC_ARM_REG_R2);
+    // pczip_stat_t is layout-identical on ARM32 and the host (char[256] +
+    // 2×uint32 + bool: every member ≤4-byte aligned, no pointers) so a raw
+    // struct copy into emulated memory is safe.
+    pczip_stat_t st;
+    bool ok = out_addr && zip_archive_stat_index(z, idx, &st);
+    if (ok) uc_mem_write(uc, out_addr, &st, sizeof(st));
+    write_reg(uc, UC_ARM_REG_R0, ok ? 1u : 0u);
+}
+
+static void tramp_zip_read(uc_engine *uc) {
+    pczip_t z = handle_unwrap(read_reg(uc, UC_ARM_REG_R0));
+    int idx = (int)read_reg(uc, UC_ARM_REG_R1);
+    uint32_t buf_addr = read_reg(uc, UC_ARM_REG_R2);
+    uint32_t buf_cap = read_reg(uc, UC_ARM_REG_R3);
+    if (!z || !buf_addr || !buf_cap) {
+        write_reg(uc, UC_ARM_REG_R0, (uint32_t)-1);
+        return;
+    }
+    void *tmp = malloc(buf_cap);
+    if (!tmp) {
+        write_reg(uc, UC_ARM_REG_R0, (uint32_t)-1);
+        return;
+    }
+    int n = zip_archive_read(z, idx, tmp, buf_cap);
+    if (n > 0) uc_mem_write(uc, buf_addr, tmp, (size_t)n);
+    free(tmp);
+    write_reg(uc, UC_ARM_REG_R0, (uint32_t)n);
+}
+
+static void tramp_zip_extract_entry(uc_engine *uc) {
+    pczip_t z = handle_unwrap(read_reg(uc, UC_ARM_REG_R0));
+    int idx = (int)read_reg(uc, UC_ARM_REG_R1);
+    char *dest = uc_read_string(uc, read_reg(uc, UC_ARM_REG_R2));
+    write_reg(uc, UC_ARM_REG_R0,
+              (dest && zip_archive_extract_entry(z, idx, dest)) ? 1u : 0u);
 }
 
 // =============================================================================
@@ -2700,6 +3061,25 @@ void unicorn_tramp_init(uc_engine *uc) {
     s_dispatch[SLOT_DISPLAY_EFFECT_DITHER]  = tramp_display_effect_stub;
     s_dispatch[SLOT_DISPLAY_EFFECT_SCANLINE]= tramp_display_effect_stub;
     s_dispatch[SLOT_DISPLAY_EFFECT_POSTERIZE]= tramp_display_effect_stub;
+    s_dispatch[SLOT_DISPLAY_FILL_VLINE]      = tramp_display_fill_vline;
+    s_dispatch[SLOT_DISPLAY_DRAW_TEXTURED_COLUMN] = tramp_display_draw_textured_column;
+    s_dispatch[SLOT_DISPLAY_FILL_VLINE_GRADIENT] = tramp_display_fill_vline_gradient;
+    s_dispatch[SLOT_DISPLAY_SET_CLIP_RECT]   = tramp_display_set_clip_rect;
+    s_dispatch[SLOT_DISPLAY_GET_CLIP_RECT]   = tramp_display_get_clip_rect;
+    s_dispatch[SLOT_DISPLAY_CLEAR_CLIP_RECT] = tramp_display_clear_clip_rect;
+    s_dispatch[SLOT_DISPLAY_FILL_HLINE]      = tramp_display_fill_hline;
+    s_dispatch[SLOT_DISPLAY_FILL_TRIANGLE]   = tramp_display_fill_triangle;
+    s_dispatch[SLOT_DISPLAY_SET_SCROLL_AREA] = tramp_display_set_scroll_area;
+    s_dispatch[SLOT_DISPLAY_SET_SCROLL_OFFSET] = tramp_display_set_scroll_offset;
+    s_dispatch[SLOT_DISPLAY_DRAW_PLANE]      = tramp_display_draw_plane;
+    s_dispatch[SLOT_DISPLAY_SET_FONT]        = tramp_display_set_font;
+    s_dispatch[SLOT_DISPLAY_GET_FONT]        = tramp_display_get_font;
+    s_dispatch[SLOT_DISPLAY_GET_FONT_WIDTH]  = tramp_display_get_font_width;
+    s_dispatch[SLOT_DISPLAY_GET_FONT_HEIGHT] = tramp_display_get_font_height;
+    s_dispatch[SLOT_DISPLAY_TEXT_WIDTH]      = tramp_display_text_width;
+    s_dispatch[SLOT_DISPLAY_LOAD_FONT]       = tramp_display_load_font;
+    s_dispatch[SLOT_DISPLAY_UNLOAD_FONT]     = tramp_display_unload_font;
+    s_dispatch[SLOT_DISPLAY_DRAW_TEXT_TRANSPARENT] = tramp_display_draw_text_transparent;
 
     // Input
     s_dispatch[SLOT_INPUT_GET_BUTTONS]         = tramp_input_get_buttons;
@@ -2775,6 +3155,7 @@ void unicorn_tramp_init(uc_engine *uc) {
     s_dispatch[SLOT_TCP_AVAILABLE]  = tramp_tcp_available;
     s_dispatch[SLOT_TCP_GET_ERROR]  = tramp_tcp_get_error;
     s_dispatch[SLOT_TCP_GET_EVENTS] = tramp_tcp_get_events;
+    s_dispatch[SLOT_TCP_CONNECT_EX] = tramp_tcp_connect_ex;
 
     // UI
     s_dispatch[SLOT_UI_TEXT_INPUT]        = tramp_ui_text_input;
@@ -2841,6 +3222,7 @@ void unicorn_tramp_init(uc_engine *uc) {
     s_dispatch[SLOT_HTTP_SET_READ_TIMEOUT]   = tramp_http_set_read_timeout;
     s_dispatch[SLOT_HTTP_SET_READ_BUFFER_SIZE]= tramp_http_set_read_buffer_size;
     s_dispatch[SLOT_HTTP_IS_COMPLETE]        = tramp_http_is_complete;
+    s_dispatch[SLOT_HTTP_SET_INSECURE]       = tramp_http_set_insecure;
 
     // Soundplayer
     s_dispatch[SLOT_SND_SAMPLE_LOAD]       = tramp_snd_sample_load;
@@ -2941,6 +3323,15 @@ void unicorn_tramp_init(uc_engine *uc) {
     s_dispatch[SLOT_VIDEO_GET_MUTED]       = tramp_video_get_muted;
     s_dispatch[SLOT_VIDEO_GET_DROPPED_FRAMES] = tramp_video_get_dropped_frames;
     s_dispatch[SLOT_VIDEO_RESET_STATS]     = tramp_video_reset_stats;
+    s_dispatch[SLOT_VIDEO_GET_FRAME_COUNT]  = tramp_video_ret_zero;
+    s_dispatch[SLOT_VIDEO_GET_DURATION_MS]  = tramp_video_ret_zero;
+    s_dispatch[SLOT_VIDEO_GET_POSITION_MS]  = tramp_video_ret_zero;
+    s_dispatch[SLOT_VIDEO_SEEK_MS]          = tramp_video_noop;
+    s_dispatch[SLOT_VIDEO_SEEK_RELATIVE_MS] = tramp_video_noop;
+    s_dispatch[SLOT_VIDEO_HAS_ENDED]        = tramp_video_ret_zero;
+    s_dispatch[SLOT_VIDEO_SET_OSD]          = tramp_video_noop;
+    s_dispatch[SLOT_VIDEO_SHOW_OSD]         = tramp_video_noop;
+    s_dispatch[SLOT_VIDEO_SET_OSD_TIMEOUT]  = tramp_video_noop;
 
     // MOD player + ZIP (stubs — unicorn_tramp_dispatch() falls back to the
     // generic tramp_stub() for any slot with no s_dispatch entry; these
@@ -2948,19 +3339,32 @@ void unicorn_tramp_init(uc_engine *uc) {
     // sub-tables exist purely to keep byte offsets in this struct aligned
     // with os.h's PicoCalcAPI — without them, `version` (the very next
     // field) is read from the wrong offset by native apps.
-    s_stub_names[SLOT_MODPLAYER_CREATE]     = "modplayer.create";
-    s_stub_names[SLOT_MODPLAYER_DESTROY]    = "modplayer.destroy";
-    s_stub_names[SLOT_MODPLAYER_LOAD]       = "modplayer.load";
-    s_stub_names[SLOT_MODPLAYER_PLAY]       = "modplayer.play";
-    s_stub_names[SLOT_MODPLAYER_STOP]       = "modplayer.stop";
-    s_stub_names[SLOT_MODPLAYER_PAUSE]      = "modplayer.pause";
-    s_stub_names[SLOT_MODPLAYER_RESUME]     = "modplayer.resume";
-    s_stub_names[SLOT_MODPLAYER_IS_PLAYING] = "modplayer.isPlaying";
-    s_stub_names[SLOT_MODPLAYER_SET_VOLUME] = "modplayer.setVolume";
-    s_stub_names[SLOT_MODPLAYER_GET_VOLUME] = "modplayer.getVolume";
-    s_stub_names[SLOT_MODPLAYER_SET_LOOP]   = "modplayer.setLoop";
-    s_stub_names[SLOT_ZIP_EXTRACT]          = "zip.extract";
-    s_stub_names[SLOT_ZIP_LIST]             = "zip.list";
+    // modplayer and zip are now fully implemented (see dispatch entries below);
+    // stub names kept for any future slot additions.
+
+    // MOD player (host mod_player_*)
+    s_dispatch[SLOT_MODPLAYER_CREATE]     = tramp_modplayer_create;
+    s_dispatch[SLOT_MODPLAYER_DESTROY]    = tramp_modplayer_destroy;
+    s_dispatch[SLOT_MODPLAYER_LOAD]       = tramp_modplayer_load;
+    s_dispatch[SLOT_MODPLAYER_PLAY]       = tramp_modplayer_play;
+    s_dispatch[SLOT_MODPLAYER_STOP]       = tramp_modplayer_stop;
+    s_dispatch[SLOT_MODPLAYER_PAUSE]      = tramp_modplayer_pause;
+    s_dispatch[SLOT_MODPLAYER_RESUME]     = tramp_modplayer_resume;
+    s_dispatch[SLOT_MODPLAYER_IS_PLAYING] = tramp_modplayer_is_playing;
+    s_dispatch[SLOT_MODPLAYER_SET_VOLUME] = tramp_modplayer_set_volume;
+    s_dispatch[SLOT_MODPLAYER_GET_VOLUME] = tramp_modplayer_get_volume;
+    s_dispatch[SLOT_MODPLAYER_SET_LOOP]   = tramp_modplayer_set_loop;
+
+    // ZIP (shared zip_archive.c)
+    s_dispatch[SLOT_ZIP_EXTRACT]          = tramp_zip_extract;
+    s_dispatch[SLOT_ZIP_LIST]             = tramp_zip_list;
+    s_dispatch[SLOT_ZIP_OPEN]             = tramp_zip_open;
+    s_dispatch[SLOT_ZIP_CLOSE]            = tramp_zip_close;
+    s_dispatch[SLOT_ZIP_NUM_ENTRIES]      = tramp_zip_num_entries;
+    s_dispatch[SLOT_ZIP_LOCATE]           = tramp_zip_locate;
+    s_dispatch[SLOT_ZIP_STAT_INDEX]       = tramp_zip_stat_index;
+    s_dispatch[SLOT_ZIP_READ]             = tramp_zip_read;
+    s_dispatch[SLOT_ZIP_EXTRACT_ENTRY]    = tramp_zip_extract_entry;
 }
 
 void unicorn_tramp_dispatch(uc_engine *uc, uint32_t slot) {
@@ -3003,7 +3407,7 @@ static uint32_t write_func_table(uc_engine *uc, uint32_t base_addr,
 
 void unicorn_build_api_struct(uc_engine *uc, uint32_t api_base, uint32_t tramp_base) {
     // Layout: PicoCalcAPI struct at api_base, followed by sub-tables
-    // PicoCalcAPI has 17 pointer fields + 1 uint32_t (version)
+    // PicoCalcAPI has 19 pointer fields + 1 uint32_t (version)
     uint32_t api_struct_size = 20 * 4;  // 19 pointers + version
 
     // Sub-tables start after the main struct
@@ -3017,7 +3421,7 @@ void unicorn_build_api_struct(uc_engine *uc, uint32_t api_base, uint32_t tramp_b
     uint32_t input_addr = sub_base;
     sub_base = write_func_table(uc, sub_base, tramp_base, SLOT_INPUT_GET_BUTTONS, 4);
 
-    // picocalc_display_t (26 function pointers — count from enum)
+    // picocalc_display_t (count from enum — keep in struct order!)
     uint32_t display_addr = sub_base;
     uint32_t display_count = SLOT_DISPLAY_END - SLOT_DISPLAY_CLEAR;
     sub_base = write_func_table(uc, sub_base, tramp_base, SLOT_DISPLAY_CLEAR, display_count);
@@ -3042,7 +3446,7 @@ void unicorn_build_api_struct(uc_engine *uc, uint32_t api_base, uint32_t tramp_b
     uint32_t wifi_count = SLOT_WIFI_END - SLOT_WIFI_CONNECT;
     sub_base = write_func_table(uc, sub_base, tramp_base, SLOT_WIFI_CONNECT, wifi_count);
 
-    // picocalc_tcp_t (7 function pointers)
+    // picocalc_tcp_t (8 function pointers)
     uint32_t tcp_addr = sub_base;
     uint32_t tcp_count = SLOT_TCP_END - SLOT_TCP_CONNECT;
     sub_base = write_func_table(uc, sub_base, tramp_base, SLOT_TCP_CONNECT, tcp_count);
@@ -3102,7 +3506,7 @@ void unicorn_build_api_struct(uc_engine *uc, uint32_t api_base, uint32_t tramp_b
     uint32_t modplayer_count = SLOT_MODPLAYER_END - SLOT_MODPLAYER_CREATE;
     sub_base = write_func_table(uc, sub_base, tramp_base, SLOT_MODPLAYER_CREATE, modplayer_count);
 
-    // picocalc_zip_t (2 function pointers, stubs)
+    // picocalc_zip_t (9 function pointers, stubs)
     uint32_t zip_addr = sub_base;
     uint32_t zip_count = SLOT_ZIP_END - SLOT_ZIP_EXTRACT;
     sub_base = write_func_table(uc, sub_base, tramp_base, SLOT_ZIP_EXTRACT, zip_count);
@@ -3159,7 +3563,7 @@ void unicorn_build_api_struct(uc_engine *uc, uint32_t api_base, uint32_t tramp_b
     write32(uc, api_base + 64, video_addr);
     write32(uc, api_base + 68, modplayer_addr);
     write32(uc, api_base + 72, zip_addr);
-    write32(uc, api_base + 76, 3);  // version = 3 (fs->browse)
+    write32(uc, api_base + 76, 8);  // version = 8 (http->setInsecure, tcp->connectEx; 7 = video seek/OSD; matches src/main.c g_api.version)
 
-    printf("[UNICORN] PicoCalcAPI struct at 0x%08x, version=3\n", api_base);
+    printf("[UNICORN] PicoCalcAPI struct at 0x%08x, version=8\n", api_base);
 }

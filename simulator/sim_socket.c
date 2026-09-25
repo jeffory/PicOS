@@ -14,13 +14,11 @@
 #include <pthread.h>
 #include <time.h>
 #include <stdbool.h>
+#include <poll.h>
 
 #define MAX_CLIENTS 8
-// Large enough to hold a full base64-encoded screenshot response (PNG or
-// raw RGB565 framebuffer, ~273KB base64) in one shot — queue_response()
-// aborts and silently truncates the message if the socket's kernel send
-// buffer is still full after one flush attempt, so undersizing this
-// caused truncated PNGs on anything but a near-empty screen.
+// Per-client write buffer. Responses stream through it (send_response waits
+// for the client to drain it); notifications must fit whole or are dropped.
 #define WRITE_BUF_SIZE (512 * 1024)
 #define READ_BUF_INIT 4096
 #define READ_BUF_MAX (256 * 1024)  // 256KB max for large base64 payloads
@@ -34,6 +32,8 @@ typedef struct {
     char *read_buf;
     int read_buf_used;
     int read_buf_cap;
+    bool sub_logs;      // subscribed to `log` notifications
+    bool mid_response;  // a response is partly in write_buf (see send_response)
 } client_t;
 
 static client_t s_clients[MAX_CLIENTS];
@@ -41,7 +41,15 @@ static int s_unix_fd = -1;
 static int s_tcp_fd = -1;
 static int s_max_fd = -1;
 static fd_set s_read_fds;
-static pthread_mutex_t s_notify_mutex = PTHREAD_MUTEX_INITIALIZER;
+// Guards every client's fd and write buffer. The socket thread writes RPC
+// responses and flushes; the main/Core-1 threads queue notifications. A
+// response is copied into the buffer under one hold of this lock, so a
+// notification can never land in the middle of it.
+static pthread_mutex_t s_clients_mutex = PTHREAD_MUTEX_INITIALIZER;
+// Client whose request is being dispatched (socket thread only).
+static client_t *s_dispatch_client = NULL;
+// How long a response may wait for a slow client to drain its buffer.
+#define RESPONSE_FLUSH_TIMEOUT_MS 5000
 static int s_actual_tcp_port = 0;
 static char s_unix_sock_path[256] = DEFAULT_UNIX_SOCK_PATH;
 
@@ -57,26 +65,33 @@ static void set_nonblocking(int fd) {
 
 static int add_client(int fd) {
     set_nonblocking(fd);
+    pthread_mutex_lock(&s_clients_mutex);
     for (int i = 0; i < MAX_CLIENTS; i++) {
         if (s_clients[i].fd <= 0) {
             s_clients[i].fd = fd;
             s_clients[i].write_buf_used = 0;
             s_clients[i].read_buf_used = 0;
             s_clients[i].read_buf_cap = READ_BUF_INIT;
+            s_clients[i].sub_logs = false;
+            s_clients[i].mid_response = false;
             s_clients[i].read_buf = malloc(READ_BUF_INIT);
             if (!s_clients[i].read_buf) {
                 close(fd);
                 s_clients[i].fd = -1;
+                pthread_mutex_unlock(&s_clients_mutex);
                 return -1;
             }
+            pthread_mutex_unlock(&s_clients_mutex);
             return 0;
         }
     }
+    pthread_mutex_unlock(&s_clients_mutex);
     close(fd);
     return -1;
 }
 
 static void remove_client(int i) {
+    pthread_mutex_lock(&s_clients_mutex);
     if (s_clients[i].fd > 0) {
         close(s_clients[i].fd);
         s_clients[i].fd = -1;
@@ -85,9 +100,12 @@ static void remove_client(int i) {
         free(s_clients[i].read_buf);
         s_clients[i].read_buf = NULL;
         s_clients[i].read_buf_cap = 0;
+        s_clients[i].sub_logs = false;
     }
+    pthread_mutex_unlock(&s_clients_mutex);
 }
 
+// Caller holds s_clients_mutex.
 static int flush_write_buf(client_t *c) {
     if (c->write_buf_used <= 0) return 0;
     ssize_t n = send(c->fd, c->write_buf, c->write_buf_used, MSG_NOSIGNAL);
@@ -102,15 +120,52 @@ static int flush_write_buf(client_t *c) {
     return 0;
 }
 
-static int queue_response(client_t *c, const char *json, size_t len) {
-    if (c->fd <= 0) return -1;
-    if (len == 0) len = strlen(json);
+// Caller holds s_clients_mutex. Notification path (main / Core-1 threads):
+// one non-blocking flush attempt, then the message is copied whole or
+// dropped — never truncated, never waited for. Dropped `log` notifications
+// are recoverable: clients backfill from get_log_buffer by seq.
+static int queue_notification_locked(client_t *c, const char *json, size_t len) {
+    if (c->fd <= 0 || c->mid_response) return -1;
+    size_t avail = WRITE_BUF_SIZE - 1 - c->write_buf_used;
+    if (avail < len) {
+        if (flush_write_buf(c) < 0) return -1;
+        avail = WRITE_BUF_SIZE - 1 - c->write_buf_used;
+        if (avail < len) return -1;
+    }
+    memcpy(c->write_buf + c->write_buf_used, json, len);
+    c->write_buf_used += (int)len;
+    // Push it out now (non-blocking): the socket thread may be busy waiting
+    // on another, slow client, and subscribers should not wait for that.
+    flush_write_buf(c);
+    return 0;
+}
+
+// Socket thread only. Streams an RPC response through the client's write
+// buffer. The lock is held only while copying/flushing, never across the
+// wait for a slow client, so sys.log on other threads is not stalled.
+// While part of a response sits in the buffer, c->mid_response keeps
+// notifications out so they cannot land inside it. Returns -1 when the
+// client did not drain within RESPONSE_FLUSH_TIMEOUT_MS or the send failed;
+// the caller must then disconnect it (a partial line is in its stream).
+static int send_response(client_t *c, const char *json, size_t len) {
+    int waited_ms = 0;
+    pthread_mutex_lock(&s_clients_mutex);
+    c->mid_response = true;
     while (len > 0) {
         size_t avail = WRITE_BUF_SIZE - 1 - c->write_buf_used;
         if (avail == 0) {
-            if (flush_write_buf(c) < 0) return -1;
+            if (flush_write_buf(c) < 0) break;
             avail = WRITE_BUF_SIZE - 1 - c->write_buf_used;
-            if (avail == 0) return -1;
+        }
+        if (avail == 0) {
+            if (waited_ms >= RESPONSE_FLUSH_TIMEOUT_MS) break;
+            int fd = c->fd;
+            pthread_mutex_unlock(&s_clients_mutex);
+            struct pollfd pfd = { .fd = fd, .events = POLLOUT };
+            poll(&pfd, 1, 10);
+            waited_ms += 10;
+            pthread_mutex_lock(&s_clients_mutex);
+            continue;
         }
         size_t chunk = len < avail ? len : avail;
         memcpy(c->write_buf + c->write_buf_used, json, chunk);
@@ -118,17 +173,31 @@ static int queue_response(client_t *c, const char *json, size_t len) {
         json += chunk;
         len -= chunk;
     }
-    return 0;
+    c->mid_response = false;
+    pthread_mutex_unlock(&s_clients_mutex);
+    return len == 0 ? 0 : -1;
 }
 
-static void queue_notification(const char *json, size_t len) {
-    pthread_mutex_lock(&s_notify_mutex);
+static void queue_notification(const char *json, size_t len, bool logs_only) {
+    pthread_mutex_lock(&s_clients_mutex);
     for (int i = 0; i < MAX_CLIENTS; i++) {
-        if (s_clients[i].fd > 0) {
-            queue_response(&s_clients[i], json, len);
+        if (s_clients[i].fd > 0 && (!logs_only || s_clients[i].sub_logs)) {
+            queue_notification_locked(&s_clients[i], json, len);
         }
     }
-    pthread_mutex_unlock(&s_notify_mutex);
+    pthread_mutex_unlock(&s_clients_mutex);
+}
+
+void sim_socket_notify_log_subscribers(const char *json_line, size_t len) {
+    queue_notification(json_line, len, true);
+}
+
+void sim_socket_set_log_subscription(bool on) {
+    // Only called from a handler, i.e. on the socket thread mid-dispatch.
+    if (!s_dispatch_client) return;
+    pthread_mutex_lock(&s_clients_mutex);
+    s_dispatch_client->sub_logs = on;
+    pthread_mutex_unlock(&s_clients_mutex);
 }
 
 static void process_requests(client_t *c) {
@@ -157,39 +226,66 @@ static void process_requests(client_t *c) {
         *newline = '\0';
         size_t msg_len = newline - c->read_buf;
 
+        s_dispatch_client = c;
         char *resp = sim_handler_dispatch(c->read_buf, c->read_buf + msg_len);
+        s_dispatch_client = NULL;
 
         c->read_buf_used -= (int)(msg_len + 1);
         memmove(c->read_buf, newline + 1, c->read_buf_used);
         if (resp) {
-            if (queue_response(c, resp, 0) < 0) {
-                free(resp);
+            // The protocol is newline-delimited; some error paths return an
+            // unterminated line, which a client would wait on forever.
+            size_t rlen = strlen(resp);
+            int rc;
+            if (rlen > 0 && resp[rlen - 1] != '\n') {
+                char *term = realloc(resp, rlen + 2);
+                if (term) {
+                    resp = term;
+                    resp[rlen++] = '\n';
+                    resp[rlen] = '\0';
+                }
+            }
+            rc = send_response(c, resp, rlen);
+            free(resp);
+            if (rc < 0) {
+                // Slow or dead client: part of the line is already queued,
+                // so the stream is unusable. Drop the connection.
+                remove_client((int)(c - s_clients));
                 return;
             }
-            free(resp);
         }
     }
 }
 
 static void *sim_socket_thread_func(void *arg);
 
-void sim_socket_init(int tcp_port, const char *instance_id) {
+void sim_socket_init(int tcp_port, const char *instance_id, const char *unix_path) {
     memset(s_clients, 0, sizeof(s_clients));
     for (int i = 0; i < MAX_CLIENTS; i++) s_clients[i].fd = -1;
     FD_ZERO(&s_read_fds);
     s_max_fd = -1;
 
-    // Build UNIX socket path based on instance ID
-    if (instance_id && instance_id[0]) {
+    // UNIX socket path: explicit override, "none", or derived from the
+    // instance ID (default ./picos_control in the cwd).
+    if (unix_path && strcmp(unix_path, "none") == 0) {
+        s_unix_sock_path[0] = '\0';
+    } else if (unix_path && unix_path[0]) {
+        snprintf(s_unix_sock_path, sizeof(s_unix_sock_path), "%s", unix_path);
+    } else if (instance_id && instance_id[0]) {
         snprintf(s_unix_sock_path, sizeof(s_unix_sock_path),
                  "./picos_control_%s", instance_id);
     } else {
-        strncpy(s_unix_sock_path, DEFAULT_UNIX_SOCK_PATH, sizeof(s_unix_sock_path) - 1);
+        snprintf(s_unix_sock_path, sizeof(s_unix_sock_path), "%s",
+                 DEFAULT_UNIX_SOCK_PATH);
     }
 
-    unlink(s_unix_sock_path);
-
-    s_unix_fd = socket(AF_UNIX, SOCK_STREAM, 0);
+    if (s_unix_sock_path[0]) {
+        unlink(s_unix_sock_path);
+        s_unix_fd = socket(AF_UNIX, SOCK_STREAM, 0);
+    } else {
+        s_unix_fd = -1;
+        printf("[Socket] UNIX domain server disabled\n");
+    }
     if (s_unix_fd >= 0) {
         set_nonblocking(s_unix_fd);
         struct sockaddr_un addr = {0};
@@ -212,7 +308,9 @@ void sim_socket_init(int tcp_port, const char *instance_id) {
         set_nonblocking(s_tcp_fd);
         struct sockaddr_in addr = {0};
         addr.sin_family = AF_INET;
-        addr.sin_addr.s_addr = htonl(INADDR_ANY);
+        // Loopback only: read_file/write_file must not be reachable from
+        // the LAN.
+        addr.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
         addr.sin_port = htons((uint16_t)bind_port);
         if (bind(s_tcp_fd, (struct sockaddr *)&addr, sizeof(addr)) == 0 &&
             listen(s_tcp_fd, 5) == 0) {
@@ -275,7 +373,10 @@ void sim_socket_poll(void) {
     // inside fflush() while holding the stdio lock, and the main thread then
     // blocks in printf() waiting for it.
     int n = select(max_fd + 1, &read_fds, NULL, NULL, &tv);
-    if (n <= 0) return;
+    // No early return when nothing is readable: notifications queued by
+    // other threads must still be flushed. (They used to sit in the write
+    // buffer until the client happened to send another request.)
+    if (n < 0) FD_ZERO(&read_fds);
 
     if (s_unix_fd >= 0 && FD_ISSET(s_unix_fd, &read_fds)) {
         int fd = accept(s_unix_fd, NULL, NULL);
@@ -313,11 +414,10 @@ void sim_socket_poll(void) {
 
         process_requests(c);
 
-        if (c->fd > 0 && c->write_buf_used > 0) {
-            if (flush_write_buf(c) < 0) {
-                remove_client(i);
-            }
-        }
+        pthread_mutex_lock(&s_clients_mutex);
+        int flush_rc = (c->fd > 0 && c->write_buf_used > 0) ? flush_write_buf(c) : 0;
+        pthread_mutex_unlock(&s_clients_mutex);
+        if (flush_rc < 0) remove_client(i);
     }
 }
 
@@ -343,12 +443,18 @@ void sim_socket_close(void) {
     }
     if (s_unix_fd >= 0) { close(s_unix_fd); s_unix_fd = -1; }
     if (s_tcp_fd >= 0)  { close(s_tcp_fd);  s_tcp_fd = -1; }
-    unlink(s_unix_sock_path);
+    if (s_unix_sock_path[0]) unlink(s_unix_sock_path);
 }
 
 void sim_socket_notify(const char *method, const char *params_json) {
-    static char buf[4096];
-    int len = snprintf(buf, sizeof(buf), "{\"jsonrpc\":\"2.0\",\"method\":\"%s\",\"params\":%s}\n",
-                       method, params_json ? params_json : "{}");
-    queue_notification(buf, (size_t)len);
+    // Heap-built: notifications come from several threads, and log/app
+    // params can exceed any fixed buffer.
+    const char *params = params_json ? params_json : "{}";
+    size_t cap = strlen(method) + strlen(params) + 64;
+    char *buf = malloc(cap);
+    if (!buf) return;
+    int len = snprintf(buf, cap, "{\"jsonrpc\":\"2.0\",\"method\":\"%s\",\"params\":%s}\n",
+                       method, params);
+    if (len > 0) queue_notification(buf, (size_t)len, false);
+    free(buf);
 }

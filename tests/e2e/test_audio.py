@@ -4,39 +4,29 @@ Verifies tone generation, volume control, and audio state reporting.
 Uses get_audio_state RPC to check playback status.
 """
 
-import time
+
 import pytest
+
+from helpers import lua_case_names
+
+
+AUDIO_CASES = lua_case_names("audio_test")
+
+
+@pytest.fixture(scope="module")
+def audio_run(lua_suite):
+    return lua_suite("audio_test")
 
 
 class TestAudioLua:
-    """Test audio operations via the audio_test Lua app."""
+    """audio_test (picotest kit): one pytest id per Lua case."""
 
-    def test_audio_operations(self, simulator):
-        """Run the audio_test app and verify all audio operations pass."""
-        simulator.clear_log()
-        simulator.launch_app("audio_test")
+    @pytest.mark.parametrize("case", AUDIO_CASES)
+    def test_audio_case(self, audio_run, case):
+        audio_run.check_case(case)
 
-        try:
-            simulator.wait_for_log("AUDIO_TESTS_DONE", timeout=15)
-        except TimeoutError:
-            logs = simulator.get_log_buffer()
-            pytest.fail(f"audio_test did not complete in time. Logs: {logs}")
-
-        logs = simulator.get_log_buffer()
-        lines = [
-            (l if isinstance(l, str) else l.get("text", ""))
-            for l in logs.get("lines", [])
-        ]
-
-        results = [l for l in lines if l.startswith("PASS:") or l.startswith("FAIL:")]
-
-        failures = [r for r in results if r.startswith("FAIL:")]
-        assert not failures, f"Audio test failures: {failures}"
-
-        expected_tests = ["setVolume", "playTone", "stopTone", "volume_range"]
-        passed = {r.split(":")[1] for r in results if r.startswith("PASS:")}
-        for name in expected_tests:
-            assert name in passed, f"Missing result for test '{name}'. Got: {results}"
+    def test_audio_suite_complete(self, audio_run):
+        audio_run.assert_all_passed(AUDIO_CASES)
 
 
 class TestAudioRPC:
@@ -50,8 +40,8 @@ class TestAudioRPC:
         })
         assert result.get("ok"), f"play_tone failed: {result}"
 
-        # Check audio state — tone should be playing
-        time.sleep(0.1)
+        # Check audio state — tone should be playing (play_tone sets the
+        # state before it replies; the 2 s tone is far from expiring)
         state = simulator.call("get_audio_state")
         assert state["tone_playing"] is True, (
             f"Tone should be playing after play_tone. State: {state}"
@@ -64,13 +54,12 @@ class TestAudioRPC:
         """Test stop_audio RPC stops playback."""
         # Start a tone
         simulator.call("play_tone", {"frequency": 880, "duration_ms": 5000})
-        time.sleep(0.1)
 
         # Stop it
         result = simulator.call("stop_audio")
         assert result.get("ok"), f"stop_audio failed: {result}"
 
-        time.sleep(0.1)
+        # stop_audio clears the state before it replies.
         state = simulator.call("get_audio_state")
         assert state["tone_playing"] is False, (
             f"Tone should not be playing after stop_audio. State: {state}"
@@ -90,7 +79,6 @@ class TestAudioRPC:
         """Test audio state when nothing is playing."""
         # Ensure nothing is playing
         simulator.call("stop_audio")
-        time.sleep(0.1)
 
         state = simulator.call("get_audio_state")
         assert state["tone_playing"] is False

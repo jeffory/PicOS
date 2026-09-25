@@ -8,6 +8,8 @@
 #include "drivers/fileplayer.h"
 #include "drivers/mp3_player.h"
 #include "drivers/sdcard.h"
+#include "drivers/wav.h"
+#include "drivers/audio_ring.h"
 
 #ifndef FPM_64BIT
 #define FPM_64BIT
@@ -41,20 +43,6 @@ static sound_context_t s_sound_ctx;
 static uint32_t s_sound_time_us = 0;
 pthread_mutex_t s_sound_mutex = PTHREAD_MUTEX_INITIALIZER;
 
-// ── File player state ───────────────────────────────────────────────────────
-static fileplayer_t s_fileplayers[FILEPLAYER_MAX_INSTANCES];
-static fileplayer_t *s_fp_active = NULL;
-static sdfile_t s_fp_file = NULL;
-static uint32_t s_fp_sample_rate = 44100;
-static uint8_t s_fp_volume_l = 100;
-static uint8_t s_fp_volume_r = 100;
-static bool s_fp_initialized = false;
-static uint8_t *s_fp_wav_buffer = NULL;
-static volatile bool s_fp_underflow = false;
-static uint16_t s_fp_channels = 2;
-static uint16_t s_fp_bits = 16;
-static uint32_t s_fp_data_offset = 44;
-static pthread_mutex_t s_fp_mutex = PTHREAD_MUTEX_INITIALIZER;
 
 // ── MP3 player state ────────────────────────────────────────────────────────
 #define MP3_DECODE_BUF_SIZE (8192 + MAD_BUFFER_GUARD)
@@ -183,9 +171,31 @@ void audio_set_volume(uint8_t volume) {
     s_master_volume = volume;
 }
 
+/* The PCM stream: the firmware's ring (src/drivers/audio_ring.h) between
+ * the producers (fileplayer.c and mod_player.c on the Core 1 thread,
+ * pushSamples from Core 0) and a consumer that stands in for audio.c's DMA
+ * refill ISR: sim_stream_drain() pops frames at AUDIO_OUT_RATE by wall
+ * clock, so audio_ring_free() means what it means on hardware and a
+ * producer without flow control loses audio here too. (It used to return a
+ * constant 4096, which made the simulator blind to flow-control bugs.) */
+static audio_ring_t s_ring;
+static uint64_t s_drain_last_us = 0;
+static uint64_t s_drain_rem = 0;  // sub-frame remainder, in frame-microseconds
+
+static uint64_t sim_time_us(void) {
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    return (uint64_t)ts.tv_sec * 1000000u + (uint64_t)ts.tv_nsec / 1000u;
+}
+
 void audio_start_stream(uint32_t sample_rate) {
     audio_stop_tone();
-    s_stream_sample_rate = sample_rate;
+    s_stream_active = false;
+    s_stream_sample_rate = sample_rate ? sample_rate : AUDIO_OUT_RATE;
+    audio_ring_clear(&s_ring);
+    s_ring.phase = 0;
+    s_drain_last_us = sim_time_us();
+    s_drain_rem = 0;
     s_stream_active = true;
 }
 
@@ -198,113 +208,75 @@ void audio_stream_poll(void) {
 }
 
 uint32_t audio_ring_free(void) {
-    return 4096; // Always report space available in simulator
+    return audio_ring_space(&s_ring);
 }
 
 void audio_stream_debug(uint32_t *isr_count, uint32_t *underruns, uint32_t *ring_used) {
     if (isr_count) *isr_count = 0;
     if (underruns) *underruns = 0;
-    if (ring_used) *ring_used = 0;
+    if (ring_used) *ring_used = audio_ring_used(&s_ring);
 }
 
 void audio_push_samples(const int16_t *samples, int count) {
     if (!s_stream_active || !samples || count <= 0) return;
+    audio_ring_push(&s_ring, samples, count);  // drops what doesn't fit
+}
 
-    // Resample from stream rate to SDL output rate if they differ
-    uint32_t src_rate = s_stream_sample_rate;
-    uint32_t dst_rate = SIM_SAMPLE_RATE;
+// The DMA stand-in (Core 1 thread, every tick): play out the frames the
+// output rate has consumed since the last call. Underrun frames are
+// silence on hardware; here they are simply not queued to SDL.
+static void sim_stream_drain(void) {
+    uint64_t now = sim_time_us();
+    if (!s_stream_active) {
+        s_drain_last_us = now;
+        return;
+    }
+    uint64_t due = (now - s_drain_last_us) * AUDIO_OUT_RATE + s_drain_rem;
+    s_drain_last_us = now;
+    s_drain_rem = due % 1000000u;
+    uint64_t frames = due / 1000000u;
+    if (frames > 2u * AUDIO_RING_SIZE)
+        frames = 2u * AUDIO_RING_SIZE;  // a stalled thread: the ring is long empty
 
-    if (src_rate == dst_rate || src_rate == 0) {
-        // No resampling needed — just apply volume
-        int16_t buf[512];
-        int pos = 0;
-        while (pos < count) {
-            int chunk = count - pos;
-            if (chunk > 256) chunk = 256;
-            for (int i = 0; i < chunk; i++) {
-                int32_t l = (int32_t)samples[(pos + i) * 2 + 0] * s_master_volume / 100;
-                int32_t r = (int32_t)samples[(pos + i) * 2 + 1] * s_master_volume / 100;
-                if (l > 32767) l = 32767; if (l < -32768) l = -32768;
-                if (r > 32767) r = 32767; if (r < -32768) r = -32768;
-                buf[i * 2 + 0] = (int16_t)l;
-                buf[i * 2 + 1] = (int16_t)r;
-            }
-            hal_audio_push_samples(buf, chunk);
-            pos += chunk;
-        }
-    } else {
-        // Linear interpolation resampling (e.g. 22050 → 44100)
-        int dst_count = (int)((int64_t)count * dst_rate / src_rate);
-        if (dst_count <= 0) return;
-
-        int16_t buf[512];
-        int dst_pos = 0;
-        while (dst_pos < dst_count) {
-            int chunk = dst_count - dst_pos;
-            if (chunk > 256) chunk = 256;
-            for (int i = 0; i < chunk; i++) {
-                // Map destination sample index to source position
-                double src_idx = (double)(dst_pos + i) * src_rate / dst_rate;
-                int idx0 = (int)src_idx;
-                double frac = src_idx - idx0;
-                int idx1 = idx0 + 1;
-                if (idx1 >= count) idx1 = count - 1;
-
-                int32_t l = (int32_t)((1.0 - frac) * samples[idx0 * 2 + 0] + frac * samples[idx1 * 2 + 0]);
-                int32_t r = (int32_t)((1.0 - frac) * samples[idx0 * 2 + 1] + frac * samples[idx1 * 2 + 1]);
-                l = l * s_master_volume / 100;
-                r = r * s_master_volume / 100;
-                if (l > 32767) l = 32767; if (l < -32768) l = -32768;
-                if (r > 32767) r = 32767; if (r < -32768) r = -32768;
-                buf[i * 2 + 0] = (int16_t)l;
-                buf[i * 2 + 1] = (int16_t)r;
-            }
-            hal_audio_push_samples(buf, chunk);
-            dst_pos += chunk;
+    int16_t buf[512];  // 256 stereo frames
+    int n = 0;
+    for (uint64_t i = 0; i < frames; i++) {
+        int32_t l, r;
+        if (!audio_ring_pop(&s_ring, s_stream_sample_rate, AUDIO_OUT_RATE, &l, &r))
+            break;
+        buf[n * 2] = (int16_t)(l * s_master_volume / 100);
+        buf[n * 2 + 1] = (int16_t)(r * s_master_volume / 100);
+        if (++n == 256) {
+            hal_audio_push_samples(buf, n);
+            n = 0;
         }
     }
+    if (n)
+        hal_audio_push_samples(buf, n);
 }
 
 // ══════════════════════════════════════════════════════════════════════════════
 // Sound sample API
 // ══════════════════════════════════════════════════════════════════════════════
 
+// Same header parsing and clamping as src/drivers/sound.c (shared wav.c).
 static bool sim_parse_wav_header(sound_sample_t *sample, uint8_t *data, uint32_t size) {
-    if (size < 44) return false;
-    if (memcmp(data, "RIFF", 4) != 0) return false;
-    if (memcmp(data + 8, "WAVE", 4) != 0) return false;
-
-    uint32_t data_offset = 0, data_size = 0;
-    uint32_t pos = 12;
-    while (pos + 8 < size) {
-        uint32_t chunk_id, chunk_size;
-        memcpy(&chunk_id, data + pos, 4);
-        memcpy(&chunk_size, data + pos + 4, 4);
-
-        uint32_t fmt_tag, data_tag;
-        memcpy(&fmt_tag, "fmt ", 4);
-        memcpy(&data_tag, "data", 4);
-
-        if (chunk_id == fmt_tag) {
-            uint16_t ch;
-            memcpy(&ch, data + pos + 10, 2);
-            sample->channels = (uint8_t)ch;
-            memcpy(&sample->sample_rate, data + pos + 12, 4);
-            uint16_t bps;
-            memcpy(&bps, data + pos + 22, 2);
-            sample->bits_per_sample = (uint8_t)bps;
-        } else if (chunk_id == data_tag) {
-            data_offset = pos + 8;
-            data_size = chunk_size;
-            break;
-        }
-        pos += 8 + chunk_size;
-        if (chunk_size % 2 != 0) pos++;
+    wav_info_t info;
+    wav_err_t err = wav_parse(data, size, &info);
+    if (err != WAV_OK) {
+        printf("sound: %s\n", wav_strerror(err));
+        return false;
     }
-
-    if (data_offset == 0 || data_size == 0) return false;
+    uint32_t data_offset = info.data_offset;
+    uint32_t data_size = info.data_size;
+    if (data_size > size - data_offset) data_size = size - data_offset;
     if (data_size > SOUND_MAX_SAMPLE_SIZE) data_size = SOUND_MAX_SAMPLE_SIZE;
-    if (data_offset + data_size > size) data_size = size - data_offset;
+    data_size -= data_size % info.block_align;
+    if (data_size == 0) return false;
+
+    sample->channels = (uint8_t)info.channels;
+    sample->sample_rate = info.sample_rate;
+    sample->bits_per_sample = (uint8_t)info.bits_per_sample;
 
     sample->data = malloc(data_size);
     if (!sample->data) return false;
@@ -317,6 +289,16 @@ static bool sim_parse_wav_header(sound_sample_t *sample, uint8_t *data, uint32_t
 
 void sound_init(void) {
     pthread_mutex_lock(&s_sound_mutex);
+    // Reclaim any loaded sample data before dropping the pointers (mirrors
+    // firmware sound_init; sim sample data is malloc/calloc'd, so plain free).
+    for (int i = 0; i < SOUND_MAX_SAMPLES; i++) {
+        sound_sample_t *s = s_sound_ctx.samples[i];
+        if (s) {
+            if (s->data) free(s->data);
+            free(s);
+            s_sound_ctx.samples[i] = NULL;
+        }
+    }
     memset(&s_sound_ctx, 0, sizeof(s_sound_ctx));
     s_sound_time_us = 0;
     pthread_mutex_unlock(&s_sound_mutex);
@@ -348,7 +330,10 @@ void sound_update(void) {
             uint32_t end_bytes = player->play_end * bytes_per_frame;
             if (end_bytes < effective_end) effective_end = end_bytes;
         }
-        uint32_t effective_start = player->play_start * bytes_per_frame;
+        // Clamped like src/drivers/sound.c: a start at or past the end
+        // plays from the beginning.
+        uint64_t start_bytes = (uint64_t)player->play_start * bytes_per_frame;
+        uint32_t effective_start = start_bytes < effective_end ? (uint32_t)start_bytes : 0;
 
         // Calculate how many source frames to generate for target sample rate
         float rate_ratio = (float)sample->sample_rate / SIM_SAMPLE_RATE * player->rate;
@@ -429,9 +414,26 @@ sound_sample_t *sound_sample_create(void) {
     return NULL;
 }
 
+static void sim_player_stop_locked(sound_player_t *player) {
+    player->playing = false;
+    player->paused = false;
+    player->position = 0;
+    player->repeat_count = 0;
+    player->repeats_played = 0;
+}
+
 void sound_sample_destroy(sound_sample_t *sample) {
     if (!sample) return;
     pthread_mutex_lock(&s_sound_mutex);
+    // Detach every player still reading this sample before its data goes
+    // (mirrors firmware sound.c): the Core 1 thread mixes under this mutex.
+    for (int p = 0; p < SOUND_MAX_SAMPLES; p++) {
+        sound_player_t *player = &s_sound_ctx.players[p];
+        if (player->sample == sample) {
+            sim_player_stop_locked(player);
+            player->sample = NULL;
+        }
+    }
     if (sample->data) free(sample->data);
     for (int i = 0; i < SOUND_MAX_SAMPLES; i++) {
         if (s_sound_ctx.samples[i] == sample) {
@@ -462,13 +464,29 @@ bool sound_sample_load(sound_sample_t *sample, const char *path) {
     int bytes_read = sdcard_fread(f, data, file_size);
     sdcard_fclose(f);
 
-    if (!sim_parse_wav_header(sample, data, bytes_read)) {
+    // Parse into a fresh sample and swap it in under the mixer mutex (mirrors
+    // firmware sound.c): the sample may be loaded and playing already.
+    sound_sample_t fresh = {0};
+    if (!sim_parse_wav_header(&fresh, data, bytes_read)) {
         free(data);
         printf("sound: failed to parse WAV %s\n", path);
         return false;
     }
-
     free(data);
+    pthread_mutex_lock(&s_sound_mutex);
+    uint8_t *old = sample->data;
+    sample->data = fresh.data;
+    sample->length = fresh.length;
+    sample->sample_rate = fresh.sample_rate;
+    sample->bits_per_sample = fresh.bits_per_sample;
+    sample->channels = fresh.channels;
+    sample->loaded = fresh.loaded;
+    for (int p = 0; p < SOUND_MAX_SAMPLES; p++) {
+        if (s_sound_ctx.players[p].sample == sample)
+            s_sound_ctx.players[p].position = 0;
+    }
+    pthread_mutex_unlock(&s_sound_mutex);
+    free(old);
     printf("sound: loaded %s (%u Hz, %u bit, %u ch)\n",
            path, sample->sample_rate, sample->bits_per_sample, sample->channels);
     return true;
@@ -489,11 +507,19 @@ sound_player_t *sound_player_create(void) {
     pthread_mutex_lock(&s_sound_mutex);
     for (int i = 0; i < SOUND_MAX_SAMPLES; i++) {
         sound_player_t *p = &s_sound_ctx.players[i];
-        if (!p->sample) {
+        if (!p->in_use) {
             p->volume = 100;
             p->rate = 1.0f;
             p->play_start = 0;
             p->play_end = 0;
+            p->phase = 0;
+            p->finish_callback = NULL;
+            p->finish_callback_arg = NULL;
+            p->loop_callback = NULL;
+            p->loop_callback_arg = NULL;
+            p->finish_pending = false;
+            p->loop_pending = false;
+            p->in_use = true;
             pthread_mutex_unlock(&s_sound_mutex);
             return p;
         }
@@ -502,37 +528,50 @@ sound_player_t *sound_player_create(void) {
     return NULL;
 }
 
+// The player never owns its sample (the Lua bridge anchors it as a user
+// value); destroying a player only stops it and frees the slot.
 void sound_player_destroy(sound_player_t *player) {
     if (!player) return;
     pthread_mutex_lock(&s_sound_mutex);
-    sound_player_stop(player);
+    sim_player_stop_locked(player);
     player->sample = NULL;
+    player->finish_callback = NULL;
+    player->finish_callback_arg = NULL;
+    player->loop_callback = NULL;
+    player->loop_callback_arg = NULL;
+    player->finish_pending = false;
+    player->loop_pending = false;
+    player->in_use = false;
     pthread_mutex_unlock(&s_sound_mutex);
 }
 
 bool sound_player_set_sample(sound_player_t *player, sound_sample_t *sample) {
     if (!player || !sample) return false;
+    pthread_mutex_lock(&s_sound_mutex);
     player->sample = sample;
     player->position = 0;
+    pthread_mutex_unlock(&s_sound_mutex);
     return true;
 }
 
 void sound_player_play(sound_player_t *player, uint8_t repeat_count) {
-    if (!player || !player->sample || !player->sample->loaded) return;
-    player->playing = true;
-    player->paused = false;
-    player->repeat_count = repeat_count;
-    player->repeats_played = 0;
-    player->position = 0;
+    if (!player) return;
+    pthread_mutex_lock(&s_sound_mutex);
+    if (player->sample && player->sample->loaded) {
+        player->paused = false;
+        player->repeat_count = repeat_count;
+        player->repeats_played = 0;
+        player->position = 0;
+        player->playing = true;
+    }
+    pthread_mutex_unlock(&s_sound_mutex);
 }
 
 void sound_player_stop(sound_player_t *player) {
     if (!player) return;
-    player->playing = false;
-    player->paused = false;
-    player->position = 0;
-    player->repeat_count = 0;
-    player->repeats_played = 0;
+    pthread_mutex_lock(&s_sound_mutex);
+    sim_player_stop_locked(player);
+    pthread_mutex_unlock(&s_sound_mutex);
 }
 
 void sound_player_set_volume(sound_player_t *player, uint8_t volume) {
@@ -636,324 +675,9 @@ void sound_reset_time(void) {
 }
 
 // ══════════════════════════════════════════════════════════════════════════════
-// File Player API
+// File Player API: the firmware src/drivers/fileplayer.c (simulator/CMakeLists)
+// streams into the ring above, paced by sim_stream_drain().
 // ══════════════════════════════════════════════════════════════════════════════
-
-static bool fp_parse_wav_header(sdfile_t f, uint32_t *sample_rate, uint16_t *channels, uint16_t *bits, uint32_t *data_size, uint32_t *data_offset_out) {
-    // Read enough to handle extended fmt chunks or extra chunks before data
-    uint8_t header[256];
-    int header_len = sdcard_fread(f, header, sizeof(header));
-    if (header_len < 44) return false;
-    if (memcmp(header, "RIFF", 4) != 0 || memcmp(header + 8, "WAVE", 4) != 0)
-        return false;
-
-    uint32_t pos = 12;
-    while (pos + 8 < (uint32_t)header_len) {
-        uint32_t chunk_id, chunk_size;
-        memcpy(&chunk_id, header + pos, 4);
-        memcpy(&chunk_size, header + pos + 4, 4);
-
-        uint32_t fmt_tag, data_tag;
-        memcpy(&fmt_tag, "fmt ", 4);
-        memcpy(&data_tag, "data", 4);
-
-        if (chunk_id == fmt_tag) {
-            memcpy(channels, header + pos + 10, 2);
-            memcpy(sample_rate, header + pos + 12, 4);
-            memcpy(bits, header + pos + 22, 2);
-        } else if (chunk_id == data_tag) {
-            *data_size = chunk_size;
-            *data_offset_out = pos + 8;
-            return true;
-        }
-        pos += 8 + chunk_size;
-        if (chunk_size % 2 != 0) pos++;
-    }
-    return false;
-}
-
-void fileplayer_init(void) {
-    if (s_fp_initialized) return;
-    s_fp_wav_buffer = malloc(FILEPLAYER_BUFFER_SIZE);
-    memset(s_fileplayers, 0, sizeof(s_fileplayers));
-    s_fp_initialized = true;
-    printf("[FILEPLAYER] Initialized (simulator)\n");
-}
-
-void fileplayer_reset(void) {
-    if (!s_fp_initialized) return;
-    if (s_fp_active && s_fp_active->state == FILEPLAYER_STATE_PLAYING)
-        audio_stop_stream();
-    if (s_fp_file) { sdcard_fclose(s_fp_file); s_fp_file = NULL; }
-    memset(s_fileplayers, 0, sizeof(s_fileplayers));
-    s_fp_active = NULL;
-    s_fp_underflow = false;
-}
-
-fileplayer_t *fileplayer_create(void) {
-    for (int i = 0; i < FILEPLAYER_MAX_INSTANCES; i++) {
-        if (s_fileplayers[i].state == FILEPLAYER_STATE_IDLE) {
-            memset(&s_fileplayers[i], 0, sizeof(fileplayer_t));
-            s_fileplayers[i].volume = 100;
-            s_fileplayers[i].channels = 2;
-            return &s_fileplayers[i];
-        }
-    }
-    return NULL;
-}
-
-void fileplayer_destroy(fileplayer_t *player) {
-    if (player) {
-        fileplayer_stop(player);
-        memset(player, 0, sizeof(fileplayer_t));
-    }
-}
-
-bool fileplayer_load(fileplayer_t *player, const char *path) {
-    if (!player || !path) return false;
-
-    pthread_mutex_lock(&s_fp_mutex);
-    if (s_fp_file) { sdcard_fclose(s_fp_file); s_fp_file = NULL; }
-
-    strncpy(player->path, path, sizeof(player->path) - 1);
-
-    s_fp_file = sdcard_fopen(path, "rb");
-    if (!s_fp_file) {
-        printf("fileplayer: failed to open %s\n", path);
-        pthread_mutex_unlock(&s_fp_mutex);
-        return false;
-    }
-
-    // Check file type
-    uint8_t header[16];
-    memset(header, 0, sizeof(header));
-    sdcard_fread(s_fp_file, header, sizeof(header));
-    sdcard_fseek(s_fp_file, 0);
-
-    if (memcmp(header, "RIFF", 4) != 0 || memcmp(header + 8, "WAVE", 4) != 0) {
-        // Check for MP3
-        if (memcmp(header, "ID3", 3) == 0 ||
-            (header[0] == 0xFF && (header[1] & 0xE0) == 0xE0)) {
-            sdcard_fclose(s_fp_file); s_fp_file = NULL;
-            printf("fileplayer: MP3 file detected, use sound.mp3player() instead\n");
-            pthread_mutex_unlock(&s_fp_mutex);
-            return false;
-        }
-        sdcard_fclose(s_fp_file); s_fp_file = NULL;
-        printf("fileplayer: unknown file format\n");
-        pthread_mutex_unlock(&s_fp_mutex);
-        return false;
-    }
-
-    uint32_t sample_rate = 44100, data_size = 0, data_offset = 44;
-    uint16_t wav_channels = 2, bits = 16;
-    if (!fp_parse_wav_header(s_fp_file, &sample_rate, &wav_channels, &bits, &data_size, &data_offset)) {
-        sdcard_fclose(s_fp_file); s_fp_file = NULL;
-        printf("fileplayer: failed to parse WAV\n");
-        pthread_mutex_unlock(&s_fp_mutex);
-        return false;
-    }
-
-    s_fp_sample_rate = sample_rate;
-    s_fp_channels = wav_channels;
-    s_fp_bits = bits;
-    s_fp_data_offset = data_offset;
-    player->channels = wav_channels;
-    player->length = data_size / (wav_channels * bits / 8);
-    player->position = 0;
-
-    printf("fileplayer: loaded %s (%u Hz, %u bit, %u ch, %u samples)\n",
-           path, sample_rate, bits, wav_channels, player->length);
-    pthread_mutex_unlock(&s_fp_mutex);
-    return true;
-}
-
-bool fileplayer_play(fileplayer_t *player, uint8_t repeat_count) {
-    (void)repeat_count;
-    if (!player || !s_fp_file) return false;
-
-    pthread_mutex_lock(&s_fp_mutex);
-    player->state = FILEPLAYER_STATE_PLAYING;
-    s_fp_active = player;
-
-    audio_start_stream(s_fp_sample_rate);
-    sdcard_fseek(s_fp_file, s_fp_data_offset);
-    player->position = 0;
-    pthread_mutex_unlock(&s_fp_mutex);
-    return true;
-}
-
-void fileplayer_stop(fileplayer_t *player) {
-    if (!player) return;
-
-    pthread_mutex_lock(&s_fp_mutex);
-    player->state = FILEPLAYER_STATE_STOPPED;
-    player->position = 0;
-
-    if (s_fp_active == player) s_fp_active = NULL;
-
-    bool any_playing = false;
-    for (int i = 0; i < FILEPLAYER_MAX_INSTANCES; i++) {
-        if (s_fileplayers[i].state == FILEPLAYER_STATE_PLAYING) {
-            any_playing = true;
-            break;
-        }
-    }
-    if (!any_playing) audio_stop_stream();
-
-    if (s_fp_file) { sdcard_fclose(s_fp_file); s_fp_file = NULL; }
-    pthread_mutex_unlock(&s_fp_mutex);
-}
-
-void fileplayer_pause(fileplayer_t *player) {
-    if (!player || player->state != FILEPLAYER_STATE_PLAYING) return;
-    player->state = FILEPLAYER_STATE_PAUSED;
-}
-
-void fileplayer_resume(fileplayer_t *player) {
-    if (!player || player->state != FILEPLAYER_STATE_PAUSED) return;
-    player->state = FILEPLAYER_STATE_PLAYING;
-}
-
-bool fileplayer_is_playing(const fileplayer_t *player) {
-    return player && player->state == FILEPLAYER_STATE_PLAYING;
-}
-
-uint32_t fileplayer_get_position(const fileplayer_t *player) {
-    if (!player) return 0;
-    return player->position / 4;
-}
-
-uint32_t fileplayer_get_length(const fileplayer_t *player) {
-    if (!player) return 0;
-    return player->length;
-}
-
-void fileplayer_set_volume(fileplayer_t *player, uint8_t left, uint8_t right) {
-    if (!player) return;
-    player->volume = left;
-    s_fp_volume_l = left;
-    s_fp_volume_r = right > 0 ? right : left;
-}
-
-void fileplayer_get_volume(const fileplayer_t *player, uint8_t *left, uint8_t *right) {
-    if (!player) return;
-    if (left) *left = player->volume;
-    if (right) *right = s_fp_volume_r;
-}
-
-void fileplayer_set_loop_range(fileplayer_t *player, uint32_t start, uint32_t end) {
-    if (!player) return;
-    player->loop = true;
-    player->loop_start = start;
-    player->loop_end = end;
-}
-
-void fileplayer_set_finish_callback(fileplayer_t *player, int (*cb)(void *), void *arg) {
-    if (!player) return;
-    player->finish_callback = cb;
-    player->finish_callback_arg = arg;
-}
-
-void fileplayer_set_offset(fileplayer_t *player, uint32_t seconds) {
-    if (!player || !s_fp_file) return;
-    uint32_t offset = seconds * s_fp_sample_rate * 4;
-    sdcard_fseek(s_fp_file, s_fp_data_offset + offset);
-    player->position = offset;
-}
-
-uint32_t fileplayer_get_offset(const fileplayer_t *player) {
-    if (!player) return 0;
-    return player->position / 4 / s_fp_sample_rate;
-}
-
-void fileplayer_set_stop_on_underrun(fileplayer_t *player, bool flag) {
-    if (!player) return;
-    player->stop_on_underrun = flag;
-}
-
-// Called from Core 1 thread every 5ms
-void fileplayer_update(void) {
-    if (!s_fp_initialized) return;
-    if (pthread_mutex_trylock(&s_fp_mutex) != 0) return;
-
-    if (!s_fp_file || !s_fp_active ||
-        s_fp_active->state != FILEPLAYER_STATE_PLAYING ||
-        !s_fp_wav_buffer) {
-        pthread_mutex_unlock(&s_fp_mutex);
-        return;
-    }
-
-    // Backpressure: skip read if SDL already has enough queued audio
-    Uint32 queued = SDL_GetQueuedAudioSize(1);
-    if (queued > 8820) {  // ~50ms at 44100Hz stereo 16-bit
-        pthread_mutex_unlock(&s_fp_mutex);
-        return;
-    }
-
-    // Read a chunk of WAV data
-    int br = sdcard_fread(s_fp_file, s_fp_wav_buffer, 4096);
-
-    if (br > 0) {
-        int16_t *pcm = (int16_t *)s_fp_wav_buffer;
-        uint32_t src_frames = br / (s_fp_channels * 2);
-        double ratio = (double)s_fp_sample_rate / SIM_SAMPLE_RATE;
-        uint32_t dst_frames = (uint32_t)(src_frames / ratio);
-        if (dst_frames == 0) dst_frames = 1;
-
-        int16_t resamp_buf[512];  // 256 stereo output frames
-        uint32_t dst_pos = 0;
-
-        while (dst_pos < dst_frames) {
-            uint32_t chunk = dst_frames - dst_pos;
-            if (chunk > 256) chunk = 256;
-
-            for (uint32_t i = 0; i < chunk; i++) {
-                double src_idx = (dst_pos + i) * ratio;
-                uint32_t idx0 = (uint32_t)src_idx;
-                double frac = src_idx - idx0;
-                uint32_t idx1 = idx0 + 1;
-                if (idx1 >= src_frames) idx1 = src_frames - 1;
-
-                int16_t l0, r0, l1, r1;
-                if (s_fp_channels == 1) {
-                    l0 = r0 = pcm[idx0];
-                    l1 = r1 = pcm[idx1];
-                } else {
-                    l0 = pcm[idx0 * 2]; r0 = pcm[idx0 * 2 + 1];
-                    l1 = pcm[idx1 * 2]; r1 = pcm[idx1 * 2 + 1];
-                }
-
-                int32_t l = (int32_t)(l0 + (l1 - l0) * frac);
-                int32_t r = (int32_t)(r0 + (r1 - r0) * frac);
-                l = l * s_fp_volume_l / 100;
-                r = r * s_fp_volume_r / 100;
-                if (l > 32767) l = 32767; if (l < -32768) l = -32768;
-                if (r > 32767) r = 32767; if (r < -32768) r = -32768;
-                resamp_buf[i * 2] = (int16_t)l;
-                resamp_buf[i * 2 + 1] = (int16_t)r;
-            }
-            audio_push_samples(resamp_buf, chunk);
-            dst_pos += chunk;
-        }
-        s_fp_active->position += br;
-    } else {
-        // End of file or error
-        if (s_fp_active->loop) {
-            sdcard_fseek(s_fp_file, s_fp_data_offset);
-            s_fp_active->position = 0;
-        } else {
-            s_fp_active->state = FILEPLAYER_STATE_STOPPED;
-            if (s_fp_active->finish_callback)
-                s_fp_active->finish_callback(s_fp_active->finish_callback_arg);
-        }
-    }
-    pthread_mutex_unlock(&s_fp_mutex);
-}
-
-bool fileplayer_did_underrun(void) {
-    return s_fp_underflow;
-}
 
 // ══════════════════════════════════════════════════════════════════════════════
 // MP3 Player API (libmad-based)
@@ -978,11 +702,18 @@ static int skip_id3v2(struct mad_stream *stream) {
     return 0;
 }
 
-static bool mp3_refill_decode_buffer(void) {
+// Mirrors src/drivers/mp3_player.c: what a refill achieved. The decode
+// loop continues only on new data; retrying on a buffered partial frame
+// with nothing new to add spun this thread (and the firmware's Core 1)
+// forever at the end of a file that stops mid-frame.
+typedef enum { MP3_REFILL_GOT_DATA, MP3_REFILL_WAIT, MP3_REFILL_EOF } mp3_refill_t;
+
+static mp3_refill_t mp3_refill_decode_buffer(void) {
     if (s_mp3_buf_pos > 0 && s_mp3_bytes_in_buf > 0)
         memmove(s_mp3_decode_buf, s_mp3_decode_buf + s_mp3_buf_pos, s_mp3_bytes_in_buf);
     s_mp3_buf_pos = 0;
 
+    mp3_refill_t result = MP3_REFILL_WAIT;
     int space = MP3_DECODE_BUF_SIZE - s_mp3_bytes_in_buf - MAD_BUFFER_GUARD;
     if (space > 0) {
         if (s_fed_mode) {
@@ -992,19 +723,45 @@ static bool mp3_refill_decode_buffer(void) {
             if (to_read > 0) {
                 fed_ring_read(s_mp3_decode_buf + s_mp3_bytes_in_buf, to_read);
                 s_mp3_bytes_in_buf += (int)to_read;
+                result = MP3_REFILL_GOT_DATA;
             }
+        } else if (!s_mp3_file) {
+            result = MP3_REFILL_EOF;
         } else {
-            if (!s_mp3_file) goto pad;
             int to_read = (space > 4096) ? 4096 : space;
             int br = sdcard_fread(s_mp3_file, s_mp3_decode_buf + s_mp3_bytes_in_buf, to_read);
-            if (br > 0) s_mp3_bytes_in_buf += br;
+            if (br > 0) {
+                s_mp3_bytes_in_buf += br;
+                result = MP3_REFILL_GOT_DATA;
+            } else {
+                result = MP3_REFILL_EOF;
+            }
         }
     }
 
-pad:
     memset(s_mp3_decode_buf + s_mp3_bytes_in_buf, 0, MAD_BUFFER_GUARD);
-    return s_mp3_bytes_in_buf > 0;
+    return result;
 }
+
+// End of file, no whole frame left: loop back (at most once per update) or
+// finish. Returns true when decoding should go on.
+static bool mp3_end_of_stream(bool *rewound) {
+    if (s_mp3_player.loop && !*rewound) {
+        *rewound = true;
+        sdcard_fseek(s_mp3_file, 0);
+        s_mp3_bytes_in_buf = 0;
+        s_mp3_buf_pos = 0;
+        mad_stream_init(s_mad_stream);
+        mad_frame_init(s_mad_frame);
+        mad_synth_init(s_mad_synth);
+        return mp3_refill_decode_buffer() == MP3_REFILL_GOT_DATA;
+    }
+    if (!s_mp3_player.loop)
+        s_mp3_player.playing = false;
+    return false;
+}
+
+#define MP3_MAX_ERRORS_PER_UPDATE 32
 
 static void mp3_decode_fill_ring(void) {
     if (!s_mp3_player.playing || s_mp3_player.paused || !s_mad_stream)
@@ -1017,6 +774,8 @@ static void mp3_decode_fill_ring(void) {
 
     int max_frames = 3;
     int frames_decoded = 0;
+    int errors_this_update = 0;
+    bool rewound = false;
     while (frames_decoded < max_frames && mp3_ring_free() >= 1152) {
         mad_stream_buffer(s_mad_stream,
                           s_mp3_decode_buf + s_mp3_buf_pos,
@@ -1031,48 +790,23 @@ static void mp3_decode_fill_ring(void) {
                 }
             }
 
-            if (s_mad_stream->error == MAD_ERROR_BUFLEN) {
-                if (!mp3_refill_decode_buffer()) {
-                    if (s_fed_mode) {
-                        break;
-                    }
-                    if (s_mp3_player.loop) {
-                        sdcard_fseek(s_mp3_file, 0);
-                        s_mp3_bytes_in_buf = 0;
-                        s_mp3_buf_pos = 0;
-                        mp3_refill_decode_buffer();
-                        mad_stream_init(s_mad_stream);
-                        mad_frame_init(s_mad_frame);
-                        mad_synth_init(s_mad_synth);
-                        continue;
-                    }
-                    s_mp3_player.playing = false;
+            bool need_data = s_mad_stream->error == MAD_ERROR_BUFLEN ||
+                             (s_mad_stream->error == MAD_ERROR_LOSTSYNC &&
+                              s_mp3_bytes_in_buf < 256);
+            if (need_data) {
+                mp3_refill_t r = mp3_refill_decode_buffer();
+                if (r == MP3_REFILL_GOT_DATA)
+                    continue;
+                if (r == MP3_REFILL_WAIT)
                     break;
-                }
-                continue;
+                if (mp3_end_of_stream(&rewound))
+                    continue;
+                break;
             }
 
             if (MAD_RECOVERABLE(s_mad_stream->error)) {
-                if (s_mad_stream->error == MAD_ERROR_LOSTSYNC && s_mp3_bytes_in_buf < 256) {
-                    if (!mp3_refill_decode_buffer()) {
-                        if (s_fed_mode) {
-                            break;
-                        }
-                        if (s_mp3_player.loop) {
-                            sdcard_fseek(s_mp3_file, 0);
-                            s_mp3_bytes_in_buf = 0;
-                            s_mp3_buf_pos = 0;
-                            mp3_refill_decode_buffer();
-                            mad_stream_init(s_mad_stream);
-                            mad_frame_init(s_mad_frame);
-                            mad_synth_init(s_mad_synth);
-                            continue;
-                        }
-                        s_mp3_player.playing = false;
-                        break;
-                    }
-                    continue;
-                }
+                if (++errors_this_update >= MP3_MAX_ERRORS_PER_UPDATE)
+                    break;
                 continue;
             }
 
@@ -1526,8 +1260,9 @@ void hal_audio_update(void) {
     // Sound sample player mixing
     sound_update();
 
-    // File player streaming
+    // File player streaming, then the stream's paced drain
     fileplayer_update();
+    sim_stream_drain();
 
     // MP3 decode + playback
     mp3_player_update();

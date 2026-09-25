@@ -1,0 +1,15 @@
+{
+  "id": "com.picos.editor",
+  "name": "Text Editor",
+  "description": "Nano-like text editor for PicOS",
+  "version": "1.0.0",
+  "author": "PicOS",
+  "requirements": [
+    "filesystem",
+    "root-filesystem",
+    "clipboard"
+  ],
+  "category": "tools",
+  "repo": "jeffory/picos-apps",
+  "min_firmware": "1.0.0"
+}
