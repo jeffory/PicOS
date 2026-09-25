@@ -251,8 +251,10 @@ if(SIM_FIRMWARE_NET)
     # a -Wformat warning on LP64 hosts (long). Firmware code stays untouched.
     set_source_files_properties(${PICOS_ROOT}/src/drivers/wifi.c
         PROPERTIES COMPILE_OPTIONS "-Wno-format")
-    # http.c includes mbedtls/platform.h (declarations only).
-    target_link_libraries(sim_network PRIVATE picos_host_mbedtls)
+    # http.c includes mbedtls/platform.h (declarations only); wifi.c reaches
+    # lua.h through os/system_menu.h and needs the project's Lua and its
+    # config (lua_sim), never a host's /usr/include/lua.h.
+    target_link_libraries(sim_network PRIVATE picos_host_mbedtls lua_sim)
 else()
     add_library(sim_network STATIC
         sim_wifi.c
