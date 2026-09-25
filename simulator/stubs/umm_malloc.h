@@ -1,9 +1,9 @@
 // umm_malloc.h stub for simulator
 //
 // umm_* is backed by the host malloc through a counting allocator
-// (simulator/stubs/driver_stubs.c): it tracks live and peak bytes with
-// malloc_usable_size, so umm_free_heap_size() reports 8 MB minus the live
-// umm/Lua allocations and a leak shows up in get_heap_info. Host malloc (not
+// (simulator/stubs/driver_stubs.c): it tracks the live and peak requested
+// bytes, so umm_free_heap_size() reports 8 MB minus the live umm/Lua
+// allocations and a leak shows up in get_heap_info. Host malloc (not
 // a real umm heap) keeps every allocation visible to ASan.
 //
 // These are real functions, not macros onto malloc: TUs that include the real

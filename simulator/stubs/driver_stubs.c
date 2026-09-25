@@ -10,7 +10,6 @@
 #include <math.h>
 #include <string.h>
 #include <dirent.h>
-#include <malloc.h>
 #include <stdatomic.h>
 #include <sys/stat.h>
 #include <sys/statvfs.h>
@@ -1002,9 +1001,9 @@ _Atomic(void (*)(void)) g_native_audio_callback = NULL;
 // audio_ring_free / audio_stream_debug live in sim_audio.c.
 
 // umm_malloc: a counting allocator over the host malloc (see stubs/
-// umm_malloc.h). Live bytes are malloc_usable_size() of every block handed
-// out, so the metric moves exactly with the allocations; Core 1 (network
-// thread) allocates too, hence the atomics. The simulated heap refuses
+// umm_malloc.h). Live bytes are the requested sizes of every block handed
+// out (kept in a header, below), so the metric moves exactly with the
+// allocations; Core 1 (network thread) allocates too, hence the atomics. The simulated heap refuses
 // requests that would exceed 8 MB, like the device heap would.
 //
 // --real-umm (sim_umm_use_real) switches every umm_* call to the firmware's
@@ -1086,12 +1085,50 @@ int umm_fragmentation_metric(void) {
     return 0;
 }
 
+// Every counting block carries its requested size in a 16-byte header (16
+// keeps malloc's alignment), so the count is exactly what the OS asked for.
+// malloc_usable_size() would count glibc's chunk instead, and glibc hands out
+// a reused chunk whole when the remainder is under its 32-byte minimum: the
+// same allocations then counted differently with the host heap's layout
+// (glibc version, thread arenas, timing). ASan builds poison the header.
+#define UMM_HDR 16
+_Static_assert(sizeof(size_t) <= UMM_HDR, "size_t fits the umm header");
+#if defined(__SANITIZE_ADDRESS__)
+#define UMM_ASAN 1
+#elif defined(__has_feature)
+#if __has_feature(address_sanitizer)
+#define UMM_ASAN 1
+#endif
+#endif
+#ifdef UMM_ASAN
+#include <sanitizer/asan_interface.h>
+#define UMM_HDR_POISON(b)   ASAN_POISON_MEMORY_REGION((b), UMM_HDR)
+#define UMM_HDR_UNPOISON(b) ASAN_UNPOISON_MEMORY_REGION((b), UMM_HDR)
+#else
+#define UMM_HDR_POISON(b)   ((void)(b))
+#define UMM_HDR_UNPOISON(b) ((void)(b))
+#endif
+
+static void *umm_hdr_wrap(uint8_t *base, size_t size) {
+    memcpy(base, &size, sizeof(size));
+    UMM_HDR_POISON(base);
+    return base + UMM_HDR;
+}
+// The block's malloc base, unpoisoned; *size gets its requested size.
+static uint8_t *umm_hdr_open(void *ptr, size_t *size) {
+    uint8_t *base = (uint8_t *)ptr - UMM_HDR;
+    UMM_HDR_UNPOISON(base);
+    memcpy(size, base, sizeof(*size));
+    return base;
+}
+
 void* umm_malloc(size_t size) {
     if (s_umm_real) return sim_real_umm_malloc(size);
     if (umm_would_overflow(size)) return NULL;
-    void *p = malloc(size);
-    if (p) umm_count_add(malloc_usable_size(p));
-    return p;
+    uint8_t *base = malloc(UMM_HDR + size);
+    if (!base) return NULL;
+    umm_count_add(size);
+    return umm_hdr_wrap(base, size);
 }
 void umm_free(void* ptr) {
     if (s_umm_real) {
@@ -1099,8 +1136,10 @@ void umm_free(void* ptr) {
         return;
     }
     if (!ptr) return;
-    umm_count_sub(malloc_usable_size(ptr));
-    free(ptr);
+    size_t size;
+    uint8_t *base = umm_hdr_open(ptr, &size);
+    umm_count_sub(size);
+    free(base);
 }
 void* umm_realloc(void* ptr, size_t size) {
     if (s_umm_real) return sim_real_umm_realloc(ptr, size);
@@ -1109,13 +1148,20 @@ void* umm_realloc(void* ptr, size_t size) {
         umm_free(ptr);
         return NULL;
     }
-    size_t old = malloc_usable_size(ptr);
-    if (size > old && umm_would_overflow(size - old)) return NULL;
-    void *p = realloc(ptr, size);
-    if (!p) return NULL;  // ptr is untouched and still counted
+    size_t old;
+    uint8_t *base = umm_hdr_open(ptr, &old);
+    if (size > old && umm_would_overflow(size - old)) {
+        UMM_HDR_POISON(base);
+        return NULL;
+    }
+    uint8_t *grown = realloc(base, UMM_HDR + size);
+    if (!grown) {  // ptr is untouched and still counted
+        UMM_HDR_POISON(base);
+        return NULL;
+    }
     umm_count_sub(old);
-    umm_count_add(malloc_usable_size(p));
-    return p;
+    umm_count_add(size);
+    return umm_hdr_wrap(grown, size);
 }
 void* umm_calloc(size_t num, size_t size) {
     if (s_umm_real) return sim_real_umm_calloc(num, size);
