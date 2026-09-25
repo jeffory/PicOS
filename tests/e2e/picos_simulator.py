@@ -533,7 +533,14 @@ class PicosSimulator:
                 continue
             except OSError:
                 break
+        # The simulator closed the connection (it exited or crashed): no reply
+        # will come, so fail the calls still waiting instead of letting each
+        # run out its timeout. call() registers under the same lock after
+        # checking _connected, so none can start waiting after this.
         self._connected = False
+        with self._pending_lock:
+            for entry in self._pending.values():
+                entry["event"].set()
 
     # ── JSON-RPC ──────────────────────────────────────────────────────────────
 
@@ -548,6 +555,8 @@ class PicosSimulator:
 
         event = threading.Event()
         with self._pending_lock:
+            if not self._connected:
+                raise RuntimeError("Not connected to simulator")
             self._pending[req_id] = {"event": event, "result": None}
 
         payload = json.dumps({
@@ -570,7 +579,8 @@ class PicosSimulator:
             entry = self._pending.pop(req_id, None)
 
         if not entry or not entry["result"]:
-            raise RuntimeError(f"No response for {method}")
+            raise RuntimeError(
+                f"No response for {method}: the simulator closed the connection")
 
         msg = entry["result"]
         if "error" in msg:

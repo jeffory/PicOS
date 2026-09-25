@@ -7,6 +7,7 @@
 - a failing @pytest.mark.flaky test is quarantined, not retried
 - a missing golden image fails unless --update-baselines
 - wait_for_exit recovers an app.exited notification the client never got
+- a call whose reply can never come (connection closed) fails at once
 - the Lua test kit reports PASS/FAIL/SKIP, survives identity tampering and
   writes test_results.json
 
@@ -16,13 +17,17 @@ conftest.py, so they test the real hooks.
 
 import re
 import site
+import socket
 import textwrap
+import threading
+import time
 from pathlib import Path
 
 import numpy as np
 import pytest
 
 from helpers import E2E_DIR, compare_golden, run_lua_app, stage_lua_app
+from picos_simulator import PicosSimulator
 
 pytest_plugins = ["pytester"]
 
@@ -187,6 +192,35 @@ def test_crash_mid_lua_suite_fails_every_case_with_evidence(pytester, simulator_
     assert _segv_count(out) >= 3, out         # crash log (or ASan) per case
     assert out.count("stderr tail:") >= 3, out            # stderr per case
     assert out.count("simulator_died") >= 3, out
+
+
+def test_call_fails_at_once_when_the_connection_closes_mid_call():
+    """The simulator closes the connection after reading a request (it
+    crashed or exited): the pending call fails with a connection error at
+    once, not a TimeoutError after the full RPC timeout. run_lua_app tells a
+    dead simulator from a hung one by that difference; an ASan build that
+    died mid-call used to be reported as "timeout"."""
+    srv = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    srv.bind(("127.0.0.1", 0))
+    srv.listen(1)
+
+    def serve():
+        conn, _ = srv.accept()
+        conn.recv(4096)  # the request; no reply
+        conn.close()
+
+    threading.Thread(target=serve, daemon=True).start()
+    sim = PicosSimulator(timeout=10.0)
+    sim.tcp_port = srv.getsockname()[1]
+    sim._connect()
+    try:
+        start = time.monotonic()
+        with pytest.raises(RuntimeError):
+            sim.call("get_last_outcome")
+        assert time.monotonic() - start < 2.0
+    finally:
+        sim._disconnect()
+        srv.close()
 
 
 def test_sim_factory_sims_are_health_checked(pytester, simulator_binary):
