@@ -3,6 +3,6 @@
     "name": "Sandbox Test",
     "description": "E2E fixture: filesystem sandbox enforcement (no requirements)",
     "version": "1.0",
-    "author": "PicOS E2E",
+    "author": "PicoDeck E2E",
     "requirements": []
 }

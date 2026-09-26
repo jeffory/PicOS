@@ -2,7 +2,7 @@
 §5.3 R15). Run them on a PicoCalc:
 
     pytest tests/e2e/test_hw_device.py -v \\
-        --target hw:/dev/serial/by-id/usb-Raspberry_Pi_PicOS_Device_<serial>-if00
+        --target hw:/dev/serial/by-id/usb-Raspberry_Pi_PicoDeck_Device_<serial>-if00
 
 On the simulator they skip (allow-listed through the `hardware` marker).
 
@@ -90,7 +90,7 @@ def test_display_byte_order_matches_the_simulator(target):
                 if got != want:
                     wrong.append(f"{name} at ({cx + dx},{cy + dy}): {got} != {want}")
         if wrong:
-            Path(tempfile.gettempdir(), "picos_hw_color.png").write_bytes(png)
+            Path(tempfile.gettempdir(), "picodeck_hw_color.png").write_bytes(png)
         assert not wrong, "\n".join(wrong)
     finally:
         _stop_probe(target)

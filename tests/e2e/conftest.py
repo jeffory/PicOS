@@ -1,4 +1,4 @@
-"""pytest fixtures and hooks for the PicOS E2E suite.
+"""pytest fixtures and hooks for the PicoDeck E2E suite.
 
 Usage (from any directory):
     SDL_VIDEODRIVER=dummy pytest tests/e2e -n auto
@@ -24,7 +24,7 @@ import pytest
 import hw_target
 from helpers import (DEFAULT_SD_SOURCE, E2E_DIR, build_sd_card, new_simulator,
                      run_lua_app, stop_and_check)
-from picos_simulator import (PicosSimulator, binary_firmware_net,
+from picodeck_simulator import (PicodeckSimulator, binary_firmware_net,
                              binary_sanitizers)
 
 SKIP_ALLOWLIST = E2E_DIR / "skip_allowlist.txt"
@@ -45,9 +45,9 @@ def pytest_addoption(parser):
     )
     parser.addoption(
         "--simulator-path", action="store",
-        default=str(PicosSimulator.DEFAULT_BINARY),
-        help="Path to the picos_simulator binary (default: $PICOS_SIM_BINARY, "
-             "else build_sim/picos_simulator)",
+        default=str(PicodeckSimulator.DEFAULT_BINARY),
+        help="Path to the picodeck_simulator binary (default: $PICODECK_SIM_BINARY, "
+             "else build_sim/picodeck_simulator)",
     )
     parser.addoption(
         "--sd-card-path", action="store", default=str(DEFAULT_SD_SOURCE),
@@ -65,8 +65,8 @@ def sim_sanitizers(config):
     """(probe_ok, kinds) for the simulator under test: kinds is the set of
     -fsanitize= kinds from its `--build-info` (empty for a release build).
     probe_ok is False when the probe failed, so nothing is known.
-    PICOS_SIM_SANITIZE set by hand overrides the probe."""
-    manual = os.environ.get("PICOS_SIM_SANITIZE")
+    PICODECK_SIM_SANITIZE set by hand overrides the probe."""
+    manual = os.environ.get("PICODECK_SIM_SANITIZE")
     if manual:
         return True, set(re.split(r"[;,]", manual)) - {""}
     san = binary_sanitizers(Path(config.getoption("--simulator-path")))
@@ -81,35 +81,35 @@ def sim_is_sanitized(config) -> bool:
 
 
 def pytest_configure(config):
-    """PICOS_SIM_EXPECT_SANITIZE (set by the sanitizer CI legs, e.g.
+    """PICODECK_SIM_EXPECT_SANITIZE (set by the sanitizer CI legs, e.g.
     "address"): refuse to run unless the binary's --build-info confirms it,
     so a failed probe can't turn an ASan leg into a release run whose
-    asan_only tests all skip. PICOS_SIM_EXPECT_FIRMWARE_NET=1 does the same
+    asan_only tests all skip. PICODECK_SIM_EXPECT_FIRMWARE_NET=1 does the same
     for the firmware_net tests (make simulator-net)."""
     hw_target.configure_target(config)  # a bad --target fails here
-    if os.environ.get("PICOS_SIM_EXPECT_FIRMWARE_NET") == "1":
+    if os.environ.get("PICODECK_SIM_EXPECT_FIRMWARE_NET") == "1":
         # The firmware-net CI legs: a failed probe or a default build must
         # not quietly skip every firmware_net test.
         net_ok, net_on = sim_firmware_net(config)
         if not (net_ok and net_on):
             raise pytest.UsageError(
-                "PICOS_SIM_EXPECT_FIRMWARE_NET=1 but "
+                "PICODECK_SIM_EXPECT_FIRMWARE_NET=1 but "
                 f"`{config.getoption('--simulator-path')} --build-info` "
                 + ("failed" if not net_ok else "reports firmware_net=0")
                 + " (build it with make simulator-net)")
-    expect = set(re.split(r"[;,]", os.environ.get("PICOS_SIM_EXPECT_SANITIZE", ""))) - {""}
+    expect = set(re.split(r"[;,]", os.environ.get("PICODECK_SIM_EXPECT_SANITIZE", ""))) - {""}
     if not expect:
         return
     probe_ok, kinds = sim_sanitizers(config)
     binary = config.getoption("--simulator-path")
     if not probe_ok:
         raise pytest.UsageError(
-            f"PICOS_SIM_EXPECT_SANITIZE={','.join(sorted(expect))} but "
+            f"PICODECK_SIM_EXPECT_SANITIZE={','.join(sorted(expect))} but "
             f"`{binary} --build-info` failed (missing binary, crash or timeout)")
     missing = expect - kinds
     if missing:
         raise pytest.UsageError(
-            f"PICOS_SIM_EXPECT_SANITIZE={','.join(sorted(expect))} but "
+            f"PICODECK_SIM_EXPECT_SANITIZE={','.join(sorted(expect))} but "
             f"{binary} was built with sanitize="
             f"{','.join(sorted(kinds)) or '(none)'}; missing {','.join(sorted(missing))}")
 
@@ -123,16 +123,16 @@ def sim_firmware_net(config):
 
 def pytest_collection_modifyitems(config, items):
     """asan_only tests need an ASan build of the simulator
-    (PICOS_SIM_BINARY=build_sim_asan/picos_simulator); otherwise they skip.
+    (PICODECK_SIM_BINARY=build_sim_asan/picodeck_simulator); otherwise they skip.
     firmware_net tests need a SIM_FIRMWARE_NET build
-    (PICOS_SIM_BINARY=build_sim_net/picos_simulator); otherwise they skip."""
+    (PICODECK_SIM_BINARY=build_sim_net/picodeck_simulator); otherwise they skip."""
     hw_target.apply_target_rules(config, items)  # hardware / both markers
     if any("firmware_net" in item.keywords for item in items):
         if not sim_firmware_net(config)[1]:
             skip_net = pytest.mark.skip(
                 reason="firmware_net: needs the simulator built with the "
                        "firmware network stack (make simulator-net; "
-                       "PICOS_SIM_BINARY=build_sim_net/picos_simulator)")
+                       "PICODECK_SIM_BINARY=build_sim_net/picodeck_simulator)")
             for item in items:
                 if "firmware_net" in item.keywords:
                     item.add_marker(skip_net)
@@ -142,7 +142,7 @@ def pytest_collection_modifyitems(config, items):
         return
     skip = pytest.mark.skip(reason="asan_only: needs an ASan build of the "
                                    "simulator (make simulator-asan; "
-                                   "PICOS_SIM_BINARY=build_sim_asan/picos_simulator)")
+                                   "PICODECK_SIM_BINARY=build_sim_asan/picodeck_simulator)")
     for item in items:
         if "asan_only" in item.keywords:
             item.add_marker(skip)
@@ -156,10 +156,10 @@ def simulator_binary(request) -> Path:
     """The simulator binary, built on demand."""
     binary_path = Path(request.config.getoption("--simulator-path")).resolve()
     # Only the default release binary is built on demand; a missing
-    # PICOS_SIM_BINARY / --simulator-path must not silently fall back to it.
-    if not binary_path.exists() and binary_path == PicosSimulator.PROJECT_ROOT / "build_sim" / "picos_simulator":
+    # PICODECK_SIM_BINARY / --simulator-path must not silently fall back to it.
+    if not binary_path.exists() and binary_path == PicodeckSimulator.PROJECT_ROOT / "build_sim" / "picodeck_simulator":
         try:
-            PicosSimulator.build()
+            PicodeckSimulator.build()
         except subprocess.CalledProcessError as e:
             pytest.fail(f"Failed to build simulator: {e}")
     if not binary_path.exists():
@@ -179,7 +179,7 @@ def test_sd_card(tmp_path, request):
 
 @pytest.fixture
 def sim_factory(request, simulator_binary, tmp_path):
-    """Start extra simulators: sim_factory(sd_path, **PicosSimulator kwargs).
+    """Start extra simulators: sim_factory(sd_path, **PicodeckSimulator kwargs).
     Each is stopped and health-checked at teardown."""
     sims = []
 
@@ -206,7 +206,7 @@ def sim_factory(request, simulator_binary, tmp_path):
 
 
 @pytest.fixture
-def simulator(sim_factory, test_sd_card) -> PicosSimulator:
+def simulator(sim_factory, test_sd_card) -> PicodeckSimulator:
     """A fresh simulator per test on the per-test SD card."""
     return sim_factory(test_sd_card)
 
@@ -301,20 +301,20 @@ def _register(node, sim):
     """Record a factory-made simulator on a collection node (the test item
     for sim_factory, the module for sim_module_factory) so the health hook
     finds it; factories hand tests a function, not the simulator."""
-    if not hasattr(node, "_picos_sims"):
-        node._picos_sims = []
-    node._picos_sims.append(sim)
+    if not hasattr(node, "_picodeck_sims"):
+        node._picodeck_sims = []
+    node._picodeck_sims.append(sim)
 
 
 def _sims_of(item) -> list:
-    """Every PicosSimulator the test used: fixture values that are
+    """Every PicodeckSimulator the test used: fixture values that are
     simulators, plus simulators registered by sim_factory on the item and
     by sim_module_factory on its module. (lua_suite stops its simulator
     before returning; its health lands in LuaRun.problems instead.)"""
     funcargs = getattr(item, "funcargs", {}) or {}
-    found = [v for v in funcargs.values() if isinstance(v, PicosSimulator)]
+    found = [v for v in funcargs.values() if isinstance(v, PicodeckSimulator)]
     for node in item.listchain():
-        found += getattr(node, "_picos_sims", [])
+        found += getattr(node, "_picodeck_sims", [])
     seen, out = set(), []
     for sim in found:
         if id(sim) not in seen:
@@ -328,7 +328,7 @@ def _tail(text: str, n: int = 200) -> str:
     return "\n".join(lines[-n:])
 
 
-def _collect_diagnostics(sim: PicosSimulator) -> dict:
+def _collect_diagnostics(sim: PicodeckSimulator) -> dict:
     """Text sections plus an optional screenshot (PNG bytes)."""
     diag = {}
     out = sim.get_output()
@@ -481,7 +481,7 @@ def pytest_sessionfinish(session, exitstatus):
     bad = [r for r in _skipped
            if not _skip_allowed(r, patterns, probe_ok, net_probe_ok)]
     if bad:
-        session.config._picos_bad_skips = bad
+        session.config._picodeck_bad_skips = bad
         if session.exitstatus == 0:
             session.exitstatus = pytest.ExitCode.TESTS_FAILED
 
@@ -491,7 +491,7 @@ def pytest_terminal_summary(terminalreporter, exitstatus, config):
         terminalreporter.section("quarantined flaky tests that failed", yellow=True)
         for r in _quarantined:
             terminalreporter.line(f"{r.nodeid} ({r.when}): {r.wasxfail}")
-    bad = getattr(config, "_picos_bad_skips", [])
+    bad = getattr(config, "_picodeck_bad_skips", [])
     if bad:
         terminalreporter.section("skips not on tests/e2e/skip_allowlist.txt",
                                  red=True)

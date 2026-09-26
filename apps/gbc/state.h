@@ -5,7 +5,7 @@
 
 struct PicoCalcAPI;
 
-// Single-slot save states at /data/com.picos.gbc/states/<rom_name>.st
+// Single-slot save states at /data/net.picodeck.gbc/states/<rom_name>.st
 // File = gbc_state_header_t + raw gb_s blob + cart RAM.
 //
 // state.c treats the emulator state as an opaque blob: peanut_gb.h can

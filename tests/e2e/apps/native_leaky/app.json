@@ -3,5 +3,5 @@
     "name": "Native Leaky",
     "description": "E2E fixture: opens files, allocates images/players/PSRAM and exits without freeing (source: tests/e2e/native/leaky.c)",
     "version": "1.0",
-    "author": "PicOS E2E"
+    "author": "PicoDeck E2E"
 }

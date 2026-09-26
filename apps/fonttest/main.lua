@@ -2,7 +2,7 @@
 local pc, disp, input, gfx = picocalc, picocalc.display, picocalc.input, picocalc.graphics
 local BLACK, WHITE, GRAY = 0x0000, 0xFFFF, disp.rgb(128, 128, 128)
 local CYAN, YELLOW = disp.rgb(0, 255, 255), disp.rgb(255, 255, 0)
-local PARA = "PicOS fonts: four built-ins live in flash and any .pfn on the SD card " ..
+local PARA = "PicoDeck fonts: four built-ins live in flash and any .pfn on the SD card " ..
              "loads into PSRAM. Proportional fonts carry an advance per glyph, so " ..
              "measurement, alignment and wrapping all use real widths."
 

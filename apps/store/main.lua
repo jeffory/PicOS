@@ -1,4 +1,4 @@
--- PicOS App Store
+-- PicoDeck App Store
 -- Browse, install, update, and remove apps + firmware updates
 -- Merges and replaces the old System Updater app
 
@@ -13,11 +13,11 @@ local crypto = picocalc.crypto
 
 -- ── Configuration ──────────────────────────────────────────────────────────
 
-local CATALOG_HOST = "picos.jeffory.dev"
+local CATALOG_HOST = "store.picodeck.net"
 local CATALOG_PORT = 443
 local CATALOG_SSL  = true
 local CATALOG_PATH = "/catalog.json"
-local CACHE_DIR    = "/data/com.picos.store"
+local CACHE_DIR    = "/data/net.picodeck.store"
 local CACHE_FILE   = CACHE_DIR .. "/catalog.json"
 local STAGING_DIR  = "/apps/.staging"
 local MAX_REDIRECTS = 3
@@ -180,7 +180,7 @@ local function parse_url(url)
 end
 
 -- Developers can point a device at a staging indexer without reflashing:
--- picocalc.sysconfig.set("store_url", "https://picos-staging.example.workers.dev/catalog.json")
+-- picocalc.sysconfig.set("store_url", "https://picodeck-staging.example.workers.dev/catalog.json")
 local function catalog_endpoint()
     local override = picocalc.sysconfig.get("store_url")
     if override and #override > 0 then
@@ -469,7 +469,7 @@ local function fetch_catalog()
         end
     end)
 
-    conn:get(path, {["User-Agent"] = "PicOS-Store/1.1"})
+    conn:get(path, {["User-Agent"] = "PicoDeck-Store/1.1"})
 end
 
 -- ── Network: Download straight to a file ───────────────────────────────────
@@ -656,7 +656,7 @@ local function download_file_with_redirects(url, dest_path, redirect_count, on_c
         end
     end)
 
-    conn:get(path, {["User-Agent"] = "PicOS-Store/1.0"})
+    conn:get(path, {["User-Agent"] = "PicoDeck-Store/1.0"})
 end
 
 -- Fetch a small text body (a checksum file) into memory, following
@@ -713,7 +713,7 @@ local function fetch_small_text(url, redirect_count, on_done)
     conn:setConnectionClosedCallback(function()
         finish(nil, conn:getError() or "Connection closed")
     end)
-    conn:get(path, {["User-Agent"] = "PicOS-Store/1.1"})
+    conn:get(path, {["User-Agent"] = "PicoDeck-Store/1.1"})
 end
 
 -- ── App installation ───────────────────────────────────────────────────────
@@ -727,7 +727,7 @@ local function install_app(app)
     end
 
     -- Self-update guard: the store can't safely replace itself while running
-    if app.id == "com.picos.store" then
+    if app.id == "net.picodeck.store" then
         error_msg = "Store updates are applied via firmware update"
         ui.toast(error_msg, ui.TOAST_INFO)
         current_screen = SCR_DETAIL
@@ -886,20 +886,20 @@ local function start_firmware_update()
     download_retry_needed = false
 
     local tag = fw_info.release_tag
-    local repo = fw_info.repo or "jeffory/picOS"
+    local repo = fw_info.repo or "PicoDeck/picodeck"
     local url = "https://github.com/" .. repo ..
-                "/releases/download/" .. tag .. "/picocalc_os.bin"
+                "/releases/download/" .. tag .. "/picodeck.bin"
     fw_hash_url = "https://github.com/" .. repo ..
-                  "/releases/download/" .. tag .. "/picocalc_os.sha256"
+                  "/releases/download/" .. tag .. "/picodeck.sha256"
     local fw_sig_url = "https://github.com/" .. repo ..
-                       "/releases/download/" .. tag .. "/picocalc_os.sig"
+                       "/releases/download/" .. tag .. "/picodeck.sig"
 
     if fs.exists(BIN_PATH) then fs.delete(BIN_PATH) end
     if fs.exists(HASH_PATH) then fs.delete(HASH_PATH) end
     if fs.exists(SIG_PATH) then fs.delete(SIG_PATH) end
 
     -- The OS refuses to flash an image without /system/update.sha256 and a
-    -- valid /system/update.sig (ECDSA signature by the PicOS update key), so
+    -- valid /system/update.sig (ECDSA signature by the PicoDeck update key), so
     -- fetch both (small, in memory) before the image; a release missing
     -- either is not offered for install.
     fetch_small_text(fw_hash_url, 0, function(body, herr)
@@ -1099,7 +1099,7 @@ local function draw_updates()
     if fw_info then
         items[#items + 1] = {
             is_firmware = true,
-            name = "PicOS Firmware",
+            name = "PicoDeck Firmware",
             version = fw_info.version,
             description = fw_info.changelog or "Firmware update available",
             size_kb = fw_info.size_kb,
@@ -1128,7 +1128,7 @@ local function draw_updates()
             if is_sel then display.fillRect(0, y - 2, W, 28, bg) end
 
             if item.is_firmware then
-                display.drawText(8, y, "PicOS Firmware", ORANGE, bg)
+                display.drawText(8, y, "PicoDeck Firmware", ORANGE, bg)
                 local ver = sys.getVersion() .. " -> " .. fw_info.version
                 display.drawText(8, y + 13, ver, CYAN, bg)
             else

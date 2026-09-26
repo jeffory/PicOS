@@ -1,7 +1,7 @@
 // libFuzzer target for src/os/elf_plan.c: plan, copy and relocate an
 // arbitrary byte string exactly as the loaders do.  Any out-of-bounds read
 // or write (ASan) or UB (UBSan) is a crash.  Seed corpus: tests/fuzz/corpus/
-// elf_plan (real PicOS app ELFs).
+// elf_plan (real PicoDeck app ELFs).
 #include "elf_plan.h"
 
 #include <stdint.h>

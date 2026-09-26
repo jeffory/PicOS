@@ -59,7 +59,7 @@ typedef struct {
 #define ELF_PT_DYNAMIC 2u
 #define ELF_PF_X       0x1u
 
-// Upper bound on e_phnum.  Real PicOS apps have 3-8 program headers; the cap
+// Upper bound on e_phnum.  Real PicoDeck apps have 3-8 program headers; the cap
 // bounds the phdr allocation and rejects PN_XNUM (0xFFFF) outright.
 #define ELF_PLAN_MAX_PHNUM 64u
 
@@ -142,7 +142,7 @@ typedef struct {
 typedef struct {
     uint32_t applied;   // R_ARM_RELATIVE entries rewritten
     uint32_t symbolic;  // R_ARM_ABS32/GLOB_DAT/JUMP_SLOT left as-is (no
-                        // symbol table is loaded; in PicOS apps these name
+                        // symbol table is loaded; in PicoDeck apps these name
                         // undefined weak symbols, which resolve to 0)
 } elf_reloc_stats_t;
 

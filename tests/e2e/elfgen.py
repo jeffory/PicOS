@@ -1,11 +1,11 @@
 """Build tiny ELF32 ARM PIE images with struct.pack, valid or deliberately
 malformed, for the native-loader E2E tests (test_native_malformed.py).
 
-The valid image is the smallest thing both PicOS loaders accept and run
+The valid image is the smallest thing both PicoDeck loaders accept and run
 (src/os/elf_plan.c validates for the firmware's native_loader.c and the
 simulator's unicorn_runner.c alike): ET_DYN, EM_ARM, one RWX PT_LOAD that
 covers the whole file at vaddr 0, and a PT_DYNAMIC naming one DT_REL table
-with a single R_ARM_RELATIVE entry. The code is `bx lr`, so picos_main()
+with a single R_ARM_RELATIVE entry. The code is `bx lr`, so picodeck_main()
 returns at once and the launch outcome is "returned".
 
 File layout (file offset == virtual address):

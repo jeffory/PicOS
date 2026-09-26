@@ -37,7 +37,7 @@ static int l_sys_getBattery(lua_State *L) {
 static int l_sys_log(lua_State *L) {
   const char *msg = luaL_checkstring(L, 1);
   printf("[APP] %s\n", msg);
-#ifdef PICOS_SIMULATOR
+#ifdef PICODECK_SIMULATOR
   extern void sim_log_append(const char *line);
   sim_log_append(msg);
 #endif
@@ -230,7 +230,7 @@ static int l_sys_addMenuItem(lua_State *L) {
 }
 
 static int l_sys_getVersion(lua_State *L) {
-  lua_pushstring(L, PICOS_VERSION);
+  lua_pushstring(L, PICODECK_VERSION);
   return 1;
 }
 
@@ -515,8 +515,8 @@ static bool sys_update_allowed(void) {
     return false;
   if (strncasecmp(me->dir, "/system/", 8) == 0)
     return true;
-  return strcmp(me->id, "com.picos.updater") == 0 ||
-         strcmp(me->id, "com.picos.store") == 0;
+  return strcmp(me->id, "net.picodeck.updater") == 0 ||
+         strcmp(me->id, "net.picodeck.store") == 0;
 }
 
 void lua_bridge_sys_init(lua_State *L) {

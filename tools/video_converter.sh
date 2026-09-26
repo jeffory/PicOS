@@ -71,7 +71,7 @@ if [[ "$FILE" =~ ^http ]]; then
     FILE="$TMPFILE"
 fi
 
-OUTPUT_DIR="$HOME/Videos/PicOS/"
+OUTPUT_DIR="$HOME/Videos/PicoDeck/"
 if [ ! -d "$OUTPUT_DIR" ]; then
     echo "Output directory $OUTPUT_DIR does not exist."
     exit 1
@@ -81,7 +81,7 @@ FILENAME=$(basename "$FILE")
 EXTENSION="${FILENAME##*.}"
 BASENAME="${FILENAME%.*}"
 
-echo "Converting $FILE to AVI format for PicOS video player..."
+echo "Converting $FILE to AVI format for PicoDeck video player..."
 
 
 

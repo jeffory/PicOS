@@ -7,7 +7,7 @@
 #include "umm_malloc.h"
 #include "pico/time.h"
 
-#ifdef PICOS_SIMULATOR
+#ifdef PICODECK_SIMULATOR
 #include "sim_socket_handler.h"
 #endif
 
@@ -30,7 +30,7 @@ static lua_terminal_t* check_terminal(lua_State* L, int idx) {
 static int l_terminal_gc(lua_State* L) {
     lua_terminal_t* t = (lua_terminal_t*)luaL_checkudata(L, 1, TERMINAL_MT);
     if (t->term) {
-#ifdef PICOS_SIMULATOR
+#ifdef PICODECK_SIMULATOR
         if (sim_get_active_terminal() == t->term)
             sim_set_active_terminal(NULL);
 #endif
@@ -71,7 +71,7 @@ static int l_terminal_new(lua_State* L) {
     t->term = term;
     terminal_parser_init(&t->parser, term);
 
-#ifdef PICOS_SIMULATOR
+#ifdef PICODECK_SIMULATOR
     sim_set_active_terminal(term);
 #endif
 

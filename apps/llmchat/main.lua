@@ -1,4 +1,4 @@
--- LLM Chat App for PicOS
+-- LLM Chat App for PicoDeck
 -- Chat with OpenAI, Anthropic Claude, or Ollama
 
 local pc    = picocalc

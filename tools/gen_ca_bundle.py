@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Generate src/drivers/ca_bundle.{c,h}: the root CAs PicOS trusts for TLS.
+"""Generate src/drivers/ca_bundle.{c,h}: the root CAs PicoDeck trusts for TLS.
 
 The firmware verifies every HTTPS / tls:// server certificate against this
 bundle (src/drivers/wifi.c passes it to mg_tls_init as opts.ca).  It is kept
@@ -45,7 +45,8 @@ ROOTS = {
     "isrg-root-x2": ("ISRG Root X2", "Let's Encrypt ECDSA"),
     "gts-root-r1": ("GTS Root R1", "Google Trust Services RSA"),
     "gts-root-r4": ("GTS Root R4",
-                    "picos.jeffory.dev (WE1 -> GTS Root R4), Cloudflare"),
+                    "Google Trust Services ECDSA (Cloudflare Universal SSL, "
+                    "e.g. store.picodeck.net)"),
     "sectigo-public-server-authentication-root-e46": (
         "Sectigo Public Server Authentication Root E46",
         "github.com, api.github.com, codeload.github.com (DV E36 -> E46)"),

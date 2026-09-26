@@ -3,6 +3,6 @@
     "name": "Save Test",
     "description": "E2E fixture: game.save name handling",
     "version": "1.0",
-    "author": "PicOS E2E",
+    "author": "PicoDeck E2E",
     "requirements": []
 }

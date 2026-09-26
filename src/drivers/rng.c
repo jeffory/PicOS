@@ -171,7 +171,7 @@ bool rng_init_this_core(void) {
                                       RNG_ENTROPY_THRESHOLD,
                                       MBEDTLS_ENTROPY_SOURCE_STRONG);
   if (rc == 0) {
-    static const char pers[] = "picos-rng";
+    static const char pers[] = "picodeck-rng";
     unsigned char custom[sizeof(pers) + 1];
     memcpy(custom, pers, sizeof(pers));
     custom[sizeof(pers)] = (unsigned char)core;  // distinct per core

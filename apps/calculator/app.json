@@ -1,10 +1,10 @@
 {
-  "id": "com.picos.calculator",
+  "id": "net.picodeck.calculator",
   "name": "Calculator",
   "description": "Scientific calculator with expression evaluation",
   "version": "0.1.0",
-  "author": "PicOS",
+  "author": "PicoDeck",
   "category": "tools",
-  "repo": "jeffory/picos-apps",
+  "repo": "PicoDeck/picodeck",
   "min_firmware": "1.0.0"
 }

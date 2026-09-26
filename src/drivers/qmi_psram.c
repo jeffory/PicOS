@@ -1,14 +1,14 @@
 // QMI (CS1) PSRAM quad-mode initialisation.  See qmi_psram.h.
 //
 // Derived from SparkFun's sfe_psram.c (MIT, (c) 2024 SparkFun Electronics):
-// https://github.com/sparkfun/sparkfun-pico — adapted for PicOS with a
+// https://github.com/sparkfun/sparkfun-pico — adapted for PicoDeck with a
 // write/readback self-test, RXDELAY escalation, and a serial-mode fallback so
 // a marginal chip degrades to the old (slow) configuration instead of
 // boot-looping the device.
 
 #include "qmi_psram.h"
 
-#if defined(PICO_RP2350) && !defined(PICOS_SIMULATOR)
+#if defined(PICO_RP2350) && !defined(PICODECK_SIMULATOR)
 
 #include "hardware/clocks.h"
 #include "hardware/gpio.h"

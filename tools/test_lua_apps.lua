@@ -1,5 +1,5 @@
 #!/usr/bin/env lua
--- Lua App Syntax Checker for PicOS
+-- Lua App Syntax Checker for PicoDeck
 -- Tests all Lua apps for syntax errors and common issues before deployment
 
 local colors = {
@@ -31,7 +31,7 @@ local function log_error(msg)
     print(color("red", "[✗] ") .. msg)
 end
 
--- Mock PicOS API to allow code to parse
+-- Mock PicoDeck API to allow code to parse
 local function create_mock_api()
     local mock_display = {
         BLACK = 0x0000, WHITE = 0xFFFF, RED = 0xF800, GREEN = 0x07E0,
@@ -159,7 +159,7 @@ end
 -- Recursively find all .lua files in a directory. Inside a git checkout,
 -- only files git would track (committed or untracked-but-not-ignored): the
 -- gitignored vendor trees (e.g. apps/tic-80's bundled Lua test suite, which
--- is deliberately invalid Lua) are not PicOS apps.
+-- is deliberately invalid Lua) are not PicoDeck apps.
 local function find_lua_files(dir)
     local files = {}
     local handle = io.popen("git ls-files --cached --others --exclude-standard -- '"
@@ -183,7 +183,7 @@ end
 
 -- Main test runner
 local function main()
-    print(color("blue", "\n=== PicOS Lua App Syntax Checker ===\n"))
+    print(color("blue", "\n=== PicoDeck Lua App Syntax Checker ===\n"))
     
     local apps_dir = "apps"
     if not io.open(apps_dir, "r") then

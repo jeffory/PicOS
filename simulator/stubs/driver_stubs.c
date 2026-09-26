@@ -1,4 +1,4 @@
-// driver_stubs.c - Stubs for PicOS driver functions
+// driver_stubs.c - Stubs for PicoDeck driver functions
 #define _XOPEN_SOURCE 500  // for nftw()
 #include <errno.h>
 #include <ftw.h>
@@ -1172,7 +1172,9 @@ void* umm_calloc(size_t num, size_t size) {
 }
 
 // Lua bridge stubs — network/tcp now provided by real lua_bridge_network.c/tcp.c
-void lua_bridge_crypto_init(void) {}
+// Must match lua_bridge_internal.h: WASM traps on signature mismatches.
+struct lua_State;
+void lua_bridge_crypto_init(struct lua_State *L) { (void)L; }
 
 // OTA: flashing is firmware-only, but the validation sys.applyUpdate runs
 // before its confirm is the firmware's own code (ota_verify.c: size, vector
@@ -1198,8 +1200,8 @@ void video_player_play(void* player) { (void)player; }
 void video_player_pause(void* player) { (void)player; }
 void video_player_resume(void* player) { (void)player; }
 void video_player_stop(void* player) { (void)player; }
-void video_player_seek(void* player, float pos) { (void)player; (void)pos; }
-void video_player_update(void* player) { (void)player; }
+void video_player_seek(void* player, uint32_t frame) { (void)player; (void)frame; }
+bool video_player_update(void* player) { (void)player; return false; }
 float video_player_get_fps(void* player) { (void)player; return 0; }
 int video_player_get_dropped_frames(void* player) { (void)player; return 0; }
 void video_player_reset_stats(void* player) { (void)player; }

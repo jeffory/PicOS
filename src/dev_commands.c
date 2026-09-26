@@ -436,7 +436,7 @@ static void dev_command_run(void *arg) {
                (unsigned long)app_stack_os_last_peak(),
                (unsigned long)APP_STACK_OS_SIZE);
     } else if (strcmp(s_cmd_buf, "ver") == 0) {
-        printf("[DEV] PicOS build %s %s\n", __DATE__, __TIME__);
+        printf("[DEV] PicoDeck build %s %s\n", __DATE__, __TIME__);
     } else if (strcmp(s_cmd_buf, "status") == 0) {
         static const char *wifi_names[] = {
             "disconnected", "connecting", "connected", "failed", "online"};

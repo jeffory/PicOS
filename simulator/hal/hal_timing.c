@@ -33,6 +33,9 @@
 #include <pthread.h>
 #include <stdbool.h>
 #include <time.h>
+#ifdef __EMSCRIPTEN__
+#include "web/web_platform.h"
+#endif
 
 static int g_debug_mode = 0;
 static float s_time_multiplier = 1.0f;
@@ -185,7 +188,11 @@ void hal_sleep_ms(uint32_t ms) {
         return;
     }
     if (s_time_multiplier <= 0.0f) return;  // 0 = paused (skip delay)
+#ifdef __EMSCRIPTEN__
+    web_yield((uint32_t)(ms / s_time_multiplier));
+#else
     SDL_Delay((uint32_t)(ms / s_time_multiplier));
+#endif
 }
 
 void hal_sleep_us(uint64_t us) {
@@ -193,6 +200,12 @@ void hal_sleep_us(uint64_t us) {
         vt_owner_sleep(us);
         return;
     }
+#ifdef __EMSCRIPTEN__
+    // No busy-waiting in a browser tab: short waits only yield when overdue.
+    if (us < 1000) web_yield_if_due();
+    else web_yield((uint32_t)(us / 1000));
+    return;
+#endif
     if (us < 100) {
         // Busy-wait for sub-100μs precision (max 99μs spin)
         uint64_t start = SDL_GetPerformanceCounter();

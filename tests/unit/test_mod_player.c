@@ -41,7 +41,7 @@ static void drain(unsigned frames) {
 static void put_mod(const char *path) {
   size_t len = 20 + 31 * 30 + 2 + 128 + 4 + 64 * 4 * 4;
   char *m = calloc(1, len);
-  memcpy(m, "picos test", 10);
+  memcpy(m, "picodeck test", 13);  // title field is 20 bytes
   for (int i = 0; i < 31; i++) {
     char *s = m + 20 + i * 30;
     s[25] = 0x40;   // volume

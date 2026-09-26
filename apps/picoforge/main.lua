@@ -1,4 +1,4 @@
--- PicoForge — Mini IDE for PicOS
+-- PicoForge — Mini IDE for PicoDeck
 -- main.lua — Entry point, module loader, mode dispatcher, main loop
 
 local pc = picocalc

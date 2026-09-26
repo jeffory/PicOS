@@ -1,4 +1,4 @@
--- Neurogram — cyberpunk nonogram for PicOS
+-- Neurogram — cyberpunk nonogram for PicoDeck
 --
 -- Scene dispatch is hand-rolled rather than using picocalc.game.scene, for two
 -- verified reasons (see src/os/lua_bridge_game_scene.c):

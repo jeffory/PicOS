@@ -1,6 +1,6 @@
 #pragma once
 
-// Shared word wrap utility for PicOS
+// Shared word wrap utility for PicoDeck
 // Used by terminal_render.c and ui_widgets.c
 
 // Find best break position in text, searching backward from max_cols

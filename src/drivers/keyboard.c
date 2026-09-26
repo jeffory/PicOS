@@ -278,7 +278,7 @@ static void kbd_poll_impl(bool bg) {
   //
   // Retiring on wall time rather than "the next poll" is the fix: apps now
   // call kbd_poll() more than once per logical frame in places (the C-Dogs
-  // SDL_Delay pump, the blit-path pump, picos_asset_load_tick — all added to
+  // SDL_Delay pump, the blit-path pump, picodeck_asset_load_tick — all added to
   // feed the watchdog during long-running work). Any such extra poll landing
   // between publish and the app's actual getButtons()/read call used to eat
   // the press before the app ever saw it. A minimum wall-clock hold makes

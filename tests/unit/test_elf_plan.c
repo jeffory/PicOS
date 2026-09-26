@@ -67,7 +67,7 @@ static void make_elf(elf_img_t *e) {
   l->p_offset = SEG_OFF;
   l->p_filesz = SEG_FILE;
   l->p_memsz = SEG_MEM;
-  l->p_flags = 7;  // RWX, as the PicOS SDK links apps
+  l->p_flags = 7;  // RWX, as the PicoDeck SDK links apps
   l->p_align = 4;
 
   elf32_phdr_t *d = phdr(e, PH_DYN);
@@ -450,7 +450,7 @@ static void check_real_elf(const char *rel, bool required) {
   if (rel[0] == '/')
     snprintf(path, sizeof(path), "%s", rel);
   else
-    snprintf(path, sizeof(path), "%s/%s", PICOS_ROOT, rel);
+    snprintf(path, sizeof(path), "%s/%s", PICODECK_ROOT, rel);
   uint32_t len;
   uint8_t *b = read_file(path, &len);
   if (!b) {

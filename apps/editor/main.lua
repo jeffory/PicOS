@@ -1,4 +1,4 @@
--- Text Editor for PicOS (Terminal SDK version)
+-- Text Editor for PicoDeck (Terminal SDK version)
 -- Nano-like text editor with full editing capabilities
 
 local pc    = picocalc

@@ -1,4 +1,4 @@
-// sim_tcp.c — POSIX socket + libcurl CONNECT_ONLY TCP client for PicOS simulator
+// sim_tcp.c — POSIX socket + libcurl CONNECT_ONLY TCP client for PicoDeck simulator
 // Implements tcp.h API. Non-TLS uses raw POSIX sockets, TLS uses curl CONNECT_ONLY.
 
 #include "tcp.h"

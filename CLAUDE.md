@@ -2,13 +2,14 @@
 
 ## Project Overview
 
-PicOS is a bare-metal embedded OS for the [ClockworkPi PicoCalc v2.0](https://www.clockworkpi.com/) handheld device. It runs on a Pimoroni Pico Plus 2 W (RP2350, 8MB QMI PSRAM + 8MB PIO PSRAM, WiFi). A resident C firmware lives in flash; apps are Lua scripts or native ELF binaries on an SD card; all hardware is exposed via a `picocalc.*` Lua API and a C `PicoCalcAPI` struct.
+PicoDeck is a bare-metal embedded OS for the [ClockworkPi PicoCalc v2.0](https://www.clockworkpi.com/) handheld device. It runs on a Pimoroni Pico Plus 2 W (RP2350, 8MB QMI PSRAM + 8MB PIO PSRAM, WiFi). A resident C firmware lives in flash; apps are Lua scripts or native ELF binaries on an SD card; all hardware is exposed via a `picocalc.*` Lua API and a C `PicoCalcAPI` struct.
 
 **Where detail lives.** Subsystem notes are in nested `CLAUDE.md` files (loaded when you read files in that directory). Read the one for an area before changing it:
 - `src/drivers/CLAUDE.md` — display, WiFi/HTTP/TCP, TLS and randomness, audio, video, PIO PSRAM, keyboard
 - `src/os/CLAUDE.md` — app runners and exit teardown, Lua bridge internals (object types, number rules, count hook, sticky exit), sandbox, file handles, config stores, save slots, OTA policy, crash records, Lua heap
 - `simulator/CLAUDE.md` — simulator divergences, the test control channel, `--test-mode` and virtual time, allocators, sanitizer and firmware-net builds. Read it before writing an E2E test or trusting a simulator result.
-- `docs/` (wiki submodule) — the app-facing API reference. It lags the code; where it disagrees with the nested files, the nested files are right.
+- `docs/` — the app-facing API reference (Markdown in this repo), published at https://picodeck.net/docs/ from each release's `picodeck-docs.zip`. Change it in the same commit as the behaviour it documents; where it disagrees with the nested files, the nested files are right and the doc is a bug. `docs/_sidebar.json` is the site's sidebar.
+- The app store is `PicoDeck/store` (https://store.picodeck.net); the website is `PicoDeck/website` (https://picodeck.net), rebuilt from the latest release by a Pages deploy hook.
 
 This file keeps only what applies across the tree. Record subsystem behaviour in the nested file (or header comment) nearest the code.
 
@@ -42,18 +43,18 @@ make -j4
 
 Other board values: `pico2` (no PSRAM/WiFi), `pico_w`, `pico`. Note: the board name in `CMakeLists.txt` defaults to `pimoroni_pico_plus2_w_rp2350` (full SDK name — not `pimoroni_pico_plus2_w`).
 
-Output: `build/picocalc_os.uf2` — drag-and-drop to Pico in BOOTSEL mode.
+Output: `build/picodeck.uf2` — drag-and-drop to Pico in BOOTSEL mode.
 
 ### Debug
 USB serial at 115200 baud. App log calls appear as `[APP] message`. Lua errors display on-screen with stack trace (dismiss with **Esc**).
 
-Stage multi-file apps (hardware or simulator) with the `push_app` MCP tool (`tools/picos_mcp.py`): it ships the directory as one ZIP and extracts it on-device with the `unzip <zip> <dest>` dev command (`rm <path>` cleans up), far faster than per-file transfers. Dev commands run on an app stack, so `unzip` is safe at the launcher.
+Stage multi-file apps (hardware or simulator) with the `push_app` MCP tool (`tools/picodeck_mcp.py`): it ships the directory as one ZIP and extracts it on-device with the `unzip <zip> <dest>` dev command (`rm <path>` cleans up), far faster than per-file transfers. Dev commands run on an app stack, so `unzip` is safe at the launcher.
 
 Dev commands while an app runs (`src/dev_commands.c`, `lua_bridge.c`, native `sys_poll`): plain `reboot` and `reboot-flash` are honoured at once and kill the app without teardown (a native app that never calls `sys->poll()` latches them until the launcher); `reboot-ota` is dropped (`reboot-ota ignored`), so `make flash-ota` (`tools/ota_flash.py`) exits the app first; `usb` waits for the launcher. `exit` with no app running replies `Error: exit: no app running` and still closes a modal open at the launcher (system menu, text input).
 
 ### Tests
-- **E2E (simulator)**: `SDL_VIDEODRIVER=dummy pytest tests/e2e -n auto` (see `tests/e2e/README.md`; config and markers in the repo-level `pytest.ini`). Runs against `build_sim/picos_simulator`; `PICOS_SIM_BINARY` (or `--simulator-path`) selects another build: `make simulator-asan` (`build_sim_asan/`, enables `asan_only` tests), `make simulator-tsan`, `make simulator-net` / `-net-asan` / `-net-tsan` (`build_sim_net/`…, the firmware network stack; enables `firmware_net` tests). Virtual time and `--real-umm` are described in `simulator/CLAUDE.md`. Lua fixture apps report through `tests/e2e/lib/picotest.lua` (staged as `/system/lib/picotest.lua`).
-- **E2E (hardware)**: `--target hw:/dev/serial/by-id/<PicOS device>` runs the `hardware`/`both` tests on a real PicoCalc through `tests/e2e/hw_target.py` (they skip, allow-listed, on the simulator).
+- **E2E (simulator)**: `SDL_VIDEODRIVER=dummy pytest tests/e2e -n auto` (see `tests/e2e/README.md`; config and markers in the repo-level `pytest.ini`). Runs against `build_sim/picodeck_simulator`; `PICODECK_SIM_BINARY` (or `--simulator-path`) selects another build: `make simulator-asan` (`build_sim_asan/`, enables `asan_only` tests), `make simulator-tsan`, `make simulator-net` / `-net-asan` / `-net-tsan` (`build_sim_net/`…, the firmware network stack; enables `firmware_net` tests). Virtual time and `--real-umm` are described in `simulator/CLAUDE.md`. Lua fixture apps report through `tests/e2e/lib/picotest.lua` (staged as `/system/lib/picotest.lua`).
+- **E2E (hardware)**: `--target hw:/dev/serial/by-id/<PicoDeck device>` runs the `hardware`/`both` tests on a real PicoCalc through `tests/e2e/hw_target.py` (they skip, allow-listed, on the simulator).
 - **Unit**: `make test-unit` (host C tests: `tests/unit/CMakeLists.txt` → `build_unit/`, ctest, ASan+UBSan; covers the pure modules `elf_plan`, `fs_path`, `app_manifest`, `config`/`appconfig` over an in-memory SD fake, `wav`, `audio_ring`, `zip_name`, `text_wrap`, `lua_numfmt` vs glibc, fonts), `python3 -m pytest tests/unit`, `make test-lua`.
 - **Fuzz**: `make fuzz` runs the libFuzzer targets in `tests/fuzz/` (clang; `FUZZ_TARGETS=`, `FUZZ_SECONDS=`). CI runs them nightly (`.github/workflows/fuzz.yml`) and the unit job on every push (`unit.yml`). There is no linter.
 
@@ -102,7 +103,7 @@ main()
 - One file per `picocalc.*` module, coordinated by `lua_bridge.c`. Functions are `static int l_<module>_<fn>(lua_State *L)` wrappers in `luaL_Reg` tables passed to `register_subtable()`; integer constants (button codes, colour names) are pushed with `lua_pushinteger` / `lua_setfield`.
 - Every userdata type registers with `lb_register_type()` (methods in a separate `__index` table, locked metatable), and each `__gc` leaves its object dead so a resurrected object is rejected. Check userdata with `luaL_checkudata`/`luaL_testudata`, never `lua_touserdata`.
 - Lua 5.4.7 with a restricted stdlib: `base`, `table`, `string`, `math`, `coroutine`, `utf8`. Blocked: `io`, `os`, `package`, `debug`; `dofile`/`loadfile` removed. `load` is text-only (bytecode rejected), as are app `main.lua` and `sys.loadlib`.
-- Numbers: `lua_Integer` is 32-bit and `lua_Number` is `float` (integers exact only to 2^24). Bridge quantity arguments (coordinates, sizes, durations, volumes) round floats to nearest; identifiers (handles, enums, colours, masks, byte counts, ports) require exact integers. Compile-time config lives in `cmake/picos_lua.cmake`.
+- Numbers: `lua_Integer` is 32-bit and `lua_Number` is `float` (integers exact only to 2^24). Bridge quantity arguments (coordinates, sizes, durations, volumes) round floats to nearest; identifiers (handles, enums, colours, masks, byte counts, ports) require exact integers. Compile-time config lives in `cmake/picodeck_lua.cmake`.
 
 ### Drivers: rules that apply everywhere
 - **Framebuffer pixels are byte-swapped RGB565** (panel order): every primitive swaps on write, every reader swaps back, and native apps writing via `getBackBuffer()` write swapped pixels.
@@ -164,7 +165,7 @@ The `id` becomes `/data/<id>`: 1-79 characters of `[A-Za-z0-9._-]`, folded to lo
 
 Pre-set Lua globals: `APP_DIR` (e.g. `"/apps/hello"`), `APP_NAME`, `APP_ID`, `APP_REQUIREMENTS` (booleans, e.g. `APP_REQUIREMENTS.root_filesystem`). They are convenience copies: the sandbox and the per-app stores read the C-side identity, so an app that rewrites them gains nothing.
 
-Native apps receive `PicoCalcAPI *api` as their entry point argument. Call `api->sys->poll()` each frame and check `api->sys->shouldExit()` to handle the system menu exit. Anything the app does not free (files, images, players, terminals, crypto contexts, `qmiAlloc` blocks, HTTP/TCP connections, loaded fonts, menu items, zip handles) is freed when `picos_main` returns. Freeing a handle twice is ignored only until its address is reused by a newer handle of the same kind (then the second free releases the newer one), so free each handle once.
+Native apps receive `PicoCalcAPI *api` as their entry point argument. Call `api->sys->poll()` each frame and check `api->sys->shouldExit()` to handle the system menu exit. Anything the app does not free (files, images, players, terminals, crypto contexts, `qmiAlloc` blocks, HTTP/TCP connections, loaded fonts, menu items, zip handles) is freed when `picodeck_main` returns. Freeing a handle twice is ignored only until its address is reused by a newer handle of the same kind (then the second free releases the newer one), so free each handle once.
 
 ### App Requirements
 `requirements` in `app.json`:
@@ -184,13 +185,13 @@ Native apps receive `PicoCalcAPI *api` as their entry point argument. Call `api-
 
 ## Lua API Notes
 
-- API reference: `docs/API-*.md` (wiki submodule; see the caveat at the top).
+- API reference: `docs/API-*.md` (published at https://picodeck.net/docs/).
 - System libraries live in `/system/lib/` and load via `picocalc.sys.loadlib(name)`: `download.lua` provides `download.toFile(url, dest, opts)` (blocking HTTP(S)-to-SD streaming download). `picocalc.crypto.sha256File(path)` returns a file's SHA-256 as lowercase hex.
-- Names that differ from the wiki or other APIs: HTTP connections have no `conn:query`; the TCP socket's error getter is `tcp:error()` (native keeps `g_api.tcp->getError`); `picocalc.video` players have no `destroy()` (the collector frees them). There is no `graphics.cache` table; sprite `setImageDrawMode`, `setIgnoresDrawOffset`, stencils, sprite clip rects, `addDirtyRect` and `markDirty` are accepted but not applied.
+- Names that differ from other APIs: HTTP connections have no `conn:query`; the TCP socket's error getter is `tcp:error()` (native keeps `g_api.tcp->getError`); `picocalc.video` players have no `destroy()` (the collector frees them). There is no `graphics.cache` table; sprite `setImageDrawMode`, `setIgnoresDrawOffset`, stencils, sprite clip rects, `addDirtyRect` and `markDirty` are accepted but not applied.
 
 ## Simulator
 
-`make simulator` builds `build_sim/picos_simulator` (SDL2 + Unicorn Engine for native ELF apps). What it does not model, in brief (full list in `simulator/CLAUDE.md`):
+`make simulator` builds `build_sim/picodeck_simulator` (SDL2 + Unicorn Engine for native ELF apps). What it does not model, in brief (full list in `simulator/CLAUDE.md`):
 - `picocalc.crypto` is absent; `picocalc.video` is stubbed; TLS verification, the SNTP clock gate and the TRNG are firmware-only.
 - Display, sample mixer and MP3 player are separate simulator implementations (`stubs/driver_stubs.c`, `sim_audio.c`): keep them in step with the firmware, and confirm colour and timing on hardware.
 - Networking is libcurl unless you build `make simulator-net` (the firmware stack on Mongoose, no TLS).

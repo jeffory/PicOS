@@ -3,6 +3,6 @@
     "name": "Sound Lifetimes",
     "description": "E2E fixture: sample/sampleplayer lifetimes, slot leaks and volume ranges",
     "version": "1.0",
-    "author": "PicOS E2E",
+    "author": "PicoDeck E2E",
     "requirements": ["audio"]
 }

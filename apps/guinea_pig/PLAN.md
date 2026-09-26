@@ -2,7 +2,7 @@
 
 ## Context
 
-Create a guinea pig platformer for PicOS where the player collects vegetables (carrots, capsicum, zucchini), avoids/defeats enemies, uses special abilities, and reaches a dome-shaped guinea pig house at the end. Features parallax scrolling clouds and a single level. Based on `apps/platformer_demo/main.lua` patterns.
+Create a guinea pig platformer for PicoDeck where the player collects vegetables (carrots, capsicum, zucchini), avoids/defeats enemies, uses special abilities, and reaches a dome-shaped guinea pig house at the end. Features parallax scrolling clouds and a single level. Based on `apps/platformer_demo/main.lua` patterns.
 
 ## App Structure
 
@@ -45,11 +45,11 @@ Generate pixel art sprites as PNG files in `apps/guinea_pig/sprites/`. Magenta (
 Already created at `apps/guinea_pig/app.json`:
 ```json
 {
-  "id": "com.picos.guineapig",
+  "id": "net.picodeck.guineapig",
   "name": "Guinea Pig Run",
   "description": "Collect veggies, avoid enemies, and find your way home!",
   "version": "1.0.0",
-  "author": "PicOS",
+  "author": "PicoDeck",
   "requirements": ["audio"]
 }
 ```
@@ -264,7 +264,7 @@ Top bar (y=0-20, black background):
 - `src/os/lua_bridge_game_camera.c` — camera getOffset() for parallax math
 - `src/os/os.h` — BTN_* constants, display API struct
 
-## Key PicOS API Patterns (from exploration)
+## Key PicoDeck API Patterns (from exploration)
 
 ### Game Loop
 ```lua
@@ -320,8 +320,8 @@ game.scene.switch("play")
 ```
 
 ## Verification
-1. Use PicOS simulator/MCP tools:
-   - `mcp__picos__launch_app` to launch "Guinea Pig Run"
-   - `mcp__picos__screenshot` to verify visual output
-   - `mcp__picos__keypress` to test controls
+1. Use PicoDeck simulator/MCP tools:
+   - `mcp__picodeck__launch_app` to launch "Guinea Pig Run"
+   - `mcp__picodeck__screenshot` to verify visual output
+   - `mcp__picodeck__keypress` to test controls
 2. Test each system: movement -> jumping -> popcorn jump -> collecting -> enemy interactions -> abilities -> parallax -> win condition -> score saving

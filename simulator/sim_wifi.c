@@ -1,4 +1,4 @@
-// sim_wifi.c — Mock WiFi + IPC queue for PicOS simulator
+// sim_wifi.c — Mock WiFi + IPC queue for PicoDeck simulator
 // Always reports "connected" with fake IP/SSID. Provides the IPC ring buffer
 // that bridges Core 0 (Lua) → Core 1 (network thread).
 

@@ -3,6 +3,6 @@
     "name": "Config Limits",
     "description": "E2E fixture: per-app and system config limits",
     "version": "1.0",
-    "author": "PicOS E2E",
+    "author": "PicoDeck E2E",
     "requirements": ["sysconfig"]
 }

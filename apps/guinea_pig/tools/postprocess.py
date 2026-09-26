@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Post-process PixelLab PNGs for PicOS: flatten alpha to the magenta
+"""Post-process PixelLab PNGs for PicoDeck: flatten alpha to the magenta
 transparency key, verify tile opacity, slice grid sheets.
 
 Usage:

@@ -33,8 +33,8 @@ jobs:
       - name: Upload simulator binary
         uses: actions/upload-artifact@v4
         with:
-          name: picos-simulator-linux
-          path: build_sim/picos_simulator
+          name: picodeck-simulator-linux
+          path: build_sim/picodeck_simulator
           retention-days: 7
 
   # Firmware compile check on every push and PR, so a firmware-only build
@@ -63,7 +63,7 @@ jobs:
         run: cmake --build build --parallel
 
       - name: Size
-        run: arm-none-eabi-size build/picocalc_os.elf
+        run: arm-none-eabi-size build/picodeck.elf
 
   # The native app ABI exists three times: src/os/os.h, sdk/native/os.h and
   # the simulator's trampoline tables. A drift shifts every later field and
@@ -94,3 +94,20 @@ jobs:
 
       - name: Compare the ABI copies
         run: python3 tools/check_native_abi.py --cc arm-none-eabi-gcc
+
+  # The browser build (picodeck.net/try) on every push, so a WASM-only break
+  # (a stub whose signature drifted) shows up before release day.
+  build-web:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+      - name: Cache Emscripten
+        uses: actions/cache@v4
+        with:
+          path: ~/emsdk
+          key: ${{ runner.os }}-emsdk-6.0.10
+      - name: Build the web simulator
+        run: scripts/ci/build-web-sim.sh

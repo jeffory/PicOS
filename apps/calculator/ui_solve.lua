@@ -1,11 +1,11 @@
 -- ui_solve.lua — Equation solver tab UI
--- Requires PicOS display API (disp), used from main.lua
+-- Requires PicoDeck display API (disp), used from main.lua
 
 local Solver = require("calc_solver")
 
 local UISolve = {}
 
--- PicOS Lua numbers are single-precision floats (~7 significant digits).
+-- PicoDeck Lua numbers are single-precision floats (~7 significant digits).
 local SIG_FMT = (2^24 + 1 == 2^24) and "%.7g" or "%.10g"
 
 -- Solver modes and their field definitions

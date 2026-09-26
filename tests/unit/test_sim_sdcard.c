@@ -57,7 +57,7 @@ static void test_resolve(void) {
 // FF_FS_LOCK parity: the 17th concurrently open file is refused, and closing
 // one frees its slot. Failed opens (missing file, directory) take no slot.
 static void test_open_limit(void) {
-  char dir[] = "/tmp/picos_sdcard_XXXXXX";
+  char dir[] = "/tmp/picodeck_sdcard_XXXXXX";
   CHECK(mkdtemp(dir) != NULL);
   CHECK(hal_sdcard_init(dir));
   void *h[HAL_SDCARD_MAX_OPEN];

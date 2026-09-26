@@ -1,4 +1,4 @@
--- panels.lua — declarative interactive-comics framework for PicOS
+-- panels.lua — declarative interactive-comics framework for PicoDeck
 --
 -- Modelled on the Playdate "Panels" library (github.com/cadin/panels): a comic
 -- is a plain Lua data table — sequences of panels of layers — and the library

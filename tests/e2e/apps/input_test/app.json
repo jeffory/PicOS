@@ -1,7 +1,7 @@
 {
-    "id": "com.picos.input_test",
+    "id": "net.picodeck.input_test",
     "name": "Input Test",
     "description": "Button and character input verification for E2E testing",
     "version": "1.0",
-    "author": "PicOS E2E"
+    "author": "PicoDeck E2E"
 }

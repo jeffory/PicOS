@@ -1,4 +1,4 @@
-# DOS/86 — fake86 8086 PC emulator for PicOS
+# DOS/86 — fake86 8086 PC emulator for PicoDeck
 
 CC      = arm-none-eabi-gcc
 OBJCOPY = arm-none-eabi-objcopy
@@ -7,7 +7,7 @@ CFLAGS  = -mcpu=cortex-m33 -mthumb -std=gnu11 \
           -O2 -Wall -Wextra -Wno-unused-parameter \
           -I. -I../../sdk/native
 LDFLAGS = -T linker.ld \
-          -Wl,--entry=picos_main \
+          -Wl,--entry=picodeck_main \
           -Wl,-pie \
           -Wl,--gc-sections \
           -Wl,--no-warn-rwx-segments \

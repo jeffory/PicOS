@@ -1,4 +1,4 @@
--- PicOS Widget Toolkit
+-- PicoDeck Widget Toolkit
 -- Composable, non-blocking UI widgets for Lua apps.
 -- Load with: local W = picocalc.sys.loadlib("widgets")
 

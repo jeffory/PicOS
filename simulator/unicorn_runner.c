@@ -1,5 +1,5 @@
 // unicorn_runner.c — Unicorn Engine integration for running ARM ELF native apps
-// in the PicOS simulator. Loads ELF32 PIE binaries, sets up emulated memory
+// in the PicoDeck simulator. Loads ELF32 PIE binaries, sets up emulated memory
 // regions, wires the PicoCalcAPI struct with trampoline-based function pointers,
 // and dispatches API calls to host simulator functions.
 
@@ -10,7 +10,7 @@
 #include <string.h>
 #include <stdarg.h>
 
-// PicOS includes
+// PicoDeck includes
 #include "os.h"
 #include "elf_plan.h"
 #include "crashlog.h"
@@ -227,7 +227,7 @@ static void trampoline_hook(uc_engine *uc, uint32_t intno, void *user_data) {
         // PC=0 with insn=0 means the app returned (LR was set to 0).
         if ((insn & 0xFF00) != 0xDF00) {
             if (pc == 0) {
-                printf("[UNICORN] Normal exit: app returned from picos_main()\n");
+                printf("[UNICORN] Normal exit: app returned from picodeck_main()\n");
             } else {
                 fprintf(stderr, "[UNICORN] Unexpected interrupt on non-SVC insn 0x%04x at 0x%08x\n",
                         insn, pc);
@@ -643,7 +643,7 @@ bool unicorn_run_app(const char *elf_path, const char *app_dir,
     s_arena_reserved = s_arena_offset;  // protect startup strings from wrap-around
 
     // ── Set up registers ────────────────────────────────────────────────
-    // picos_main(const PicoCalcAPI *api, const char *app_dir,
+    // picodeck_main(const PicoCalcAPI *api, const char *app_dir,
     //            const char *app_id, const char *app_name)
     uint32_t sp = EMU_STACK_BASE + EMU_STACK_SIZE;  // Stack top
     uint32_t r0 = EMU_API_BASE;     // api pointer
@@ -657,7 +657,7 @@ bool unicorn_run_app(const char *elf_path, const char *app_dir,
     uc_reg_write(uc, UC_ARM_REG_R2, &r2);
     uc_reg_write(uc, UC_ARM_REG_R3, &r3);
 
-    // Set LR to 0 so return from picos_main causes a fetch fault (stopping emulation)
+    // Set LR to 0 so return from picodeck_main causes a fetch fault (stopping emulation)
     uint32_t lr = 0;
     uc_reg_write(uc, UC_ARM_REG_LR, &lr);
 

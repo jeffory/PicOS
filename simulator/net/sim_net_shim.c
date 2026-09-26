@@ -253,7 +253,7 @@ static int loopback_socket(int type, char *url, size_t url_len,
 }
 
 static void endpoints_init(void) {
-  const char *env = getenv("PICOS_SIM_NET_CHECK_URL");
+  const char *env = getenv("PICODECK_SIM_NET_CHECK_URL");
   if (env && env[0]) {
     snprintf(s_check_url, sizeof(s_check_url), "%s", env);
   } else {
@@ -262,7 +262,7 @@ static void endpoints_init(void) {
     if (s_check_fd < 0)
       snprintf(s_check_url, sizeof(s_check_url), "tcp://127.0.0.1:1");
   }
-  env = getenv("PICOS_SIM_NET_SNTP_URL");
+  env = getenv("PICODECK_SIM_NET_SNTP_URL");
   if (env && env[0]) {
     snprintf(s_sntp_url, sizeof(s_sntp_url), "%s", env);
   } else {

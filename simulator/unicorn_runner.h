@@ -5,7 +5,7 @@
 
 // Run a native ARM ELF app inside the Unicorn Engine emulator.
 // elf_path  — host filesystem path to the main.elf file
-// app_dir   — PicOS path (e.g. "/apps/hello_c")
+// app_dir   — PicoDeck path (e.g. "/apps/hello_c")
 // app_id    — from app.json (e.g. "com.example.hello")
 // app_name  — from app.json (e.g. "Hello C")
 // Returns true if the app ran and exited normally, false on error.

@@ -197,7 +197,7 @@ Found while auditing the sound path for this design:
 - `apps/guinea_pig/tools/postprocess.py` — alpha→magenta flattening for PixelLab
   PNGs, opaque-border enforcement/verification for tiles, edge-continuity check
   for parallax strips. Committed; assets are reproducible.
-- Test loop (PicOS MCP, simulator):
+- Test loop (PicoDeck MCP, simulator):
   1. `push_app` stages `apps/guinea_pig` to the sim SD (whole directory, incl.
      new `sfx/`).
   2. `launch_app` "Guinea Pig Run" → screenshot title.

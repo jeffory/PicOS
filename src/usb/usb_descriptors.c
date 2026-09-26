@@ -74,10 +74,10 @@ uint8_t const *tud_descriptor_configuration_cb(uint8_t index) {
 char const *string_desc_arr[] = {
     (const char[]){0x09, 0x04}, // 0: is supported language is English (0x0409)
     "Raspberry Pi",             // 1: Manufacturer
-    "PicOS Device",             // 2: Product
+    "PicoDeck Device",             // 2: Product
     "123456",                   // 3: Serials (will be replaced by read_uid)
-    "PicOS CDC",                // 4: Interface CDC
-    "PicOS MSC",                // 5: Interface MSC
+    "PicoDeck CDC",                // 4: Interface CDC
+    "PicoDeck MSC",                // 5: Interface MSC
 };
 
 static uint16_t _desc_str[32];

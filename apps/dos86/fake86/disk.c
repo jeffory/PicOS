@@ -1,10 +1,10 @@
 /*
-  DOS86 — BIOS INT 13h disk services for fake86 on PicOS.
+  DOS86 — BIOS INT 13h disk services for fake86 on PicoDeck.
   Copyright (C)2010-2013 Mike Chambers (original fake86 disk.c)
-  Adapted for PicOS by dos86 project.
+  Adapted for PicoDeck by dos86 project.
 
   Geometry is auto-detected from image file size.
-  Actual I/O goes through backend_disk_read/write (PicOS fs API).
+  Actual I/O goes through backend_disk_read/write (PicoDeck fs API).
 */
 
 #include "disk.h"

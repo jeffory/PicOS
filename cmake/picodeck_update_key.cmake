@@ -1,18 +1,18 @@
 # Embeds the OTA update PUBLIC key (a P-256 PEM) as a C string, the key
 # src/os/ota_verify.c checks /system/update.sig against.
 #
-#   picos_generate_update_pubkey(<out.c> <key.pem>)
+#   picodeck_generate_update_pubkey(<out.c> <key.pem>)
 #
-# Firmware: CMake option PICOS_UPDATE_PUBKEY_PEM (default: the TEST key in
+# Firmware: CMake option PICODECK_UPDATE_PUBKEY_PEM (default: the TEST key in
 # tests/keys, whose PRIVATE half is in the repo — dev builds only).  Release
-# builds pass the real public key and PICOS_REQUIRE_RELEASE_UPDATE_KEY=ON,
+# builds pass the real public key and PICODECK_REQUIRE_RELEASE_UPDATE_KEY=ON,
 # which refuses the test key (see .github/workflows/release.yml).
 include_guard(GLOBAL)
 
-get_filename_component(PICOS_TEST_UPDATE_PUBKEY
-    "${CMAKE_CURRENT_LIST_DIR}/../tests/keys/picos-update-TEST-public.pem" ABSOLUTE)
+get_filename_component(PICODECK_TEST_UPDATE_PUBKEY
+    "${CMAKE_CURRENT_LIST_DIR}/../tests/keys/picodeck-update-TEST-public.pem" ABSOLUTE)
 
-function(picos_generate_update_pubkey out_c pem)
+function(picodeck_generate_update_pubkey out_c pem)
     get_filename_component(pem "${pem}" ABSOLUTE)
     if(NOT EXISTS "${pem}")
         message(FATAL_ERROR "OTA update public key not found: ${pem}")
@@ -23,8 +23,8 @@ function(picos_generate_update_pubkey out_c pem)
         message(FATAL_ERROR "${pem} is not a PEM SubjectPublicKeyInfo "
                             "(openssl pkey -pubout) file")
     endif()
-    string(REPLACE "\n" "\\n\"\n    \"" PICOS_UPDATE_PUBKEY_C "${_pem}")
-    set(PICOS_UPDATE_PUBKEY_SOURCE "${pem}")
+    string(REPLACE "\n" "\\n\"\n    \"" PICODECK_UPDATE_PUBKEY_C "${_pem}")
+    set(PICODECK_UPDATE_PUBKEY_SOURCE "${pem}")
     configure_file("${CMAKE_CURRENT_FUNCTION_LIST_DIR}/ota_pubkey.c.in"
                    "${out_c}" @ONLY)
     set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS "${pem}")

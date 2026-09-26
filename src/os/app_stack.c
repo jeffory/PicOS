@@ -4,7 +4,7 @@
 
 #include "umm_malloc.h"
 
-#ifndef PICOS_SIMULATOR
+#ifndef PICODECK_SIMULATOR
 #include "hardware/sync.h"
 #endif
 
@@ -29,7 +29,7 @@ bool app_stack_guard_intact(const uint8_t *base) {
   return true;
 }
 
-#ifndef PICOS_SIMULATOR
+#ifndef PICODECK_SIMULATOR
 
 // Bytes between the first non-paint word at or above lo and hi.
 static uint32_t used_above(const uint32_t *lo, const uint32_t *hi) {
@@ -159,7 +159,7 @@ bool app_stack_active(void) {
   return (control & 2u) != 0;
 }
 
-#else  // PICOS_SIMULATOR: no PSP; run on the host stack.
+#else  // PICODECK_SIMULATOR: no PSP; run on the host stack.
 
 void app_stack_run(uint8_t *base, uint32_t size, app_stack_owner_t owner,
                    void (*fn)(void *), void *arg) {

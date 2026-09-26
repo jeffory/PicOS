@@ -4,7 +4,7 @@
 Runs only against a simulator built with SIM_FIRMWARE_NET=ON:
 
     make simulator-net            # build_sim_net/ (or simulator-net-asan/-tsan)
-    PICOS_SIM_BINARY=build_sim_net/picos_simulator \\
+    PICODECK_SIM_BINARY=build_sim_net/picodeck_simulator \\
         SDL_VIDEODRIVER=dummy pytest tests/e2e/test_network_firmware.py -v
 
 That build runs the firmware's src/drivers/wifi.c, http.c and tcp.c on

@@ -1,5 +1,5 @@
 // HAL Input - SDL2 Keyboard Mapping
-// Maps PC keyboard to PicOS buttons
+// Maps PC keyboard to PicoDeck buttons
 
 #ifndef HAL_INPUT_H
 #define HAL_INPUT_H

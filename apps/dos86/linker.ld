@@ -1,18 +1,18 @@
-/* PicOS Native App Linker Script
+/* PicoDeck Native App Linker Script
  *
  * Produces a Position-Independent ELF32 (ET_DYN) for ARM Thumb-2.
  * The OS loads this into PSRAM at a runtime address and applies
- * R_ARM_RELATIVE relocations before calling picos_main.
+ * R_ARM_RELATIVE relocations before calling picodeck_main.
  *
  * Usage:
- *   arm-none-eabi-gcc ... -T linker.ld -Wl,-pie -Wl,--entry=picos_main
+ *   arm-none-eabi-gcc ... -T linker.ld -Wl,-pie -Wl,--entry=picodeck_main
  *
  * Explicit PHDRS block: suppresses the auto-generated PT_PHDR entry
  * that would otherwise cause "PHDR segment not covered by LOAD segment"
  * errors when there is no OS dynamic linker to map the headers.
  */
 
-ENTRY(picos_main)
+ENTRY(picodeck_main)
 
 PHDRS {
     load PT_LOAD FLAGS(7);    /* rwx — one segment; permissions not enforced in PSRAM */

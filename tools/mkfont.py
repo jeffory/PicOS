@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""mkfont.py - build PicOS .pfn bitmap fonts.
+"""mkfont.py - build PicoDeck .pfn bitmap fonts.
 
   mkfont.py SRC OUT.pfn [--size N] [--cell WxH] [--range FIRST-LAST]
                         [--proportional] [--spacing N] [--dump]

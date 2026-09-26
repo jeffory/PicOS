@@ -1,10 +1,10 @@
 {
-    "id": "com.picos.hello",
+    "id": "net.picodeck.hello",
     "name": "Hello World",
     "description": "A basic drawing demo",
     "version": "1.0",
-    "author": "PicOS",
+    "author": "PicoDeck",
     "category": "demos",
-    "repo": "jeffory/picos-apps",
+    "repo": "PicoDeck/picodeck",
     "min_firmware": "1.0.0"
 }

@@ -1,5 +1,5 @@
 // Keyboard driver stub for simulator
-// Bridges SDL2 input to PicOS keyboard driver interface
+// Bridges SDL2 input to PicoDeck keyboard driver interface
 
 #include "../../src/drivers/keyboard.h"
 #include "../../src/drivers/kbd_event_queue.h"
@@ -64,6 +64,11 @@ bool kbd_init(void) {
 }
 
 void kbd_poll(void) {
+#ifdef __EMSCRIPTEN__
+    // Input-polling loops that never flush must still let key events arrive.
+    extern void web_yield_if_due(void);
+    web_yield_if_due();
+#endif
     // Pull pending events from the Wayland socket into SDL's internal queue.
     // Must be called before SDL_PollEvent to avoid blocking on compositor I/O.
     SDL_PumpEvents();

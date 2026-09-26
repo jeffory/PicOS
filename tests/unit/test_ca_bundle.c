@@ -1,6 +1,6 @@
 // Host unit test for src/drivers/ca_bundle.c: the bundle parses as a whole
 // (the firmware parses it ONCE at boot into one mbedtls_x509_crt chain that
-// every TLS connection shares, wifi.c) and the chains PicOS depends on verify
+// every TLS connection shares, wifi.c) and the chains PicoDeck depends on verify
 // against it, with host-name checking.  Fixtures in fixtures/tls/ are the
 // chains served by the real hosts on 2026-09-24 (`openssl s_client
 // -showcerts`); the host build has no MBEDTLS_HAVE_TIME_DATE, so leaf expiry
@@ -14,7 +14,7 @@
 #include <stdlib.h>
 #include <string.h>
 
-#define FIX PICOS_ROOT "/tests/unit/fixtures/tls/"
+#define FIX PICODECK_ROOT "/tests/unit/fixtures/tls/"
 
 static mbedtls_x509_crt s_ca;
 
@@ -45,9 +45,11 @@ int main(void) {
   for (mbedtls_x509_crt *c = &s_ca; c && c->raw.len; c = c->next) count++;
   CHECK_EQ_INT(count, 11);
 
-  // WE1 -> GTS Root R4 (in the bundle directly).
-  CHECK_EQ_U32(verify_chain(FIX "picos.jeffory.dev.chain.pem",
-                            "picos.jeffory.dev"), 0);
+  // The store (Cloudflare Universal SSL; chain captured 2026-09-26):
+  // WE1 -> GTS Root R4 (in the bundle directly).  Cloudflare may reissue from
+  // Let's Encrypt, Google Trust Services or SSL.com; all three roots are bundled.
+  CHECK_EQ_U32(verify_chain(FIX "store.picodeck.net.chain.pem",
+                            "store.picodeck.net"), 0);
   // DV E36 -> Sectigo E46 (P-384).
   CHECK_EQ_U32(verify_chain(FIX "github.com.chain.pem", "github.com"), 0);
   // YR1 -> ISRG Root YR, which is NOT in the bundle: only its cross-sign by

@@ -2,7 +2,7 @@
   DOS86 — Audio mixer.
 
   Combines PC speaker (square wave) and OPL2 (FM synthesis) into a stereo
-  PCM stream pushed to PicOS audio via Core 1 callback.
+  PCM stream pushed to PicoDeck audio via Core 1 callback.
 
   This program is free software; you can redistribute it and/or
   modify it under the terms of the GNU General Public License

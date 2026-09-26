@@ -3,12 +3,12 @@
   "name": "File Manager",
   "description": "Dual-panel Norton Commander-style file manager",
   "version": "1.0",
-  "author": "PicOS",
+  "author": "PicoDeck",
   "requirements": [
     "root-filesystem",
     "audio"
   ],
   "category": "tools",
-  "repo": "jeffory/picos-apps",
+  "repo": "PicoDeck/picodeck",
   "min_firmware": "1.0.0"
 }

@@ -247,7 +247,7 @@ volatile bool g_lua_service_pending = false;
 static uint32_t s_last_full_pass_us = 0;
 
 static inline uint32_t service_now_us(void) {
-#ifdef PICOS_SIMULATOR
+#ifdef PICODECK_SIMULATOR
   extern uint64_t hal_get_time_us(void);
   return (uint32_t)hal_get_time_us();
 #else
@@ -264,7 +264,7 @@ static void lua_service_full(lua_State *L) {
   lua_bridge_sound_poll(L); // fire any pending sound finish/loop callbacks
   dev_commands_poll();
   dev_commands_process();
-#ifdef PICOS_SIMULATOR
+#ifdef PICODECK_SIMULATOR
   // Socket polling is handled by the dedicated socket thread.
   // Check the global running flag (set by signal handler or shutdown RPC).
   extern volatile int g_running;
@@ -366,24 +366,24 @@ void lua_bridge_terminal_init(lua_State *L);
 void lua_bridge_register_3d(lua_State *L);
 void lua_bridge_zip_init(lua_State *L);
 
-// The VM and this bridge must agree on the number types. cmake/picos_lua.cmake
+// The VM and this bridge must agree on the number types. cmake/picodeck_lua.cmake
 // patches luaconf.h so LUA_32BITS=1 takes effect and applies it PUBLIC; if
 // either step regresses, Lua silently reverts to 64-bit integers and doubles
 // (apps then behave differently on the simulator and the device). Fail the
 // build instead.
 _Static_assert(sizeof(lua_Integer) == 4,
                "lua_Integer must be 32-bit: luaconf.h not patched or "
-               "PICOS_LUA_DEFINITIONS not applied (see cmake/picos_lua.cmake)");
+               "PICODECK_LUA_DEFINITIONS not applied (see cmake/picodeck_lua.cmake)");
 _Static_assert(sizeof(lua_Number) == 4,
                "lua_Number must be float: luaconf.h not patched or "
-               "PICOS_LUA_DEFINITIONS not applied (see cmake/picos_lua.cmake)");
+               "PICODECK_LUA_DEFINITIONS not applied (see cmake/picodeck_lua.cmake)");
 _Static_assert(LUAI_MAXSTACK == 1000,
-               "LUAI_MAXSTACK override not applied (see cmake/picos_lua.cmake)");
+               "LUAI_MAXSTACK override not applied (see cmake/picodeck_lua.cmake)");
 // The Lua VM stack (lua_runner.c LUA_VM_STACK_SIZE) is sized for this many
 // nested C calls; raising it without growing that stack turns the clean
 // "C stack overflow" error into a stack-limit HardFault.
 _Static_assert(LUAI_MAXCCALLS == 60,
-               "LUAI_MAXCCALLS override not applied (see cmake/picos_lua.cmake)");
+               "LUAI_MAXCCALLS override not applied (see cmake/picodeck_lua.cmake)");
 
 // load(chunk [, chunkname [, mode [, env]]]) with mode forced to "t".
 // Precompiled bytecode is not verified by the VM, so a crafted chunk can read
@@ -430,7 +430,7 @@ void lua_bridge_register(lua_State *L) {
   lua_pop(L, 1);
   printf("[LUA] registering math...\n");
   luaL_requiref(L, "math", luaopen_math, 1);
-#ifdef PICOS_SIMULATOR
+#ifdef PICODECK_SIMULATOR
   // Simulator --test-mode: a fixed seed, so math.random repeats run to run.
   if (sim_test_mode()) {
     lua_getfield(L, -1, "randomseed");

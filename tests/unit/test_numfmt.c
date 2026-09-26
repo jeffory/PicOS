@@ -1,5 +1,5 @@
 // Host unit test for src/os/lua_numfmt.c (Lua's float formatting, which does
-// not use the C library): picos_numfmt_float and picos_lua_sprintf must print
+// not use the C library): picodeck_numfmt_float and picodeck_lua_sprintf must print
 // exactly what glibc prints for every float32.
 //
 // Deterministic sample (fixed-seed xorshift + hand-picked edge values), every
@@ -63,8 +63,8 @@ static bool glibc_hash_g_bug(const char *spec, const char *ours,
 // Our two entry points against glibc for one spec and value.
 static void check_one(const char *spec, float v) {
   char ours[512], lua[512], want[512];
-  int ro = picos_numfmt_float(ours, sizeof ours, spec, v);
-  int rl = picos_lua_sprintf(lua, sizeof lua, spec, (double)v);
+  int ro = picodeck_numfmt_float(ours, sizeof ours, spec, v);
+  int rl = picodeck_lua_sprintf(lua, sizeof lua, spec, (double)v);
   // NaN: compare against glibc's rendering of a positive NaN.
   double ref = isnan(v) ? fabs((double)v) : (double)v;
   int rw = snprintf(want, sizeof want, spec, ref);
@@ -164,81 +164,81 @@ static void test_nan(void) {
     }
   }
   char b[32];
-  picos_numfmt_float(b, sizeof b, "%g", -NAN);
+  picodeck_numfmt_float(b, sizeof b, "%g", -NAN);
   CHECK_STR(b, "nan");
-  picos_numfmt_float(b, sizeof b, "%F", NAN);
+  picodeck_numfmt_float(b, sizeof b, "%F", NAN);
   CHECK_STR(b, "NAN");
-  picos_numfmt_float(b, sizeof b, "%+E", -NAN);
+  picodeck_numfmt_float(b, sizeof b, "%+E", -NAN);
   CHECK_STR(b, "+NAN");
-  picos_numfmt_float(b, sizeof b, "%F", -INFINITY);
+  picodeck_numfmt_float(b, sizeof b, "%F", -INFINITY);
   CHECK_STR(b, "-INF");
-  picos_numfmt_float(b, sizeof b, "%05.1f", INFINITY);
+  picodeck_numfmt_float(b, sizeof b, "%05.1f", INFINITY);
   CHECK_STR(b, "  inf");  // '0' does not pad inf/nan
 }
 
 static void test_F(void) {
   char b[64];
-  picos_numfmt_float(b, sizeof b, "%F", 1.5f);
+  picodeck_numfmt_float(b, sizeof b, "%F", 1.5f);
   CHECK_STR(b, "1.500000");
-  picos_numfmt_float(b, sizeof b, "%.0F", 2.5f);
+  picodeck_numfmt_float(b, sizeof b, "%.0F", 2.5f);
   CHECK_STR(b, "2");  // half-to-even
-  picos_numfmt_float(b, sizeof b, "%#.0F", 3.0f);
+  picodeck_numfmt_float(b, sizeof b, "%#.0F", 3.0f);
   CHECK_STR(b, "3.");
-  picos_numfmt_float(b, sizeof b, "%F", 1e10f);
+  picodeck_numfmt_float(b, sizeof b, "%F", 1e10f);
   CHECK_STR(b, "10000000000.000000");
 }
 
 static void test_hash_g(void) {
   char b[64];
-  picos_numfmt_float(b, sizeof b, "%#g", 999999.5f);
+  picodeck_numfmt_float(b, sizeof b, "%#g", 999999.5f);
   CHECK_STR(b, "1.00000e+06");  // glibc: "1.e+06" (its bug, see above)
-  picos_numfmt_float(b, sizeof b, "% #18G", 999999.5f);
+  picodeck_numfmt_float(b, sizeof b, "% #18G", 999999.5f);
   CHECK_STR(b, "       1.00000E+06");
-  picos_numfmt_float(b, sizeof b, "%#g", 1.0f);
+  picodeck_numfmt_float(b, sizeof b, "%#g", 1.0f);
   CHECK_STR(b, "1.00000");
-  picos_numfmt_float(b, sizeof b, "%#.3g", 9.9996f);
+  picodeck_numfmt_float(b, sizeof b, "%#.3g", 9.9996f);
   CHECK_STR(b, "10.0");
 }
 
 static void test_hex_ties(void) {
   char b[32];
-  picos_numfmt_float(b, sizeof b, "%.0a", 1.5f);   // 0x1.8p+0: tie, 1 odd
+  picodeck_numfmt_float(b, sizeof b, "%.0a", 1.5f);   // 0x1.8p+0: tie, 1 odd
   CHECK_STR(b, "0x2p+0");
-  picos_numfmt_float(b, sizeof b, "%.0a", 1.25f);  // below the tie
+  picodeck_numfmt_float(b, sizeof b, "%.0a", 1.25f);  // below the tie
   CHECK_STR(b, "0x1p+0");
-  picos_numfmt_float(b, sizeof b, "%#.0A", 0.75f);
+  picodeck_numfmt_float(b, sizeof b, "%#.0A", 0.75f);
   CHECK_STR(b, "0X2.P-1");
-  picos_numfmt_float(b, sizeof b, "%.1a", 1.03125f);  // 0x1.08: tie, 0 even
+  picodeck_numfmt_float(b, sizeof b, "%.1a", 1.03125f);  // 0x1.08: tie, 0 even
   CHECK_STR(b, "0x1.0p+0");
 }
 
 static void test_sprintf_passthrough(void) {
   char o[64];
-  picos_lua_sprintf(o, sizeof o, "x%%%.2fy%%", 1.25);
+  picodeck_lua_sprintf(o, sizeof o, "x%%%.2fy%%", 1.25);
   CHECK_STR(o, "x%1.25y%");
-  picos_lua_sprintf(o, sizeof o, "%5.3d", 7);
+  picodeck_lua_sprintf(o, sizeof o, "%5.3d", 7);
   CHECK_STR(o, "  007");
-  picos_lua_sprintf(o, sizeof o, "%s|%c", "ab", 'z');
+  picodeck_lua_sprintf(o, sizeof o, "%s|%c", "ab", 'z');
   CHECK_STR(o, "ab|z");
-  picos_lua_sprintf(o, sizeof o, "%.14g", 0.1);  // Lua's number format
+  picodeck_lua_sprintf(o, sizeof o, "%.14g", 0.1);  // Lua's number format
   CHECK_STR(o, "0.10000000149012");  // the float32 nearest 0.1
 }
 
 static void test_truncation(void) {
   char o[8];
   memset(o, 'Z', sizeof o);
-  int r = picos_numfmt_float(o, 5, "%f", 3.25f);
+  int r = picodeck_numfmt_float(o, 5, "%f", 3.25f);
   CHECK_EQ_INT(r, 8);  // full length, snprintf semantics
   CHECK_STR(o, "3.25");
   CHECK_EQ_INT(o[5], 'Z');  // nothing written past size
-  r = picos_numfmt_float(o, 0, "%f", 3.25f);
+  r = picodeck_numfmt_float(o, 0, "%f", 3.25f);
   CHECK_EQ_INT(r, 8);
   CHECK_EQ_INT(o[0], '3');  // size 0 writes nothing
-  CHECK_EQ_INT(picos_numfmt_float(o, sizeof o, "%q", 1.0f), -1);  // malformed
-  CHECK_EQ_INT(picos_numfmt_float(o, sizeof o, "f", 1.0f), -1);
+  CHECK_EQ_INT(picodeck_numfmt_float(o, sizeof o, "%q", 1.0f), -1);  // malformed
+  CHECK_EQ_INT(picodeck_numfmt_float(o, sizeof o, "f", 1.0f), -1);
   // Precision capped at 150.
   char big[400];
-  r = picos_numfmt_float(big, sizeof big, "%.200f", 1.0f);
+  r = picodeck_numfmt_float(big, sizeof big, "%.200f", 1.0f);
   CHECK_EQ_INT(r, 152);
 }
 

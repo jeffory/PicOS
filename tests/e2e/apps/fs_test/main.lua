@@ -30,7 +30,7 @@ pc.display.flush()
 
 T.case("write_read", function()
     local path = fs.appPath("test_write.txt")
-    local data = "Hello, PicOS filesystem!"
+    local data = "Hello, PicoDeck filesystem!"
     write(path, data)
     local f = T.ok(fs.open(path, "r"), "open for read")
     local got = fs.read(f, #data + 10)

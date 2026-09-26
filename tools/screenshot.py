@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Capture a screenshot from a PicOS device over USB serial.
+"""Capture a screenshot from a PicoDeck device over USB serial.
 
 Usage:
     python3 tools/screenshot.py                     # auto-detect, save screenshot.png
@@ -30,7 +30,7 @@ TIMEOUT = 5  # seconds
 
 
 def find_device():
-    """Try common PicOS serial device paths."""
+    """Try common PicoDeck serial device paths."""
     import glob
     for pattern in ["/dev/ttyACM*", "/dev/tty.usbmodem*", "COM*"]:
         matches = sorted(glob.glob(pattern))
@@ -156,7 +156,7 @@ def save_png(width, height, rgb_data, path):
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Capture PicOS screenshot")
+    parser = argparse.ArgumentParser(description="Capture PicoDeck screenshot")
     parser.add_argument(
         "command", nargs="?", default=None,
         help="'ping' to test connectivity (omit for screenshot)"

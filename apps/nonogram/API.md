@@ -17,7 +17,7 @@ opaque token and never decodes it.
 This is a deliberate constraint, not an omission:
 
 - One codec. The share code is simultaneously the on-disk format
-  (`/data/com.picos.nonogram/puzzles/*.json`), the typed offline format, and the
+  (`/data/net.picodeck.nonogram/puzzles/*.json`), the typed offline format, and the
   wire format. There is one encoder, one decoder, one checksum, and therefore one
   place a bug can live.
 - The client already validates. The code carries a 10-bit checksum and the client

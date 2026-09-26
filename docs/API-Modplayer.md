@@ -1,0 +1,143 @@
+---
+title: "API Mod Player"
+---
+
+Tracker module music playback (MOD, XM, S3M formats). The mod player runs on Core 1 alongside other audio.
+
+## picocalc.modplayer
+
+### Functions
+
+#### `picocalc.modplayer.create()`
+Create a new mod player instance.
+
+- **Parameters:** None
+- **Returns:** (userdata) Player object, or `nil, errorString` on failure
+
+```lua
+local player, err = picocalc.modplayer.create()
+if not player then
+    picocalc.repl.print("Error: " .. err)
+end
+```
+
+---
+
+### Player Methods
+
+Objects returned by `picocalc.modplayer.create()`. There is one MOD player:
+`create()` returns the one live handle (calling it again returns the same
+object while it is alive). It is cleaned up by the garbage collector; a
+destroyed handle raises on use. Volume is 0-100.
+
+#### `player:load(path)`
+Load a tracker module file from the SD card.
+
+- **Parameters:**
+  - `path` (string): Path to a MOD, XM, or S3M file
+- **Returns:** (boolean) `true` if the file was loaded successfully
+
+```lua
+local ok = player:load("/apps/myapp/music.mod")
+```
+
+---
+
+#### `player:play([loop])`
+Start playback of the loaded module.
+
+- **Parameters:**
+  - `loop` (boolean, optional): Whether to loop playback. Default `false`.
+- **Returns:** None
+
+```lua
+player:play(true)  -- play with looping
+```
+
+---
+
+#### `player:stop()`
+Stop playback.
+
+- **Parameters:** None
+- **Returns:** None
+
+```lua
+player:stop()
+```
+
+---
+
+#### `player:pause()`
+Pause playback at the current position.
+
+- **Parameters:** None
+- **Returns:** None
+
+```lua
+player:pause()
+```
+
+---
+
+#### `player:resume()`
+Resume paused playback.
+
+- **Parameters:** None
+- **Returns:** None
+
+```lua
+player:resume()
+```
+
+---
+
+#### `player:isPlaying()`
+Check whether the player is currently playing.
+
+- **Parameters:** None
+- **Returns:** (boolean) `true` if playback is active
+
+```lua
+if player:isPlaying() then
+    picocalc.repl.print("Playing...")
+end
+```
+
+---
+
+#### `player:setVolume(vol)`
+Set the playback volume.
+
+- **Parameters:**
+  - `vol` (number): Volume level from 0 (silent) to 100 (maximum)
+- **Returns:** None
+
+```lua
+player:setVolume(75)
+```
+
+---
+
+#### `player:getVolume()`
+Get the current playback volume.
+
+- **Parameters:** None
+- **Returns:** (number) Current volume level (0-100)
+
+```lua
+local vol = player:getVolume()
+```
+
+---
+
+#### `player:setLoop(enabled)`
+Enable or disable looping on the current module.
+
+- **Parameters:**
+  - `enabled` (boolean): `true` to loop, `false` to play once
+- **Returns:** None
+
+```lua
+player:setLoop(true)
+```

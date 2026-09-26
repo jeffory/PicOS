@@ -1,6 +1,6 @@
 /*
-  DOS86 — PicOS backend: timing, keyboard buffer, disk I/O.
-  Uses PicOS API (api->fs->*, api->sys->*) for hardware access.
+  DOS86 — PicoDeck backend: timing, keyboard buffer, disk I/O.
+  Uses PicoDeck API (api->fs->*, api->sys->*) for hardware access.
 */
 
 #include "backend.h"

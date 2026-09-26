@@ -1,7 +1,7 @@
 # ThreadSanitizer suppressions for the simulator (TSAN_OPTIONS=suppressions=,
-# set by tests/e2e/picos_simulator.py). Third-party code only: every PicOS
+# set by tests/e2e/picodeck_simulator.py). Third-party code only: every PicoDeck
 # race stays visible.
 
 # SDL's D-Bus teardown takes two libdbus mutexes in both orders on the main
-# thread at exit (lock-order-inversion inside libdbus-1.so, no PicOS frames).
+# thread at exit (lock-order-inversion inside libdbus-1.so, no PicoDeck frames).
 deadlock:libdbus-1.so

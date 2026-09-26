@@ -27,7 +27,7 @@ import numpy as np
 import pytest
 
 from helpers import E2E_DIR, compare_golden, run_lua_app, stage_lua_app
-from picos_simulator import PicosSimulator
+from picodeck_simulator import PicodeckSimulator
 
 pytest_plugins = ["pytester"]
 
@@ -37,7 +37,7 @@ INNER_CONFTEST = textwrap.dedent(f"""
     import importlib.util, sys
     sys.path.insert(0, {str(E2E_DIR)!r})
     _spec = importlib.util.spec_from_file_location(
-        "picos_e2e_conftest", {str(E2E_DIR / "conftest.py")!r})
+        "picodeck_e2e_conftest", {str(E2E_DIR / "conftest.py")!r})
     _mod = importlib.util.module_from_spec(_spec)
     _spec.loader.exec_module(_mod)
     globals().update({{k: v for k, v in vars(_mod).items()
@@ -210,7 +210,7 @@ def test_call_fails_at_once_when_the_connection_closes_mid_call():
         conn.close()
 
     threading.Thread(target=serve, daemon=True).start()
-    sim = PicosSimulator(timeout=10.0)
+    sim = PicodeckSimulator(timeout=10.0)
     sim.tcp_port = srv.getsockname()[1]
     sim._connect()
     try:
@@ -293,25 +293,25 @@ def test_real_sanitizer_report_fails_the_test(pytester, simulator_binary):
 
 
 def test_sanitizer_expectation_mismatch_fails_the_run(pytester, simulator_binary):
-    """PICOS_SIM_EXPECT_SANITIZE names a sanitizer the binary's --build-info
+    """PICODECK_SIM_EXPECT_SANITIZE names a sanitizer the binary's --build-info
     does not report: the run stops with a usage error instead of running
     (and skipping every asan_only test)."""
-    pytester._monkeypatch.setenv("PICOS_SIM_EXPECT_SANITIZE", "memory")
-    pytester._monkeypatch.delenv("PICOS_SIM_SANITIZE", raising=False)
+    pytester._monkeypatch.setenv("PICODECK_SIM_EXPECT_SANITIZE", "memory")
+    pytester._monkeypatch.delenv("PICODECK_SIM_SANITIZE", raising=False)
     result = _inner(pytester, simulator_binary, """
         def test_never_runs():
             pass
     """)
     assert result.ret == pytest.ExitCode.USAGE_ERROR, result.stdout.str()
     err = result.stderr.str()
-    assert "PICOS_SIM_EXPECT_SANITIZE=memory" in err and "missing memory" in err, err
+    assert "PICODECK_SIM_EXPECT_SANITIZE=memory" in err and "missing memory" in err, err
 
 
 def test_sanitizer_expectation_with_failed_probe_fails_the_run(pytester, tmp_path):
     """An expected sanitizer build whose --build-info probe fails (here: no
     binary) is a usage error, not a silent release run."""
-    pytester._monkeypatch.setenv("PICOS_SIM_EXPECT_SANITIZE", "address")
-    pytester._monkeypatch.delenv("PICOS_SIM_SANITIZE", raising=False)
+    pytester._monkeypatch.setenv("PICODECK_SIM_EXPECT_SANITIZE", "address")
+    pytester._monkeypatch.delenv("PICODECK_SIM_SANITIZE", raising=False)
     result = _inner(pytester, tmp_path / "no_such_simulator", """
         def test_never_runs():
             pass
@@ -323,8 +323,8 @@ def test_sanitizer_expectation_with_failed_probe_fails_the_run(pytester, tmp_pat
 def test_asan_only_skip_not_allowed_when_probe_fails(pytester, tmp_path):
     """asan_only skips are allow-listed only when the probe says the binary
     is a release build; if the probe failed the skip fails the run."""
-    pytester._monkeypatch.delenv("PICOS_SIM_EXPECT_SANITIZE", raising=False)
-    pytester._monkeypatch.delenv("PICOS_SIM_SANITIZE", raising=False)
+    pytester._monkeypatch.delenv("PICODECK_SIM_EXPECT_SANITIZE", raising=False)
+    pytester._monkeypatch.delenv("PICODECK_SIM_SANITIZE", raising=False)
     result = _inner(pytester, tmp_path / "no_such_simulator", """
         import pytest
         @pytest.mark.asan_only
@@ -339,7 +339,7 @@ def test_asan_only_skip_not_allowed_when_probe_fails(pytester, tmp_path):
 def test_sanitizer_options_merge_per_key(monkeypatch):
     """A caller's ASAN_OPTIONS overrides only the keys it sets; the suite's
     other options survive (setdefault used to drop them all)."""
-    from picos_simulator import sanitizer_env
+    from picodeck_simulator import sanitizer_env
     env = sanitizer_env({"ASAN_OPTIONS": "detect_leaks=1:verbosity=1"})
     opts = dict(o.split("=", 1) for o in env["ASAN_OPTIONS"].split(":"))
     assert opts == {"abort_on_error": "1", "halt_on_error": "1",
@@ -379,12 +379,12 @@ def test_wait_for_exit_recovers_a_lost_notification(simulator):
 
 
 def test_unix_socket_disabled_and_tcp_on_loopback(simulator):
-    """--unix-socket none leaves no picos_control in the cwd; TCP listens on
+    """--unix-socket none leaves no picodeck_control in the cwd; TCP listens on
     127.0.0.1 only."""
     out = simulator.get_output()["stdout"]
     assert "UNIX domain server disabled" in out, out[-2000:]
     assert "UNIX domain server listening" not in out
-    assert not list(Path.cwd().glob("picos_control*"))
+    assert not list(Path.cwd().glob("picodeck_control*"))
     listening = Path("/proc/net/tcp").read_text().splitlines()[1:]
     port_hex = f"{simulator.tcp_port:04X}"
     ours = [l.split() for l in listening if l.split()[1].endswith(":" + port_hex)

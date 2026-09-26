@@ -35,7 +35,7 @@ typedef struct {
     uint32_t size;
 } table_t;
 
-void picos_main(const PicoCalcAPI *api, const char *app_dir,
+void picodeck_main(const PicoCalcAPI *api, const char *app_dir,
                 const char *app_id, const char *app_name) {
     (void)app_dir; (void)app_id; (void)app_name;
     void (*log)(const char *, ...) = api->sys->log;

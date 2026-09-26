@@ -1,4 +1,4 @@
--- Guinea Pig Run - A PicOS Platformer
+-- Guinea Pig Run - A PicoDeck Platformer
 -- Collect veggies, avoid enemies, find your way home!
 
 local pc = picocalc
@@ -154,7 +154,7 @@ local SFX_PRIORITY = {  -- higher wins when stealing a busy player
 }
 
 local function sfx_init()
-    -- dofile is blocked on PicOS (no host fopen for the SD FATFS);
+    -- dofile is blocked on PicoDeck (no host fopen for the SD FATFS);
     -- load the ranges module via pc.fs + load() like picoforge does.
     local src = pc.fs.readFile(APP_DIR .. "/sfx/sfx_ranges.lua")
     if not src then return end

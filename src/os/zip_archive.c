@@ -5,7 +5,7 @@
 
 #include "zip_util.h"
 
-#ifndef PICOS_SIMULATOR
+#ifndef PICODECK_SIMULATOR
 #include "hardware/watchdog.h"
 #endif
 
@@ -18,7 +18,7 @@
 static bool zip_archive_progress(int done, int total, const char *name,
                                  void *user) {
     (void)done; (void)total; (void)name; (void)user;
-#ifndef PICOS_SIMULATOR
+#ifndef PICODECK_SIMULATOR
     // Extraction can outlast the 10s watchdog window and nothing else feeds
     // it while we're in here.
     watchdog_update();

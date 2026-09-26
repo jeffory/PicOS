@@ -77,7 +77,7 @@ static void ota_show_progress(uint32_t bytes_done, uint32_t bytes_total) {
 
 static void ota_show_status(const char *line1, const char *line2, uint16_t color) {
     display_clear(COLOR_BLACK);
-    display_draw_text(8, 8, "PicOS Firmware Update", COLOR_CYAN, COLOR_BLACK);
+    display_draw_text(8, 8, "PicoDeck Firmware Update", COLOR_CYAN, COLOR_BLACK);
     display_draw_text(8, 140, line1, color, COLOR_BLACK);
     if (line2)
         display_draw_text(8, 156, line2, COLOR_GRAY, COLOR_BLACK);

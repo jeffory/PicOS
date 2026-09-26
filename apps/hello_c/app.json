@@ -4,6 +4,6 @@
     "version": "1.0",
     "description": "Native C demo",
     "category": "demos",
-    "repo": "jeffory/picos-apps",
+    "repo": "PicoDeck/picodeck",
     "min_firmware": "1.0.0"
 }

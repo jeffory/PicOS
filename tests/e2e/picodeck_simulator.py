@@ -1,10 +1,10 @@
-"""PicOS Simulator control wrapper for E2E testing.
+"""PicoDeck Simulator control wrapper for E2E testing.
 
 Uses JSON-RPC 2.0 over TCP to communicate with the simulator, matching
-the protocol used by the MCP server (tools/picos_mcp.py).
+the protocol used by the MCP server (tools/picodeck_mcp.py).
 
 Usage:
-    with PicosSimulator(headless=True) as sim:
+    with PicodeckSimulator(headless=True) as sim:
         sim.launch_app("hello")
         screenshot = sim.screenshot()
         sim.exit_app()
@@ -62,11 +62,11 @@ def sanitizer_env(env: dict) -> dict:
 
 
 def default_binary() -> Path:
-    """$PICOS_SIM_BINARY (relative to the cwd, else the repo root) or
-    build_sim/picos_simulator."""
-    override = os.environ.get("PICOS_SIM_BINARY")
+    """$PICODECK_SIM_BINARY (relative to the cwd, else the repo root) or
+    build_sim/picodeck_simulator."""
+    override = os.environ.get("PICODECK_SIM_BINARY")
     if not override:
-        return PROJECT_ROOT / "build_sim" / "picos_simulator"
+        return PROJECT_ROOT / "build_sim" / "picodeck_simulator"
     path = Path(override).expanduser()
     if not path.is_absolute() and not path.exists():
         path = PROJECT_ROOT / path
@@ -77,7 +77,7 @@ _build_info_cache: dict = {}
 
 
 def binary_build_info(binary) -> Optional[dict]:
-    """`picos_simulator --build-info` as a dict of its key=value lines
+    """`picodeck_simulator --build-info` as a dict of its key=value lines
     (sanitize=..., firmware_net=0|1); None when the probe failed (missing
     binary, crash, timeout, no sanitize= line), so callers can tell "no"
     from "don't know"."""
@@ -102,7 +102,7 @@ def binary_build_info(binary) -> Optional[dict]:
 
 def binary_sanitizers(binary) -> Optional[str]:
     """The -fsanitize= list a simulator binary was built with ('' for a
-    release build), from `picos_simulator --build-info`; None when the probe
+    release build), from `picodeck_simulator --build-info`; None when the probe
     failed (missing binary, crash, timeout, no sanitize= line), so callers
     can tell "not sanitized" from "don't know"."""
     info = binary_build_info(binary)
@@ -117,8 +117,8 @@ def binary_firmware_net(binary) -> Optional[bool]:
     return None if info is None else info.get("firmware_net") == "1"
 
 
-class PicosSimulator:
-    """Controls PicOS Simulator process for E2E testing via JSON-RPC 2.0."""
+class PicodeckSimulator:
+    """Controls PicoDeck Simulator process for E2E testing via JSON-RPC 2.0."""
 
     # Project root (two levels up from tests/e2e/)
     PROJECT_ROOT = PROJECT_ROOT
@@ -152,11 +152,11 @@ class PicosSimulator:
         # set_time_multiplier x real time, default 50x; 0 pauses it for
         # step_time). Off by default: audio playback and network I/O stay on
         # real time, and apps with time-boxed input waits would expire before
-        # a test could type. None = $PICOS_SIM_VIRTUAL_TIME=1 turns it on for
+        # a test could type. None = $PICODECK_SIM_VIRTUAL_TIME=1 turns it on for
         # every test-mode simulator (a whole-suite experiment knob).
         if virtual_time is None:
             virtual_time = test_mode and os.environ.get(
-                "PICOS_SIM_VIRTUAL_TIME") == "1"
+                "PICODECK_SIM_VIRTUAL_TIME") == "1"
         if virtual_time and not test_mode:
             raise ValueError("virtual_time requires test_mode")
         self.virtual_time = virtual_time
@@ -165,7 +165,7 @@ class PicosSimulator:
         # get_crash_log). None = the sim's per-PID default under /tmp.
         self.crash_log_path = crash_log_path
         # --unix-socket: "none" (default) keeps parallel instances from
-        # binding ./picos_control in the cwd; None = the sim's default.
+        # binding ./picodeck_control in the cwd; None = the sim's default.
         self.unix_socket = unix_socket
         # More simulator flags, e.g. ["--real-umm"] (device-accurate heap).
         self.extra_args = list(extra_args)
@@ -917,4 +917,4 @@ class PicosSimulator:
             check=True,
             capture_output=True,
         )
-        return build_dir / "picos_simulator"
+        return build_dir / "picodeck_simulator"

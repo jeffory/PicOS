@@ -16,7 +16,7 @@
 #include <stdio.h>
 #include <string.h>
 
-#if !defined(PICOS_SIMULATOR) && !defined(PICOS_HOST_TEST)
+#if !defined(PICODECK_SIMULATOR) && !defined(PICODECK_HOST_TEST)
 #include "hardware/watchdog.h"
 #define OTA_FEED_WATCHDOG() watchdog_update()
 #else
@@ -124,7 +124,7 @@ bool ota_check_digest(const uint8_t digest[32], const char *hash_path,
     return false;
   }
   if (!ota_sig_verify_pem(g_ota_update_pubkey_pem, digest, buf, (size_t)n)) {
-    *err = "Bad signature: image not signed by the PicOS update key";
+    *err = "Bad signature: image not signed by the PicoDeck update key";
     return false;
   }
   return true;

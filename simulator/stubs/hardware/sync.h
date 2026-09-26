@@ -4,7 +4,7 @@
 // this header, but the simulator's own network layer (sim_http.c/sim_tcp.c)
 // and toast never contend across threads in a way these locks protect.
 //
-// SIM_FIRMWARE_NET build (PICOS_SIM_FIRMWARE_NET): the firmware's
+// SIM_FIRMWARE_NET build (PICODECK_SIM_FIRMWARE_NET): the firmware's
 // src/drivers/http.c, tcp.c and wifi.c run with Core 0 and Core 1 as two
 // host threads, so the spinlocks they take around the Core 0/Core 1 shared
 // ring buffers and pending flags must really exclude. Each hardware spinlock
@@ -15,7 +15,7 @@
 #include <stdint.h>
 #include <stdbool.h>
 
-#ifdef PICOS_SIM_FIRMWARE_NET
+#ifdef PICODECK_SIM_FIRMWARE_NET
 
 #include <stdatomic.h>
 
@@ -38,7 +38,7 @@ void spin_unlock(spin_lock_t *lock, uint32_t saved_irq);
 // Data memory barrier (http_free orders Core 1's writes before freeing).
 #define __dmb() atomic_thread_fence(memory_order_seq_cst)
 
-#else  // !PICOS_SIM_FIRMWARE_NET
+#else  // !PICODECK_SIM_FIRMWARE_NET
 
 typedef int spin_lock_t;
 
@@ -63,4 +63,4 @@ static inline void spin_unlock(spin_lock_t *lock, uint32_t saved_irq) {
     (void)saved_irq;
 }
 
-#endif  // PICOS_SIM_FIRMWARE_NET
+#endif  // PICODECK_SIM_FIRMWARE_NET

@@ -1,5 +1,5 @@
 -- calc_memory.lua — Memory and history management
--- Pure Lua 5.4, no PicOS dependencies. Testable on host.
+-- Pure Lua 5.4, no PicoDeck dependencies. Testable on host.
 
 local Memory = {}
 Memory.__index = Memory

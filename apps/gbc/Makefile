@@ -1,4 +1,4 @@
-# PicOS GBC Emulator Native App Build
+# PicoDeck GBC Emulator Native App Build
 #
 # Produces main.elf — a Position-Independent ELF32 ARM Thumb-2 binary.
 # Copy main.elf + app.json to /apps/gbc/ on the SD card.
@@ -23,7 +23,7 @@ CFLAGS  = -mcpu=cortex-m33 -mthumb \
           -DENABLE_SDCARD=1 \
           -DENABLE_RTC=0
 LDFLAGS = -T linker.ld \
-          -Wl,--entry=picos_main \
+          -Wl,--entry=picodeck_main \
           -Wl,-pie \
           -Wl,--gc-sections \
           -Wl,--no-warn-rwx-segments \

@@ -1,7 +1,7 @@
 {
-    "id": "com.picos.harness_err",
+    "id": "net.picodeck.harness_err",
     "name": "Harness Err",
     "description": "Harness fixture: raises a runtime error",
     "version": "1.0",
-    "author": "PicOS E2E"
+    "author": "PicoDeck E2E"
 }

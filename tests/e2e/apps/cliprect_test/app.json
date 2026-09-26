@@ -1,7 +1,7 @@
 {
-    "id": "com.picos.cliprect_test",
+    "id": "net.picodeck.cliprect_test",
     "name": "Clip Rect Test",
     "description": "setClipRect/flushRows/flushRegion regression fixture",
     "version": "1.0",
-    "author": "PicOS"
+    "author": "PicoDeck"
 }

@@ -1,14 +1,14 @@
 #!/usr/bin/env python3
-"""Sign, verify and key-gen for PicOS OTA firmware images.
+"""Sign, verify and key-gen for PicoDeck OTA firmware images.
 
-Scheme: ECDSA P-256 over SHA-256 of the raw image (build/picocalc_os.bin).
+Scheme: ECDSA P-256 over SHA-256 of the raw image (build/picodeck.bin).
 The signature file is the DER ECDSA-Sig-Value that `openssl dgst -sha256
 -sign` writes, so plain openssl can check it too:
 
     openssl dgst -sha256 -verify pub.pem -signature image.sig image.bin
 
 The firmware embeds the PUBLIC key at build time (CMake option
-PICOS_UPDATE_PUBKEY_PEM, default tests/keys/picos-update-TEST-public.pem) and
+PICODECK_UPDATE_PUBKEY_PEM, default tests/keys/picodeck-update-TEST-public.pem) and
 refuses to flash /system/update.bin unless /system/update.sig verifies against
 it (src/os/ota_verify.c).  Everything here shells out to the openssl CLI, so
 the tool needs no Python packages.
@@ -18,7 +18,7 @@ Usage:
     tools/sign_update.py verify IMAGE [--pub PUB.pem]  [--sig IMAGE.sig]
     tools/sign_update.py genkey PRIV.pem PUB.pem
 
-`sign` defaults to the TEST key (tests/keys/picos-update-TEST-private.pem),
+`sign` defaults to the TEST key (tests/keys/picodeck-update-TEST-private.pem),
 which only local/dev builds trust.  Release builds embed the real public key
 and are signed in CI from the UPDATE_SIGNING_KEY secret.
 """
@@ -30,8 +30,8 @@ import sys
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
-TEST_PRIVATE = ROOT / "tests" / "keys" / "picos-update-TEST-private.pem"
-TEST_PUBLIC = ROOT / "tests" / "keys" / "picos-update-TEST-public.pem"
+TEST_PRIVATE = ROOT / "tests" / "keys" / "picodeck-update-TEST-private.pem"
+TEST_PUBLIC = ROOT / "tests" / "keys" / "picodeck-update-TEST-public.pem"
 
 
 def _openssl(*args: str, input_bytes: bytes | None = None) -> bytes:

@@ -1,4 +1,4 @@
--- test_all.lua — Master test runner for PicOS Calculator
+-- test_all.lua — Master test runner for PicoDeck Calculator
 -- Usage: cd apps/calculator/tests && lua test_all.lua
 
 local lu = require("luaunit")

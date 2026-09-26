@@ -251,7 +251,7 @@ void http_c1_send_request(struct mg_connection *nc, http_conn_t *c) {
       "%s"
       "Connection: %s\r\n",
       c->method, c->path ? c->path : "/", c->server,
-      has_ua ? "" : "User-Agent: PicOS/1.0\r\n",
+      has_ua ? "" : "User-Agent: PicoDeck/1.0\r\n",
       has_ae ? "" : "Accept-Encoding: identity\r\n",
       c->req_keep_alive ? "keep-alive" : "close");
 

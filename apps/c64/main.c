@@ -1,5 +1,5 @@
 /*
- * PicOS C64 Emulator
+ * PicoDeck C64 Emulator
  *
  * Commodore 64 emulator using floooh/chips (zlib license).
  * Cycle-accurate 6502 + VIC-II + SID + dual CIAs.
@@ -51,8 +51,8 @@
 #define AUDIO_NUM_SAMPLES   256
 #define AUDIO_BUF_SIZE      2048  // samples per frame batch
 
-#define ROM_DIR          "/data/com.picos.c64/roms"
-#define PROGS_DIR        "/data/com.picos.c64/progs"
+#define ROM_DIR          "/data/net.picodeck.c64/roms"
+#define PROGS_DIR        "/data/net.picodeck.c64/progs"
 
 #define MAX_PROGS        64
 #define MAX_FILENAME     48
@@ -441,7 +441,7 @@ static void show_error(const char *line1, const char *line2) {
 // ---------------------------------------------------------------------------
 // Entry point
 // ---------------------------------------------------------------------------
-void picos_main(const PicoCalcAPI *api,
+void picodeck_main(const PicoCalcAPI *api,
                 const char *app_dir,
                 const char *app_id,
                 const char *app_name)

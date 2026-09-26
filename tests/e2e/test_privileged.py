@@ -33,8 +33,8 @@ APP_BASE = 288 * 1024  # PIO_PSRAM_APP_BASE (src/drivers/pio_psram.h)
 
 ROOT = Path(__file__).resolve().parents[2]
 SIGN_TOOL = ROOT / "tools" / "sign_update.py"
-TEST_KEY = ROOT / "tests" / "keys" / "picos-update-TEST-private.pem"
-OTHER_KEY = ROOT / "tests" / "keys" / "picos-update-TEST-other-private.pem"
+TEST_KEY = ROOT / "tests" / "keys" / "picodeck-update-TEST-private.pem"
+OTHER_KEY = ROOT / "tests" / "keys" / "picodeck-update-TEST-other-private.pem"
 
 
 def fake_firmware(size=4096, fill=0):
@@ -232,7 +232,7 @@ def test_system_update_needs_an_os_app_id(sim):
 
 def test_os_updater_without_requirement_has_no_apply_update(sim):
     stage_lua_app(sim.sd_card_path, "priv_upd_noreq", UPDATE_PRESENCE_APP,
-                  id="com.picos.store")
+                  id="net.picodeck.store")
     _passed(run_lua_app(sim, "priv_upd_noreq"))
 
 
@@ -244,13 +244,13 @@ def test_apply_update_asks_before_flashing(sim, tmp_path):
     stage_update_files(sim.sd_card_path, image, tmp_path)
     stage_lua_app(sim.sd_card_path, "priv_upd_ok", UPDATE_CONFIRM_APP,
                   requirements=["system-update", "root-filesystem"],
-                  id="com.picos.updater", files={"fw.bin": image})
+                  id="net.picodeck.updater", files={"fw.bin": image})
     seq = sim.get_log_buffer(tail=1).get("next_seq", 0)
     sim.launch_app("priv_upd_ok")
     sim.wait_for_log("T7:CONFIRM_NEXT", timeout=15, since_seq=seq)
     outcome = _press_until_exit(sim, "esc")
     assert outcome.get("result") == "returned", outcome
-    res = json.loads((Path(sim.sd_card_path) / "data" / "com.picos.updater" /
+    res = json.loads((Path(sim.sd_card_path) / "data" / "net.picodeck.updater" /
                       "test_results.json").read_text())
     cases = {c["name"]: c for c in res["cases"]}
     assert res["done"], res
@@ -278,7 +278,7 @@ def test_confirm_ignores_keys_queued_before_it(sim, tmp_path):
     stage_update_files(sim.sd_card_path, image, tmp_path)
     stage_lua_app(sim.sd_card_path, "priv_upd_queued", QUEUED_KEYS_APP,
                   requirements=["system-update", "root-filesystem"],
-                  id="com.picos.store", files={"fw.bin": image})
+                  id="net.picodeck.store", files={"fw.bin": image})
     seq = sim.get_log_buffer(tail=1).get("next_seq", 0)
     sim.launch_app("priv_upd_queued")
     sim.wait_for_log("T7:QUEUE_NOW", timeout=15, since_seq=seq)
@@ -290,7 +290,7 @@ def test_confirm_ignores_keys_queued_before_it(sim, tmp_path):
         sim.wait_for_exit(timeout=3.0)
     outcome = _press_until_exit(sim, "n")
     assert outcome.get("result") == "returned", outcome
-    res = json.loads((Path(sim.sd_card_path) / "data" / "com.picos.store" /
+    res = json.loads((Path(sim.sd_card_path) / "data" / "net.picodeck.store" /
                       "test_results.json").read_text())
     case = {c["name"]: c for c in res["cases"]}["queued_keys_do_not_confirm"]
     assert case["status"] == "PASS", case
@@ -349,7 +349,7 @@ def test_apply_update_refuses_unsigned_or_bad_image(sim, tmp_path, case, expect)
     elif case == "no_checksum":
         sha = None
     elif case == "sha256sum_format":
-        sha = (hashlib.sha256(good).hexdigest() + "  picocalc_os.bin\n").encode()
+        sha = (hashlib.sha256(good).hexdigest() + "  picodeck.bin\n").encode()
     stage_update_files(sim.sd_card_path, image, tmp_path, sha=sha, sig=sig)
     if case == "empty_sig":
         (Path(sim.sd_card_path) / "system" / "update.sig").write_bytes(b"")
@@ -357,7 +357,7 @@ def test_apply_update_refuses_unsigned_or_bad_image(sim, tmp_path, case, expect)
     stage_lua_app(sim.sd_card_path, name,
                   UPDATE_REFUSED_APP.replace("EXPECT", json.dumps(expect)),
                   requirements=["system-update", "root-filesystem"],
-                  id="com.picos.updater", files={"fw.bin": image})
+                  id="net.picodeck.updater", files={"fw.bin": image})
     # No dialog: the app must finish on its own.
     _passed(run_lua_app(sim, name, timeout=20))
 

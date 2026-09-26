@@ -109,7 +109,7 @@ static void screenshot_write(void *arg) {
   for (int y = 0; y < BMP_HEIGHT; y++) {
     for (int x = 0; x < BMP_WIDTH; x++) {
       uint16_t raw = fb[y * BMP_WIDTH + x];
-#ifdef PICOS_SIMULATOR
+#ifdef PICODECK_SIMULATOR
       uint16_t px = raw; // simulator stores native byte order
 #else
       // Un-byte-swap: display stores pixels big-endian

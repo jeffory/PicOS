@@ -1,4 +1,4 @@
--- Calculator — Scientific calculator for PicOS
+-- Calculator — Scientific calculator for PicoDeck
 -- Full-featured: Basic, Scientific, Statistics, Base conversion
 
 local pc = picocalc
@@ -723,7 +723,7 @@ local function handle_input(pressed)
             return true
         end
         -- Save history before exit
-        local data_dir = "/data/com.picos.calculator"
+        local data_dir = "/data/net.picodeck.calculator"
         fs.mkdir(data_dir)
         local json = memory:serialize()
         local h = fs.open(data_dir .. "/history.json", "w")
@@ -866,7 +866,7 @@ end
 -- ── Load saved history ──────────────────────────────────────────────────────
 
 local function load_history()
-    local path = "/data/com.picos.calculator/history.json"
+    local path = "/data/net.picodeck.calculator/history.json"
     if fs.exists(path) then
         local json = fs.readFile(path)
         if json then

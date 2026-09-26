@@ -273,7 +273,7 @@ static void test_real_manifests(void) {
                                  "guinea_pig", "panels_demo", "c64", "dos86"};
   for (size_t i = 0; i < sizeof(k_apps) / sizeof(k_apps[0]); i++) {
     char path[512];
-    snprintf(path, sizeof(path), "%s/apps/%s/app.json", PICOS_ROOT, k_apps[i]);
+    snprintf(path, sizeof(path), "%s/apps/%s/app.json", PICODECK_ROOT, k_apps[i]);
     FILE *f = fopen(path, "rb");
     if (!f)
       continue;

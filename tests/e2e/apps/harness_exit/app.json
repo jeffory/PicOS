@@ -1,7 +1,7 @@
 {
-    "id": "com.picos.harness_exit",
+    "id": "net.picodeck.harness_exit",
     "name": "Harness Exit",
     "description": "Harness fixture: leaves through sys.exit",
     "version": "1.0",
-    "author": "PicOS E2E"
+    "author": "PicoDeck E2E"
 }

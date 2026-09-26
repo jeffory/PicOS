@@ -1,9 +1,9 @@
 {
   "mcpServers": {
-    "picos": {
+    "picodeck": {
       "command": "python3",
       "args": [
-        "tools/picos_mcp.py"
+        "tools/picodeck_mcp.py"
       ]
     },
     "context7": {

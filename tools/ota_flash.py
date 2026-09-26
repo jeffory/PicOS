@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""PicOS OTA firmware flasher — stage, reboot, verify.
+"""PicoDeck OTA firmware flasher — stage, reboot, verify.
 
 Pushes a raw firmware image to a USB-connected device over the SD-staged
 OTA path: signs it (ECDSA P-256, tools/sign_update.py — the TEST key by
@@ -16,22 +16,22 @@ flashed: the boot renames it to *.stale.  Firmware older than `reboot-ota`
 answers "Unknown command"; the tool then falls back to a plain `reboot`
 (those builds flash any staged image at boot and ignore the .sig).
 
-Reuses the serial transfer helpers from picos_mcp.py (same directory) so
+Reuses the serial transfer helpers from picodeck_mcp.py (same directory) so
 chunk/ACK pacing, integrity checks and transfer retries live in one place.
 
 Usage:
-    python3 tools/ota_flash.py [build/picocalc_os.bin] [--device /dev/ttyACM0]
-                               [--key tests/keys/picos-update-TEST-private.pem]
+    python3 tools/ota_flash.py [build/picodeck.bin] [--device /dev/ttyACM0]
+                               [--key tests/keys/picodeck-update-TEST-private.pem]
 
 Notes:
   - Hardware only.  The simulator has no flash; this tool never falls back
     to the simulator transport.
   - The device must be at the launcher: `reboot-ota` is dropped while an app
     is running, so a running app is asked to exit first.
-  - Do not run this while another process (for example the picos MCP server
+  - Do not run this while another process (for example the picodeck MCP server
     with an active hardware log monitor) is reading the same serial port.
   - Recovery if an update bricks the device: hold BOOTSEL, connect USB and
-    copy build/picocalc_os.uf2 to the mounted drive.
+    copy build/picodeck.uf2 to the mounted drive.
 """
 
 import argparse
@@ -43,7 +43,7 @@ import time
 from pathlib import Path
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-import picos_mcp as pm  # noqa: E402
+import picodeck_mcp as pm  # noqa: E402
 import sign_update  # noqa: E402
 
 OTA_MAX_SIZE = 2 * 1024 * 1024  # must match OTA_MAX_SIZE in ota_verify.h
@@ -56,13 +56,13 @@ def fail(msg: str) -> "NoReturn":  # noqa: F821
 
 
 def get_ver(port: str) -> str | None:
-    """Return the device's 'PicOS build <date> <time>' string, or None."""
+    """Return the device's 'PicoDeck build <date> <time>' string, or None."""
     try:
         lines = pm.do_command_hardware("ver", port, timeout=2.5)
     except Exception:
         return None
     for line in lines:
-        if "PicOS build" in line:
+        if "PicoDeck build" in line:
             return line.split("[DEV] ", 1)[-1]
     return None
 
@@ -191,9 +191,9 @@ def wait_for_reflash(old_port: str, old_ver: str | None, timeout: float) -> None
 
 def main() -> None:
     ap = argparse.ArgumentParser(
-        description="Flash PicOS firmware to a USB device via the OTA path")
-    ap.add_argument("firmware", nargs="?", default="build/picocalc_os.bin",
-                    help="raw firmware image (default: build/picocalc_os.bin)")
+        description="Flash PicoDeck firmware to a USB device via the OTA path")
+    ap.add_argument("firmware", nargs="?", default="build/picodeck.bin",
+                    help="raw firmware image (default: build/picodeck.bin)")
     ap.add_argument("--device", help="serial port (default: auto-detect)")
     ap.add_argument("--timeout", type=float, default=240.0,
                     help="seconds to wait for reflash + reboot (default 240)")
@@ -210,7 +210,7 @@ def main() -> None:
     data = fw.read_bytes()
     if data[:4] in (b"UF2\n", b"UF2\x0a"):
         fail("that is a UF2 file — the OTA path needs the raw .bin "
-             "(build/picocalc_os.bin)")
+             "(build/picodeck.bin)")
     if len(data) < OTA_MIN_SIZE:
         fail(f"{fw} is too small ({len(data)} bytes) to be firmware")
     if len(data) > OTA_MAX_SIZE:
@@ -219,7 +219,7 @@ def main() -> None:
 
     port = args.device or pm.find_usb_device()
     if not port:
-        fail("no PicOS device detected on USB (OTA flash targets hardware "
+        fail("no PicoDeck device detected on USB (OTA flash targets hardware "
              "only); pass --device if detection failed")
 
     print(f"Device:   {port}")

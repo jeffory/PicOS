@@ -4,6 +4,7 @@
 
 #include <stdint.h>
 #include <stdbool.h>
+#include <sys/types.h>  // uint (glibc gets it transitively; musl/Emscripten doesn't)
 
 // GPIO pin functions
 enum gpio_function {

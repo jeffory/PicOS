@@ -75,11 +75,11 @@ jobs:
           export SDL_VIDEODRIVER=dummy
           # The harness asks the binary --build-info: asan_only tests run only
           # against the ASan build. ASAN/UBSAN_OPTIONS come from
-          # tests/e2e/picos_simulator.py (every report is fatal).
-          export PICOS_SIM_BINARY=${{ matrix.build_dir }}/picos_simulator
+          # tests/e2e/picodeck_simulator.py (every report is fatal).
+          export PICODECK_SIM_BINARY=${{ matrix.build_dir }}/picodeck_simulator
           # conftest refuses to run unless --build-info confirms these, so a
           # failed probe can't quietly skip every asan_only test.
-          export PICOS_SIM_EXPECT_SANITIZE="${{ matrix.expect_sanitize }}"
+          export PICODECK_SIM_EXPECT_SANITIZE="${{ matrix.expect_sanitize }}"
           # Symbolised stacks (the sanitizer self-test looks for a frame name).
           export ASAN_SYMBOLIZER_PATH="$(command -v llvm-symbolizer || true)"
           # Per-test timeout (60 s), strict xfail and the skip allow-list come
@@ -151,9 +151,9 @@ jobs:
           mkdir -p reports
           set -o pipefail
           export SDL_VIDEODRIVER=dummy
-          export PICOS_SIM_BINARY=${{ matrix.build_dir }}/picos_simulator
-          export PICOS_SIM_EXPECT_SANITIZE="${{ matrix.expect_sanitize }}"
-          export PICOS_SIM_EXPECT_FIRMWARE_NET=1
+          export PICODECK_SIM_BINARY=${{ matrix.build_dir }}/picodeck_simulator
+          export PICODECK_SIM_EXPECT_SANITIZE="${{ matrix.expect_sanitize }}"
+          export PICODECK_SIM_EXPECT_FIRMWARE_NET=1
           export ASAN_SYMBOLIZER_PATH="$(command -v llvm-symbolizer || true)"
           pytest tests/e2e/test_network_firmware.py tests/e2e/test_network.py \
             -v --tb=short --artifacts-dir=reports/failures \
@@ -199,8 +199,8 @@ jobs:
           mkdir -p reports/tsan
           set -o pipefail
           export SDL_VIDEODRIVER=dummy
-          export PICOS_SIM_BINARY=build_sim_tsan/picos_simulator
-          export PICOS_SIM_EXPECT_SANITIZE=thread
+          export PICODECK_SIM_BINARY=build_sim_tsan/picodeck_simulator
+          export PICODECK_SIM_EXPECT_SANITIZE=thread
           export TSAN_SYMBOLIZER_PATH="$(command -v llvm-symbolizer || true)"
           # One report file per simulator process, for the artifact.
           export TSAN_OPTIONS="halt_on_error=0:second_deadlock_stack=1:suppressions=$PWD/tests/e2e/tsan.supp:log_path=$PWD/reports/tsan/tsan"

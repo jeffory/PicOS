@@ -69,8 +69,8 @@ static void lcd_draw_line(struct gb_s *gb, const uint8_t pixels[160], const uint
     gbc_display_draw_line(&s_display, pixels, line, gb);
 }
 
-#define ROMS_DIR "/data/com.picos.gbc/roms"
-#define DATA_DIR "/data/com.picos.gbc"
+#define ROMS_DIR "/data/net.picodeck.gbc/roms"
+#define DATA_DIR "/data/net.picodeck.gbc"
 
 #define RUN_EXIT       1
 #define RUN_SWITCH_ROM 2
@@ -445,7 +445,7 @@ static int run_game(char *rom_path, int rom_path_len) {
     return exit_reason;
 }
 
-void picos_main(const PicoCalcAPI *api,
+void picodeck_main(const PicoCalcAPI *api,
                 const char *app_dir,
                 const char *app_id,
                 const char *app_name)
@@ -459,7 +459,7 @@ void picos_main(const PicoCalcAPI *api,
     const picocalc_display_t *d = api->display;
     const picocalc_sys_t *sys = api->sys;
     const picocalc_input_t *in = api->input;
-    sys->log("[GBC] picos_main entered (api version %lu)\n",
+    sys->log("[GBC] picodeck_main entered (api version %lu)\n",
              (unsigned long)api->version);
     d->clear(0x0000);
     d->drawText(100, 150, "GBC...", 0xFFFF, 0x0000);
@@ -468,7 +468,7 @@ void picos_main(const PicoCalcAPI *api,
     if (api->version < 3) {
         d->clear(0x0000);
         d->drawText(30, 150, "Firmware too old (need v3+)", 0xF800, 0x0000);
-        d->drawText(60, 170, "Update PicOS firmware", 0xFFFF, 0x0000);
+        d->drawText(60, 170, "Update PicoDeck firmware", 0xFFFF, 0x0000);
         d->flush();
         while (1) {
             sys->poll();

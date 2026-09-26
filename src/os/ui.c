@@ -171,7 +171,7 @@ void ui_draw_splash(const char *status, const char *subtext) {
   }
 #else
   // ── No logo: centred title + status ───────────────────────────────────────
-  const char *title = "PicOS";
+  const char *title = "PicoDeck";
   int tx = (FB_WIDTH - display_text_width(title)) / 2;
   display_draw_text(tx, FB_HEIGHT / 2 - 14, title, COLOR_WHITE, COLOR_BLACK);
 

@@ -1,12 +1,12 @@
-# PicOS PC Simulator
+# PicoDeck PC Simulator
 
-A cross-platform SDL2-based simulator for PicOS that runs on desktop computers for development, debugging, and testing.
+A cross-platform SDL2-based simulator for PicoDeck that runs on desktop computers for development, debugging, and testing.
 
 ## Features
 
 - **3x Scale Display**: 960×960 window simulating the 320×320 LCD
 - **Dual-Core Simulation**: Core 0 (Lua VM) and Core 1 (audio/network) run in separate threads
-- **Keyboard Input**: Full keyboard mapping to PicOS buttons
+- **Keyboard Input**: Full keyboard mapping to PicoDeck buttons
 - **Host Filesystem**: SD card simulated as local directory
 - **Audio Support**: SDL2 audio output
 - **Debuggable**: Use GDB/LLDB, printf debugging, IDE breakpoints
@@ -41,37 +41,37 @@ pacman -S mingw-w64-x86_64-cmake mingw-w64-x86_64-SDL2
 mkdir build_sim && cd build_sim
 
 # Configure
-cmake .. -DPICOS_SIMULATOR=ON
+cmake .. -DPICODECK_SIMULATOR=ON
 
 # Build
 make -j4
 
 # Run
-./picos_simulator
+./picodeck_simulator
 ```
 
 ## Usage
 
 ```bash
 # Run with default SD card path (.)
-./picos_simulator
+./picodeck_simulator
 
 # Run with custom SD card path
-./picos_simulator --sd-card /path/to/apps
+./picodeck_simulator --sd-card /path/to/apps
 
 # Show boot splash screen with delays (for screencasting)
-./picos_simulator --show-splash
+./picodeck_simulator --show-splash
 
 # Enable debug logging
-./picos_simulator --debug
+./picodeck_simulator --debug
 
 # Show help
-./picos_simulator --help
+./picodeck_simulator --help
 ```
 
 ## Keyboard Mapping
 
-| PC Key | PicOS Button |
+| PC Key | PicoDeck Button |
 |--------|-------------|
 | Arrow Keys | BTN_UP/DOWN/LEFT/RIGHT |
 | Enter | BTN_ENTER |
@@ -125,12 +125,12 @@ The simulator enables automated testing:
 - name: Build Simulator
   run: |
     mkdir build_sim && cd build_sim
-    cmake .. -DPICOS_SIMULATOR=ON
+    cmake .. -DPICODECK_SIMULATOR=ON
     make -j4
 
 - name: Run Tests
   run: |
-    ./build_sim/picos_simulator --sd-card ./test_apps &
+    ./build_sim/picodeck_simulator --sd-card ./test_apps &
     sleep 5
     # Run automated tests...
 ```
@@ -145,4 +145,4 @@ The simulator enables automated testing:
 
 ## License
 
-Same as PicOS (see main project LICENSE)
+Same as PicoDeck (see main project LICENSE)

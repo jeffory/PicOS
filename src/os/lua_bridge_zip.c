@@ -9,7 +9,7 @@
 
 #include <string.h>
 
-#ifndef PICOS_SIMULATOR
+#ifndef PICODECK_SIMULATOR
 #include "hardware/watchdog.h"
 #endif
 
@@ -23,7 +23,7 @@ typedef struct {
 static bool lua_zip_progress(int done, int total, const char *name, void *user) {
     (void)name;
     lua_zip_progress_t *p = (lua_zip_progress_t *)user;
-#ifndef PICOS_SIMULATOR
+#ifndef PICODECK_SIMULATOR
     // Extraction can far outlast the 10s watchdog window; the only other
     // feeder (sys->poll) never runs while we're inside this call.
     watchdog_update();

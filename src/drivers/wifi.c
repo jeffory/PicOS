@@ -297,7 +297,7 @@ static bool tls_clock_ready(void) {
   return false;
 }
 
-#ifndef PICOS_SIM_FIRMWARE_NET
+#ifndef PICODECK_SIM_FIRMWARE_NET
 // (Guard: the simulator's SIM_FIRMWARE_NET build runs this file on Mongoose
 // MG_ARCH_UNIX with TLS compiled out, so there is no mbedTLS here; the #else
 // branch below refuses TLS instead.)
@@ -374,7 +374,7 @@ bool wifi_tls_verify_error(struct mg_connection *nc, char *out, size_t n) {
   if (flags == 0 || flags == (uint32_t)-1) return false;
   const char *why;
   if (flags & MBEDTLS_X509_BADCERT_NOT_TRUSTED)
-    why = "certificate not trusted (its root CA is not in the PicOS bundle)";
+    why = "certificate not trusted (its root CA is not in the PicoDeck bundle)";
   else if (flags & MBEDTLS_X509_BADCERT_EXPIRED)
     why = "certificate expired";
   else if (flags & MBEDTLS_X509_BADCERT_FUTURE)
@@ -389,7 +389,7 @@ bool wifi_tls_verify_error(struct mg_connection *nc, char *out, size_t n) {
   return true;
 }
 
-#else  // PICOS_SIM_FIRMWARE_NET: TLS compiled out (simulator/net)
+#else  // PICODECK_SIM_FIRMWARE_NET: TLS compiled out (simulator/net)
 
 bool wifi_tls_init(void) { return false; }
 
@@ -408,7 +408,7 @@ bool wifi_tls_verify_error(struct mg_connection *nc, char *out, size_t n) {
   return false;
 }
 
-#endif  // PICOS_SIM_FIRMWARE_NET
+#endif  // PICODECK_SIM_FIRMWARE_NET
 
 // ── Core 1 request drainer
 // ────────────────────────────────────────────────
@@ -815,7 +815,7 @@ void wifi_poll(void) {
 
 // mbedtls/time support.  (Guard: not in the simulator's SIM_FIRMWARE_NET
 // build, which has no mbedTLS and must not replace the host's time().)
-#ifndef PICOS_SIM_FIRMWARE_NET
+#ifndef PICODECK_SIM_FIRMWARE_NET
 #include "mbedtls/platform_time.h"
 
 mbedtls_ms_time_t mbedtls_platform_ms_time(void) {
@@ -829,4 +829,4 @@ time_t time(time_t *t) {
     *t = now;
   return now;
 }
-#endif  // !PICOS_SIM_FIRMWARE_NET
+#endif  // !PICODECK_SIM_FIRMWARE_NET

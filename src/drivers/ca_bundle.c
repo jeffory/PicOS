@@ -13,7 +13,7 @@
 //   GTS Root R4
 //     expires Jun 22 00:00:00 2036 GMT
 //     SHA-256 34:9D:FA:40:58:C5:E2:63:12:3B:39:8A:E7:95:57:3C:4E:13:13:C8:3F:E6:8F:93:55:6C:D5:E8:03:1B:3C:7D
-//     picos.jeffory.dev (WE1 -> GTS Root R4), Cloudflare
+//     Google Trust Services ECDSA (Cloudflare Universal SSL, e.g. store.picodeck.net)
 //   ISRG Root X1
 //     expires Jun  4 11:04:38 2035 GMT
 //     SHA-256 96:BC:EC:06:26:49:76:F3:74:60:77:9A:CF:28:C5:A7:CF:E8:A3:C0:AA:E1:1A:8F:FC:EE:05:C0:BD:DF:08:C6

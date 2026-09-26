@@ -39,7 +39,7 @@ static void lua_show_launch_failure(const app_entry_t *app, const char *line1,
   char heap[96];
   crashlog_describe_heap(heap, sizeof(heap));
   crashlog_write("LUA ERROR", app->name, line1, line2);
-#ifdef PICOS_SIMULATOR
+#ifdef PICODECK_SIMULATOR
   {
     char err[192];
     snprintf(err, sizeof(err), "%s %s", line1, line2 ? line2 : "");
@@ -68,7 +68,7 @@ static void lua_show_launch_failure(const app_entry_t *app, const char *line1,
 // runs there too: the debug hook, the system menu, HTTP callbacks,
 // sys.sleep, modal dialogs and the dev-command pump.
 //
-// Sizing: LUAI_MAXCCALLS (cmake/picos_lua.cmake) caps nested C calls /
+// Sizing: LUAI_MAXCCALLS (cmake/picodeck_lua.cmake) caps nested C calls /
 // parser levels at 60, so the stack must hold 60 of the deepest C level in
 // the VM: a string.gsub callback (str_gsub 640 B + lua_callk, ccall,
 // luaD_precall, precallC, luaV_execute; measured on device at 864 B per
@@ -94,7 +94,7 @@ typedef struct {
   bool ran;           // the app body ran (false: failed before it)
 } lua_vm_ctx_t;
 
-#ifdef PICOS_SIMULATOR
+#ifdef PICODECK_SIMULATOR
 // pcall message handler (simulator only): hand the traceback to the test
 // control channel and return the error value unchanged, so the error screen
 // and /system/error.log read exactly as on firmware.
@@ -180,7 +180,7 @@ static void lua_vm_body(void *arg) {
   }
 
   ctx->ran = true;
-#ifdef PICOS_SIMULATOR
+#ifdef PICODECK_SIMULATOR
   lua_pushcfunction(L, sim_traceback_msgh);
   lua_insert(L, -2);  // handler below the chunk
   int run_err = lua_pcall(L, 0, 0, -2);

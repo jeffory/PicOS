@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
-"""PicOS MCP Server — exposes PicOS simulator and hardware to coding agents.
+"""PicoDeck MCP Server — exposes PicoDeck simulator and hardware to coding agents.
 
-Transports: PicOS Simulator (JSON-RPC over TCP) and hardware devices over
+Transports: PicoDeck Simulator (JSON-RPC over TCP) and hardware devices over
 serial (USB CDC /dev/ttyACM* or UART adapters /dev/ttyUSB*).  By default the
 server auto-selects: simulator when reachable, otherwise a detected serial
 device; a per-call device= argument always forces that serial port.
@@ -12,9 +12,9 @@ uploads firmware via the SD-staged OTA path — no BOOTSEL/USB required.
 
 Usage:
     Registered in .mcp.json as an MCP server.
-    Auto mode (default):   python3 tools/picos_mcp.py
-    Hardware only:         python3 tools/picos_mcp.py --hardware
-    Simulator only:        python3 tools/picos_mcp.py --simulator
+    Auto mode (default):   python3 tools/picodeck_mcp.py
+    Hardware only:         python3 tools/picodeck_mcp.py --hardware
+    Simulator only:        python3 tools/picodeck_mcp.py --simulator
 """
 
 import argparse
@@ -52,7 +52,7 @@ if TYPE_CHECKING:
 from mcp.server.fastmcp import FastMCP
 from mcp.server.fastmcp import Image as MCPImage
 
-mcp = FastMCP("picos")
+mcp = FastMCP("picodeck")
 
 DEFAULT_TIMEOUT = 5
 DEFAULT_TCP_PORT = 7878
@@ -76,7 +76,7 @@ class JRpcError(Exception):
 
 
 class SimulatorConnection:
-    """Manages a connection to the PicOS simulator via JSON-RPC 2.0 over TCP.
+    """Manages a connection to the PicoDeck simulator via JSON-RPC 2.0 over TCP.
 
     Uses a single reader thread that routes ALL incoming messages:
     - Messages with an "id" → delivered to the corresponding pending call via Event
@@ -295,11 +295,11 @@ def get_connection() -> SimulatorConnection:
 def _default_project_root() -> Path:
     """Repo root used for simulator builds/launches.
 
-    PICOS_PROJECT_ROOT overrides the location of this file, so a session
+    PICODECK_PROJECT_ROOT overrides the location of this file, so a session
     working in a git worktree can point the server at that tree instead of
     the main checkout.  start_simulator(project_root=...) overrides per call.
     """
-    env = os.environ.get("PICOS_PROJECT_ROOT", "")
+    env = os.environ.get("PICODECK_PROJECT_ROOT", "")
     return Path(env).resolve() if env else Path(__file__).resolve().parent.parent
 
 
@@ -316,7 +316,7 @@ class SimulatorManager:
         # deadlocks once the 64KB kernel pipe buffer fills — the sim's own
         # host-side traces (e.g. "[TRAMP] fs_read" per file read) block in
         # write() while holding the stdio lock, wedging the main thread.
-        # Same bug and fix as tests/e2e/picos_simulator.py.
+        # Same bug and fix as tests/e2e/picodeck_simulator.py.
         self._stdout_tail: deque = deque(maxlen=2000)
         self._stderr_tail: deque = deque(maxlen=2000)
         self._drain_threads: list[threading.Thread] = []
@@ -339,11 +339,11 @@ class SimulatorManager:
 
         # Build if needed (missing binary, or sources newer than the binary —
         # a stale simulator silently running old source cost real debugging time)
-        binary = self.project_root / "build_sim" / "picos_simulator"
+        binary = self.project_root / "build_sim" / "picodeck_simulator"
         if not binary.exists():
             self._build()
         elif self._sources_newer_than(binary):
-            print("[picos] simulator binary is stale (source changed) — rebuilding…")
+            print("[picodeck] simulator binary is stale (source changed) — rebuilding…")
             self._build()
 
         # Start simulator
@@ -1006,7 +1006,7 @@ def resolve_port(device: str | None = None) -> str | None:
         port = find_usb_device()
         if not port:
             raise RuntimeError(
-                "No PicOS hardware device found. Connect via USB or use --simulator flag."
+                "No PicoDeck hardware device found. Connect via USB or use --simulator flag."
             )
         return port
     if SIMULATOR_ONLY:
@@ -1021,7 +1021,7 @@ def resolve_port(device: str | None = None) -> str | None:
 
 @mcp.tool()
 async def ping(device: str | None = None) -> str:
-    """Ping the PicOS device or simulator. Returns 'pong' on success."""
+    """Ping the PicoDeck device or simulator. Returns 'pong' on success."""
     port = resolve_port(device)
     if port:
         try:
@@ -1043,7 +1043,7 @@ async def ping(device: str | None = None) -> str:
 
 @mcp.tool()
 async def screenshot(device: str | None = None, save_path: str = "") -> list:
-    """Take a screenshot of the PicOS display. Returns a PNG image block.
+    """Take a screenshot of the PicoDeck display. Returns a PNG image block.
 
     save_path: optional host filesystem path — when given, the PNG is also
     written there (useful for byte-diffing successive screenshots).
@@ -1082,7 +1082,7 @@ async def screenshot(device: str | None = None, save_path: str = "") -> list:
 
 @mcp.tool()
 async def list_apps(device: str | None = None) -> str:
-    """List all apps installed on the PicOS device or simulator."""
+    """List all apps installed on the PicoDeck device or simulator."""
     port = resolve_port(device)
     if port:
         try:
@@ -1317,7 +1317,7 @@ def _do_keysequence_hardware_once(keys: list[str], port: str, delay_ms: int,
 @mcp.tool()
 async def keypress(key: str, count: int = 1, delay_ms: int = 100,
                    device: str | None = None) -> str:
-    """Inject keypress(es) on the PicOS simulator or hardware.
+    """Inject keypress(es) on the PicoDeck simulator or hardware.
 
     Valid named keys: up, down, left, right, enter, esc, menu, f1-f10,
     backspace, tab, del, shift, ctrl, sym. Single characters (a-z, A-Z,
@@ -1390,7 +1390,7 @@ async def keypress(key: str, count: int = 1, delay_ms: int = 100,
 
 @mcp.tool()
 async def send_command(command: str, timeout: float = 5.0, device: str | None = None) -> str:
-    """Send a raw dev command to PicOS and return the response."""
+    """Send a raw dev command to PicoDeck and return the response."""
     port = resolve_port(device)
     if port:
         try:
@@ -1431,7 +1431,7 @@ async def get_status(device: str | None = None) -> str:
             # Older firmware without the status command: report the build.
             lines = await asyncio.to_thread(do_command_hardware, "ver", port)
             ver = next((l.split("[DEV] ", 1)[1] for l in lines
-                        if "PicOS build" in l), "unknown firmware")
+                        if "PicoDeck build" in l), "unknown firmware")
             return (f"{ver} — this firmware predates the `status` dev "
                     "command; flash the current build for app/wifi/battery "
                     "status.")
@@ -1669,7 +1669,7 @@ async def get_crash_log(device: str | None = None) -> str:
         pass
 
     # If simulator is unreachable, try reading the file directly
-    crash_log_path = Path("/tmp/picos_sim_crash.log")
+    crash_log_path = Path("/tmp/picodeck_sim_crash.log")
     if crash_log_path.exists():
         try:
             return f"Crash log (from file):\n{crash_log_path.read_text()}"
@@ -1680,7 +1680,7 @@ async def get_crash_log(device: str | None = None) -> str:
 
 @mcp.tool()
 async def shutdown_simulator(device: str | None = None) -> str:
-    """Gracefully shut down the PicOS simulator."""
+    """Gracefully shut down the PicoDeck simulator."""
     port = resolve_port(device)
     if port:
         return "(shutdown not available in hardware mode)"
@@ -1699,14 +1699,14 @@ async def start_simulator(
     headless: bool = True,
     project_root: str = "",
 ) -> str:
-    """Build (if needed) and start a PicOS simulator instance.
+    """Build (if needed) and start a PicoDeck simulator instance.
 
     Args:
         port: TCP port (0=auto-assign)
         sd_card_path: Path to SD card directory (empty=default)
         headless: Run without display (for CI/testing)
         project_root: Repo or worktree root whose simulator sources and
-            build_sim/ are used. Defaults to the PICOS_PROJECT_ROOT env
+            build_sim/ are used. Defaults to the PICODECK_PROJECT_ROOT env
             var, else the repo containing this server. Pass your worktree
             path here when the server was launched from the main checkout.
 
@@ -1747,10 +1747,10 @@ async def start_simulator(
 
 
 def _find_simulator_pids() -> set[int]:
-    """Find all picos_simulator processes on the system via pgrep."""
+    """Find all picodeck_simulator processes on the system via pgrep."""
     try:
         result = subprocess.run(
-            ["pgrep", "-f", "picos_simulator"],
+            ["pgrep", "-f", "picodeck_simulator"],
             capture_output=True, text=True, timeout=5,
         )
         if result.returncode == 0:
@@ -1771,7 +1771,7 @@ def _is_pid_alive(pid: int) -> bool:
 
 @mcp.tool()
 async def list_simulators() -> str:
-    """List all tracked simulator PIDs and any picos_simulator processes on the system."""
+    """List all tracked simulator PIDs and any picodeck_simulator processes on the system."""
     with _tracked_pids_lock:
         tracked = set(_tracked_pids)
 
@@ -1788,7 +1788,7 @@ async def list_simulators() -> str:
 
     orphans = system_pids - tracked
     if orphans:
-        lines.append("System picos_simulator processes (not tracked):")
+        lines.append("System picodeck_simulator processes (not tracked):")
         for pid in sorted(orphans):
             lines.append(f"  PID {pid}")
 
@@ -1803,7 +1803,7 @@ async def kill_simulators(include_orphans: bool = True) -> str:
     """Force-kill all tracked simulator processes.
 
     Args:
-        include_orphans: Also kill any picos_simulator processes found on the
+        include_orphans: Also kill any picodeck_simulator processes found on the
                          system that weren't launched by this MCP session.
     """
     global _sim_manager, _conn
@@ -1879,7 +1879,7 @@ async def kill_simulators(include_orphans: bool = True) -> str:
 
 @mcp.tool()
 async def reboot(mode: str = "normal", device: str | None = None) -> str:
-    """Reboot the PicOS hardware device (not available in simulator)."""
+    """Reboot the PicoDeck hardware device (not available in simulator)."""
     if mode not in ("normal", "flash"):
         return f"Unknown mode '{mode}'. Use 'normal' or 'flash'."
     try:
@@ -1913,7 +1913,7 @@ async def flash(file: str, device: str | None = None) -> str:
     per-sector re-enable windows bricked cross-version updates — verified
     fixed by an end-to-end cross-version OTA on hardware).  Requires the
     on-device firmware to include that fix; older firmware may brick on a
-    cross-version flash (recovery: BOOTSEL + copy build/picocalc_os.uf2)."""
+    cross-version flash (recovery: BOOTSEL + copy build/picodeck.uf2)."""
     if not HAS_SERIAL:
         return "pyserial not installed: pip install pyserial"
     try:
@@ -1923,7 +1923,7 @@ async def flash(file: str, device: str | None = None) -> str:
         data = Path(file).read_bytes()
         if data[:4] == b"UF2\n" or data[:4] == b"UF2\x0a":
             return ("This is a UF2 file — the OTA path needs the raw .bin "
-                    "(build/picocalc_os.bin).")
+                    "(build/picodeck.bin).")
         if len(data) < 256:
             return "File too small to be firmware."
         sha = hashlib.sha256(data).hexdigest()
@@ -1947,7 +1947,7 @@ async def flash(file: str, device: str | None = None) -> str:
 
 @mcp.tool()
 async def put_file(local_path: str, remote_path: str, device: str | None = None) -> str:
-    """Upload a file to the PicOS SD card (hardware: base64 over serial;
+    """Upload a file to the PicoDeck SD card (hardware: base64 over serial;
     simulator: copies into the simulated SD directory)."""
     try:
         port = resolve_port(device)
@@ -1955,7 +1955,7 @@ async def put_file(local_path: str, remote_path: str, device: str | None = None)
         return f"Error: {e}"
     if port is None:
         try:
-            sim_apps = os.environ.get("PICOS_SIMULATOR_SD", ".")
+            sim_apps = os.environ.get("PICODECK_SIMULATOR_SD", ".")
             dest = Path(sim_apps) / remote_path.lstrip("/")
             dest.parent.mkdir(parents=True, exist_ok=True)
             shutil.copy(local_path, dest)
@@ -1973,7 +1973,7 @@ async def put_file(local_path: str, remote_path: str, device: str | None = None)
 
 @mcp.tool()
 async def get_file(remote_path: str, local_path: str, device: str | None = None) -> str:
-    """Download a file from the PicOS SD card (hardware: base64 over serial;
+    """Download a file from the PicoDeck SD card (hardware: base64 over serial;
     simulator: copies from the simulated SD directory)."""
     try:
         port = resolve_port(device)
@@ -1981,7 +1981,7 @@ async def get_file(remote_path: str, local_path: str, device: str | None = None)
         return f"Error: {e}"
     if port is None:
         try:
-            sim_apps = os.environ.get("PICOS_SIMULATOR_SD", ".")
+            sim_apps = os.environ.get("PICODECK_SIMULATOR_SD", ".")
             src = Path(sim_apps) / remote_path.lstrip("/")
             shutil.copy(src, local_path)
             return f"Copied from simulator: {src} -> {local_path}"
@@ -2045,7 +2045,7 @@ async def push_app(local_dir: str, app_name: str = "",
     if port is None:
         # Simulator: straight copy into the SD directory the sim is using.
         sd = (_sim_manager.sd_card_path if _sim_manager else None) \
-            or os.environ.get("PICOS_SIMULATOR_SD", ".")
+            or os.environ.get("PICODECK_SIMULATOR_SD", ".")
         dest = Path(sd) / "apps" / name
         try:
             if dest.exists():
@@ -2235,7 +2235,7 @@ def main():
     global HARDWARE_MODE, SIMULATOR_ONLY, _configured_port
 
     parser = argparse.ArgumentParser(
-        description="PicOS MCP Server - Control PicOS simulator and/or hardware device"
+        description="PicoDeck MCP Server - Control PicoDeck simulator and/or hardware device"
     )
     parser.add_argument("--hardware", action="store_true", help="Hardware only (USB serial)")
     parser.add_argument("--simulator", action="store_true", help="Simulator only")
@@ -2259,7 +2259,7 @@ def main():
     mode_str = ("hardware" if HARDWARE_MODE
                 else "simulator" if SIMULATOR_ONLY
                 else "auto (simulator if reachable, else serial hardware)")
-    print(f"PicOS MCP Server starting in {mode_str} mode (port {_configured_port})...", file=sys.stderr)
+    print(f"PicoDeck MCP Server starting in {mode_str} mode (port {_configured_port})...", file=sys.stderr)
     mcp.run(transport=args.transport)
 
 

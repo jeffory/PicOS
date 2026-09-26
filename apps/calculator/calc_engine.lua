@@ -1,10 +1,10 @@
 -- calc_engine.lua — Expression tokenizer + shunting-yard evaluator
--- Pure Lua 5.4, no PicOS dependencies. Testable on host.
+-- Pure Lua 5.4, no PicoDeck dependencies. Testable on host.
 
 local Engine = {}
 Engine.__index = Engine
 
--- PicOS runs Lua with single-precision floats (LUA_32BITS): ~7 significant
+-- PicoDeck runs Lua with single-precision floats (LUA_32BITS): ~7 significant
 -- digits, integers exact only up to 2^24. Host tests run with doubles.
 local FLOAT32 = (2^24 + 1 == 2^24)
 local SIG_FMT = FLOAT32 and "%.7g" or "%.10g"

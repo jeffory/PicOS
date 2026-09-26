@@ -1,11 +1,11 @@
 {
-    "id": "com.picos.ssh",
+    "id": "net.picodeck.ssh",
     "name": "SSH",
     "description": "SSH terminal client",
     "version": "0.1.0",
-    "author": "PicOS",
+    "author": "PicoDeck",
     "requirements": ["http", "root-filesystem"],
     "category": "network",
-    "repo": "jeffory/picos-apps",
+    "repo": "PicoDeck/picodeck",
     "min_firmware": "1.0.0"
 }

@@ -1,7 +1,7 @@
 {
-    "id": "com.picos.effects_test",
+    "id": "net.picodeck.effects_test",
     "name": "Effects Test",
     "description": "display.applyEffect regression fixture",
     "version": "1.0",
-    "author": "PicOS"
+    "author": "PicoDeck"
 }

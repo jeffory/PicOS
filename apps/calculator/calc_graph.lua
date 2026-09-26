@@ -1,5 +1,5 @@
 -- calc_graph.lua — Graph data model and coordinate math
--- Pure Lua 5.4, no PicOS dependencies. Testable on host.
+-- Pure Lua 5.4, no PicoDeck dependencies. Testable on host.
 
 local Graph = {}
 Graph.__index = Graph

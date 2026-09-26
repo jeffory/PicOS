@@ -1,10 +1,10 @@
 {
-    "id": "com.picos.snake",
+    "id": "net.picodeck.snake",
     "name": "Snake",
     "description": "Classic snake game",
     "version": "1.0",
-    "author": "PicOS",
+    "author": "PicoDeck",
     "category": "games",
-    "repo": "jeffory/picos-apps",
+    "repo": "PicoDeck/picodeck",
     "min_firmware": "1.0.0"
 }

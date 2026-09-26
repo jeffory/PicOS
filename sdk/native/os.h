@@ -13,7 +13,7 @@
 // apps borrow it through here.
 //
 // In Lua, this is exposed as the `picocalc` global module.
-// In C, a pointer to this struct is passed to picos_main() by the native loader.
+// In C, a pointer to this struct is passed to picodeck_main() by the native loader.
 // =============================================================================
 
 // --- Input ------------------------------------------------------------------
@@ -208,7 +208,7 @@ typedef struct {
     void     (*poll)(void);
     // Returns true (once) after the user selects "Exit App" from the system
     // menu.  Native apps should check this each frame and return from
-    // picos_main() when it fires.
+    // picodeck_main() when it fires.
     bool     (*shouldExit)(void);
     // Register a callback to be called on Core 1 every 5ms, alongside
     // audio updates.  Used by native apps (e.g. DOOM) to offload audio

@@ -1,4 +1,4 @@
-# PicOS TODO
+# PicoDeck TODO
 
 ## Lua API gaps — C exists, not wired to Lua
 
