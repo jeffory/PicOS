@@ -27,6 +27,8 @@ end
 #### `picocalc.repl.print(...)`
 Print values to the REPL output area. Accepts multiple arguments which are converted to strings and separated by tabs. Supports nil, boolean, number, string, table, function, and userdata types.
 
+Values go through `tostring()` (so `__tostring` metamethods are honoured). The output keeps a 256-line scrollback.
+
 - **Parameters:**
   - `...` (any): One or more values to print
 - **Returns:** None

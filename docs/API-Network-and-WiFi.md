@@ -102,7 +102,12 @@ end
 
 ## picocalc.network
 
-HTTP client for making network requests. Requires WiFi to be connected first. Up to **8 simultaneous connections** are supported. HTTPS (SSL/TLS) is supported via mbedTLS.
+HTTP client for making network requests. Requires WiFi to be connected first. Up to **8 simultaneous connections** are supported. HTTPS (SSL/TLS) is supported via mbedTLS and **verifies the server
+certificate by default** (chain to the OS root bundle, validity dates, host
+name). Failures read `"TLS: certificate not trusted …"`, `"… expired"` or
+`"… does not match the host name"`. Because validity needs the wall clock, a
+verifying connection is refused with an error starting `"clock not set"` until
+SNTP has set the time; retry a few seconds later.
 
 HTTP connections are objects with method syntax (`conn:get(...)`, `conn:read()`, etc.). Callbacks are fired automatically — you do not need to poll manually.
 
@@ -196,6 +201,8 @@ All methods are called on the connection object with colon syntax.
 #### `conn:get(path [, headers])`
 Issues an HTTP GET request.
 
+Returns `false` ("a request is already in progress") unless the connection is idle or its last request finished. POST bodies are binary-safe.
+
 - **Parameters:**
   - `path` (string): URL path (e.g., `"/api/data"`)
   - `headers` (string or table, optional): Extra headers. Can be a raw `"Key: Value
@@ -210,6 +217,8 @@ conn:get("/api/data")
 
 #### `conn:post(path [, headers], data)`
 Issues an HTTP POST request.
+
+Returns `false` ("a request is already in progress") unless the connection is idle or its last request finished. POST bodies are binary-safe.
 
 - **Parameters:**
   - `path` (string): URL path
@@ -275,6 +284,12 @@ Resizes the receive ring buffer. Must be called before `get`/`post`. Defaults to
 - **Parameters:**
   - `bytes` (number): Buffer size in bytes
 - **Returns:** None
+
+---
+
+#### `conn:setInsecure(flag)`
+Before `get`/`post`: `true` skips certificate verification and the clock check
+for this connection only (self-signed development servers). Logs a warning.
 
 ---
 
@@ -345,6 +360,10 @@ end
 ```
 
 ---
+
+### Responses
+
+Content-Length, chunked and close-delimited bodies are supported, with keep-alive reuse. A body cut short (reset, early close, out of memory) fails; it never reports complete. Callbacks never nest: a callback that sleeps leaves later events for the outer call. The read timeout runs from the moment the request is sent.
 
 ### Callbacks
 

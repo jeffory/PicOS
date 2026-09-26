@@ -11,6 +11,8 @@ Cryptographic primitives for hashing, encryption, key exchange, and signature ve
 #### `picocalc.crypto.randomBytes(n)`
 Generate cryptographically random bytes.
 
+Draws from a hardware-seeded CTR_DRBG. Raises an error when no seeded, healthy generator is available (it never returns weak bytes).
+
 - **Parameters:**
   - `n` (number): Number of random bytes to generate (1-4096)
 - **Returns:** (string) Binary string of `n` random bytes
@@ -240,7 +242,7 @@ Compute the shared secret using the peer's public key.
 
 - **Parameters:**
   - `peerPublicKey` (string): The peer's public key bytes
-- **Returns:** (string) Shared secret bytes
+- **Returns:** (string) Shared secret bytes, or `nil, err` on failure (e.g. an invalid peer key)
 
 ```lua
 local shared = ecdh:computeShared(peer_pub)

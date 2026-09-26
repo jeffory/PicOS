@@ -23,7 +23,10 @@ end
 
 ### Player Methods
 
-Objects returned by `picocalc.modplayer.create()`. The player is automatically cleaned up by the garbage collector when it goes out of scope.
+Objects returned by `picocalc.modplayer.create()`. There is one MOD player:
+`create()` returns the one live handle (calling it again returns the same
+object while it is alive). It is cleaned up by the garbage collector; a
+destroyed handle raises on use. Volume is 0-100.
 
 #### `player:load(path)`
 Load a tracker module file from the SD card.

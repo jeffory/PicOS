@@ -4,6 +4,14 @@ Graphics and display functions. The display is **320×320 pixels** with RGB565 c
 
 ## picocalc.display
 
+Coordinates and sizes may be floats: they round to nearest (`fillRect(10.5, …)`
+draws at x = 11). NaN, inf and values beyond ±2^24 are argument errors.
+Colour components, brightness and effect factors clamp to their range.
+
+Every primitive clips to the clip rect (`setClipRect`, default the screen)
+once, before drawing, so huge or off-screen shapes (a line to 1e7, a
+radius-1e6 circle) cost only their visible pixels.
+
 ### Functions
 
 #### `picocalc.display.clear([color])`
@@ -184,7 +192,7 @@ Returns the display height in pixels.
 Sets the display backlight brightness.
 
 - **Parameters:**
-  - `level` (number): Brightness value (0-255, where 255 is full brightness)
+  - `level` (number): Brightness value (0-255, where 255 is full brightness) (clamped)
 - **Returns:** None
 
 ```lua
@@ -197,9 +205,9 @@ picocalc.display.setBrightness(128)  -- 50% brightness
 Converts 8-bit RGB components to a 16-bit RGB565 color value.
 
 - **Parameters:**
-  - `r` (number): Red component (0-255)
-  - `g` (number): Green component (0-255)
-  - `b` (number): Blue component (0-255)
+  - `r` (number): Red component (0-255) (clamped)
+  - `g` (number): Green component (0-255) (clamped)
+  - `b` (number): Blue component (0-255) (clamped)
 - **Returns:** (number) RGB565 color value
 
 ```lua
@@ -1096,7 +1104,7 @@ local w, h = picocalc.graphics.getTextSizeForMaxWidth("A long string to measure.
 ---
 
 #### `picocalc.graphics.imageWithText(text, maxWidth, maxHeight [, bgColor [, font]])`
-Renders word-wrapped text into a new image in PSRAM. Uses the current graphics color for the text foreground.
+Renders word-wrapped text into a new image in PSRAM. Uses the current graphics color for the text foreground. The image is capped at 2048 px.
 
 - **Parameters:**
   - `text` (string): Text to render
@@ -1147,8 +1155,10 @@ local img = picocalc.graphics.image.load("/apps/myapp/sprite.bmp")
 
 ---
 
-#### `picocalc.graphics.image.loadFromBuffer(data)`
+#### `picocalc.graphics.image.loadFromBuffer(data [, len])`
 Decodes an image from an in-memory buffer. The format is auto-detected from the magic bytes — BMP, JPEG, PNG, and GIF are all supported.
+
+`data` is a string or a `sys.qmiPsramAlloc` handle (`len` is checked against its size). Decoded images are capped at 2048×2048.
 
 - **Parameters:**
   - `data` (string or userdata): Image file data
@@ -1361,6 +1371,8 @@ img:drawScaled(160, 160, 1.0, 0.785) -- Rotate 45°
 #### `img:drawScaledNN(x, y, scale)`
 Draws the image scaled using nearest-neighbor interpolation. Faster and sharper for integer scaling (pixel art).
 
+Samples source pixels exactly for any scale (older firmware sampled the wrong column at non-power-of-two scales, e.g. every third column at scale 3).
+
 - **Parameters:**
   - `x` (number): Destination X coordinate
   - `y` (number): Destination Y coordinate
@@ -1387,6 +1399,8 @@ local backup = img:copy()
 ## picocalc.graphics.sprite
 
 Sprite system for game and graphics applications. Sprites are 2D objects that can be positioned, scaled, rotated, and managed through a global sprite manager.
+
+**Object lifetimes:** a sprite added with `add()` stays alive while displayed (no need to keep a reference); `remove()`/`removeSprites()`/`removeAll()` release it. `add()` is idempotent. A sprite keeps its image, stencil and tilemap alive; a spritesheet its image; a tilemap its tileset; an animation loop its frames. Sprite `width`/`height` are bounds only; drawing uses the image's own size.
 
 ### Constructor Functions
 
@@ -1469,7 +1483,7 @@ picocalc.graphics.sprite.removeSprites({sprite1, sprite2, sprite3})
 ---
 
 #### `picocalc.graphics.sprite.performOnAllSprites(callback)`
-Calls a function on each sprite in the manager.
+Calls a function on each sprite in the manager. It iterates a snapshot of the display list and propagates errors from the callback.
 
 - **Parameters:**
   - `callback` (function): Function to call with each sprite as argument
@@ -1602,7 +1616,7 @@ sprite:setImage(myImage, false, 1.5)
 ---
 
 #### `sprite:getImage()`
-Gets the sprite's image.
+Gets the sprite's image (the image object itself).
 
 - **Returns:** (userdata or nil) Image object
 
@@ -1858,14 +1872,14 @@ Enables or disables forced redraw for this sprite every frame, even if it hasn't
 ---
 
 #### `sprite:markDirty()`
-Explicitly marks the sprite as needing to be redrawn in the next update.
+Explicitly marks the sprite as needing to be redrawn in the next update. Accepted but not applied (no effect yet).
 
 - **Returns:** None
 
 ---
 
 #### `sprite:addDirtyRect(x, y, width, height)`
-Adds a dirty rectangle for partial redrawing. (Stub implementation)
+Adds a dirty rectangle for partial redrawing. Accepted but not applied (no effect yet).
 
 ---
 
@@ -1915,7 +1929,7 @@ Gets horizontal flip state.
 ---
 
 #### `sprite:setIgnoresDrawOffset(flag)`
-Sets whether the sprite ignores global draw offsets.
+Sets whether the sprite ignores global draw offsets. Accepted but not applied (no effect yet).
 
 - **Parameters:**
   - `flag` (boolean): Ignore offset
@@ -2113,7 +2127,7 @@ Returns the sprite's collision response type.
 ---
 
 #### `sprite:setStencilImage(image)`
-Sets a stencil image for the sprite.
+Sets a stencil image for the sprite. Accepted but not applied (no effect yet).
 
 - **Parameters:**
   - `image` (userdata): Image object to use as the stencil
@@ -2158,7 +2172,7 @@ print("Created " .. wallCount .. " wall sprites")
 ---
 
 #### `picocalc.graphics.sprite.spriteWithText(text, maxWidth, maxHeight [, bgColor [, font]])`
-Creates a sprite with text rendered into it. Uses the current graphics color for the text foreground.
+Creates a sprite with text rendered into it. Uses the current graphics color for the text foreground. The image is capped at 2048 px.
 
 - **Parameters:**
   - `text` (string): Text to render

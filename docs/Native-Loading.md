@@ -125,6 +125,10 @@ The `api->version` field indicates which additions are present:
 - `2` — Phase 2 additions
 - `3` — `api->fs->browse` (modal file-browser overlay for native apps)
 - `4` — display clip rect (`setClipRect`/`getClipRect`/`clearClipRect`), mode-7 `drawPlane`, and native parity for `fillHLine`/`fillTriangle`/`setScrollArea`/`setScrollOffset`
+- `5` — zip read-in-place handles
+- `6` — fonts (`setFont`/`getFont`/`getFontWidth`/`getFontHeight`/`textWidth`/`loadFont`/`unloadFont`/`drawTextTransparent`)
+- `7` — video time seek/position, progress OSD, `hasEnded`
+- `8` — TLS verification: `http->setInsecure`, `tcp->connectEx` (`PCTCP_TLS`, `PCTCP_TLS_INSECURE`)
 
 ```c
 if (api->version >= 2) {
@@ -170,30 +174,38 @@ main.elf: main.c
 
 When the PicOS launcher starts a native app:
 1. Core 1 is paused to prevent PSRAM heap contention during loading.
-2. The `main.elf` file is read and the ELF header and program headers are validated.
+2. The `main.elf` file is read and the ELF header and program headers are validated. A malformed ELF file is refused with a reason (on screen, in `/system/error.log`).
 3. The virtual address range of all `PT_LOAD` segments is computed.
 4. **Split-mode loading**: If the code segment (`PF_X`) fits in SRAM, it is placed there for faster execution. Data/BSS segments go into PSRAM via `umm_malloc`. If SRAM is insufficient, everything goes into PSRAM.
 5. Code written to PSRAM uses the uncached alias (`0x15xxxxxx`) to bypass write-back cache, then XIP cache is invalidated. Execution uses the cached alias (`0x11xxxxxx`) so the 16KB XIP cache serves most instruction fetches.
 6. `R_ARM_RELATIVE` relocations are applied with dual bias (code bias for SRAM, data bias for PSRAM).
-7. The app runs on the **Process Stack Pointer (PSP)** via an 8KB static SRAM stack buffer, keeping the main stack (MSP) available for interrupt handlers.
+7. The app runs on the **Process Stack Pointer (PSP)** on its own 64 KB stack in PSRAM (16 KB SRAM if it were ever available), guarded by `PSPLIM`: an overflow faults (crash record `PSP (native app)`) instead of corrupting memory. Interrupts keep using the main stack (MSP).
 8. Core 1 is resumed after the app exits and resources are freed.
 
 The application runs in the same privilege level as the OS but is expected to return control to the OS by returning from `picos_main`.
 
 ## Memory
 
-- **Stack**: 8KB (static SRAM buffer, runs on PSP). Do not use large stack allocations.
-- **SRAM heap**: ~28.8KB available via `malloc()`/`free()`. Very limited — free promptly.
+- **Stack**: 64 KB in PSRAM (PSPLIM-guarded, runs on PSP).
+- **SRAM heap**: effectively none (~2.6 KB). Use `api->psram->qmiAlloc()`.
 - **PSRAM heap**: 8MB available via `api->psram->qmiAlloc()`/`api->psram->qmiFree()`. Use for large allocations.
-- **PIO PSRAM**: 8MB secondary PSRAM available via `api->psram->pioRead()`/`api->psram->pioWrite()` for bulk data.
+- **PIO PSRAM**: 8MB secondary PSRAM available via `api->psram->pioRead()`/`api->psram->pioWrite()` for bulk data. Only addresses `0x48000` and up are yours; `pioRead/pioWrite/pioBulkRead/pioBulkWrite` refuse anything overlapping the OS region (the call does nothing and logs `[NATIVE] psram->… refused`).
 
 **Important**: Do not mix `malloc`/`free` (SRAM) with PSRAM allocation functions. They use separate heaps.
+
+### Resources are freed at exit
+
+Anything the app got through the API and did not free — files, images, samples and players, video/MOD players, terminals, AES/ECDH contexts, `qmiAlloc` blocks, HTTP/TCP connections, fonts, menu items, zip handles — is released when `picos_main` returns. Do not rely on double frees being harmless: a stale pointer whose address was reused by a newer handle frees that newer object.
+
+### Per-app config, randomness
+
+`appconfig`: nothing loads it for you. Call `api->appconfig->load(your_app_id)` first; another app's id is refused. `crypto->randomBytes` returns `bool` (false = buffer zeroed, no healthy generator). There is no system-config table in the native API.
 
 ## Debugging
 
 - Native apps can log via `api->sys->log("message: %d", value)`. Output appears on USB serial at 115200 baud as `[APP] message`.
 - If the app crashes (HardFault), the fault handler displays register state, CFSR flags, and stack pointer info on the LCD. It detects whether the crash was in the app (PSP) or OS (MSP).
-- Stack overflow signature: OVFL with SP below `__StackBottom` (0x20081000) and BFAR at 0x35xxxxxx.
+- A stack overflow raises a STKOF UsageFault (CFSR bit 20, 0x00100000) recorded in /system/crashlog.txt with the stack owner (PSP (native app) / PSP (Lua VM) / PSP (OS command) / MSP).
 
 ## See also
 

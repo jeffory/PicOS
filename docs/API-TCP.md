@@ -14,8 +14,8 @@ Open a new TCP connection to a host.
 - **Parameters:**
   - `host` (string): Hostname or IP address
   - `port` (number, optional): Port number. Default 80.
-  - `use_ssl` (boolean, optional): `true` for a TLS connection. Default `false`.
-- **Returns:** (userdata) PicOSTcpConn connection object
+  - `use_ssl` (boolean, optional): `true` for a TLS connection. Default `false`. TLS verifies the server certificate (OS root bundle + host name); a TLS connect before SNTP has set the clock fails with "clock not set". The socket counts as connected only after the TLS handshake.
+- **Returns:** a connection object, or `nil, err` when the 4-socket pool is full. Nothing is sent until `conn:connect()`.
 
 ```lua
 local conn = picocalc.tcp.new("example.com", 443, true)
@@ -26,6 +26,22 @@ local conn = picocalc.tcp.new("example.com", 443, true)
 ### Connection Methods
 
 Objects returned by `picocalc.tcp.new()`.
+
+#### `conn:connect()`
+Start connecting (non-blocking).
+
+- **Returns:** `true`, or `false, err` (WiFi not available, already connecting or connected)
+
+Completion: `isConnected()`, `waitConnected()`, the connect callback or
+`picocalc.tcp.CB_CONNECT` in `getEvents()`.
+
+---
+
+#### `conn:setInsecure(flag)`
+Before `connect()`: TLS without certificate verification or the clock check
+(self-signed development servers only). Default `false`.
+
+---
 
 #### `conn:write(data)`
 Write data to the connection.
@@ -56,6 +72,8 @@ local chunk = conn:read(1024)
 #### `conn:close()`
 Close the connection.
 
+The object is unusable afterwards (I/O raises). Data already received stays readable until close, including after the peer closes.
+
 - **Parameters:** None
 - **Returns:** None
 
@@ -79,7 +97,7 @@ end
 
 ---
 
-#### `conn:getError()`
+#### `conn:error()`
 Get the last connection error.
 
 - **Parameters:** None
@@ -98,6 +116,8 @@ Check whether the connection is established.
 #### `conn:setConnectTimeout(seconds)`
 Set the connection timeout.
 
+Applies to the next connect; default 15 s (covers the TLS handshake).
+
 - **Parameters:**
   - `seconds` (number): Timeout in seconds
 - **Returns:** None
@@ -111,6 +131,8 @@ conn:setConnectTimeout(10)
 #### `conn:setReadTimeout(seconds)`
 Set the read timeout.
 
+Off by default; 0 disables it.
+
 - **Parameters:**
   - `seconds` (number): Timeout in seconds
 - **Returns:** None
@@ -119,6 +141,8 @@ Set the read timeout.
 
 #### `conn:setConnectCallback(fn)`
 Set a callback fired when the connection is established (or fails). The callback receives the connection object.
+
+Callbacks receive the socket and are never nested.
 
 - **Parameters:**
   - `fn` (function): `function(conn) ... end`
@@ -161,7 +185,7 @@ Set a callback fired when the connection closes. The callback receives the conne
 Get pending connection events.
 
 - **Parameters:** None
-- **Returns:** (number) Event bitmask
+- **Returns:** (number) the pending events that have **no callback registered**, cleared by the call: `picocalc.tcp.CB_CONNECT` (1), `CB_READ` (2), `CB_WRITE` (4), `CB_CLOSED` (8), `CB_FAILED` (16).
 
 ---
 

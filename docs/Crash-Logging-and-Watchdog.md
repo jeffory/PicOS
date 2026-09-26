@@ -8,8 +8,14 @@ PicOS captures two categories of failure: HardFaults (CPU exceptions) and Lua ru
 
 1. **Fault fires** — the `isr_hardfault` / `hardfault_c` handler runs on Core 0.
 2. **Display** — fault details (PC, LR, SP, CFSR/HFSR/BFAR, decoded flag names) are printed to both the LCD and UART so you can read them without a serial adapter.
-3. **Scratch registers** — the raw fault frame is encoded into RP2350 watchdog scratch registers (`SCRATCH4`/`SCRATCH5`) so the data survives the upcoming reset.
-4. **Reboot** — after a ~2-second display pause the handler calls `watchdog_reboot(0, 0, 0)`.
+3. **Scratch registers** — the record is written to watchdog scratch 0-3,
+   which survive `watchdog_reboot(0, 0, 0)`: [0] tag + flags (fault during
+   boot and that boot's attempt number; PSP and which PSP user — Lua VM, OS
+   command, native app; HFSR forced/vecttbl) + SFSR, [1] stacked PC, [2]
+   stacked LR, [3] CFSR. Scratch 5-7 add the pre-fault SP, the fault address
+   (or a diagnostic pack) and the app uptime. After a stack-overflow fault
+   the stacked PC/LR may be garbage.
+4. **Reboot** — after a ~3-second display pause the handler calls `watchdog_reboot(0, 0, 0)`.
 5. **Next boot** — once PSRAM is initialised and the SD card is mounted, `crash_log_save()` reads the scratch registers and appends a record to `/system/crashlog.txt`.
 
 > **Why the delay before `crash_log_save()`?**
@@ -17,12 +23,21 @@ PicOS captures two categories of failure: HardFaults (CPU exceptions) and Lua ru
 
 ---
 
+## Boot-loop protection
+
+While booting, scratch 0 counts boot attempts. A boot that faults or hangs
+until the watchdog counts as a failure; reaching the launcher resets the count.
+After 3 failed boots the boot watchdog stays off, and a fault at that point
+shows "Boot failed N times - halted" and stops instead of rebooting. Power-cycle
+to retry (on batteries, a USB replug does not clear it).
+
 ## Log files
 
 | File | Contents | Max size |
 |------|----------|----------|
 | `/system/crashlog.txt` | HardFault records written on the boot after a crash | 64 KB (truncated on open if larger) |
-| `/system/error.log` | Lua runtime errors recorded during normal execution | 64 KB (truncated on open if larger) |
+| `/system/error.log` | Lua runtime errors recorded during normal execution; each entry ends with a `Heap:` line | 64 KB (truncated on open if larger) |
+| `/system/running.txt` | Dirty-exit marker: names the running app; if it survives a boot, that app never returned to the launcher | one line |
 | `/system/filesystem.log` | SD card / FatFS structural errors (disk errors, media failures) | 4 KB (truncated on open if larger) |
 
 All files are opened in **append** mode so multiple events accumulate. They are truncated (not rotated) when they exceed their size limit.

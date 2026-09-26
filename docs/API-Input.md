@@ -9,6 +9,8 @@ Keyboard and button input functions.
 #### `picocalc.input.update()`
 Polls the keyboard for new input events. **Call once per frame** before reading button or character state.
 
+`update()` also services HTTP/TCP/sound callbacks, the system menu and dev commands.
+
 - **Parameters:** None
 - **Returns:** None
 
@@ -111,7 +113,7 @@ Returns the raw STM32 keycode from the keyboard controller.
 ---
 
 #### `picocalc.input.clearState()`
-Clear all button and key input state. Resets pressed, released, and held button buffers. Useful when returning from modal dialogs or menus to prevent stale input.
+Clear all button and key input state. Resets pressed, released, and held button buffers, queued `pollEvent` events and `isKeyDown` state. Useful when returning from modal dialogs or menus to prevent stale input.
 
 - **Parameters:** None
 - **Returns:** None
@@ -120,6 +122,40 @@ Clear all button and key input state. Resets pressed, released, and held button 
 -- After closing a dialog, clear stale input
 picocalc.input.clearState()
 ```
+
+---
+
+#### `picocalc.input.pollEvent()`
+Pops the oldest keyboard event, or `nil` when none is queued. Events are
+filled by `update()` in the order keys were pressed and released, so taps
+shorter than a frame and several characters in one frame are all reported.
+
+- **Returns:** (table or nil) `{type, key, char, mods, button, repeat}`:
+  - `type`: `"down"`, `"up"` or `"char"`
+  - `key`: ASCII for printable keys, else the keyboard code (as `getRawKey()`)
+  - `char`: the character (`"char"` events only)
+  - `mods`: `BTN_SHIFT`/`BTN_CTRL`/`BTN_ALT`/`BTN_FN` held at the event
+  - `button`: the `BTN_*` constant for keys that have one
+  - `repeat`: `true` for events produced by holding the key (read as `ev["repeat"]`)
+
+Independent of `getChar()`/`getButtons*()`. 16 events are kept (the oldest is
+dropped); a new app starts with an empty queue.
+
+```lua
+picocalc.input.update()
+for ev in picocalc.input.pollEvent do
+    if ev.type == "char" then text = text .. ev.char end
+end
+```
+
+---
+
+#### `picocalc.input.isKeyDown(k)`
+True while a key is held. `k` is a one-character string (`"w"`; letters
+ignore case) or an integer keycode as `pollEvent` reports it. Updated by
+`update()`. Reliable for buttons (arrows, Enter, Esc, F-keys, modifiers);
+letters and shifted symbols depend on the keyboard reporting their release
+(pending hardware confirmation). `clearState()` clears a key that sticks.
 
 ---
 

@@ -1,5 +1,11 @@
 # API System Configuration
 
+> `picocalc.sysconfig` exists only for apps whose `app.json` declares the
+> `"sysconfig"` requirement (otherwise it is nil). `get("wifi_pass")` always
+> returns nil — the WiFi password is write-only through this API (`set`
+> works). Note that `/system/config.json` itself is readable by a
+> `root-filesystem` app through `picocalc.fs`.
+
 System-wide configuration stored at `/system/config.json` on the SD card. This is distinct from per-app configuration (`picocalc.config`). System configuration persists across all apps and reboots.
 
 ## picocalc.sysconfig

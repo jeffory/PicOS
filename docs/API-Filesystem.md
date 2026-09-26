@@ -12,7 +12,14 @@ Opens a file on the SD card.
 - **Parameters:**
   - `path` (string): Absolute file path (e.g., `"/apps/hello/data.txt"`)
   - `mode` (string, optional): File mode (`"r"`, `"w"`, `"a"`, `"rb"`, `"wb"`, etc.). Defaults to `"r"`.
-- **Returns:** (userdata or nil) File handle, or `nil` on error
+- **Returns:** a file handle (userdata), or `nil, err` (`"permission denied"`, `"cannot open file"`, `"too many open files"`)
+
+Handles have methods — `f:read(n)`, `f:write(s)`, `f:seek(pos)`, `f:tell()`,
+`f:close()` — identical to the `picocalc.fs.*` functions. A handle closes
+itself when garbage-collected, and `local f <close> = picocalc.fs.open(...)`
+closes it at the end of the scope. Using a closed handle raises "attempt to
+use a closed file"; `close` is idempotent. At most 16 files can be open at
+once (FatFS), and files still open when the app exits are closed by the OS.
 
 ```lua
 local f = picocalc.fs.open("/data/save.txt", "w")
@@ -31,6 +38,8 @@ Reads bytes from an open file.
   - `file` (userdata): File handle from `open()`
   - `length` (number): Number of bytes to read
 - **Returns:** (string or nil) Data read, or `nil` on error
+
+Raises on a negative length or a closed handle; the length is clamped to the bytes left in the file.
 
 ```lua
 local data = picocalc.fs.read(f, 1024)
@@ -81,7 +90,7 @@ Reads an entire file into memory in one call.
 
 - **Parameters:**
   - `path` (string): Absolute file path
-- **Returns:** (string or nil) File contents, or `nil` on error
+- **Returns:** (string or nil) File contents, or `nil` when the path is denied, missing or unreadable. A file larger than free memory **raises** a memory error instead of returning `nil`; wrap it in `pcall` when the size is not known to fit.
 
 ```lua
 local content = picocalc.fs.readFile("/apps/hello/config.txt")

@@ -8,8 +8,10 @@
 local term = picocalc.terminal.new([cols [, rows [, scrollback]]])
 ```
 
-- `cols` (number, default **53**): grid width in characters
-- `rows` (number, default **26**): grid height in characters
+- `cols` (number, default **53**): grid width in characters, 1-53
+- `rows` (number, default **26**): grid height in characters, 1-26
+
+Out-of-range sizes raise an error.
 - `scrollback` (number, default **1000**): number of lines kept in scrollback history
 
 Returns a terminal object. Raises an error if allocation fails (PSRAM OOM).
@@ -257,7 +259,7 @@ Return the number of visual (wrapped) rows the current content occupies.
 
 ## Input helpers
 
-These methods block the calling Lua coroutine while keeping the system menu, HTTP callbacks, screenshots, and the watchdog all responsive.
+These methods block the calling Lua coroutine while keeping the system menu, HTTP callbacks, screenshots, and the watchdog all responsive: they run the full OS service pass (menu, callbacks, dev commands, exit request).
 
 #### `term:waitForAnyKey()`
 Block until any button is pressed, then return `nil`.

@@ -376,7 +376,19 @@ Clear all values shared across scenes.
 
 ## picocalc.game.save
 
-Per-app persistent save data. Values must be serializable: string, number, boolean, or table.
+Per-app save slots, one JSON file each at `/data/<app id>/saves/<key>.json`.
+
+- Keys are 1-128 bytes of `[A-Za-z0-9._-]`, contain no `..` and do not start
+  with `.`. Any other key is refused: `set` returns `false, "invalid save name"`,
+  `get` returns nil, `exists`/`delete` return false.
+- The value passed to `set` must be a **table** (nested tables, strings,
+  numbers, booleans). Integer-keyed tables come back with string keys; whole
+  floats keep `.0` so `math.type` survives.
+- Saves used to live in a shared `/saves/<key>.json`. The first time an app
+  reads a key (`get`/`exists`) that it has no slot for and the old file
+  exists, the file is **copied** into the app's slot; the old file is never
+  modified or removed.
+- `list()` returns only this app's slot names.
 
 ### Functions
 
@@ -385,11 +397,11 @@ Save a value under a key.
 
 - **Parameters:**
   - `key` (string): Key name
-  - `value` (string | number | boolean | table): Value to save
-- **Returns:** None
+  - `value` (table): Value to save
+- **Returns:** `true`, or `false, err`
 
 ```lua
-picocalc.game.save.set("highscore", 12500)
+picocalc.game.save.set("highscore", { score = 12500 })
 ```
 
 ---
@@ -402,7 +414,7 @@ Load a saved value.
 - **Returns:** (any) Saved value, or `nil` if the key does not exist
 
 ```lua
-local best = picocalc.game.save.get("highscore") or 0
+local best = (picocalc.game.save.get("highscore") or {}).score or 0
 ```
 
 ---
@@ -421,7 +433,7 @@ Delete a saved value.
 
 - **Parameters:**
   - `key` (string): Key name
-- **Returns:** None
+- **Returns:** (boolean) `false` if the slot did not exist or the key is invalid
 
 ---
 
@@ -480,9 +492,9 @@ function play:draw()
 end
 
 function play:exit()
-    local best = picocalc.game.save.get("highscore") or 0
+    local best = (picocalc.game.save.get("highscore") or {}).score or 0
     if score > best then
-        picocalc.game.save.set("highscore", score)
+        picocalc.game.save.set("highscore", { score = score })
     end
 end
 

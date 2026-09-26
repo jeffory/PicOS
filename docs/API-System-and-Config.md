@@ -23,6 +23,10 @@ local elapsed = picocalc.sys.getTimeMs() - start
 #### `picocalc.sys.sleep(ms)`
 Sleeps for the specified number of milliseconds. Does not consume input events.
 
+`sys.sleep()` and `input.update()` both service the OS while they run: HTTP,
+TCP and sound callbacks, the system menu and dev commands. Callbacks can
+therefore fire inside `input.update()`.
+
 - **Parameters:**
   - `ms` (number): Milliseconds to sleep
 - **Returns:** None
@@ -136,8 +140,13 @@ Returns a snapshot of heap memory usage.
   - `psram_free` (number): Free bytes in the Lua PSRAM heap
   - `psram_used` (number): Used bytes in the Lua PSRAM heap
   - `psram_total` (number): Total bytes in the Lua PSRAM heap
-  - `sram_free` (number): Free bytes in the system SRAM heap (via `mallinfo`)
+  - `psram_largest_block` (number): Largest single free block — what one big allocation can get (compare `min_psram_kb` in app.json)
+  - `psram_fragmentation` (number): 0-100
+  - `small_pool_slabs`, `small_pool_bytes` (number): Lua small-object pool slabs (4 KB each, carved from the PSRAM heap) and their bytes
+  - `small_pool_objects`, `small_pool_object_bytes` (number): live objects of up to 128 B in those pools and their bytes
+  - `sram_free` (number): Free bytes in the system SRAM heap (via `mallinfo`; the SRAM heap is only ~2.6 KB)
   - `sram_used` (number): Used bytes in the system SRAM heap
+  - `pio_psram_available` (boolean), `pio_psram_size` (number): mainboard PIO PSRAM
 
 ```lua
 local mem = picocalc.sys.getMemInfo()
@@ -217,18 +226,34 @@ end
 ---
 
 #### `picocalc.sys.applyUpdate(path)`
-Trigger an OTA firmware update from a UF2 file on the SD card. The device will reboot to apply the update.
+Flash a firmware image (`picocalc_os.bin`) from the SD card. **Only present**
+for apps that declare `"system-update"` AND are OS apps (id
+`com.picos.updater` / `com.picos.store`, or installed under `/system/`).
+
+Before anything is flashed:
+- `/system/update.sha256` (exactly 64 hex digits + optional newline) must match
+  the image, and `/system/update.sig` (DER ECDSA P-256 over the SHA-256 of the
+  image) must verify against the key built into the running firmware;
+- a confirmation dialog names the file; declining returns `false, "cancelled"`
+  (keys pressed before the dialog appears are ignored).
+
+The image is copied to `/system/update.bin` and the device reboots; the boot
+checks the checksum and signature again before writing flash. An image the
+boot refuses is renamed `update.bin.rejected` and logged (`OTA REJECTED` in
+`/system/error.log`); it is never retried. A `/system/update.bin` found at boot
+without an update request is renamed `update.bin.stale`.
 
 - **Parameters:**
-  - `path` (string): Path to UF2 file on the SD card
-- **Returns:** (boolean) `true` on success; `false, string` on failure with error message
+  - `path` (string): Path to the `.bin` image on the SD card
+- **Returns:** does not return on success; `false, err` on failure
 
 ```lua
-local ok, err = picocalc.sys.applyUpdate("/system/update.uf2")
-if not ok then
-    picocalc.sys.log("Update failed: " .. err)
-end
+local ok, err = picocalc.sys.applyUpdate("/system/update.bin")
 ```
+
+(Release assets: `picocalc_os.bin`, `picocalc_os.sha256`, `picocalc_os.sig`.
+Signing: `tools/sign_update.py`. Local builds embed a TEST key whose private
+half is in the repo; release builds use the `UPDATE_SIGNING_KEY` CI secret.)
 
 ---
 
@@ -275,13 +300,17 @@ local data = json.decode(raw)
 #### `picocalc.sys.pioPsramRead(addr, len)`
 Read bytes from PIO PSRAM (mainboard 8MB).
 
+Apps may use addresses from `0x48000` to the end of the chip; anything below
+(the OS's MP3 ring and reserved video region), negative, or past the end
+raises an error.
+
 - **Parameters:**
   - `addr` (number): Byte address
   - `len` (number): Number of bytes to read
 - **Returns:** (string) Data, or `nil` if PIO PSRAM not available
 
 ```lua
-local data = picocalc.sys.pioPsramRead(0x0000, 256)
+local data = picocalc.sys.pioPsramRead(0x48000, 256)
 ```
 
 ---
@@ -289,13 +318,17 @@ local data = picocalc.sys.pioPsramRead(0x0000, 256)
 #### `picocalc.sys.pioPsramWrite(addr, data)`
 Write bytes to PIO PSRAM.
 
+Apps may use addresses from `0x48000` to the end of the chip; anything below
+(the OS's MP3 ring and reserved video region), negative, or past the end
+raises an error.
+
 - **Parameters:**
   - `addr` (number): Byte address
   - `data` (string): Bytes to write
 - **Returns:** (number) Bytes written (0 if unavailable)
 
 ```lua
-local written = picocalc.sys.pioPsramWrite(0x8000, myData)
+local written = picocalc.sys.pioPsramWrite(0x48000, myData)
 ```
 
 ---
@@ -318,9 +351,14 @@ end
 #### `picocalc.sys.qmiPsramAlloc(size)`
 Allocate a buffer in QMI PSRAM (Lua heap). Low-level; prefer standard Lua tables for most uses.
 
+Returns a bounds-checked buffer handle (userdata), not a pointer. It is freed
+by `qmiPsramFree` (idempotent) or when garbage-collected; `qmiPsramRead/Write`
+raise on an out-of-range offset/length or a freed handle. The handle can be
+passed to `picocalc.graphics.image.loadFromBuffer(handle [, len])`.
+
 - **Parameters:**
   - `size` (number): Bytes to allocate
-- **Returns:** (lightuserdata) Handle, or `nil` on failure
+- **Returns:** (userdata) Handle, or `nil` on failure
 
 ```lua
 local buf = picocalc.sys.qmiPsramAlloc(4096)
@@ -332,7 +370,7 @@ local buf = picocalc.sys.qmiPsramAlloc(4096)
 Free a QMI PSRAM allocation.
 
 - **Parameters:**
-  - `handle` (lightuserdata): Handle from `qmiPsramAlloc`
+  - `handle` (userdata): Handle from `qmiPsramAlloc`
 - **Returns:** None
 
 ```lua
@@ -345,7 +383,7 @@ picocalc.sys.qmiPsramFree(buf)
 Write to a QMI PSRAM buffer.
 
 - **Parameters:**
-  - `handle` (lightuserdata): Handle from `qmiPsramAlloc`
+  - `handle` (userdata): Handle from `qmiPsramAlloc`
   - `offset` (number): Byte offset within the buffer
   - `data` (string): Bytes to write
 - **Returns:** (number) Bytes written
@@ -360,7 +398,7 @@ picocalc.sys.qmiPsramWrite(buf, 0, "Hello PSRAM")
 Read from a QMI PSRAM buffer.
 
 - **Parameters:**
-  - `handle` (lightuserdata): Handle from `qmiPsramAlloc`
+  - `handle` (userdata): Handle from `qmiPsramAlloc`
   - `offset` (number): Byte offset within the buffer
   - `len` (number): Number of bytes to read
 - **Returns:** (string) Data
@@ -376,6 +414,8 @@ local data = picocalc.sys.qmiPsramRead(buf, 0, 11)
 Persistent **per-app** key-value configuration storage, stored at `/data/<APP_ID>/config.json`. Each app gets its own isolated store. The same store is also available under the alias `picocalc.appconfig` — same data, two names.
 
 For the **system-wide** store shared by all apps (`/system/config.json`), use `picocalc.sysconfig` — see [[API Sysconfig]].
+
+`picocalc.sysconfig` exists only for apps whose `app.json` declares the `"sysconfig"` requirement (otherwise it is nil).
 
 ### Functions
 

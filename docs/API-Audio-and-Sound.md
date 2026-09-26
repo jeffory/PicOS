@@ -39,7 +39,7 @@ picocalc.audio.stopTone()
 Sets the audio output volume.
 
 - **Parameters:**
-  - `volume` (number): Volume level (0–255, where 0 is muted and 255 is maximum)
+  - `volume` (number): Volume level (0–100, where 0 is muted and 100 is maximum; larger values clamp to 100)
 - **Returns:** None
 
 ```lua
@@ -149,6 +149,8 @@ A `Sample` holds raw PCM audio data loaded from a WAV file.
 #### `picocalc.sound.sample([path])`
 Creates a new Sample object, optionally loading a WAV file immediately.
 
+WAVs must be 8- or 16-bit PCM with 1-2 channels (float, 24/32-bit, ADPCM and more channels are refused); only the first 64 KB of sample data is kept.
+
 - **Parameters:**
   - `path` (string, optional): Absolute path to a WAV file
 - **Returns:** (userdata) Sample object, or `nil, errstr` on failure
@@ -161,6 +163,8 @@ local s = picocalc.sound.sample("/apps/myapp/beep.wav")
 
 #### `sample:load(path)`
 Loads a WAV file into the sample.
+
+WAVs must be 8- or 16-bit PCM with 1-2 channels (float, 24/32-bit, ADPCM and more channels are refused); only the first 64 KB of sample data is kept.
 
 - **Parameters:**
   - `path` (string): Absolute path to a WAV file
@@ -239,7 +243,7 @@ Creates a temporary SamplePlayer and starts playback. The `when` parameter is ac
 
 - **Parameters:**
   - `when` (number): Ignored (accepted for API compatibility)
-  - `vol` (number, optional): Volume 0–255 (default `100`)
+  - `vol` (number, optional): Volume 0–100 (default `100`; larger values clamp)
   - `rightvol` (number, optional): Ignored (mono PWM output)
   - `rate` (number, optional): Playback rate multiplier (default `1.0`)
 - **Returns:** (userdata) SamplePlayer object
@@ -272,6 +276,8 @@ Plays a `Sample` from memory. Supports looping and volume control.
 
 #### `picocalc.sound.sampleplayer([sample_or_path])`
 Creates a SamplePlayer, optionally pre-loading a sample.
+
+A SamplePlayer keeps its Sample alive (you may drop your own reference). `sampleplayer(path)` and `sample:play()` create a Sample of their own. Dropping the player returned by `sample:play()` stops that sound when it is collected.
 
 - **Parameters:**
   - `sample_or_path` (userdata or string, optional): A `Sample` object or a WAV file path
@@ -313,14 +319,14 @@ Stops playback.
 ---
 
 #### `player:setVolume(vol)` / `player:getVolume()`
-Volume range 0–255.
+Volume range 0–100 (larger values clamp to 100).
 
 ---
 
 #### `player:getSample()`
 Returns the Sample object currently assigned to this player.
 
-- **Returns:** (lightuserdata) Sample handle, or `nil` if no sample is set
+- **Returns:** (userdata) the Sample object, or `nil` if no sample is set
 
 ---
 
@@ -434,6 +440,8 @@ Creates a FilePlayer.
 #### `player:load(path)`
 Opens a WAV file for streaming.
 
+Streams 16-bit PCM only: an 8-bit WAV is refused here (a Sample accepts it).
+
 - **Parameters:**
   - `path` (string): Absolute path to a WAV file
 - **Returns:** `true` on success, or `nil, errstr`
@@ -451,7 +459,7 @@ Returns or seeks to a position in seconds.
 ---
 
 #### `player:setVolume(left [, right])` / `player:getVolume()`
-Sets left/right channel volumes (0–255). Returns both channels.
+Sets the volume (0–100, clamped). `right` is accepted for compatibility but ignored: both channels use `left`. `getVolume()` returns the volume twice.
 
 ---
 
@@ -534,6 +542,8 @@ Streams an MP3 file from the SD card.
 #### `picocalc.sound.mp3player()`
 Creates an MP3Player.
 
+`picocalc.sound.mp3player()` returns the one live MP3 player handle (there is a single MP3 decoder).
+
 - **Returns:** (userdata) MP3Player object, or `nil, errstr` on failure
 
 ```lua
@@ -569,7 +579,7 @@ Returns the sample rate of the MP3 file in Hz.
 ---
 
 #### `player:setVolume(vol)` / `player:getVolume()`
-Volume range 0–255.
+Volume range 0–100 (larger values clamp to 100).
 
 ---
 
