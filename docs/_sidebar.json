@@ -1,0 +1,138 @@
+[
+  {
+    "label": "Documentation",
+    "items": [
+      {
+        "label": "Home",
+        "page": "index.md"
+      },
+      {
+        "label": "Creating your first app",
+        "page": "Creating-your-first-app.md"
+      },
+      {
+        "label": "Publishing Apps",
+        "page": "Publishing-Apps.md"
+      },
+      {
+        "label": "Native Loading",
+        "page": "Native-Loading.md"
+      },
+      {
+        "label": "Lua SDK Reference",
+        "page": "Lua-SDK-Reference.md"
+      }
+    ]
+  },
+  {
+    "label": "System",
+    "items": [
+      {
+        "label": "Crash Logging and Watchdog",
+        "page": "Crash-Logging-and-Watchdog.md"
+      },
+      {
+        "label": "Simulator and Testing",
+        "page": "Simulator-and-Testing.md"
+      }
+    ]
+  },
+  {
+    "label": "Libraries",
+    "items": [
+      {
+        "label": "Library Download",
+        "page": "Library-Download.md"
+      },
+      {
+        "label": "Library Panels",
+        "page": "Library-Panels.md"
+      }
+    ]
+  },
+  {
+    "label": "API Reference",
+    "items": [
+      {
+        "label": "Global Variables and Permissions",
+        "page": "Global-Variables-and-Permissions.md"
+      },
+      {
+        "label": "API Audio and Sound",
+        "page": "API-Audio-and-Sound.md"
+      },
+      {
+        "label": "API Crypto",
+        "page": "API-Crypto.md"
+      },
+      {
+        "label": "API Display and Graphics",
+        "page": "API-Display-and-Graphics.md"
+      },
+      {
+        "label": "API Filesystem",
+        "page": "API-Filesystem.md"
+      },
+      {
+        "label": "API Game",
+        "page": "API-Game.md"
+      },
+      {
+        "label": "API Input",
+        "page": "API-Input.md"
+      },
+      {
+        "label": "API JSON",
+        "page": "API-JSON.md"
+      },
+      {
+        "label": "API Modplayer",
+        "page": "API-Modplayer.md"
+      },
+      {
+        "label": "API Network and WiFi",
+        "page": "API-Network-and-WiFi.md"
+      },
+      {
+        "label": "API Performance",
+        "page": "API-Performance.md"
+      },
+      {
+        "label": "API REPL",
+        "page": "API-Repl.md"
+      },
+      {
+        "label": "API System and Config",
+        "page": "API-System-and-Config.md"
+      },
+      {
+        "label": "API Sysconfig",
+        "page": "API-Sysconfig.md"
+      },
+      {
+        "label": "API TCP",
+        "page": "API-TCP.md"
+      },
+      {
+        "label": "API Terminal",
+        "page": "API-Terminal.md"
+      },
+      {
+        "label": "API UI",
+        "page": "API-UI.md"
+      },
+      {
+        "label": "API Video",
+        "page": "API-Video.md"
+      },
+      {
+        "label": "API Zip",
+        "page": "API-Zip.md"
+      },
+      {
+        "label": "Standard Lua Libraries",
+        "page": "Standard-Lua-Libraries.md"
+      }
+    ]
+  }
+]

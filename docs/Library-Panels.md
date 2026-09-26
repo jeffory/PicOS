@@ -1,4 +1,6 @@
-# Library Panels
+---
+title: "Library Panels"
+---
 
 A declarative interactive-comics framework, modelled on the Playdate [Panels](https://github.com/cadin/panels) library. A comic is a plain Lua data table — **sequences** of **panels** of **layers** — and the library owns scrolling, parallax, keyframed animation, audio cues, transitions, branching choices, and progress save/resume.
 

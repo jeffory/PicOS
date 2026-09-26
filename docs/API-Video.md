@@ -1,4 +1,6 @@
-# API — Video Playback
+---
+title: "API — Video Playback"
+---
 
 PicOS supports MJPEG video playback from AVI files stored on the SD card. Video is decoded on Core 0 using JPEGDEC and displayed via the standard display framebuffer. Audio tracks (MP3) are decoded on Core 1 via a shared ring buffer.
 

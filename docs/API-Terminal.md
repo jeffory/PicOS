@@ -1,4 +1,6 @@
-# API Terminal
+---
+title: "API Terminal"
+---
 
 `picocalc.terminal` provides a full-featured terminal emulator widget. Each terminal has its own cell grid, scrollback buffer, cursor, and colour state. Multiple terminals can be created but only one should render to the display at a time.
 

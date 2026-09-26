@@ -1,4 +1,6 @@
-# API Input
+---
+title: "API Input"
+---
 
 Keyboard and button input functions.
 

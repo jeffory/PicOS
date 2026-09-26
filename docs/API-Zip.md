@@ -1,4 +1,6 @@
-# API Zip
+---
+title: "API Zip"
+---
 
 Read and extract ZIP archives on the SD card. Useful for shipping an app's assets as a single file: transfer one archive instead of hundreds of loose files, then extract it once, or open it and read entries straight out of it at runtime.
 

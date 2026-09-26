@@ -1,4 +1,6 @@
-# API Performance
+---
+title: "API Performance"
+---
 
 Performance monitoring utilities for apps.
 

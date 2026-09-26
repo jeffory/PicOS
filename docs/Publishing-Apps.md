@@ -1,4 +1,6 @@
-# Publishing Apps
+---
+title: "Publishing Apps"
+---
 
 The App Store is an automatic index of public GitHub repositories tagged with
 the topic `picos-app`. There is no registration or review: tag the repo,

@@ -1,4 +1,6 @@
-# Library Download
+---
+title: "Library Download"
+---
 
 Stream an HTTP(S) response straight to a file on the SD card. The library wraps `picocalc.network.http` in a single blocking call with redirect handling, progress reporting and automatic cleanup of partial files, so an app can fetch an asset pack or an update with one function call.
 

@@ -1,25 +1,27 @@
-# Lua SDK Reference
+---
+title: "Lua SDK Reference"
+---
 
 This document provides a complete reference for all Lua APIs available to PicOS apps.
 
 ## API Sections
 
-- [[Global Variables and Permissions]]
-- [[API Audio and Sound]] — Audio Playback (WAV, MP3) & Tones
-- [[API Crypto]] — Cryptographic Primitives
-- [[API Display and Graphics]] — Graphics & Display
-- [[API Filesystem]] — Filesystem (SD Card)
-- [[API Input]] — Keyboard & Button Input
-- [[API Modplayer]] — Tracker Module Music (MOD, XM, S3M)
-- [[API Network and WiFi]] — WiFi & HTTP Client
-- [[API Performance]] — Performance Monitoring
-- [[API REPL]] — Interactive Lua REPL
-- [[API Sysconfig]] — System-Wide Configuration
-- [[API System and Config]] — System Functions & Per-App Config
-- [[API Terminal]] — Terminal Emulator Widget
-- [[API UI]] — Standard UI Components
-- [[API Video]] — MJPEG Video Playback
-- [[Standard Lua Libraries]]
+- [Global Variables and Permissions](Global-Variables-and-Permissions.md)
+- [API Audio and Sound](API-Audio-and-Sound.md) — Audio Playback (WAV, MP3) & Tones
+- [API Crypto](API-Crypto.md) — Cryptographic Primitives
+- [API Display and Graphics](API-Display-and-Graphics.md) — Graphics & Display
+- [API Filesystem](API-Filesystem.md) — Filesystem (SD Card)
+- [API Input](API-Input.md) — Keyboard & Button Input
+- [API Modplayer](API-Modplayer.md) — Tracker Module Music (MOD, XM, S3M)
+- [API Network and WiFi](API-Network-and-WiFi.md) — WiFi & HTTP Client
+- [API Performance](API-Performance.md) — Performance Monitoring
+- [API REPL](API-Repl.md) — Interactive Lua REPL
+- [API Sysconfig](API-Sysconfig.md) — System-Wide Configuration
+- [API System and Config](API-System-and-Config.md) — System Functions & Per-App Config
+- [API Terminal](API-Terminal.md) — Terminal Emulator Widget
+- [API UI](API-UI.md) — Standard UI Components
+- [API Video](API-Video.md) — MJPEG Video Playback
+- [Standard Lua Libraries](Standard-Lua-Libraries.md)
 
 ---
 
@@ -68,5 +70,5 @@ end
 
 ### Native App Development
 
-If you prefer to write apps in C or C++ instead of Lua, see the [[Native App Development]] guide. The C API mirrors the Lua modules documented here.
+If you prefer to write apps in C or C++ instead of Lua, see the [Native App Development](Native-Loading.md) guide. The C API mirrors the Lua modules documented here.
 

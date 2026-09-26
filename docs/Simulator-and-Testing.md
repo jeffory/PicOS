@@ -1,4 +1,6 @@
-# Simulator and Testing
+---
+title: "Simulator and Testing"
+---
 
 ## Simulator control protocol (TCP 127.0.0.1, or the ./picos_control UNIX socket)
 

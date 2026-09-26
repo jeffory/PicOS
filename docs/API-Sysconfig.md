@@ -1,4 +1,6 @@
-# API System Configuration
+---
+title: "API System Configuration"
+---
 
 > `picocalc.sysconfig` exists only for apps whose `app.json` declares the
 > `"sysconfig"` requirement (otherwise it is nil). `get("wifi_pass")` always

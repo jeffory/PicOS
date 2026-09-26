@@ -1,3 +1,7 @@
+---
+title: "Creating your first app"
+---
+
 ## Your First App
 
 Creating an app is incredibly straightforward. You only need two files in a directory inside `/apps/` on the SD Card:
@@ -37,4 +41,4 @@ end
 
 ### Prefer C or C++?
 
-If you want to build high-performance apps or prefer working in C/C++, check out our guide on [[Native App Development]].
+If you want to build high-performance apps or prefer working in C/C++, check out our guide on [Native App Development](Native-Loading.md).

@@ -1,4 +1,6 @@
-# API Mod Player
+---
+title: "API Mod Player"
+---
 
 Tracker module music playback (MOD, XM, S3M formats). The mod player runs on Core 1 alongside other audio.
 

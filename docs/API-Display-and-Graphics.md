@@ -1,4 +1,6 @@
-# API Display and Graphics
+---
+title: "API Display and Graphics"
+---
 
 Graphics and display functions. The display is **320×320 pixels** with RGB565 color format.
 

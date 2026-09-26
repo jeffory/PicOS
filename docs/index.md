@@ -1,5 +1,6 @@
-# Welcome to PicOS Development!
-
+---
+title: "Welcome to PicOS Development!"
+---
 
 Welcome to the documentation for PicOS, a lightweight app platform for the [ClockworkPi PicoCalc](https://www.clockworkpi.com/picocalc). If you're excited about creating retro-style games and utilities with modern tools, you're in the right place.
 
@@ -14,7 +15,7 @@ The OS handles the low-level hardware details so you can focus on your app's log
 
 ## Native App Support
 
-For performance-critical applications or those who prefer C/C++, PicOS supports [[Native App Development]] using a C API that mirrors the Lua SDK. Native apps are compiled as Position-Independent ELF binaries and loaded into PSRAM.
+For performance-critical applications or those who prefer C/C++, PicOS supports [Native App Development](Native-Loading.md) using a C API that mirrors the Lua SDK. Native apps are compiled as Position-Independent ELF binaries and loaded into PSRAM.
 
 ## Screenshots
 

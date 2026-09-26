@@ -1,4 +1,6 @@
-# API REPL
+---
+title: "API REPL"
+---
 
 Interactive read-eval-print loop primitives for building console-style applications. The REPL module manages a scrolling text display with command-line input and history.
 

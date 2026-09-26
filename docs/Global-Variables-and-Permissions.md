@@ -1,4 +1,6 @@
-# Global Variables and Permissions
+---
+title: "Global Variables and Permissions"
+---
 
 ## Global Variables
 

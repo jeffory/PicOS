@@ -1,4 +1,6 @@
-# Standard Lua Libraries
+---
+title: "Standard Lua Libraries"
+---
 
 The following Lua 5.4 standard libraries are available:
 

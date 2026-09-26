@@ -1,4 +1,6 @@
-# API System and Config
+---
+title: "API System and Config"
+---
 
 System-level functions and persistent configuration storage.
 
@@ -61,7 +63,7 @@ Checks if the device is powered via USB (GP24 VBUS sense).
 ---
 
 #### `picocalc.sys.resetIdleTimer()`
-Resets the idle screen-dim timer. Call on user activity to keep the display from dimming (see the `dim_timeout_s` key in [[API Sysconfig]]).
+Resets the idle screen-dim timer. Call on user activity to keep the display from dimming (see the `dim_timeout_s` key in [API Sysconfig](API-Sysconfig.md)).
 
 - **Parameters:** None
 - **Returns:** None
@@ -413,7 +415,7 @@ local data = picocalc.sys.qmiPsramRead(buf, 0, 11)
 
 Persistent **per-app** key-value configuration storage, stored at `/data/<APP_ID>/config.json`. Each app gets its own isolated store. The same store is also available under the alias `picocalc.appconfig` — same data, two names.
 
-For the **system-wide** store shared by all apps (`/system/config.json`), use `picocalc.sysconfig` — see [[API Sysconfig]].
+For the **system-wide** store shared by all apps (`/system/config.json`), use `picocalc.sysconfig` — see [API Sysconfig](API-Sysconfig.md).
 
 `picocalc.sysconfig` exists only for apps whose `app.json` declares the `"sysconfig"` requirement (otherwise it is nil).
 

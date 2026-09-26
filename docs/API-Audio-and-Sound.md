@@ -1,4 +1,6 @@
-# API Audio and Sound
+---
+title: "API Audio and Sound"
+---
 
 Audio output, including simple tones and full sample/file playback.
 

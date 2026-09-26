@@ -1,4 +1,6 @@
-# API UI
+---
+title: "API UI"
+---
 
 Standard UI components for consistent app appearance. These draw directly to the framebuffer.
 

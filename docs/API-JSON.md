@@ -1,4 +1,6 @@
-# API — JSON
+---
+title: "API — JSON"
+---
 
 JSON encoding and decoding. JSON `null` maps to a sentinel value, **not** `nil` — a `nil` table value would delete the key.
 

@@ -1,4 +1,6 @@
-# Crash Logging and Watchdog
+---
+title: "Crash Logging and Watchdog"
+---
 
 PicOS captures two categories of failure: HardFaults (CPU exceptions) and Lua runtime errors. Both are written to the SD card so they survive a reboot and can be inspected later.
 

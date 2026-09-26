@@ -1,4 +1,6 @@
-# API Network and WiFi
+---
+title: "API Network and WiFi"
+---
 
 WiFi connectivity and HTTP client.
 

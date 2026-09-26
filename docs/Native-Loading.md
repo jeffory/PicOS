@@ -1,4 +1,6 @@
-# Native App Development
+---
+title: "Native App Development"
+---
 
 PicOS supports running native ARM Cortex-M33 (RP2350) applications in addition to Lua scripts. Native apps are Position-Independent ELF32 (PIE) binaries loaded from the SD card into PSRAM at runtime.
 
@@ -32,7 +34,7 @@ Place these files in `/apps/<your_app_name>/` on the SD card.
 }
 ```
 
-See [[Global Variables and Permissions]] for available requirements (`filesystem`, `root-filesystem`, `http`, `audio`).
+See [Global Variables and Permissions](Global-Variables-and-Permissions.md) for available requirements (`filesystem`, `root-filesystem`, `http`, `audio`).
 
 ## Development Environment
 
@@ -137,7 +139,7 @@ if (api->version >= 2) {
 }
 ```
 
-`sdk/native/os.h` is the source of truth for the complete type definitions, the exact struct layout, and the latest `version` values. The C API maps directly to the `picocalc.*` Lua modules documented in the [[Lua SDK Reference]].
+`sdk/native/os.h` is the source of truth for the complete type definitions, the exact struct layout, and the latest `version` values. The C API maps directly to the `picocalc.*` Lua modules documented in the [Lua SDK Reference](Lua-SDK-Reference.md).
 
 ## Compilation
 
@@ -209,6 +211,6 @@ Anything the app got through the API and did not free — files, images, samples
 
 ## See also
 
-- [[Lua SDK Reference]] — Lua API documentation (C API mirrors these modules)
-- [[Global Variables and Permissions]] — App requirements
-- [[Crash Logging and Watchdog]] — Fault recovery and reboot behavior
+- [Lua SDK Reference](Lua-SDK-Reference.md) — Lua API documentation (C API mirrors these modules)
+- [Global Variables and Permissions](Global-Variables-and-Permissions.md) — App requirements
+- [Crash Logging and Watchdog](Crash-Logging-and-Watchdog.md) — Fault recovery and reboot behavior

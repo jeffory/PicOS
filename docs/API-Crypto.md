@@ -1,4 +1,6 @@
-# API Crypto
+---
+title: "API Crypto"
+---
 
 Cryptographic primitives for hashing, encryption, key exchange, and signature verification. All functions operate on binary strings.
 
