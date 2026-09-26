@@ -1,6 +1,3 @@
-[submodule "docs"]
-	path = docs
-	url = https://github.com/jeffory/PicOS.wiki.git
 [submodule "third_party/AnimatedGIF"]
 	path = third_party/AnimatedGIF
 	url = https://github.com/bitbank2/AnimatedGIF.git
