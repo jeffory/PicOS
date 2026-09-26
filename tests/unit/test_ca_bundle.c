@@ -45,9 +45,11 @@ int main(void) {
   for (mbedtls_x509_crt *c = &s_ca; c && c->raw.len; c = c->next) count++;
   CHECK_EQ_INT(count, 11);
 
-  // WE1 -> GTS Root R4 (in the bundle directly).
-  CHECK_EQ_U32(verify_chain(FIX "picos.jeffory.dev.chain.pem",
-                            "picos.jeffory.dev"), 0);
+  // The store (Cloudflare Universal SSL; chain captured 2026-09-26):
+  // WE1 -> GTS Root R4 (in the bundle directly).  Cloudflare may reissue from
+  // Let's Encrypt, Google Trust Services or SSL.com; all three roots are bundled.
+  CHECK_EQ_U32(verify_chain(FIX "store.picodeck.net.chain.pem",
+                            "store.picodeck.net"), 0);
   // DV E36 -> Sectigo E46 (P-384).
   CHECK_EQ_U32(verify_chain(FIX "github.com.chain.pem", "github.com"), 0);
   // YR1 -> ISRG Root YR, which is NOT in the bundle: only its cross-sign by
