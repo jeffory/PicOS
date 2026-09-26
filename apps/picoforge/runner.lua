@@ -2,7 +2,7 @@
 
 local Runner = {}
 
--- Read a file into a string using the PicOS fs API
+-- Read a file into a string using the PicoDeck fs API
 local function read_file(fs, path)
     local f = fs.open(path, "r")
     if not f then return nil, "cannot open " .. path end

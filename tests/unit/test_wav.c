@@ -242,7 +242,7 @@ static void test_real_files(void) {
       "tests/fuzz/corpus/wav/canonical.wav"};
   for (size_t k = 0; k < sizeof(k_files) / sizeof(k_files[0]); k++) {
     char path[512];
-    snprintf(path, sizeof(path), "%s/%s", PICOS_ROOT, k_files[k]);
+    snprintf(path, sizeof(path), "%s/%s", PICODECK_ROOT, k_files[k]);
     FILE *f = fopen(path, "rb");
     CHECK(f != NULL);
     if (!f)

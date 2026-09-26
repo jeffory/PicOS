@@ -133,7 +133,7 @@ local function check_stack_alive(what)
     local r = request("/ok")
     T.ok(wait(function() return r.complete or r.closed end, 3000),
          (what or "") .. ": follow-up GET /ok never finished")
-    T.eq(body(r), "hello picos", (what or "") .. ": follow-up body")
+    T.eq(body(r), "hello picodeck", (what or "") .. ": follow-up body")
     r.conn:close()
 end
 
@@ -163,7 +163,7 @@ case_fw("http_get_ok", function()
          "complete never fired (closed=" .. tostring(r.closed) .. " err=" ..
          tostring(r.err) .. ")")
     T.eq(r.status, 200, "status")
-    T.eq(body(r), "hello picos", "body")
+    T.eq(body(r), "hello picodeck", "body")
     T.eq(r.err, nil, "error")
     r.conn:close()
 end)
@@ -235,7 +235,7 @@ case_fw("http_open_close_loop", function()
         local r = request("/ok")
         T.ok(wait(function() return r.complete or r.closed end, 3000),
              "iteration " .. i .. " never finished")
-        T.eq(body(r), "hello picos", "iteration " .. i .. " body")
+        T.eq(body(r), "hello picodeck", "iteration " .. i .. " body")
         r.conn:close()
     end
 end)
@@ -275,7 +275,7 @@ case_fw("http_after_inflight_exit", function()
         end
         return true
     end, 3000), "requests after the previous app's exit never finished")
-    for i, r in ipairs(rs) do T.eq(body(r), "hello picos", "req " .. i) end
+    for i, r in ipairs(rs) do T.eq(body(r), "hello picodeck", "req " .. i) end
     for _, r in ipairs(rs) do r.conn:close() end
 end)
 
@@ -367,13 +367,13 @@ case_fw("http_keepalive_reuse", function()
     local r1 = request("/ok", { conn = conn, keepalive = true,
                                 connect_timeout = 10 })
     T.ok(wait(function() return r1.complete end, 3000), "first request")
-    T.eq(body(r1), "hello picos", "first body")
+    T.eq(body(r1), "hello picodeck", "first body")
     local r2 = request("/ok", { conn = conn, keepalive = true,
                                 connect_timeout = 10 })
     T.ok(wait(function() return r2.complete or r2.closed end, 3000),
          "second request on the kept-alive connection never finished")
     T.eq(r2.err, nil, "second request error")
-    T.eq(body(r2), "hello picos", "second body")
+    T.eq(body(r2), "hello picodeck", "second body")
     conn:close()
 end)
 
@@ -391,7 +391,7 @@ case_fw("http_close_delimited_body", function()
     T.ok(wait(function() return r.complete end, 3000),
          "complete never fired for a close-delimited response (closed=" ..
          tostring(r.closed) .. ")")
-    T.eq(body(r), "hello picos", "body")
+    T.eq(body(r), "hello picodeck", "body")
 end)
 
 case_fw("http_post_binary", function()
@@ -548,7 +548,7 @@ case_fw("http_close_delimited_small_ring", function()
         if not d then break end
         parts[#parts + 1] = d
     end
-    T.eq(table.concat(parts), "hello picos", "the whole body after the close")
+    T.eq(table.concat(parts), "hello picodeck", "the whole body after the close")
     conn:close()
 end)
 
@@ -640,7 +640,7 @@ case_fw("pool_churn_then_fill", function()
         local r = request("/ok")
         T.ok(wait(function() return r.complete or r.closed end, 3000),
              "http " .. i .. " never finished")
-        T.eq(body(r), "hello picos", "http " .. i .. " body")
+        T.eq(body(r), "hello picodeck", "http " .. i .. " body")
         r.conn:close()
     end
     for i = 1, 10 do

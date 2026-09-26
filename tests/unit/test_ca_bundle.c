@@ -1,6 +1,6 @@
 // Host unit test for src/drivers/ca_bundle.c: the bundle parses as a whole
 // (the firmware parses it ONCE at boot into one mbedtls_x509_crt chain that
-// every TLS connection shares, wifi.c) and the chains PicOS depends on verify
+// every TLS connection shares, wifi.c) and the chains PicoDeck depends on verify
 // against it, with host-name checking.  Fixtures in fixtures/tls/ are the
 // chains served by the real hosts on 2026-09-24 (`openssl s_client
 // -showcerts`); the host build has no MBEDTLS_HAVE_TIME_DATE, so leaf expiry
@@ -14,7 +14,7 @@
 #include <stdlib.h>
 #include <string.h>
 
-#define FIX PICOS_ROOT "/tests/unit/fixtures/tls/"
+#define FIX PICODECK_ROOT "/tests/unit/fixtures/tls/"
 
 static mbedtls_x509_crt s_ca;
 

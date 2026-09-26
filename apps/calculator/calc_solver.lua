@@ -1,5 +1,5 @@
 -- calc_solver.lua — Equation solving algorithms
--- Pure Lua 5.4, no PicOS dependencies. Testable on host.
+-- Pure Lua 5.4, no PicoDeck dependencies. Testable on host.
 
 local Solver = {}
 

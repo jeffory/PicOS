@@ -5,8 +5,8 @@
 // (simulator/main.c core1_thread); get_core_num() tells them apart.
 // Implemented in simulator/net/sim_net_shim.c.
 
-#ifndef PICOS_SIM_NET_MULTICORE_H
-#define PICOS_SIM_NET_MULTICORE_H
+#ifndef PICODECK_SIM_NET_MULTICORE_H
+#define PICODECK_SIM_NET_MULTICORE_H
 
 #include <stdint.h>
 
@@ -28,4 +28,4 @@ void multicore_doorbell_set_other_core(unsigned int doorbell_num);
 }
 #endif
 
-#endif  // PICOS_SIM_NET_MULTICORE_H
+#endif  // PICODECK_SIM_NET_MULTICORE_H

@@ -1,9 +1,9 @@
 """The hardware backend's protocol layer, against a fake serial port.
 
 hw_target.HwTarget drives a PicoCalc over USB serial through
-tools/picos_mcp.py's helpers (do_command_hardware, do_get_file_b64,
+tools/picodeck_mcp.py's helpers (do_command_hardware, do_get_file_b64,
 do_put_file_b64, do_screenshot_hardware, push_app). These tests replace
-picos_mcp.open_serial with a FakeSerial wired to FakeDevice, a small model of
+picodeck_mcp.open_serial with a FakeSerial wired to FakeDevice, a small model of
 the firmware's dev console that answers with the exact reply formats of
 src/dev_commands.c, src/dev_ops.c and src/os/launcher.c (the replies quoted
 in the remediation task reports: "[DEV] Status: app=Guinea Pig Run
@@ -33,7 +33,7 @@ import pytest
 import hw_target
 from hw_target import HwTarget, HwTargetError
 
-pm = hw_target.load_picos_mcp()
+pm = hw_target.load_picodeck_mcp()
 
 pytest_plugins = ["pytester"]
 
@@ -260,7 +260,7 @@ class FakeDevice:
 
 
 class FakeSerial:
-    """The subset of pyserial.Serial picos_mcp uses, over a FakeDevice."""
+    """The subset of pyserial.Serial picodeck_mcp uses, over a FakeDevice."""
 
     def __init__(self, dev: FakeDevice, timeout: float):
         if not dev.present:
@@ -615,7 +615,7 @@ def test_reboot_is_refused_while_an_app_runs(hw, dev):
 def test_flash_is_refused_while_an_app_runs(hw, dev, tmp_path):
     dev.install(FakeApp("spin", "Spin", "com.test.spin", hold=True))
     hw.launch_app("spin")
-    fw = tmp_path / "picocalc_os.bin"
+    fw = tmp_path / "picodeck.bin"
     fw.write_bytes(b"\0" * 4096)
     with pytest.raises(HwTargetError, match="running"):
         hw.flash(fw)
@@ -668,7 +668,7 @@ INNER_CONFTEST = textwrap.dedent(f"""
     import importlib.util, sys
     sys.path.insert(0, {str(E2E_DIR)!r})
     _spec = importlib.util.spec_from_file_location(
-        "picos_e2e_conftest", {str(E2E_DIR / "conftest.py")!r})
+        "picodeck_e2e_conftest", {str(E2E_DIR / "conftest.py")!r})
     _mod = importlib.util.module_from_spec(_spec)
     _spec.loader.exec_module(_mod)
     globals().update({{k: v for k, v in vars(_mod).items()
@@ -710,11 +710,11 @@ def test_sim_target_skips_hardware_and_runs_both(pytester, simulator_binary):
 
 
 def test_hw_target_selects_hardware_and_both(pytester, simulator_binary):
-    # Collection only: nothing connects. PICOS_HW_PREFLIGHT=0 skips the tty
+    # Collection only: nothing connects. PICODECK_HW_PREFLIGHT=0 skips the tty
     # check so a made-up path gets through to the collection rules.
     result = _inner(pytester, simulator_binary, INNER_TESTS,
                     "--target", "hw:/dev/fake-picocalc", "--collect-only", "-q",
-                    env={"PICOS_HW_PREFLIGHT": "0"})
+                    env={"PICODECK_HW_PREFLIGHT": "0"})
     out = result.stdout.str()
     assert "test_hw_only" in out and "test_on_both" in out, out
     assert "test_sim_only" not in out, out

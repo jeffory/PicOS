@@ -1,4 +1,4 @@
--- SSH Client for PicOS
+-- SSH Client for PicoDeck
 -- Full SSH-2 terminal client with VT100 emulation
 
 local pc = picocalc
@@ -34,7 +34,7 @@ local ssh_input = require("lib.ssh_input")
 
 -- ── Known hosts management ──────────────────────────────────────────────────
 
-local DATA_DIR = "/data/com.picos.ssh"
+local DATA_DIR = "/data/net.picodeck.ssh"
 local KNOWN_HOSTS_PATH = DATA_DIR .. "/known_hosts"
 local CONNECTIONS_PATH = DATA_DIR .. "/connections.json"
 

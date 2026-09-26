@@ -1,7 +1,7 @@
 -- store.lua — the local puzzle library on disk.
 --
 -- Layout under the app's writable sandbox:
---   /data/com.picos.nonogram/puzzles/<id>.json
+--   /data/net.picodeck.nonogram/puzzles/<id>.json
 --
 -- Puzzles are stored with the grid as a share code rather than as a 225-element
 -- JSON array: it is far smaller, and it means the file format, the typed share

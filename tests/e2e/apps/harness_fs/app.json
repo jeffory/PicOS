@@ -1,7 +1,7 @@
 {
-    "id": "com.picos.harness_fs",
+    "id": "net.picodeck.harness_fs",
     "name": "Harness FS",
     "description": "Harness fixture: probes SD-root containment",
     "version": "1.0",
-    "author": "PicOS E2E"
+    "author": "PicoDeck E2E"
 }

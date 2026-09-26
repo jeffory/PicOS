@@ -1,8 +1,8 @@
 {
-    "id": "com.picos.fs_test",
+    "id": "net.picodeck.fs_test",
     "name": "FS Test",
     "description": "Filesystem test fixture",
     "version": "1.0",
-    "author": "PicOS",
+    "author": "PicoDeck",
     "requirements": ["root-filesystem"]
 }

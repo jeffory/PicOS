@@ -22,7 +22,7 @@ for _, k in ipairs({
     keywords[k] = true
 end
 
--- PicOS API prefixes
+-- PicoDeck API prefixes
 local api_prefixes = {
     "picocalc", "pc", "disp", "fs", "input",
     "audio", "wifi", "config", "tcp", "ui"

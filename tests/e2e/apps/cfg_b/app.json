@@ -3,6 +3,6 @@
     "name": "Cfg B",
     "description": "E2E fixture: second app of the appconfig bleed pair",
     "version": "1.0",
-    "author": "PicOS E2E",
+    "author": "PicoDeck E2E",
     "requirements": []
 }

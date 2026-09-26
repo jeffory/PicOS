@@ -3,6 +3,6 @@
     "name": "GC Test",
     "description": "E2E fixture: object lifetimes under garbage collection",
     "version": "1.0",
-    "author": "PicOS E2E",
+    "author": "PicoDeck E2E",
     "requirements": ["audio"]
 }

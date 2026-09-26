@@ -3,6 +3,6 @@
     "name": "MP3 Test",
     "description": "E2E fixture: the MP3 decode loop ends a truncated file instead of spinning Core 1",
     "version": "1.0",
-    "author": "PicOS E2E",
+    "author": "PicoDeck E2E",
     "requirements": ["audio"]
 }

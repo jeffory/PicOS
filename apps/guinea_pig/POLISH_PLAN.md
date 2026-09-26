@@ -6,11 +6,11 @@
 
 **Architecture:** Lua-only game changes in `apps/guinea_pig/main.lua`; new raster assets generated via PixelLab MCP then post-processed by committed Python tools; audio synthesized by a committed Python script into a ≤64 KB SFX bank (play-range indexed) + a streamed BGM WAV. Two small firmware sound fixes land as separate commits and are mirrored into `simulator/sim_audio.c`.
 
-**Tech Stack:** PicOS Lua API (v5), PixelLab MCP (`create_map_object`, `create_sidescroller_tileset`, `animate_object`), Python 3 + Pillow + stdlib `wave`, PicOS simulator via `picos` MCP, arm-none-eabi firmware build.
+**Tech Stack:** PicoDeck Lua API (v5), PixelLab MCP (`create_map_object`, `create_sidescroller_tileset`, `animate_object`), Python 3 + Pillow + stdlib `wave`, PicoDeck simulator via `picodeck` MCP, arm-none-eabi firmware build.
 
 ## Global Constraints
 
-- Worktree: `/home/keith/Projects/PicOS/.claude/worktrees/guinea-pig-polish`, branch `worktree-guinea-pig-polish`. All paths below are relative to it.
+- Worktree: `/home/keith/Projects/PicoDeck/picodeck/.claude/worktrees/guinea-pig-polish`, branch `worktree-guinea-pig-polish`. All paths below are relative to it.
 - `docs/` is the wiki submodule — never commit there. Spec = `apps/guinea_pig/POLISH_DESIGN.md`.
 - Transparency key is magenta `disp.rgb(255,0,255)`; every sprite PNG must be flattened so transparent pixels become exactly `(255,0,255)` RGB (no alpha channel).
 - All WAV output: **11025 Hz, 16-bit, mono** (uniform rate is mandatory — the firmware playback timer interval comes from the last-played sample's native rate).
@@ -23,8 +23,8 @@
 
 ## Sim/MCP quick reference (from project memory, verified)
 
-- Start sim: `mcp__picos__start_simulator` with explicit `sd_card_path` (e.g. `<worktree>/simulator/assets/sd_card`), `headless: true`.
-- Stage app: `mcp__picos__push_app` with `local_dir: <worktree>/apps/guinea_pig` — ships the whole directory including `sfx/`.
+- Start sim: `mcp__picodeck__start_simulator` with explicit `sd_card_path` (e.g. `<worktree>/simulator/assets/sd_card`), `headless: true`.
+- Stage app: `mcp__picodeck__push_app` with `local_dir: <worktree>/apps/guinea_pig` — ships the whole directory including `sfx/`.
 - Keys: `keypress("enter")`, `keypress("right")`, `keypress("down 5x")`, menu key is `"menu"` (not "sym").
 - If the sim behaves like hardware (no SimulatorWiFi in `get_status`), the device fell through to hardware — always confirm `get_status` shows the simulator before injecting keys.
 - Fresh worktrees lack `build_sim` and submodule checkouts; Task 1 sets this up.
@@ -49,12 +49,12 @@
 Fresh worktrees don't populate submodules or downloaded `third_party` content (recurring gotcha). The simulator and firmware builds need them:
 
 ```bash
-cd /home/keith/Projects/PicOS/.claude/worktrees/guinea-pig-polish
+cd /home/keith/Projects/PicoDeck/picodeck/.claude/worktrees/guinea-pig-polish
 for d in $(git config -f .gitmodules --get-regexp path | awk '{print $2}'); do
   mkdir -p "$d"
-  rsync -a "/home/keith/Projects/PicOS/$d/" "$d/" 2>/dev/null || true
+  rsync -a "/home/keith/Projects/PicoDeck/picodeck/$d/" "$d/" 2>/dev/null || true
 done
-rsync -a /home/keith/Projects/PicOS/third_party/ third_party/ 2>/dev/null || true
+rsync -a /home/keith/Projects/PicoDeck/picodeck/third_party/ third_party/ 2>/dev/null || true
 ls third_party/ | head -5
 ```
 
@@ -63,18 +63,18 @@ Expected: `third_party` populated; if any submodule path is still empty after rs
 - [ ] **Step 2: Build the simulator once**
 
 ```bash
-cd /home/keith/Projects/PicOS/.claude/worktrees/guinea-pig-polish
+cd /home/keith/Projects/PicoDeck/picodeck/.claude/worktrees/guinea-pig-polish
 make simulator -j4 2>&1 | tail -5
-ls -la build_sim/picos_simulator
+ls -la build_sim/picodeck_simulator
 ```
 
-Expected: `build_sim/picos_simulator` exists. (If `make simulator` doesn't auto-create `build_sim`, use `cmake -B build_sim -S simulator && make -C build_sim -j4` per repo docs.)
+Expected: `build_sim/picodeck_simulator` exists. (If `make simulator` doesn't auto-create `build_sim`, use `cmake -B build_sim -S simulator && make -C build_sim -j4` per repo docs.)
 
 - [ ] **Step 3: Write `tools/postprocess.py`**
 
 ```python
 #!/usr/bin/env python3
-"""Post-process PixelLab PNGs for PicOS: flatten alpha to the magenta
+"""Post-process PixelLab PNGs for PicoDeck: flatten alpha to the magenta
 transparency key, verify tile opacity, slice grid sheets.
 
 Usage:
@@ -304,13 +304,13 @@ Call it from both branches: `draw_tiled_platform(sx, sy, plat.w, plat.h)` (keeps
 
 Stage and run:
 ```
-mcp__picos__push_app(local_dir=<worktree>/apps/guinea_pig)
-mcp__picos__start_simulator(sd_card_path=<worktree>/simulator/assets/sd_card, headless=true)
-mcp__picos__launch_app("Guinea Pig Run")
-mcp__picos__keypress("enter")            # menu -> play
-mcp__picos__screenshot(save_path=/tmp/gp_t0.png)
-mcp__picos__keypress("right", count=30)  # hold right ~3s (100ms per press)
-mcp__picos__screenshot(save_path=/tmp/gp_t1.png)
+mcp__picodeck__push_app(local_dir=<worktree>/apps/guinea_pig)
+mcp__picodeck__start_simulator(sd_card_path=<worktree>/simulator/assets/sd_card, headless=true)
+mcp__picodeck__launch_app("Guinea Pig Run")
+mcp__picodeck__keypress("enter")            # menu -> play
+mcp__picodeck__screenshot(save_path=/tmp/gp_t0.png)
+mcp__picodeck__keypress("right", count=30)  # hold right ~3s (100ms per press)
+mcp__picodeck__screenshot(save_path=/tmp/gp_t1.png)
 ```
 Then pixel-scan the ground band (y=280..295 in world → screen rows vary; scan full frame) for vertical sky-colored stripes cutting through the ground:
 
@@ -415,7 +415,7 @@ Apply the same `sound_player_destroy` body and `sound_init` hardening to the sim
 - [ ] **Step 5: Build firmware + simulator**
 
 ```bash
-cd /home/keith/Projects/PicOS/.claude/worktrees/guinea-pig-polish
+cd /home/keith/Projects/PicoDeck/picodeck/.claude/worktrees/guinea-pig-polish
 make -C build -j4 2>&1 | tail -3        # firmware (build/ configured by user env)
 make simulator -j4 2>&1 | tail -3
 ```
@@ -1261,7 +1261,7 @@ Expected: `check_assets: all OK`.
 
 - [ ] **Step 5: Hardware pass (if device attached)**
 
-Confirm with `mcp__picos__get_status` (hardware, not sim). Flash firmware with the Task 3 fixes (`make flash-ota` per project memory, from launcher — exit any running app first), `push_app` the polished game, launch, and listen: jump/collect/damage/win sounds distinct chiptune (not beeps), BGM audible in menu. Screenshot title + gameplay on device. If no device is attached, mark this step deferred-for-user and note it in the final summary.
+Confirm with `mcp__picodeck__get_status` (hardware, not sim). Flash firmware with the Task 3 fixes (`make flash-ota` per project memory, from launcher — exit any running app first), `push_app` the polished game, launch, and listen: jump/collect/damage/win sounds distinct chiptune (not beeps), BGM audible in menu. Screenshot title + gameplay on device. If no device is attached, mark this step deferred-for-user and note it in the final summary.
 
 - [ ] **Step 6: Commit**
 

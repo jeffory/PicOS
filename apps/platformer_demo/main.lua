@@ -1,4 +1,4 @@
--- Platformer Demo for PicOS Game Framework
+-- Platformer Demo for PicoDeck Game Framework
 -- Demonstrates: camera, scenes, save/load, particles, object pooling
 
 local pc = picocalc

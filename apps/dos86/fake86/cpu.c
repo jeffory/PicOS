@@ -18,7 +18,7 @@
 */
 
 /* cpu.c: functions to emulate the 8086/V20 CPU in software. the heart of Fake86.
-   Adapted for PicOS/dos86: external memory pointers, no SDL/audio/video/timing. */
+   Adapted for PicoDeck/dos86: external memory pointers, no SDL/audio/video/timing. */
 
 #include "config.h"
 #include <stdint.h>

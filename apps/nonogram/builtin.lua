@@ -200,7 +200,7 @@ local function build(entry, curated)
     return {
         id       = "builtin_" .. entry.name:lower():gsub("%W", "_"),
         name     = entry.name,
-        author   = "PicOS",
+        author   = "PicoDeck",
         w        = w,
         h        = h,
         solution = solution,

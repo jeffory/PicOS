@@ -4854,7 +4854,7 @@ void mg_multicast_restore(struct mg_connection *c, uint8_t *from) {
 #ifndef MG_TCPIP_ARP_MS
 #define MG_TCPIP_ARP_MS 100    // Timeout for ARP response
 #endif
-// PicOS patch: resend an unanswered ARP request / IPv6 neighbour solicitation
+// PicoDeck patch: resend an unanswered ARP request / IPv6 neighbour solicitation
 // this many times (MG_TCPIP_ARP_MS apart) before failing the connection with
 // "ARP timeout".  Upstream (through 7.23) sends ONE request and gives up after
 // 100 ms; over Wi-Fi a power-saving LAN peer often answers later than that, so
@@ -4887,7 +4887,7 @@ struct connstate {
   struct mg_iobuf raw;   // For TLS only. Incoming raw data
   bool fin_rcvd;         // We have received FIN from the peer
   bool twclosure;        // 3-way closure done
-  uint8_t arp_tries;     // PicOS patch: ARP/NS requests resent so far
+  uint8_t arp_tries;     // PicoDeck patch: ARP/NS requests resent so far
 };
 
 #if defined(__DCC__)
@@ -6770,7 +6770,7 @@ static void mg_tcpip_poll(struct mg_tcpip_if *ifp, uint64_t now) {
       continue;
     if (ifp->now > s->timer) {
       if (s->ttype == MIP_TTYPE_ARP && s->arp_tries < MG_TCPIP_ARP_RETRIES) {
-        // PicOS patch: ask again instead of failing (see MG_TCPIP_ARP_RETRIES)
+        // PicoDeck patch: ask again instead of failing (see MG_TCPIP_ARP_RETRIES)
         s->arp_tries++;
 #if MG_ENABLE_IPV6
         if (c->rem.is_ip6)

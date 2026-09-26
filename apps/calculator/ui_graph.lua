@@ -1,4 +1,4 @@
--- ui_graph.lua — Graph tab UI for PicOS calculator
+-- ui_graph.lua — Graph tab UI for PicoDeck calculator
 -- Handles input mode (expression entry), view mode (graph rendering),
 -- trace mode (cursor on curve), and table mode (x/y columns).
 
@@ -6,7 +6,7 @@ local Graph = require("calc_graph")
 
 local UIGraph = {}
 
--- PicOS Lua numbers are single-precision floats (~7 significant digits).
+-- PicoDeck Lua numbers are single-precision floats (~7 significant digits).
 local SIG_FMT = (2^24 + 1 == 2^24) and "%.7g" or "%.8g"
 
 -- State

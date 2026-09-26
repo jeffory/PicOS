@@ -17,7 +17,7 @@
 #include "../dev_commands.h"
 #include "../os/os.h"
 #include "terminal.h"
-#ifndef PICOS_SIMULATOR
+#ifndef PICODECK_SIMULATOR
 #include "crypto.h"
 #endif
 
@@ -137,7 +137,7 @@ _Atomic(bool)      g_code_watch_active = false;
 // Trampoline for app_stack_run(): unpacks the native entry point's four
 // arguments (app_stack_run passes a single pointer).
 typedef struct {
-  picos_app_entry_t fn;
+  picodeck_app_entry_t fn;
   const PicoCalcAPI *api;
   const char *app_dir, *app_id, *app_name;
 } native_launch_t;
@@ -161,7 +161,7 @@ void native_res_release(int kind, void *h) {
   case NATIVE_RES_VIDEO:      video_player_destroy((video_player_t *)h); break;
   case NATIVE_RES_MOD:        mod_player_destroy((mod_player_t *)h); break;
   case NATIVE_RES_TERMINAL:   terminal_free((terminal_t *)h); break;
-#ifndef PICOS_SIMULATOR
+#ifndef PICODECK_SIMULATOR
   // The simulator has no crypto, and its qmiAlloc is the emulator's own
   // heap (gone with the Unicorn instance): neither is ever tracked there.
   case NATIVE_RES_QMI:        umm_free(h); break;
@@ -228,7 +228,7 @@ static void native_teardown(const app_entry_t *app) {
 extern _Atomic bool g_core1_pause;
 extern _Atomic bool g_core1_paused;
 
-#ifdef PICOS_SIMULATOR
+#ifdef PICODECK_SIMULATOR
 // Simulator: use Unicorn Engine to emulate the ARM ELF binary
 #include "unicorn_runner.h"
 
@@ -521,11 +521,11 @@ static bool native_run_app(const app_entry_t *app) {
   }
 
   // ── 4a'. Flush dirty cache lines from umm_malloc ─────────────────────────
-  #ifndef PICOS_SIMULATOR
+  #ifndef PICODECK_SIMULATOR
   __asm volatile ("dsb sy");
   #endif
   xip_cache_clean_all();
-  #ifndef PICOS_SIMULATOR
+  #ifndef PICODECK_SIMULATOR
   __asm volatile ("isb sy");
   #endif
 
@@ -659,11 +659,11 @@ static bool native_run_app(const app_entry_t *app) {
       // range must be cache-line aligned.
       start &= ~(uintptr_t)(XIP_CACHE_LINE_SIZE - 1);
       end = (end + XIP_CACHE_LINE_SIZE - 1) & ~(uintptr_t)(XIP_CACHE_LINE_SIZE - 1);
-      #ifndef PICOS_SIMULATOR
+      #ifndef PICODECK_SIMULATOR
       __asm volatile ("dsb sy");
       #endif
       xip_cache_invalidate_range(start, end - start);
-      #ifndef PICOS_SIMULATOR
+      #ifndef PICODECK_SIMULATOR
       __asm volatile ("isb sy");
       #endif
     }
@@ -759,7 +759,7 @@ static bool native_run_app(const app_entry_t *app) {
   display_clear(C_BG);
   display_flush();
 
-  picos_app_entry_t entry_fn = (picos_app_entry_t)entry_addr;
+  picodeck_app_entry_t entry_fn = (picodeck_app_entry_t)entry_addr;
 
   // Prefer an SRAM stack: PSRAM stacks funnel every call frame, local array
   // and register spill through the XIP cache, which measurably slows
@@ -878,7 +878,7 @@ out:
 
   return ok;
 }
-#endif  // !PICOS_SIMULATOR
+#endif  // !PICODECK_SIMULATOR
 
 // Same identity lifecycle as Lua apps: installed before the ELF is loaded,
 // cleared after the app has returned and been torn down.

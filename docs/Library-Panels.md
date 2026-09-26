@@ -349,7 +349,7 @@ Panels.start(comic, {
 
 ## Differences from Playdate Panels
 
-| Playdate | PicOS |
+| Playdate | PicoDeck |
 |----------|-------|
 | Crank scrolling | **D-pad** scroll/advance along the sequence axis |
 | 1-bit display | **RGB565 colour** (320×320) |

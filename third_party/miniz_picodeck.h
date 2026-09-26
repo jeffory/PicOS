@@ -1,4 +1,4 @@
-// PicOS-specific miniz configuration.
+// PicoDeck-specific miniz configuration.
 // Redirect heap allocations to umm_malloc (8MB PSRAM) instead of
 // standard malloc (~28KB SRAM heap).
 #pragma once

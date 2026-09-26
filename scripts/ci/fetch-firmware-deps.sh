@@ -6,7 +6,7 @@ sudo apt-get update -q
 sudo apt-get install -y cmake curl unzip gcc-arm-none-eabi libnewlib-arm-none-eabi \
   libstdc++-arm-none-eabi-newlib
 
-# Lua 5.4.7, patched to honour the CMake Lua config (see cmake/picos_lua.cmake).
+# Lua 5.4.7, patched to honour the CMake Lua config (see cmake/picodeck_lua.cmake).
 make download-lua
 
 # FatFS R0.15 upstream sources only; ffconf.h and port/diskio_spi.c are tracked.

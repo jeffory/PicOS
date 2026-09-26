@@ -1,4 +1,4 @@
--- PicOS System Updater
+-- PicoDeck System Updater
 -- Downloads and applies firmware updates from GitHub Releases
 
 local display = picocalc.display
@@ -10,11 +10,11 @@ local ui = picocalc.ui
 
 -- GitHub Releases API configuration
 local GH_API_HOST  = "api.github.com"
-local GH_REPO      = "jeffory/picOS"
+local GH_REPO      = "PicoDeck/picodeck"
 local GH_API_PATH  = "/repos/" .. GH_REPO .. "/releases/latest"
-local BIN_FILENAME  = "picocalc_os.bin"
-local HASH_FILENAME = "picocalc_os.sha256"
-local SIG_FILENAME  = "picocalc_os.sig"
+local BIN_FILENAME  = "picodeck.bin"
+local HASH_FILENAME = "picodeck.sha256"
+local SIG_FILENAME  = "picodeck.sig"
 local BIN_PATH      = "/system/update.bin"
 local HASH_PATH     = "/system/update.sha256"
 local SIG_PATH      = "/system/update.sig"
@@ -247,7 +247,7 @@ local function check_for_update()
 
         -- Extract binary size from assets array
         local size_str = body:match(
-            '"name"%s*:%s*"picocalc_os%.bin".-"size"%s*:%s*(%d+)')
+            '"name"%s*:%s*"picodeck%.bin".-"size"%s*:%s*(%d+)')
         remote_size = tonumber(size_str or "0")
 
         -- Construct download URLs from tag (deterministic pattern)
@@ -275,7 +275,7 @@ local function check_for_update()
     end)
 
     local headers = {
-        ["User-Agent"] = "PicOS-Updater/1.0",
+        ["User-Agent"] = "PicoDeck-Updater/1.0",
         ["Accept"] = "application/vnd.github+json",
     }
 
@@ -363,7 +363,7 @@ local function download_small_file(url, dest, extract, on_done, redirect_count)
         end
     end)
 
-    if not conn:get(path, {["User-Agent"] = "PicOS-Updater/1.0"}) then
+    if not conn:get(path, {["User-Agent"] = "PicoDeck-Updater/1.0"}) then
         on_done()
     end
 end
@@ -690,7 +690,7 @@ local function download_fallback(host, port, ssl, path)
         current_screen = SCR_MAIN
     end)
 
-    if not conn:get(path, {["User-Agent"] = "PicOS-Updater/1.0"}) then
+    if not conn:get(path, {["User-Agent"] = "PicoDeck-Updater/1.0"}) then
         error_msg = "Failed to start download."
         ui.toast(error_msg, ui.TOAST_ERROR)
         current_screen = SCR_MAIN

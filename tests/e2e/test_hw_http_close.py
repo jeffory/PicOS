@@ -6,8 +6,8 @@ http.c/tcp.c inside the simulator (make simulator-net). This module runs the
 close-related ones on a PicoCalc, where Core 0 and Core 1 are real cores and
 the CYW43 link is real:
 
-    PICOS_HW_HOST_IP=<this host's LAN address> pytest tests/e2e/test_hw_http_close.py \\
-        --target hw:/dev/serial/by-id/usb-Raspberry_Pi_PicOS_Device_<serial>-if00
+    PICODECK_HW_HOST_IP=<this host's LAN address> pytest tests/e2e/test_hw_http_close.py \\
+        --target hw:/dev/serial/by-id/usb-Raspberry_Pi_PicoDeck_Device_<serial>-if00
 
 The device must have WiFi configured (wifi_ssid / wifi_pass in
 /system/config.json) on a network that reaches this host; the servers
@@ -52,7 +52,7 @@ CLOSE_CASES = [
 
 
 def _host_ip() -> str:
-    ip = os.environ.get("PICOS_HW_HOST_IP")
+    ip = os.environ.get("PICODECK_HW_HOST_IP")
     if ip:
         return ip
     s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
@@ -60,7 +60,7 @@ def _host_ip() -> str:
         s.connect(("192.0.2.1", 9))  # UDP connect sends nothing
         return s.getsockname()[0]
     except OSError:
-        pytest.skip("no LAN address for this host: set PICOS_HW_HOST_IP")
+        pytest.skip("no LAN address for this host: set PICODECK_HW_HOST_IP")
     finally:
         s.close()
 

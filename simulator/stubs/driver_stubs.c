@@ -1,4 +1,4 @@
-// driver_stubs.c - Stubs for PicOS driver functions
+// driver_stubs.c - Stubs for PicoDeck driver functions
 #define _XOPEN_SOURCE 500  // for nftw()
 #include <errno.h>
 #include <ftw.h>

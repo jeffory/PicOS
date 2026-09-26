@@ -105,7 +105,7 @@ def stage_native_app(sd: Path, name: str, elf: bytes) -> Path:
     (app_dir / "app.json").write_text(json.dumps({
         "id": f"com.test.{name}", "name": name,
         "description": "E2E native test app", "version": "1.0",
-        "author": "PicOS E2E"}, indent=2))
+        "author": "PicoDeck E2E"}, indent=2))
     (app_dir / "main.elf").write_bytes(elf)
     return app_dir
 
@@ -155,7 +155,7 @@ def test_baseline_image_loads_and_returns(simulator, test_sd_card):
     assert outcome.get("result") == "returned", (outcome, out["stderr"][-2000:])
     assert "ELF rejected" not in out["stderr"]
     assert "[UNICORN] Starting emulation" in out["stdout"], out["stdout"][-2000:]
-    assert "[UNICORN] Normal exit: app returned from picos_main()" in out["stdout"]
+    assert "[UNICORN] Normal exit: app returned from picodeck_main()" in out["stdout"]
 
 
 @pytest.mark.parametrize("case", list(CASES))

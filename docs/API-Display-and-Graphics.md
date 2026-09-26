@@ -752,7 +752,7 @@ end
 Native ELF apps access effects through the `picocalc_display_t` vtable:
 
 ```c
-void picos_main(PicoCalcAPI *api) {
+void picodeck_main(PicoCalcAPI *api) {
     const picocalc_display_t *d = api->display;
 
     d->clear(RGB565(0, 0, 0));

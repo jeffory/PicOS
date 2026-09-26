@@ -1,4 +1,4 @@
--- File Manager for PicOS
+-- File Manager for PicoDeck
 -- Dual-panel Norton Commander-style file manager
 -- Requires: root-filesystem
 

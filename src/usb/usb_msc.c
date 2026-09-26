@@ -244,7 +244,7 @@ void tud_msc_inquiry_cb(uint8_t lun, uint8_t p_vendor_id[8],
                         uint8_t p_product_id[16], uint8_t p_product_rev[4]) {
   (void)lun;
   static const char vendor[8] = "PICO";
-  static const char product[16] = "PicOS_MSC";
+  static const char product[16] = "PicoDeck_MSC";
   static const char revision[4] = "1.0 ";
 
   memcpy(p_vendor_id, vendor, sizeof(vendor));

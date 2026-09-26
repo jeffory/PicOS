@@ -1,4 +1,4 @@
-// Hello C — minimal PicOS native app demo
+// Hello C — minimal PicoDeck native app demo
 //
 // Build:   make
 // Deploy:  copy main.elf + app.json to /apps/hello_c/ on the SD card
@@ -10,7 +10,7 @@
 #define RGB565(r, g, b) \
     ((uint16_t)(((r) & 0x1F) << 11 | ((g) & 0x3F) << 5 | ((b) & 0x1F)))
 
-void picos_main(const PicoCalcAPI *api,
+void picodeck_main(const PicoCalcAPI *api,
                 const char *app_dir,
                 const char *app_id,
                 const char *app_name)

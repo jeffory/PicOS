@@ -11,8 +11,8 @@
 #include <stdlib.h>
 #include <string.h>
 
-#define FIX PICOS_ROOT "/tests/unit/fixtures/ota/"
-#define KEYS PICOS_ROOT "/tests/keys/"
+#define FIX PICODECK_ROOT "/tests/unit/fixtures/ota/"
+#define KEYS PICODECK_ROOT "/tests/keys/"
 
 #define BIN  "/system/update.bin"
 #define HASH "/system/update.sha256"
@@ -113,7 +113,7 @@ static void test_wrong_key(void) {
   CHECK(err && strstr(err, "signature"));
   // The same signature does verify under the key that made it.
   size_t pl;
-  char *other_pub = slurp(KEYS "picos-update-TEST-other-public.pem", &pl);
+  char *other_pub = slurp(KEYS "picodeck-update-TEST-other-public.pem", &pl);
   uint8_t d[32];
   CHECK(ota_hash_file(BIN, d));
   CHECK(ota_sig_verify_pem(other_pub, d, (const uint8_t *)s_other_sig,
@@ -157,7 +157,7 @@ static void test_strict_hex(void) {
   CHECK(!ota_parse_sha256_hex(good, 63, out));
   snprintf(buf, sizeof(buf), "%s0", good);
   CHECK(!ota_parse_sha256_hex(buf, 65, out));
-  snprintf(buf, sizeof(buf), "%s  picocalc_os.bin\n", good);
+  snprintf(buf, sizeof(buf), "%s  picodeck.bin\n", good);
   CHECK(!ota_parse_sha256_hex(buf, strlen(buf), out));
   snprintf(buf, sizeof(buf), " %.63s", good);
   CHECK(!ota_parse_sha256_hex(buf, 64, out));

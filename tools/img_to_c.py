@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-img_to_c.py — Convert an image to a PicOS splash screen C header.
+img_to_c.py — Convert an image to a PicoDeck splash screen C header.
 
 Usage:
     python tools/img_to_c.py <input_image> [output_header]

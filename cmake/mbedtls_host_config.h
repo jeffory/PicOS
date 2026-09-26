@@ -4,8 +4,8 @@
 // No MBEDTLS_HAVE_TIME_DATE: the chain test checks trust paths and names,
 // not dates (so its captured fixtures never expire).  The firmware uses
 // src/mbedtls_config.h instead.
-#ifndef PICOS_MBEDTLS_HOST_CONFIG_H
-#define PICOS_MBEDTLS_HOST_CONFIG_H
+#ifndef PICODECK_MBEDTLS_HOST_CONFIG_H
+#define PICODECK_MBEDTLS_HOST_CONFIG_H
 
 #define MBEDTLS_BIGNUM_C
 #define MBEDTLS_ECP_C

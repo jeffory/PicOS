@@ -1,6 +1,6 @@
 -- records.lua — per-puzzle completion records.
 --
--- Persists to /data/com.picos.nonogram/records.json:
+-- Persists to /data/net.picodeck.nonogram/records.json:
 --
 --   { "v":1, "records": { "<puzzleId>": {"solved":true,"secs":42,"moves":9,"plays":3} } }
 --

@@ -16,14 +16,14 @@ remediation):
    buffer too (source "native", text prefixed "[APP] "). The stdout/stderr
    reading below is still needed, though: HEAPSTAT, GFXSTAT, CHARSFMT and the
    RenderPresent census are fprintf(stderr, ...) calls inside the app
-   (apps/cdogs/picos_heap.h, stubs.c), not sys->log calls, so only the
+   (apps/cdogs/picodeck_heap.h, stubs.c), not sys->log calls, so only the
    process output carries them. That output is read through the shared
-   PicosSimulator harness's get_output() (backed by its _start_pipe_drains()
+   PicodeckSimulator harness's get_output() (backed by its _start_pipe_drains()
    background threads, started automatically in sim.start()).
 
 The one hazard get_output() doesn't remove on its own: its stdout/stderr
 tails are each bounded at 2000 lines (collections.deque(maxlen=2000) in
-picos_simulator.py), and C-Dogs' startup burst of "[TRAMP] fs_*" stderr
+picodeck_simulator.py), and C-Dogs' startup burst of "[TRAMP] fs_*" stderr
 tracing (one line per file operation across ~2700 SD directory entries)
 comfortably exceeds that in well under a second — easily enough volume to
 evict an early HEAPSTAT/GFXSTAT line (in particular the very first,
@@ -34,7 +34,7 @@ drive and accumulates every new matching line into a running list
 a report is only lost if it's evicted before the very first poll after
 it was written, never merely before the last one.
 
-Finally: picos_asset_load_tick()'s 1000ms report cadence (apps/cdogs/stubs.c)
+Finally: picodeck_asset_load_tick()'s 1000ms report cadence (apps/cdogs/stubs.c)
 is measured against sys->getTimeMs(), i.e. the simulator's uptime since
 process start (SDL_GetTicks()) — not since C-Dogs launches. C-Dogs' own
 startup scan of data/graphics plus the campaign/dogfight lists finishes
@@ -96,9 +96,9 @@ import pytest
 from helpers import build_sd_card, new_simulator, stop_and_check
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
-# C-Dogs lives in its own repo (github.com/jeffory/picos-cdogs) since 2026-09-16.
-# Point PICOS_CDOGS_DIR at a checkout that has been built (`make`) to run this module.
-CDOGS_SRC = Path(os.environ.get("PICOS_CDOGS_DIR", Path.home() / "Projects" / "picos-cdogs"))
+# C-Dogs lives in its own repo (github.com/PicoDeck/cdogs) since 2026-09-16.
+# Point PICODECK_CDOGS_DIR at a checkout that has been built (`make`) to run this module.
+CDOGS_SRC = Path(os.environ.get("PICODECK_CDOGS_DIR", Path.home() / "Projects" / "picodeck-cdogs"))
 
 HEAPSTAT_RE = re.compile(
     r"HEAPSTAT (\S+) watermark=(\d+) true=(\d+) arena=(\d+) used=(\d+) peak=(\d+)"
@@ -133,16 +133,16 @@ def parse_charsfmt(log_text):
     """Return list of dicts for every CHARSFMT line in the log.
 
     Logged exactly once per process, via fprintf(stderr, ...) in stubs.c's
-    picos_charsfmt_report (called from cdogs_picos.c's picos_main —
-    apps/cdogs's native PICOS entry point, NOT pic_manager.c's
-    PicManagerLoad — immediately after picos_gfx_report("picmanagerload") —
+    picodeck_charsfmt_report (called from cdogs_picodeck.c's picodeck_main —
+    apps/cdogs's native PICODECK entry point, NOT pic_manager.c's
+    PicManagerLoad — immediately after picodeck_gfx_report("picmanagerload") —
     same call site, same "picmanagerload" tag — right after BOTH the
     graphics/ and graphics_hd/ trees have been fully, recursively scanned).
-    picos_main calls PicManagerLoadDir directly for both trees and never
+    picodeck_main calls PicManagerLoadDir directly for both trees and never
     calls PicManagerLoad itself; PicManagerLoad has its own matching
-    #ifdef PICOS report call with the same tag; but it never runs on this
-    target since nothing calls PicManagerLoad here (see cdogs_picos.c's own
-    comment at that call site) — desktop never defines PICOS either, so that
+    #ifdef PICODECK report call with the same tag; but it never runs on this
+    target since nothing calls PicManagerLoad here (see cdogs_picodeck.c's own
+    comment at that call site) — desktop never defines PICODECK either, so that
     copy is dead on both targets. Same per-run logging point as the
     boot-time HEAPSTAT/GFXSTAT report, so it
     is exposed to the exact same get_output() ring-buffer eviction hazard
@@ -193,7 +193,7 @@ def parse_gfxstats(log_text):
     return out
 
 
-# Pre-existing debug instrumentation in picos_sdl_impl.c's SDL_RenderPresent
+# Pre-existing debug instrumentation in picodeck_sdl_impl.c's SDL_RenderPresent
 # (not added for this test): it fprintf(stderr, ...)s a per-frame pixel
 # census — how many of the just-presented framebuffer's pixels are non-zero
 # — for the first 8 SDL_RenderPresent calls of the process, then goes
@@ -201,7 +201,7 @@ def parse_gfxstats(log_text):
 # of polling the display_stats RPC because it's synchronous with the exact
 # frame it describes: RPC-polling display_stats independently was tried
 # first and proved unreliable for this purpose — it can observe the
-# PicOS launcher's own leftover screen content from before C-Dogs ever
+# PicoDeck launcher's own leftover screen content from before C-Dogs ever
 # presented a frame (nothing has overwritten the panel yet at that point),
 # which reads as "non-blank" regardless of whether C-Dogs' own render path
 # is healthy. This log line has no such gap: it's computed from the exact
@@ -248,7 +248,7 @@ LOADED_PEAK_FLOOR_BYTES = 1_500_000
 # Fixed in number and size, so this figure is deterministic.
 ALL_16BIT_TEX_BYTES = 5 * 320 * 240 * 2  # 768_000
 
-# Logged once via api->sys->log() in apps/cdogs/cdogs_picos.c, right
+# Logged once via api->sys->log() in apps/cdogs/cdogs_picodeck.c, right
 # before the menu's LoopRunnerRun() starts consuming input — the first
 # point C-Dogs is actually ready to receive a keypress. _drive_quickplay
 # waits for this literal line before sending any Enters (see its
@@ -273,9 +273,9 @@ def cdogs_simulator(simulator_binary, tmp_path_factory, request):
     `simulator` fixture and doesn't rely on get_log_buffer()/wait_for_log().
     """
     if not (CDOGS_SRC / "main.elf").exists():
-        pytest.skip(f"{CDOGS_SRC}/main.elf not built — clone jeffory/picos-cdogs, run `make`, or set PICOS_CDOGS_DIR")
+        pytest.skip(f"{CDOGS_SRC}/main.elf not built — clone PicoDeck/cdogs, run `make`, or set PICODECK_CDOGS_DIR")
     if not (CDOGS_SRC / "data" / "graphics").exists():
-        pytest.skip(f"{CDOGS_SRC}/data not prepared — run ./prepare_data.sh in the picos-cdogs checkout")
+        pytest.skip(f"{CDOGS_SRC}/data not prepared — run ./prepare_data.sh in the picodeck-cdogs checkout")
 
     base = tmp_path_factory.mktemp("cdogs")
     sd_path = build_sd_card(
@@ -312,7 +312,7 @@ def cdogs_simulator(simulator_binary, tmp_path_factory, request):
 def _combined_output(simulator):
     """Return the simulator's captured stdout+stderr as one string.
 
-    HEAPSTAT/GFXSTAT are written to stderr (see apps/cdogs/picos_heap.h),
+    HEAPSTAT/GFXSTAT are written to stderr (see apps/cdogs/picodeck_heap.h),
     but the simulator's own [TRAMP]/[UNICORN] trampoline tracing and the
     app's own logging don't reliably land on the same stream — combine
     both rather than assume which one a given marker is on.
@@ -502,8 +502,8 @@ def _drive_quickplay(simulator, streams, settle_s=45, done=None, soft_streams=No
     (issue #14 originally shared just the drive logic between those two
     call sites; prereq-6 went further and merged the call sites
     themselves). HEAPSTAT and GFXSTAT are always emitted as a pair from
-    the same picos_asset_load_tick() report (apps/cdogs/stubs.c calls
-    picos_heap_report() immediately followed by picos_gfx_report(), same
+    the same picodeck_asset_load_tick() report (apps/cdogs/stubs.c calls
+    picodeck_heap_report() immediately followed by picodeck_gfx_report(), same
     tag, same tick) — one regex matches "HEAPSTAT ...", the other
     "GFXSTAT ...", against identical polls of the same text — so driving
     them separately was always redoing the same boot/stage/navigate work
@@ -605,7 +605,7 @@ def _drive_quickplay(simulator, streams, settle_s=45, done=None, soft_streams=No
     # reliable signal that the instrumentation is wired up and C-Dogs has
     # started booting. NOT a signal that the main menu is ready for input
     # — empirically this fires during early graphics/font init
-    # (picos_asset_load_tick's very first call always clears its tick
+    # (picodeck_asset_load_tick's very first call always clears its tick
     # gate), well before the campaign manifest scan that follows it
     # finishes.
     deadline = time.time() + 60
@@ -620,7 +620,7 @@ def _drive_quickplay(simulator, streams, settle_s=45, done=None, soft_streams=No
         f"no {'/'.join(missing)} lines found in log:\n{text[-2000:]}"
     )
 
-    # The real "ready for input" signal: cdogs_picos.c logs this literal
+    # The real "ready for input" signal: cdogs_picodeck.c logs this literal
     # line via api->sys->log() (routed to real stdout the same way
     # HEAPSTAT/GFXSTAT are — see module docstring) immediately before
     # entering the menu's LoopRunnerRun(), i.e. the first point input is
@@ -768,7 +768,7 @@ def _drive_quickplay(simulator, streams, settle_s=45, done=None, soft_streams=No
     # substantive assertions are the only gate between "quick-play loaded"
     # and a pass, and on their own a failure there just says the expected
     # data never showed up — which points straight at the instrumentation
-    # (stubs.c / pic.c / picos_heap.h). But the far more likely real cause
+    # (stubs.c / pic.c / picodeck_heap.h). But the far more likely real cause
     # is that the three `enter` presses above no longer land on Start >
     # Campaign > first campaign (e.g. the main menu or a submenu
     # gained/lost/reordered an item and the default selection shifted):
@@ -901,7 +901,7 @@ def cdogs_quickplay_stats(cdogs_simulator):
 #   Gun Game (25):     enter -> loads the campaign -> "Gun Game by Wuzzy"
 #                      briefing text
 #   briefing:          'x' (player-1 button1, per the SD's own
-#                      com.picos.cdogsoptions.cnf — plain `enter` does not
+#                      net.picodeck.cdogsoptions.cnf — plain `enter` does not
 #                      advance this screen; this is the exact fix Task 2
 #                      shipped in apps/cdogs) -> "Select number of players"
 #                      (default "1")
@@ -1174,8 +1174,8 @@ def _peak_gfx_entry(gfx_stats):
     parse_gfxstats dicts.
 
     peak= is a running high-water mark of (data+tex) sampled every time
-    either byte counter grows (see picos_gfx_bytes_peak_sample in
-    picos_heap.h) — not just at report time — so unlike a plain instant
+    either byte counter grows (see picodeck_gfx_bytes_peak_sample in
+    picodeck_heap.h) — not just at report time — so unlike a plain instant
     sample it cannot land between two ticks and miss the load entirely.
 
     Because peak= is monotonically non-decreasing, max(stats, key=...)
@@ -1287,7 +1287,7 @@ def test_sd_payload_excludes_non_runtime_sources():
     """
     data_dir = CDOGS_SRC / "data"
     if not data_dir.exists():
-        pytest.skip(f"{CDOGS_SRC}/data not prepared — run ./prepare_data.sh in the picos-cdogs checkout")
+        pytest.skip(f"{CDOGS_SRC}/data not prepared — run ./prepare_data.sh in the picodeck-cdogs checkout")
 
     offenders = []
     for pattern in EXCLUDED_PATTERNS:
@@ -1305,8 +1305,8 @@ def test_textures_borrow_rather_than_duplicate(cdogs_quickplay_stats):
     With no GPU a texture is plain heap, so duplicating every image
     doubled resident graphics memory for no benefit. tex_bytes accounting
     was moved from pic.c (caller) into the SDL texture shim itself
-    (picos_sdl_impl.c's SDL_CreateTexture/SDL_DestroyTexture) so it counts
-    bytes a texture actually OWNS — PicosTextureBorrow (used for every
+    (picodeck_sdl_impl.c's SDL_CreateTexture/SDL_DestroyTexture) so it counts
+    bytes a texture actually OWNS — PicodeckTextureBorrow (used for every
     per-pic texture on this port) adds nothing. That means tex is NOT
     expected to be 0: a handful of textures legitimately own their pixels
     — grafx.c's GraphicsInitialize creates 5 whole-screen ARGB8888 buffers
@@ -1435,11 +1435,11 @@ def test_render_pipeline_saving(cdogs_quickplay_stats):
     defect, so the figure has to be pinned from both sides to be
     trustworthy.
 
-    Not covered here, because g_picos_pic_tex_bytes only counts textures
-    created through SDL_CreateTexture: PicosRenderer.framebuf (307_200 ->
+    Not covered here, because g_picodeck_pic_tex_bytes only counts textures
+    created through SDL_CreateTexture: PicodeckRenderer.framebuf (307_200 ->
     153_600) and the deleted s_rgb565_buf staging buffer (153_600). Those
     307_200 further bytes are verified statically in the same-named task
-    step, by reading the two calloc sites in picos_sdl_impl.c.
+    step, by reading the two calloc sites in picodeck_sdl_impl.c.
     """
     peak = _peak_gfx_entry(cdogs_quickplay_stats["GFXSTAT"])
 
@@ -1473,10 +1473,10 @@ def test_boot_loading_screen_is_not_blank(cdogs_quickplay_stats):
     texture's "nothing drawn yet" state. That was correct for ARGB8888
     (0x00000000 is alpha=0, transparent) but wrong for RGB565, which has no
     alpha channel — 0x0000 is opaque black, not transparent, and isn't
-    PICOS_RGB565_CKEY either. g->screen (grafx.c's window texture, created
+    PICODECK_RGB565_CKEY either. g->screen (grafx.c's window texture, created
     with SDL_BLENDMODE_BLEND) was never written before the first
     LoadingScreenDraw() call, so every one of C-Dogs' boot loading screens
-    (LoadingScreenDraw, cdogs_picos.c) rendered as solid black — both on
+    (LoadingScreenDraw, cdogs_picodeck.c) rendered as solid black — both on
     real hardware and in this simulator.
 
     Nothing else in this module would have caught this: the GFXSTAT/
@@ -1489,7 +1489,7 @@ def test_boot_loading_screen_is_not_blank(cdogs_quickplay_stats):
     This does NOT poll the display_stats RPC the way the reviewer's manual
     verification did (see the module's RENDERPRESENT_RE comment for why):
     an independent RPC poll during boot turned out to be unreliable for
-    this specific purpose — it can observe the PicOS launcher's own
+    this specific purpose — it can observe the PicoDeck launcher's own
     leftover screen content from before C-Dogs ever presented a single
     frame, which reads as "non-blank" no matter what C-Dogs itself does,
     producing a false pass. Confirmed directly: an RPC-polling version of
@@ -1511,7 +1511,7 @@ def test_boot_loading_screen_is_not_blank(cdogs_quickplay_stats):
     frames = cdogs_quickplay_stats.get("RENDERPRESENT", [])
     assert frames, (
         "no RenderPresent debug lines found in the log — either the "
-        "instrumentation in picos_sdl_impl.c's SDL_RenderPresent was "
+        "instrumentation in picodeck_sdl_impl.c's SDL_RenderPresent was "
         "removed, or C-Dogs never presented a frame at all"
     )
 
@@ -1522,7 +1522,7 @@ def test_boot_loading_screen_is_not_blank(cdogs_quickplay_stats):
     # regardless of this bug, so including them would dilute (not corrupt,
     # since max() is used below and a blank max only comes from an
     # all-blank set — but still worth being precise) what this test is
-    # actually checking. cdogs_picos.c calls LoadingScreenDraw exactly 4
+    # actually checking. cdogs_picodeck.c calls LoadingScreenDraw exactly 4
     # times before "Entering main menu loop", so #1-#4 are guaranteed to
     # all be loading-screen frames.
     boot_frames = [f for f in frames if f["num"] <= 4]
@@ -1600,8 +1600,8 @@ def test_gfxstat_data_bounded_by_2byte_full_tree_cost(cdogs_quickplay_stats):
     FULL, fixed asset tree's total pixel count sidesteps that: `data` is
     bounded above by "every file, at 2 B/px" regardless of which/how many
     of those files the reserve guard actually admits in any given run.
-    `data` is g_picos_pic_data_bytes (pic.c's PicPxBytes-sized accounting,
-    not g_picos_pic_tex_bytes — textures borrow Pic->Data per Stage 1, see
+    `data` is g_picodeck_pic_data_bytes (pic.c's PicPxBytes-sized accounting,
+    not g_picodeck_pic_tex_bytes — textures borrow Pic->Data per Stage 1, see
     test_textures_borrow_rather_than_duplicate, so tex is deliberately
     excluded here).
     """
@@ -1672,9 +1672,9 @@ def test_charsfmt_line_is_well_formed(cdogs_quickplay_stats):
     """
     lines = cdogs_quickplay_stats.get("CHARSFMT", [])
     assert lines, (
-        "no CHARSFMT line found in the log — either picos_charsfmt_report "
-        "(stubs.c) was removed, or its call site right after picos_main's "
-        "own directory scan (cdogs_picos.c, not PicManagerLoad in "
+        "no CHARSFMT line found in the log — either picodeck_charsfmt_report "
+        "(stubs.c) was removed, or its call site right after picodeck_main's "
+        "own directory scan (cdogs_picodeck.c, not PicManagerLoad in "
         "pic_manager.c — see parse_charsfmt's docstring) never ran"
     )
 
@@ -1711,7 +1711,7 @@ def test_charsfmt_line_is_well_formed(cdogs_quickplay_stats):
 # for step 'customize \"Done\" -> continue/level-select menu'" — with a
 # healthy simulator (no crash, no sanitizer output). The cause is the
 # screen-signature heuristic in _advance_through_screens (it infers a
-# dropped key from a display_stats change within 3 s), not PicOS. Fix: drive
+# dropped key from a display_stats change within 3 s), not PicoDeck. Fix: drive
 # the steps on input_seq consumption (wait_input_consumed) plus an in-app
 # marker per screen instead of screen signatures. The per-test timeout is
 # raised because the drive alone is close to the suite's 60 s default.

@@ -8,7 +8,7 @@
 // Scheme: ECDSA P-256 over SHA-256 of the raw image.  The signature file holds
 // the DER ECDSA-Sig-Value (what `openssl dgst -sha256 -sign` and
 // tools/sign_update.py write).  The public key is embedded at build time from
-// the CMake option PICOS_UPDATE_PUBKEY_PEM (see cmake/picos_update_key.cmake).
+// the CMake option PICODECK_UPDATE_PUBKEY_PEM (see cmake/picodeck_update_key.cmake).
 // The .sha256 file is a cheap pre-check (it catches a truncated download
 // before any public-key maths); only the signature authenticates the image.
 

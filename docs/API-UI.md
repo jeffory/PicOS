@@ -100,7 +100,7 @@ end
 ---
 
 #### `picocalc.ui.splash([status], [subtext])`
-Draw a splash/loading screen with the PicOS logo.
+Draw a splash/loading screen with the PicoDeck logo.
 
 - **Parameters:**
   - `status` (string, optional): Status text

@@ -50,7 +50,7 @@ function transport.new(conn)
     local self = setmetatable({}, transport)
     self.conn = conn               -- TCP connection userdata
     self.recv_buf = ""             -- accumulated receive buffer
-    self.client_version = "SSH-2.0-PicOS_1.0"
+    self.client_version = "SSH-2.0-PicoDeck_1.0"
     self.server_version = nil
     self.session_id = nil
 

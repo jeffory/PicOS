@@ -1,9 +1,9 @@
 {
-  "id": "com.picos.editor",
+  "id": "net.picodeck.editor",
   "name": "Text Editor",
-  "description": "Nano-like text editor for PicOS",
+  "description": "Nano-like text editor for PicoDeck",
   "version": "1.0.0",
-  "author": "PicOS",
+  "author": "PicoDeck",
   "requirements": [
     "filesystem",
     "root-filesystem",
@@ -11,6 +11,6 @@
     "sysconfig"
   ],
   "category": "tools",
-  "repo": "jeffory/picos-apps",
+  "repo": "PicoDeck/picodeck",
   "min_firmware": "1.0.0"
 }

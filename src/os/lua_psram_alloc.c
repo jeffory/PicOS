@@ -20,7 +20,7 @@ critical_section_t g_umm_critsec;
 // Allocate PSRAM for the Lua VM heap.
 // On RP2350, reserve 128KB at the end of the 6MB region for Core 1's
 // dedicated allocator (WiFi/Mongoose) to eliminate cross-core contention.
-#ifdef PICOS_SIMULATOR
+#ifdef PICODECK_SIMULATOR
   #define CORE1_POOL_SIZE 0
   static uint8_t *s_lua_psram_heap = NULL;
   uint32_t UMM_MALLOC_CFG_HEAP_SIZE = 8 * 1024 * 1024;
@@ -109,7 +109,7 @@ static void l_warnfoff(void *ud, const char *message, int tocont) {
 
 void lua_psram_alloc_init(void) {
   critical_section_init(&g_umm_critsec);
-#ifdef PICOS_SIMULATOR
+#ifdef PICODECK_SIMULATOR
   // 8 MB for the counting allocator, the device size under --real-umm
   // (the simulator's umm owns its own arena; this buffer is never used).
   UMM_MALLOC_CFG_HEAP_SIZE = (uint32_t)sim_umm_heap_size();
@@ -131,8 +131,8 @@ void lua_psram_alloc_init(void) {
          free_after_init, free_after_init / 1024);
 }
 
-#ifdef PICOS_LUA_ALLOC_HISTOGRAM
-// Opt-in measurement build (-DPICOS_LUA_ALLOC_HISTOGRAM): histograms the Lua
+#ifdef PICODECK_LUA_ALLOC_HISTOGRAM
+// Opt-in measurement build (-DPICODECK_LUA_ALLOC_HISTOGRAM): histograms the Lua
 // allocator's request sizes and prints them when the VM's last block is freed
 // (lua_close). Lua passes the old block size on every realloc/free, so live
 // objects per size bin are exact. Bins: 8-byte steps up to 256, then powers
@@ -209,10 +209,10 @@ static void hist_record(void *ptr, size_t osize, size_t nsize) {
 // is whole again for the next one (C-Dogs needs one ~5.9 MB block).
 // Core 0 only (the Lua VM); umm's own critical section guards the slabs'
 // allocation against Core 1's umm use.
-// -DPICOS_LUA_SMALL_POOLS=0 builds a firmware or simulator without them, for
+// -DPICODECK_LUA_SMALL_POOLS=0 builds a firmware or simulator without them, for
 // before/after measurements.
-#ifndef PICOS_LUA_SMALL_POOLS
-#define PICOS_LUA_SMALL_POOLS 1
+#ifndef PICODECK_LUA_SMALL_POOLS
+#define PICODECK_LUA_SMALL_POOLS 1
 #endif
 _Static_assert(SMALL_UMM_BLOCK_BYTES == UMM_BLOCK_BODY_SIZE,
                "small_alloc slabs are sized in umm blocks");
@@ -223,11 +223,11 @@ void *lua_psram_alloc(void *ud, void *ptr, size_t osize, size_t nsize) {
   (void)ud;
   // Lua passes a type tag, not a size, as osize when ptr is NULL.
   if (!ptr) osize = 0;
-#ifdef PICOS_LUA_ALLOC_HISTOGRAM
+#ifdef PICODECK_LUA_ALLOC_HISTOGRAM
   hist_record(ptr, osize, nsize);
 #endif
 
-  if (PICOS_LUA_SMALL_POOLS && !s_small && nsize > 0 && nsize <= SMALL_ALLOC_MAX)
+  if (PICODECK_LUA_SMALL_POOLS && !s_small && nsize > 0 && nsize <= SMALL_ALLOC_MAX)
     s_small = small_create(&k_umm_backing);  // NULL: plain umm until it fits
 
   void *result;

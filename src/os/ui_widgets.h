@@ -4,7 +4,7 @@
 #include <stdbool.h>
 #include "../drivers/display.h"
 
-// ── Widget color constants (matching existing PicOS UI theme) ────────────────
+// ── Widget color constants (matching existing PicoDeck UI theme) ────────────────
 
 #define UW_BG         RGB565(20,  28,  50)   // Panel background
 #define UW_BG_INPUT   RGB565( 5,  10,  20)   // Input field background

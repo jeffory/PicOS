@@ -204,7 +204,7 @@ picocalc.sys.log(fmt.bits .. "bit, " .. fmt.channels .. "ch, " .. fmt.sampleRate
 ---
 
 #### `sample:decompress()`
-Returns the sample itself (no-op). Provided for API compatibility with engines that distinguish compressed and decompressed sample data. On PicOS, samples are always stored decompressed.
+Returns the sample itself (no-op). Provided for API compatibility with engines that distinguish compressed and decompressed sample data. On PicoDeck, samples are always stored decompressed.
 
 - **Returns:** (userdata) The same Sample object
 

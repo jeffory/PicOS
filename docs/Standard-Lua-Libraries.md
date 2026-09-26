@@ -19,7 +19,7 @@ functions `dofile` and `loadfile` are removed. `load` accepts text chunks only
 
 ## Numbers
 
-PicOS Lua uses **32-bit integers and single-precision floats** (`LUA_32BITS`):
+PicoDeck Lua uses **32-bit integers and single-precision floats** (`LUA_32BITS`):
 
 - Integers wrap at ±2^31 (`0xDEADBEEF` is negative; `%x` still prints the
   32-bit pattern). `sys.getTimeMs()` goes negative after ~24.8 days of uptime

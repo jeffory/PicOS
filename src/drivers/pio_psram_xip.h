@@ -56,7 +56,7 @@ static inline pio_psram_xip_split_t pio_psram_xip_split(uintptr_t dst, uint32_t 
     return s;
 }
 
-#ifndef PICOS_HOST_TEST
+#ifndef PICODECK_HOST_TEST
 
 #include "hardware/sync.h"
 #include "hardware/xip_cache.h"
@@ -140,4 +140,4 @@ static inline void pio_psram_xip_read(uint32_t addr, uint8_t *dst, uint32_t len,
     }
 }
 
-#endif  // !PICOS_HOST_TEST
+#endif  // !PICODECK_HOST_TEST

@@ -2,7 +2,7 @@
 title: "Simulator and Testing"
 ---
 
-## Simulator control protocol (TCP 127.0.0.1, or the ./picos_control UNIX socket)
+## Simulator control protocol (TCP 127.0.0.1, or the ./picodeck_control UNIX socket)
 
 - `launch_app` → `{queued, busy, launch_id}`; `app.exited` notifications carry
   `{name, id, found, result: returned|error|exit_sentinel|load_failed, error,
@@ -22,10 +22,10 @@ title: "Simulator and Testing"
 
 - `SDL_VIDEODRIVER=dummy pytest tests/e2e -n auto` (release simulator).
 - Sanitizers: `make simulator-asan` / `simulator-tsan`, then
-  `PICOS_SIM_BINARY=build_sim_asan/picos_simulator pytest tests/e2e -n auto`.
+  `PICODECK_SIM_BINARY=build_sim_asan/picodeck_simulator pytest tests/e2e -n auto`.
 - Firmware network stack in the simulator: `make simulator-net`,
-  `PICOS_SIM_BINARY=build_sim_net/picos_simulator pytest tests/e2e/test_network_firmware.py`.
-- On a real device: `pytest tests/e2e --target hw:/dev/serial/by-id/<PicOS device>`
+  `PICODECK_SIM_BINARY=build_sim_net/picodeck_simulator pytest tests/e2e/test_network_firmware.py`.
+- On a real device: `pytest tests/e2e --target hw:/dev/serial/by-id/<PicoDeck device>`
   runs the `hardware`/`both` tests.
 - Host unit tests: `make test-unit`; fuzzers: `make fuzz`.
 

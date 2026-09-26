@@ -1,6 +1,6 @@
-# PicOS E2E tests
+# PicoDeck E2E tests
 
-pytest suite that drives the SDL2 + Unicorn simulator (`build_sim/picos_simulator`)
+pytest suite that drives the SDL2 + Unicorn simulator (`build_sim/picodeck_simulator`)
 over its JSON-RPC control channel.
 
 ## Running
@@ -21,17 +21,17 @@ pytest tests/e2e --html=reports/e2e.html --self-contained-html \
 
 ```bash
 make simulator-asan      # ASan + UBSan, build_sim_asan/ (clang; SIM_SAN_CC to override)
-PICOS_SIM_BINARY=build_sim_asan/picos_simulator SDL_VIDEODRIVER=dummy pytest tests/e2e -n auto
+PICODECK_SIM_BINARY=build_sim_asan/picodeck_simulator SDL_VIDEODRIVER=dummy pytest tests/e2e -n auto
 make simulator-tsan      # TSan, build_sim_tsan/ (informational, see below)
 ```
 
-`PICOS_SIM_BINARY` (or `--simulator-path`) picks the binary. The harness asks it
+`PICODECK_SIM_BINARY` (or `--simulator-path`) picks the binary. The harness asks it
 `--build-info` and runs the `asan_only` tests only against an ASan build; they
 skip (allow-listed) otherwise. Every simulator gets `ASAN_OPTIONS`,
-`UBSAN_OPTIONS` and `TSAN_OPTIONS` from `picos_simulator.SANITIZER_ENV` (any
+`UBSAN_OPTIONS` and `TSAN_OPTIONS` from `picodeck_simulator.SANITIZER_ENV` (any
 already set in the environment win): ASan and UBSan reports are fatal, leak
 checking is off (options you set yourself are merged in per key and win).
-Set `PICOS_SIM_EXPECT_SANITIZE=address` (the ASan CI leg does) to make the run
+Set `PICODECK_SIM_EXPECT_SANITIZE=address` (the ASan CI leg does) to make the run
 refuse to start unless `--build-info` confirms the sanitizer; if the probe
 fails without it, `asan_only` skips are no longer allow-listed. Install
 `llvm-symbolizer` (or set `ASAN_SYMBOLIZER_PATH`) for symbolised stacks. The
@@ -52,7 +52,7 @@ nightly and informational; `tests/e2e/tsan.supp` suppresses third-party
 
 ```bash
 make simulator-net       # build_sim_net/ (also simulator-net-asan, simulator-net-tsan)
-PICOS_SIM_BINARY=build_sim_net/picos_simulator SDL_VIDEODRIVER=dummy \
+PICODECK_SIM_BINARY=build_sim_net/picodeck_simulator SDL_VIDEODRIVER=dummy \
     pytest tests/e2e/test_network_firmware.py -n auto
 ```
 
@@ -61,7 +61,7 @@ PICOS_SIM_BINARY=build_sim_net/picos_simulator SDL_VIDEODRIVER=dummy \
 Core 0 and Core 1 as two host threads (`simulator/net/`). The `firmware_net`
 tests (`test_network_firmware.py`) run only against it (`--build-info` says
 `firmware_net=1`) and skip, allow-listed, elsewhere;
-`PICOS_SIM_EXPECT_FIRMWARE_NET=1` makes the run refuse to start without it.
+`PICODECK_SIM_EXPECT_FIRMWARE_NET=1` makes the run refuse to start without it.
 Each case runs in its own simulator against local servers
 (`net_servers.py`: HTTP on 127.0.0.1 with `/ok`, `/big`, `/chunked`, `/close`,
 `/drip`, `/hang`, `/reset`, `/echo`; a TCP echo/flood server; a black-hole
@@ -79,14 +79,14 @@ xfail, and markers `slow`, `hardware`, `both`, `native`, `asan_only`, `flaky`,
 ### On a PicoCalc (`--target hw`)
 
 ```bash
-ls /dev/serial/by-id/                       # usb-Raspberry_Pi_PicOS_Device_<serial>-if00
-PORT=/dev/serial/by-id/usb-Raspberry_Pi_PicOS_Device_<serial>-if00
+ls /dev/serial/by-id/                       # usb-Raspberry_Pi_PicoDeck_Device_<serial>-if00
+PORT=/dev/serial/by-id/usb-Raspberry_Pi_PicoDeck_Device_<serial>-if00
 pytest tests/e2e --target hw:$PORT -v       # every hardware + both test, serially
 pytest tests/e2e/test_hw_device.py --target hw:$PORT -v
-PICOS_HW_HOST_IP=192.168.1.20 pytest tests/e2e/test_hw_http_close.py --target hw:$PORT -v
+PICODECK_HW_HOST_IP=192.168.1.20 pytest tests/e2e/test_hw_http_close.py --target hw:$PORT -v
 ```
 
-`--target hw:<port>` (or `PICOS_E2E_TARGET`) runs only tests marked
+`--target hw:<port>` (or `PICODECK_E2E_TARGET`) runs only tests marked
 `@pytest.mark.hardware` or `@pytest.mark.both`, one at a time (no `-n`); every
 other test is deselected. On the simulator (`--target sim`, the default)
 `hardware` tests skip, allow-listed, and `both` tests run. A `both` test must
@@ -98,7 +98,7 @@ simulator, or the session's `hw_target.HwTarget`. Both offer `launch_app`,
 fixture apps live in `hw_apps/` (pushed by the test, never staged on
 simulator SD cards).
 
-`HwTarget` drives the device through `tools/picos_mcp.py`'s serial helpers
+`HwTarget` drives the device through `tools/picodeck_mcp.py`'s serial helpers
 and builds the device's traps in:
 
 - **Results come from files.** The serial capture drops `[APP]` lines, so a
@@ -129,7 +129,7 @@ and builds the device's traps in:
 Pre-release checklist (not in CI): flash the release candidate
 (`make flash-ota`), reboot so the heap is unfragmented, stop any serial log
 capture, then run `pytest tests/e2e --target hw:$PORT -v` with WiFi
-configured and `PICOS_HW_HOST_IP` set. All hardware and both tests must
+configured and `PICODECK_HW_HOST_IP` set. All hardware and both tests must
 pass; a skip needs a reason (no WiFi) that is fixed before the release.
 
 ## Layout
@@ -138,7 +138,7 @@ pass; a skip needs a reason (no WiFi) that is fixed before the release.
 tests/e2e/
 ├── conftest.py          fixtures and hooks (simulator, SD card, health check, skip allow-list)
 ├── helpers.py           SD staging, the Lua test-kit runner, golden compare, heap-metric check
-├── picos_simulator.py   JSON-RPC client and process wrapper
+├── picodeck_simulator.py   JSON-RPC client and process wrapper
 ├── hw_target.py         --target sim|hw: SimTarget / HwTarget (serial device backend)
 ├── hw_apps/<name>/      hardware-only fixture apps, pushed to the device by the test
 ├── lib/picotest.lua     Lua test kit, staged to /system/lib/picotest.lua
@@ -301,5 +301,5 @@ A missing golden fails the test. Create or refresh goldens with
   fragmentation and `min_psram_kb` behaviour are still device-only.
   `test_heap_metrics_live` proves the metric moves; the leak tests check it
   first (`require_heap_metrics_live`).
-- `test_cdogs_memory.py` needs a built checkout of jeffory/picos-cdogs
-  (`PICOS_CDOGS_DIR`, default `~/Projects/picos-cdogs`); it is allow-listed to skip.
+- `test_cdogs_memory.py` needs a built checkout of PicoDeck/cdogs
+  (`PICODECK_CDOGS_DIR`, default `~/Projects/PicoDeck/cdogs`); it is allow-listed to skip.

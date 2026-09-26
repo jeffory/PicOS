@@ -1,7 +1,7 @@
 /*
   Fake86: A portable, open-source 8086 PC emulator.
   Copyright (C)2010-2013 Mike Chambers
-  Adapted for PicOS/dos86 — stripped of SDL, audio, video, disk dependencies.
+  Adapted for PicoDeck/dos86 — stripped of SDL, audio, video, disk dependencies.
 
   This program is free software; you can redistribute it and/or
   modify it under the terms of the GNU General Public License
@@ -57,7 +57,7 @@ static inline bool is_readonly(uint32_t addr) {
 /* Called by intcall86 for video interrupt (INT 10h) */
 extern void vidinterrupt(void);
 
-/* Disable features we don't need on PicOS */
+/* Disable features we don't need on PicoDeck */
 /* #define NETWORKING_ENABLED */
 /* #define NETWORKING_OLDCARD */
 /* #define DISK_CONTROLLER_ATA */

@@ -1,9 +1,9 @@
 {
-  "id": "com.picos.panelsdemo",
+  "id": "net.picodeck.panelsdemo",
   "name": "Panels Demo",
   "description": "Interactive comic showcasing the panels.lua framework: parallax scrolling, animation, audio cues, branching.",
   "version": "1.0.0",
-  "author": "PicOS",
+  "author": "PicoDeck",
   "category": "demos",
   "requirements": ["audio"],
   "system_clock_khz": 300000

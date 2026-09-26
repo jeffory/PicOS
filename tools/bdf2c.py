@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Convert BDF bitmap font files to C arrays for PicOS.
+"""Convert BDF bitmap font files to C arrays for PicoDeck.
 
 Usage:
     python3 bdf2c.py <regular.bdf> <bold.bdf> <output_dir>

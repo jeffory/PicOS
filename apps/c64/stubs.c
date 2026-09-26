@@ -1,6 +1,6 @@
 /*
  * Minimal newlib syscall stubs for bare-metal PIE apps.
- * The C64 emulator uses the PicOS API directly, so most of these are no-ops.
+ * The C64 emulator uses the PicoDeck API directly, so most of these are no-ops.
  * They're only needed to satisfy newlib's libc/libm references.
  */
 #include <sys/stat.h>

@@ -109,7 +109,7 @@ def test_app_exited_reports_returned(harness_sim):
     out = _run(harness_sim, "harness_ok")
     assert out["found"] is True
     assert out["result"] == "returned", out
-    assert out["id"] == "com.picos.harness_ok"
+    assert out["id"] == "net.picodeck.harness_ok"
     assert out["name"] == "harness_ok"
     assert out["error"] is None
     assert isinstance(out["runtime_ms"], int) and out["runtime_ms"] >= 0
@@ -226,7 +226,7 @@ def test_launch_app_staged_after_boot(harness_sim, test_sd_card):
     app = test_sd_card / "apps" / "harness_late"
     app.mkdir()
     (app / "app.json").write_text(json.dumps(
-        {"id": "com.picos.harness_late", "name": "Harness Late"}))
+        {"id": "net.picodeck.harness_late", "name": "Harness Late"}))
     (app / "main.lua").write_text('picocalc.sys.log("H:LATE")\n')
 
     out = _run(harness_sim, "harness_late")

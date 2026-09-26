@@ -1,4 +1,4 @@
--- Burn-In Fixer for PicOS
+-- Burn-In Fixer for PicoDeck
 -- Cycles through colors and patterns to exercise LCD pixels.
 -- Run for several minutes to help loosen stuck or burned-in pixels.
 

@@ -1,4 +1,4 @@
--- Terminal Example App for PicOS
+-- Terminal Example App for PicoDeck
 -- Demonstrates the terminal emulator SDK with VT100 escape sequences
 
 local pc = picocalc
@@ -9,7 +9,7 @@ local function demo_basic_text(term)
     term:write("\x1b[2J")  -- Clear screen
     term:write("\x1b[H")    -- Home cursor
     
-    term:write("=== PicOS Terminal Demo ===\n\n")
+    term:write("=== PicoDeck Terminal Demo ===\n\n")
     term:write("This is plain text.\n")
     term:write("This is \x1b[1mbold\x1b[0m text.\n")
     term:write("This is \x1b[3mitalic\x1b[0m text.\n")

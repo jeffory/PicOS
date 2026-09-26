@@ -1976,7 +1976,7 @@ int main(void) {
   }
   watchdog_update();
 
-  printf("\n--- PicOS booting ---\n");
+  printf("\n--- PicoDeck booting ---\n");
   printf("[BOOT] scratch0_at_entry=0x%08lx s_had_crash=%d boot_attempt=%d\n",
          (unsigned long)scratch0, s_had_crash, boot_attempt);
   printf("[BOOT] watchdog_caused_reboot=%d\n", watchdog_caused_reboot());
@@ -2137,7 +2137,7 @@ int main(void) {
       // Flush dirty cache lines so Core 1 sees the init block header.
       // core1_alloc_init writes through Core 0's write-back XIP cache;
       // Core 1 has its own cache and would read stale zeros on a cold miss.
-#ifndef PICOS_SIMULATOR
+#ifndef PICODECK_SIMULATOR
       __asm volatile ("dsb sy" ::: "memory");
       xip_cache_clean_all();
       __asm volatile ("isb sy" ::: "memory");

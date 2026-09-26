@@ -1,7 +1,7 @@
 """Where an E2E test runs: the simulator (default) or a real PicoCalc.
 
     pytest tests/e2e                                            # simulator
-    pytest tests/e2e --target hw:/dev/serial/by-id/usb-Raspberry_Pi_PicOS_Device_<serial>-if00
+    pytest tests/e2e --target hw:/dev/serial/by-id/usb-Raspberry_Pi_PicoDeck_Device_<serial>-if00
 
 A test asks for the `target` fixture (conftest.py) and gets a SimTarget over
 its simulator, or the session's HwTarget on --target hw:<port>. Both offer the
@@ -17,7 +17,7 @@ Collection rules (apply_target_rules):
     simulator fixtures.
   - unmarked tests are simulator-only: deselected on --target hw.
 
-HwTarget drives the device over USB serial with tools/picos_mcp.py's helpers
+HwTarget drives the device over USB serial with tools/picodeck_mcp.py's helpers
 (do_command_hardware, do_get_file_b64, do_put_file_b64,
 do_screenshot_hardware, do_keysequence_hardware, push_app) and encodes the
 device's known traps (see the task-27 report and CLAUDE.md "Debug"):
@@ -68,7 +68,7 @@ TEST_KIT = E2E_DIR / "lib" / "picotest.lua"
 HW_APPS_DIR = E2E_DIR / "hw_apps"
 
 HW_SKIP_REASON = ("hardware: needs a PicoCalc "
-                  "(--target hw:/dev/serial/by-id/usb-Raspberry_Pi_PicOS_Device_*-if00)")
+                  "(--target hw:/dev/serial/by-id/usb-Raspberry_Pi_PicoDeck_Device_*-if00)")
 
 # Fixtures that start or wrap a simulator: a `both` test must not use them.
 SIM_FIXTURES = {"simulator", "sim_factory", "sim_module", "sim_module_factory",
@@ -79,13 +79,13 @@ class HwTargetError(RuntimeError):
     """The device did not do what the backend asked (with the evidence)."""
 
 
-# ── picos_mcp ───────────────────────────────────────────────────────────────
+# ── picodeck_mcp ───────────────────────────────────────────────────────────────
 
 _pm = None
 
 
 def _install_fastmcp_stub():
-    """picos_mcp imports mcp.server.fastmcp for its MCP server. The helpers
+    """picodeck_mcp imports mcp.server.fastmcp for its MCP server. The helpers
     used here do not need it, so without the package installed a stand-in
     whose tool() decorator returns the function unchanged is enough."""
     class FastMCP:
@@ -108,23 +108,23 @@ def _install_fastmcp_stub():
     sys.modules["mcp.server.fastmcp"].Image = Image
 
 
-def load_picos_mcp():
-    """tools/picos_mcp.py as a module (shared with anything else that
-    imported it as `picos_mcp`)."""
+def load_picodeck_mcp():
+    """tools/picodeck_mcp.py as a module (shared with anything else that
+    imported it as `picodeck_mcp`)."""
     global _pm
     if _pm is not None:
         return _pm
-    if "picos_mcp" in sys.modules:
-        _pm = sys.modules["picos_mcp"]
+    if "picodeck_mcp" in sys.modules:
+        _pm = sys.modules["picodeck_mcp"]
         return _pm
     try:
         import mcp.server.fastmcp  # noqa: F401
     except ImportError:
         _install_fastmcp_stub()
-    spec = importlib.util.spec_from_file_location("picos_mcp",
-                                                  TOOLS_DIR / "picos_mcp.py")
+    spec = importlib.util.spec_from_file_location("picodeck_mcp",
+                                                  TOOLS_DIR / "picodeck_mcp.py")
     mod = importlib.util.module_from_spec(spec)
-    sys.modules["picos_mcp"] = mod
+    sys.modules["picodeck_mcp"] = mod
     spec.loader.exec_module(mod)
     _pm = mod
     return mod
@@ -201,7 +201,7 @@ def parse_target_spec(spec: str) -> tuple:
         return "hw", spec[3:]
     raise ValueError(f"--target {spec!r}: expected 'sim' or 'hw:<absolute "
                      "serial port path>' (e.g. hw:/dev/serial/by-id/"
-                     "usb-Raspberry_Pi_PicOS_Device_<serial>-if00)")
+                     "usb-Raspberry_Pi_PicoDeck_Device_<serial>-if00)")
 
 
 def pixel(png: bytes, x: int, y: int) -> tuple:
@@ -458,7 +458,7 @@ class HwTarget(Target):
                  poll_interval: float = 0.5, boot_timeout: float = 60.0,
                  exit_timeout: float = 15.0, connect_timeout: float = 5.0,
                  command_timeout: float = 5.0):
-        self.pm = load_picos_mcp()
+        self.pm = load_picodeck_mcp()
         self.port = port
         self.preflight = preflight
         self.poll_interval = poll_interval
@@ -501,7 +501,7 @@ class HwTarget(Target):
             self._stop_monitor()
             raise HwTargetError(
                 f"{self.port}: no answer to ping within {self.connect_timeout}s. "
-                "Is PicOS running (not BOOTSEL / USB-MSC), current enough to "
+                "Is PicoDeck running (not BOOTSEL / USB-MSC), current enough to "
                 "have the dev console, and is nothing else reading the port?")
         return self
 
@@ -873,7 +873,7 @@ class HwTarget(Target):
             raise HwTargetError(f"reboot ignored: uptime {before} -> {after} ms")
 
     def flash(self, firmware, timeout: float = 300.0):
-        """Flash `firmware` (build/picocalc_os.bin) with tools/ota_flash.py.
+        """Flash `firmware` (build/picodeck.bin) with tools/ota_flash.py.
         Refused while an app runs: the firmware drops the `reboot-ota`
         that applies the image ("reboot-ota ignored: an app is running").
         Proof of the new build is the OTA tool's .flashed check plus the
@@ -902,14 +902,14 @@ class HwTarget(Target):
 def add_target_option(parser):
     parser.addoption(
         "--target", action="store",
-        default=os.environ.get("PICOS_E2E_TARGET", "sim"),
+        default=os.environ.get("PICODECK_E2E_TARGET", "sim"),
         help="Where tests run: 'sim' (default) or 'hw:<serial port>', e.g. "
-             "hw:/dev/serial/by-id/usb-Raspberry_Pi_PicOS_Device_<serial>-if00. "
+             "hw:/dev/serial/by-id/usb-Raspberry_Pi_PicoDeck_Device_<serial>-if00. "
              "hw runs only tests marked hardware or both (serially).")
 
 
 def target_spec(config) -> tuple:
-    return getattr(config, "_picos_target", ("sim", None))
+    return getattr(config, "_picodeck_target", ("sim", None))
 
 
 def configure_target(config):
@@ -919,14 +919,14 @@ def configure_target(config):
         kind, port = parse_target_spec(config.getoption("--target"))
     except ValueError as e:
         raise _usage_error(str(e))
-    config._picos_target = (kind, port)
+    config._picodeck_target = (kind, port)
     if kind != "hw":
         return
     n = getattr(config.option, "numprocesses", None)
     if n not in (None, 0, "0") and not hasattr(config, "workerinput"):
         raise _usage_error("--target hw drives one device: run without -n "
                            "(pytest-xdist)")
-    if os.environ.get("PICOS_HW_PREFLIGHT", "1") != "0":
+    if os.environ.get("PICODECK_HW_PREFLIGHT", "1") != "0":
         try:
             preflight_port(port)
         except HwTargetError as e:
@@ -968,10 +968,10 @@ def session_target(config) -> HwTarget:
     """The session's HwTarget, connected on first use; a device that does
     not answer ends the session at once with the reason."""
     import pytest
-    tgt = getattr(config, "_picos_hw", None)
+    tgt = getattr(config, "_picodeck_hw", None)
     if tgt is None:
         _, port = target_spec(config)
-        tgt = HwTarget(port, preflight=os.environ.get("PICOS_HW_PREFLIGHT", "1") != "0")
+        tgt = HwTarget(port, preflight=os.environ.get("PICODECK_HW_PREFLIGHT", "1") != "0")
         try:
             tgt.connect()
             tgt.ensure_launcher()
@@ -979,6 +979,6 @@ def session_target(config) -> HwTarget:
         except (HwTargetError, TimeoutError) as e:
             tgt.close()
             pytest.exit(f"--target hw:{port}: {e}", returncode=pytest.ExitCode.USAGE_ERROR)
-        config._picos_hw = tgt
+        config._picodeck_hw = tgt
         config.add_cleanup(tgt.close)
     return tgt

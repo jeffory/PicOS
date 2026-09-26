@@ -1,4 +1,4 @@
-// sim_http.c — libcurl multi-based HTTP client for PicOS simulator
+// sim_http.c — libcurl multi-based HTTP client for PicoDeck simulator
 // Implements the full http.h API using libcurl on the host machine.
 // Core 1 thread calls http_poll() which drives curl_multi_perform().
 
@@ -469,7 +469,7 @@ void sim_http_start(http_conn_t *c) {
                   (strstr(c->extra_hdrs, "User-Agent:") != NULL ||
                    strstr(c->extra_hdrs, "user-agent:") != NULL);
     if (!has_ua) {
-        hdrs = curl_slist_append(hdrs, "User-Agent: PicOS/1.0");
+        hdrs = curl_slist_append(hdrs, "User-Agent: PicoDeck/1.0");
     }
 
     // Range header

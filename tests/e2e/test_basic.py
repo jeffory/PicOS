@@ -1,6 +1,6 @@
 """Simulator process basics: it starts, auto-launches, and exits on SIGTERM.
 
-These spawn the binary directly (not through PicosSimulator) because the
+These spawn the binary directly (not through PicodeckSimulator) because the
 behaviour under test is the raw process lifecycle. Paths are absolute and the
 SD card is a per-test tmp dir, so nothing is written into the repo.
 """
@@ -17,7 +17,7 @@ import time
 import pytest
 
 from helpers import build_sd_card
-from picos_simulator import sanitizer_env
+from picodeck_simulator import sanitizer_env
 
 
 def _spawn(binary, sd, *extra):

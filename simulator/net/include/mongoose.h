@@ -19,8 +19,8 @@
 // Nothing in mongoose.c dereferences mgr->ifp when MG_ENABLE_TCPIP is 0 (every
 // use is under #if MG_ENABLE_TCPIP), so the stand-in never reaches it.
 
-#ifndef PICOS_SIM_NET_MONGOOSE_H
-#define PICOS_SIM_NET_MONGOOSE_H
+#ifndef PICODECK_SIM_NET_MONGOOSE_H
+#define PICODECK_SIM_NET_MONGOOSE_H
 
 #include "../../../third_party/mongoose/mongoose.h"
 
@@ -88,8 +88,8 @@ bool sim_net_wifi_disconnect(void);
 // test run never leaves the machine. The check URL is a loopback listener
 // the shim owns (connect succeeds → "connectivity check OK" → ONLINE); the
 // SNTP URL is a loopback UDP socket that never answers (the query stays
-// pending, as on a network with NTP blocked). PICOS_SIM_NET_CHECK_URL and
-// PICOS_SIM_NET_SNTP_URL in the environment override them.
+// pending, as on a network with NTP blocked). PICODECK_SIM_NET_CHECK_URL and
+// PICODECK_SIM_NET_SNTP_URL in the environment override them.
 const char *sim_net_check_url(void);
 const char *sim_net_sntp_url(void);
 
@@ -97,4 +97,4 @@ const char *sim_net_sntp_url(void);
 }
 #endif
 
-#endif  // PICOS_SIM_NET_MONGOOSE_H
+#endif  // PICODECK_SIM_NET_MONGOOSE_H

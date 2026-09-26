@@ -2,7 +2,7 @@
 title: "Native App Development"
 ---
 
-PicOS supports running native ARM Cortex-M33 (RP2350) applications in addition to Lua scripts. Native apps are Position-Independent ELF32 (PIE) binaries loaded from the SD card into PSRAM at runtime.
+PicoDeck supports running native ARM Cortex-M33 (RP2350) applications in addition to Lua scripts. Native apps are Position-Independent ELF32 (PIE) binaries loaded from the SD card into PSRAM at runtime.
 
 
 ## Choosing Lua vs native
@@ -27,7 +27,7 @@ Place these files in `/apps/<your_app_name>/` on the SD card.
 {
   "id": "com.example.myapp",
   "name": "My App",
-  "description": "A native PicOS app",
+  "description": "A native PicoDeck app",
   "version": "1.0",
   "author": "Your Name",
   "requirements": ["audio", "http"]
@@ -40,20 +40,20 @@ See [Global Variables and Permissions](Global-Variables-and-Permissions.md) for 
 
 ### Prerequisites
 - **GNU Arm Embedded Toolchain**: `arm-none-eabi-gcc`
-- **PicOS SDK Headers**: `app_abi.h` and `os.h` (found in `sdk/native/`)
+- **PicoDeck SDK Headers**: `app_abi.h` and `os.h` (found in `sdk/native/`)
 - **Linker Script**: `linker.ld` (found in `sdk/native/`)
 
 ## Creating a Native App
 
 ### Entry Point
 
-Your application must define an entry point named `picos_main`. The OS passes a pointer to the `PicoCalcAPI` struct, which provides access to all OS services.
+Your application must define an entry point named `picodeck_main`. The OS passes a pointer to the `PicoCalcAPI` struct, which provides access to all OS services.
 
 ```c
 #include "app_abi.h"
 #include "os.h"
 
-void picos_main(const PicoCalcAPI *api,
+void picodeck_main(const PicoCalcAPI *api,
                 const char *app_dir,
                 const char *app_id,
                 const char *app_name)
@@ -79,7 +79,7 @@ void picos_main(const PicoCalcAPI *api,
 }
 ```
 
-**Important**: You must call `s->poll()` each frame and check `s->shouldExit()` to properly handle the system menu exit. Returning from `picos_main` returns control to the launcher.
+**Important**: You must call `s->poll()` each frame and check `s->shouldExit()` to properly handle the system menu exit. Returning from `picodeck_main` returns control to the launcher.
 
 ### The API Surface
 
@@ -152,7 +152,7 @@ Native apps MUST be compiled as **Position-Independent Executables (PIE)**. This
 
 ### Required LDFLAGS
 - `-T linker.ld`: Use the provided linker script.
-- `-Wl,--entry=picos_main`: Set the entry point.
+- `-Wl,--entry=picodeck_main`: Set the entry point.
 - `-Wl,-pie`: Final link as PIE.
 - `-Wl,--no-warn-rwx-segments`: Suppress linker warnings about RWX segments.
 - `-nostartfiles -nodefaultlibs`: Native apps do not use standard C runtime startup (CRT0).
@@ -163,7 +163,7 @@ A complete working example can be found in `sdk/native/Makefile`.
 ```makefile
 CC      = arm-none-eabi-gcc
 CFLAGS  = -mcpu=cortex-m33 -mthumb -fpie -fno-plt -Os -I.
-LDFLAGS = -T linker.ld -Wl,--entry=picos_main -Wl,-pie \
+LDFLAGS = -T linker.ld -Wl,--entry=picodeck_main -Wl,-pie \
           -Wl,--no-warn-rwx-segments -nostartfiles -nodefaultlibs
 
 all: main.elf
@@ -174,7 +174,7 @@ main.elf: main.c
 
 ## Binary Loading Process
 
-When the PicOS launcher starts a native app:
+When the PicoDeck launcher starts a native app:
 1. Core 1 is paused to prevent PSRAM heap contention during loading.
 2. The `main.elf` file is read and the ELF header and program headers are validated. A malformed ELF file is refused with a reason (on screen, in `/system/error.log`).
 3. The virtual address range of all `PT_LOAD` segments is computed.
@@ -184,7 +184,7 @@ When the PicOS launcher starts a native app:
 7. The app runs on the **Process Stack Pointer (PSP)** on its own 64 KB stack in PSRAM (16 KB SRAM if it were ever available), guarded by `PSPLIM`: an overflow faults (crash record `PSP (native app)`) instead of corrupting memory. Interrupts keep using the main stack (MSP).
 8. Core 1 is resumed after the app exits and resources are freed.
 
-The application runs in the same privilege level as the OS but is expected to return control to the OS by returning from `picos_main`.
+The application runs in the same privilege level as the OS but is expected to return control to the OS by returning from `picodeck_main`.
 
 ## Memory
 
@@ -197,7 +197,7 @@ The application runs in the same privilege level as the OS but is expected to re
 
 ### Resources are freed at exit
 
-Anything the app got through the API and did not free — files, images, samples and players, video/MOD players, terminals, AES/ECDH contexts, `qmiAlloc` blocks, HTTP/TCP connections, fonts, menu items, zip handles — is released when `picos_main` returns. Do not rely on double frees being harmless: a stale pointer whose address was reused by a newer handle frees that newer object.
+Anything the app got through the API and did not free — files, images, samples and players, video/MOD players, terminals, AES/ECDH contexts, `qmiAlloc` blocks, HTTP/TCP connections, fonts, menu items, zip handles — is released when `picodeck_main` returns. Do not rely on double frees being harmless: a stale pointer whose address was reused by a newer handle frees that newer object.
 
 ### Per-app config, randomness
 

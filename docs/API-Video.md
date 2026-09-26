@@ -2,7 +2,7 @@
 title: "API — Video Playback"
 ---
 
-PicOS supports MJPEG video playback from AVI files stored on the SD card. Video is decoded on Core 0 using JPEGDEC and displayed via the standard display framebuffer. Audio tracks (MP3) are decoded on Core 1 via a shared ring buffer.
+PicoDeck supports MJPEG video playback from AVI files stored on the SD card. Video is decoded on Core 0 using JPEGDEC and displayed via the standard display framebuffer. Audio tracks (MP3) are decoded on Core 1 via a shared ring buffer.
 
 ---
 
@@ -181,7 +181,7 @@ player:stop()
 
 ## Video format
 
-PicOS plays **MJPEG AVI** files only. Each video frame is an independent JPEG; the player does not support inter-frame codecs (H.264, VP9, etc.).
+PicoDeck plays **MJPEG AVI** files only. Each video frame is an independent JPEG; the player does not support inter-frame codecs (H.264, VP9, etc.).
 
 | Property | Value |
 |----------|-------|
@@ -217,7 +217,7 @@ pip install yt-dlp
 tools/video_converter.sh [options] <file_or_url>
 ```
 
-Output is written to `~/Videos/PicOS/` (the directory must exist).
+Output is written to `~/Videos/PicoDeck/` (the directory must exist).
 
 ### Options
 

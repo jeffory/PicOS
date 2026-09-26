@@ -1,4 +1,4 @@
-// PicOS PC Simulator - Main Entry Point
+// PicoDeck PC Simulator - Main Entry Point
 // Cross-platform SDL2 implementation for desktop debugging
 
 #include <SDL2/SDL.h>
@@ -22,7 +22,7 @@
 #include "hal/hal_threading.h"
 #include "sim_socket.h"
 
-// PicOS includes (adapted for simulator)
+// PicoDeck includes (adapted for simulator)
 #include "os.h"
 #include "terminal.h"
 #include "launcher.h"
@@ -34,7 +34,7 @@
 #include "drivers/fileplayer.h"
 #include "drivers/mp3_player.h"
 #include "drivers/http.h"
-#ifdef PICOS_SIM_FIRMWARE_NET
+#ifdef PICODECK_SIM_FIRMWARE_NET
 #include "drivers/wifi.h"
 #include "net/sim_net.h"
 #endif
@@ -47,12 +47,12 @@
 #include "sim_test_control.h"
 
 // Simulator configuration
-#define SIM_WINDOW_TITLE "PicOS Simulator"
-#ifdef PICOS_PROJECT_ROOT
+#define SIM_WINDOW_TITLE "PicoDeck Simulator"
+#ifdef PICODECK_PROJECT_ROOT
 #ifdef __EMSCRIPTEN__
 #define SIM_DEFAULT_SD_CARD "/sd"  // --preload-file mount point
 #else
-#define SIM_DEFAULT_SD_CARD PICOS_PROJECT_ROOT
+#define SIM_DEFAULT_SD_CARD PICODECK_PROJECT_ROOT
 #endif
 #else
 #define SIM_DEFAULT_SD_CARD "."
@@ -103,7 +103,7 @@ static void force_exit_handler(int sig) {
     _exit(1);
 }
 
-// ASan/TSan install their own fatal-signal handlers (PICOS_SIM_SANITIZE).
+// ASan/TSan install their own fatal-signal handlers (PICODECK_SIM_SANITIZE).
 #if defined(__SANITIZE_ADDRESS__) || defined(__SANITIZE_THREAD__)
 #define SIM_HAS_SANITIZER 1
 #elif defined(__has_feature)
@@ -127,7 +127,7 @@ static void crash_handler(int sig) {
             case SIGBUS:  sig_name = "SIGBUS"; break;
             case SIGFPE:  sig_name = "SIGFPE"; break;
         }
-        (void)!write(fd, "PicOS Simulator Crash\nSignal: ", 30);
+        (void)!write(fd, "PicoDeck Simulator Crash\nSignal: ", 30);
         (void)!write(fd, sig_name, strlen(sig_name));
         (void)!write(fd, "\nBacktrace:\n", 12);
 
@@ -154,7 +154,7 @@ static void print_usage(const char* program) {
     printf("  --port PORT          TCP port for RPC socket (default: 7878, 0=auto)\n");
     printf("  --instance-id ID     Unique instance ID (for parallel simulators)\n");
     printf("  --unix-socket PATH   UNIX control socket path, or 'none' to disable\n");
-    printf("  --crash-log PATH     Crash log file path (default: /tmp/picos_sim_crash_<pid>.log)\n");
+    printf("  --crash-log PATH     Crash log file path (default: /tmp/picodeck_sim_crash_<pid>.log)\n");
     printf("  --show-splash        Show boot splash screen with delays\n");
     printf("  --test-mode          Error screens return at once; idle dim off;\n"
            "                       math.random seeded and the clock pinned to\n"
@@ -176,8 +176,8 @@ static void parse_args(int argc, char** argv) {
             exit(0);
         } else if (strcmp(argv[i], "--build-info") == 0) {
             // Read by the E2E harness (conftest) to enable asan_only tests.
-            printf("sanitize=%s\n", PICOS_SIM_SANITIZE_STR);
-#ifdef PICOS_SIM_FIRMWARE_NET
+            printf("sanitize=%s\n", PICODECK_SIM_SANITIZE_STR);
+#ifdef PICODECK_SIM_FIRMWARE_NET
             // test_network_firmware.py runs only against this build.
             printf("firmware_net=1\n");
 #else
@@ -237,7 +237,7 @@ static void parse_args(int argc, char** argv) {
     // read each other's crashes, and a stale file cannot outlive the process.
     if (g_crash_log_path[0] == '\0') {
         snprintf(g_crash_log_path, sizeof(g_crash_log_path),
-                 "/tmp/picos_sim_crash_%d.log", (int)getpid());
+                 "/tmp/picodeck_sim_crash_%d.log", (int)getpid());
     }
     // A previous process may have died holding this PID's name.
     unlink(g_crash_log_path);
@@ -284,8 +284,8 @@ static void show_boot_splash(void) {
     printf("[Core0] Showing boot splash screen...\n");
     fflush(stdout);
 
-    // Initial splash - "PicOS Simulator"
-    draw_splash_screen("PicOS Simulator", "Starting up...");
+    // Initial splash - "PicoDeck Simulator"
+    draw_splash_screen("PicoDeck Simulator", "Starting up...");
     hal_sleep_ms(800);
 
     // Show initialization steps like hardware does
@@ -308,7 +308,7 @@ static void show_boot_splash(void) {
 // Core 1 entry point (simulates the second core)
 static void* core1_thread(void* arg) {
     (void)arg;
-#ifdef PICOS_SIM_FIRMWARE_NET
+#ifdef PICODECK_SIM_FIRMWARE_NET
     // Firmware wifi_poll() only runs on Core 1 (get_core_num() == 1).
     sim_net_core1_init();
 #endif
@@ -472,7 +472,7 @@ static void sim_wire_g_api(void) {
 }
 
 int main(int argc, char** argv) {
-    printf("PicOS Simulator v%s\n", PICOS_VERSION);
+    printf("PicoDeck Simulator v%s\n", PICODECK_VERSION);
     printf("=====================\n\n");
     
     // Parse arguments
@@ -592,7 +592,7 @@ int main(int argc, char** argv) {
     wifi_init();
     http_init();
     tcp_init();
-#ifdef PICOS_SIM_FIRMWARE_NET
+#ifdef PICODECK_SIM_FIRMWARE_NET
     // Firmware network stack (simulator/net): join the stand-in network now,
     // as sim_wifi.c's mock is "always online", unless config.json's
     // wifi_ssid already started the firmware's own boot auto-connect.

@@ -1199,7 +1199,7 @@ static void tramp_fs_list_dir(uc_engine *uc) {
      * top-level entries. At the old cap of 128 the excess entries were
      * silently dropped — two thirds of the sprite set never even appeared
      * in directory listings. Matches MAX_DIR_ENTRIES in the C-Dogs port's
-     * dirent shim (stubs.c in jeffory/picos-cdogs), which hit the same bug app-side. */
+     * dirent shim (stubs.c in PicoDeck/cdogs), which hit the same bug app-side. */
     #define MAX_ENTRIES 512
     static entry_info_t entries[MAX_ENTRIES];
 

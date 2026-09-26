@@ -12,7 +12,7 @@ set(PICO_MBEDTLS_CONFIG_FILE "${CMAKE_SOURCE_DIR}/src/mbedtls_config.h" CACHE ST
 # Pull in Pico SDK (must be done before project())
 include(pico_sdk_import.cmake)
 
-project(picocalc_os C CXX ASM)
+project(picodeck C CXX ASM)
 set(CMAKE_C_STANDARD   11)
 set(CMAKE_CXX_STANDARD 17)
 
@@ -28,36 +28,36 @@ execute_process(
 )
 # Strip leading 'v' from tag (v0.0.7 → 0.0.7)
 if(GIT_VERSION)
-    string(REGEX REPLACE "^v" "" PICOS_VERSION "${GIT_VERSION}")
+    string(REGEX REPLACE "^v" "" PICODECK_VERSION "${GIT_VERSION}")
 else()
-    set(PICOS_VERSION "0.0.0-unknown")
+    set(PICODECK_VERSION "0.0.0-unknown")
 endif()
-message(STATUS "PicOS version: ${PICOS_VERSION}")
+message(STATUS "PicoDeck version: ${PICODECK_VERSION}")
 
 # ── OTA update signing key (public half, embedded in flash) ──────────────────
 # The firmware flashes /system/update.bin only if /system/update.sig verifies
 # against this P-256 key (src/os/ota_verify.c).  The default is the TEST key
 # in tests/keys, whose private half is in the repo: fine for local builds and
 # `make flash-ota` (tools/ota_flash.py signs with it), never for a release.
-# Release builds pass the real key and PICOS_REQUIRE_RELEASE_UPDATE_KEY=ON.
-include(cmake/picos_update_key.cmake)
-set(PICOS_UPDATE_PUBKEY_PEM "${PICOS_TEST_UPDATE_PUBKEY}" CACHE FILEPATH
+# Release builds pass the real key and PICODECK_REQUIRE_RELEASE_UPDATE_KEY=ON.
+include(cmake/picodeck_update_key.cmake)
+set(PICODECK_UPDATE_PUBKEY_PEM "${PICODECK_TEST_UPDATE_PUBKEY}" CACHE FILEPATH
     "P-256 public key (PEM) that OTA images must be signed with")
-option(PICOS_REQUIRE_RELEASE_UPDATE_KEY
+option(PICODECK_REQUIRE_RELEASE_UPDATE_KEY
        "Refuse to build with the TEST update key (release builds)" OFF)
-file(READ "${PICOS_UPDATE_PUBKEY_PEM}" _picos_key_text)
-file(READ "${PICOS_TEST_UPDATE_PUBKEY}" _picos_test_key_text)
-if(_picos_key_text STREQUAL _picos_test_key_text)
-    if(PICOS_REQUIRE_RELEASE_UPDATE_KEY)
-        message(FATAL_ERROR "PICOS_REQUIRE_RELEASE_UPDATE_KEY is ON but "
-            "PICOS_UPDATE_PUBKEY_PEM is the TEST key (${PICOS_UPDATE_PUBKEY_PEM})")
+file(READ "${PICODECK_UPDATE_PUBKEY_PEM}" _picodeck_key_text)
+file(READ "${PICODECK_TEST_UPDATE_PUBKEY}" _picodeck_test_key_text)
+if(_picodeck_key_text STREQUAL _picodeck_test_key_text)
+    if(PICODECK_REQUIRE_RELEASE_UPDATE_KEY)
+        message(FATAL_ERROR "PICODECK_REQUIRE_RELEASE_UPDATE_KEY is ON but "
+            "PICODECK_UPDATE_PUBKEY_PEM is the TEST key (${PICODECK_UPDATE_PUBKEY_PEM})")
     endif()
     message(STATUS "OTA update key: TEST key (dev build — its private key is public)")
 else()
-    message(STATUS "OTA update key: ${PICOS_UPDATE_PUBKEY_PEM}")
+    message(STATUS "OTA update key: ${PICODECK_UPDATE_PUBKEY_PEM}")
 endif()
-picos_generate_update_pubkey(${CMAKE_BINARY_DIR}/generated/ota_pubkey.c
-                             ${PICOS_UPDATE_PUBKEY_PEM})
+picodeck_generate_update_pubkey(${CMAKE_BINARY_DIR}/generated/ota_pubkey.c
+                             ${PICODECK_UPDATE_PUBKEY_PEM})
 
 # ── Lua 5.4 ──────────────────────────────────────────────────────────────────
 # Lua is added as a git submodule or downloaded into third_party/lua-5.4/
@@ -103,10 +103,10 @@ target_include_directories(lua PUBLIC ${LUA_DIR})
 
 # Lua config (shared with the simulator). luaconf.h is patched so these
 # -D values actually take effect; PUBLIC so the bridge sees the same types.
-include(${CMAKE_SOURCE_DIR}/cmake/picos_lua.cmake)
-picos_patch_luaconf(${LUA_DIR})
-target_compile_definitions(lua PUBLIC ${PICOS_LUA_DEFINITIONS})
-target_sources(lua PRIVATE ${PICOS_LUA_SOURCES})  # picos_lua_sprintf (float formatting)
+include(${CMAKE_SOURCE_DIR}/cmake/picodeck_lua.cmake)
+picodeck_patch_luaconf(${LUA_DIR})
+target_compile_definitions(lua PUBLIC ${PICODECK_LUA_DEFINITIONS})
+target_sources(lua PRIVATE ${PICODECK_LUA_SOURCES})  # picodeck_lua_sprintf (float formatting)
 # No signals, no OS-level stuff
 target_compile_options(lua PRIVATE -Os)
 
@@ -143,8 +143,8 @@ set(GIF_DIR ${CMAKE_SOURCE_DIR}/third_party/AnimatedGIF)
 
 # PNGdec's zlib with its unaligned word copies made alignment-safe (patched
 # copies in the build tree; the submodule stays pristine). See the module.
-include(${CMAKE_SOURCE_DIR}/cmake/picos_pngdec.cmake)
-picos_pngdec_sources(PICOS_PNGDEC_SOURCES ${PNGDEC_DIR}/src)
+include(${CMAKE_SOURCE_DIR}/cmake/picodeck_pngdec.cmake)
+picodeck_pngdec_sources(PICODECK_PNGDEC_SOURCES ${PNGDEC_DIR}/src)
 
 # JPEGDEC as separate lib with -O2 for faster decode loops (IDCT, Huffman VLC,
 # pixel conversion).  Code grows from ~17KB (-Os) to ~24KB (-O2), but it already
@@ -159,7 +159,7 @@ add_library(image_decoders STATIC
     ${TGX_DIR}/src/Color.cpp
     ${TGX_DIR}/src/Fonts.cpp
     ${TGX_DIR}/src/Renderer3D.cpp
-    ${PICOS_PNGDEC_SOURCES}
+    ${PICODECK_PNGDEC_SOURCES}
     ${GIF_DIR}/src/AnimatedGIF.cpp
 )
 
@@ -234,7 +234,7 @@ pico_generate_pio_header(pio_psram_lib ${PIO_PSRAM_DIR}/psram_spi.pio)
 
 # ── Main firmware target ───────────────────────────────────────────────────────
 
-add_executable(picocalc_os
+add_executable(picodeck
     src/main.c
     src/dev_commands.c
     src/dev_ops.c
@@ -337,7 +337,7 @@ add_executable(picocalc_os
     third_party/miniz/miniz_zip.c
 )
 
-target_include_directories(picocalc_os PRIVATE
+target_include_directories(picodeck PRIVATE
     src/usb/
     src/
     src/os/
@@ -352,7 +352,7 @@ target_include_directories(picocalc_os PRIVATE
     data/
 )
 
-target_link_libraries(picocalc_os
+target_link_libraries(picodeck
     pico_stdlib
     pico_multicore
     hardware_spi
@@ -391,7 +391,7 @@ endif()
 # ── miniz compile options (decompression only, no stdio, PSRAM allocator) ────
 # Redirect miniz heap allocations to umm_malloc (8MB PSRAM) instead of
 # standard malloc (~28KB SRAM) so ZIP extraction can handle real app sizes.
-# Force-include miniz_picos.h which defines MZ_MALLOC/MZ_FREE/MZ_REALLOC
+# Force-include miniz_picodeck.h which defines MZ_MALLOC/MZ_FREE/MZ_REALLOC
 # before miniz_common.h's #ifndef guards.
 set_source_files_properties(
     third_party/miniz/miniz.c
@@ -399,14 +399,14 @@ set_source_files_properties(
     third_party/miniz/miniz_tdef.c
     third_party/miniz/miniz_zip.c
     PROPERTIES COMPILE_FLAGS
-    "-DMINIZ_NO_STDIO -DMINIZ_NO_ARCHIVE_WRITING_APIS -DMINIZ_NO_ZLIB_COMPATIBLE_NAMES -include ${CMAKE_SOURCE_DIR}/third_party/miniz_picos.h"
+    "-DMINIZ_NO_STDIO -DMINIZ_NO_ARCHIVE_WRITING_APIS -DMINIZ_NO_ZLIB_COMPATIBLE_NAMES -include ${CMAKE_SOURCE_DIR}/third_party/miniz_picodeck.h"
 )
 
 # ── PIO PSRAM Bulk Transfer (improved driver with 16-bit counters) ─────────────
 # Supports up to 8187 bytes per transaction (vs 27 bytes in polpo library).
 # Uses a custom PIO program in src/drivers/pio_psram_bulk.pio.
-pico_generate_pio_header(picocalc_os ${CMAKE_SOURCE_DIR}/src/drivers/pio_psram_bulk.pio)
-pico_generate_pio_header(picocalc_os ${CMAKE_SOURCE_DIR}/src/drivers/pio_psram_qpi.pio)
+pico_generate_pio_header(picodeck ${CMAKE_SOURCE_DIR}/src/drivers/pio_psram_bulk.pio)
+pico_generate_pio_header(picodeck ${CMAKE_SOURCE_DIR}/src/drivers/pio_psram_qpi.pio)
 
 # Rename .text sections in libmad_ram objects to .time_critical.libmad
 # so the SDK linker script places them in SRAM (the default RP2350 linker
@@ -424,12 +424,12 @@ add_custom_command(TARGET libmad_ram POST_BUILD
 if(PICO_BOARD STREQUAL "pimoroni_pico_plus2_w_rp2350" OR
    PICO_BOARD STREQUAL "pico_w" OR
    PICO_BOARD STREQUAL "pico2_w")
-    target_link_libraries(picocalc_os 
+    target_link_libraries(picodeck 
         pico_cyw43_arch_none
         pico_mbedtls
         pico_rand
     )
-    target_compile_definitions(picocalc_os PRIVATE 
+    target_compile_definitions(picodeck PRIVATE 
         WIFI_ENABLED=1
         MG_ENABLE_TCPIP=1
         MG_ENABLE_DRIVER_PICO_W=1
@@ -442,17 +442,17 @@ else()
 endif()
 
 # Enable USB serial for stdio (printf goes to USB-C serial — handy for debug)
-pico_enable_stdio_usb(picocalc_os 1)
-pico_enable_stdio_uart(picocalc_os 1)
+pico_enable_stdio_usb(picodeck 1)
+pico_enable_stdio_uart(picodeck 1)
 
-pico_generate_pio_header(picocalc_os ${CMAKE_CURRENT_SOURCE_DIR}/src/drivers/lcd_spi.pio)
+pico_generate_pio_header(picodeck ${CMAKE_CURRENT_SOURCE_DIR}/src/drivers/lcd_spi.pio)
 
 # Generate UF2, map, and disassembly
-pico_add_extra_outputs(picocalc_os)
+pico_add_extra_outputs(picodeck)
 
 # ── Compiler flags ────────────────────────────────────────────────────────────
 
-target_compile_options(picocalc_os PRIVATE
+target_compile_options(picodeck PRIVATE
     -Wall -Wextra
     -Wno-unused-parameter
     -Os                    # Optimise for size (Lua + framebuffer is large)
@@ -461,8 +461,8 @@ target_compile_options(picocalc_os PRIVATE
 # Put the framebuffer in PSRAM section (only effective on Pimoroni boards
 # with a linker script that defines .psram → PSRAM address space)
 # On standard Pico 2 the attribute is silently ignored and FB goes in SRAM.
-target_compile_definitions(picocalc_os PRIVATE
-    PICOS_VERSION="${PICOS_VERSION}"
+target_compile_definitions(picodeck PRIVATE
+    PICODECK_VERSION="${PICODECK_VERSION}"
     PICO_RP2350=1
     PICO_MALLOC_PANIC=0   # Return NULL on SRAM OOM instead of HardFault
     PICO_STACK_SIZE=4096  # Reduced to 4KB to fit in SCRATCH_X/Y
@@ -483,7 +483,7 @@ target_compile_definitions(picocalc_os PRIVATE
 
 # ── Print firmware size after build ───────────────────────────────────────────
 
-add_custom_command(TARGET picocalc_os POST_BUILD
-    COMMAND arm-none-eabi-size $<TARGET_FILE:picocalc_os>
+add_custom_command(TARGET picodeck POST_BUILD
+    COMMAND arm-none-eabi-size $<TARGET_FILE:picodeck>
     COMMENT "Firmware size:"
 )

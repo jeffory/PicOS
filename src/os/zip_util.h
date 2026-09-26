@@ -1,4 +1,4 @@
-// zip_util.h — shared hardened ZIP engine for PicOS.
+// zip_util.h — shared hardened ZIP engine for PicoDeck.
 //
 // The single miniz consumer for the OS. Everything that reads ZIP archives
 // (Lua bridge, native ABI, future app bundling) goes through this module.

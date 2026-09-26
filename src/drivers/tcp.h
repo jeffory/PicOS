@@ -6,7 +6,7 @@
 #include "hardware/sync.h"
 
 // =============================================================================
-// TCP client over Mongoose for PicOS
+// TCP client over Mongoose for PicoDeck
 //
 // Non-blocking, cross-core: Core 0 (apps) owns the slot and requests work
 // through the wifi.c request ring; Core 1 owns the Mongoose connection.

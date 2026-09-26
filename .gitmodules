@@ -18,8 +18,8 @@
 	url = https://github.com/vindar/tgx.git
 [submodule "apps/gbc/RP2350-GBC"]
 	path = apps/gbc/RP2350-GBC
-	url = https://github.com/jeffory/RP2350-GBC.git
-	branch = picos
+	url = https://github.com/PicoDeck/RP2350-GBC.git
+	branch = picodeck
 [submodule "apps/ssh/wolfssh"]
 	path = apps/ssh/wolfssh
 	url = https://github.com/wolfSSL/wolfssh.git

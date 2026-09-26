@@ -1,4 +1,4 @@
--- Wikipedia App for PicOS
+-- Wikipedia App for PicoDeck
 -- Fetches from Wikipedia TextExtracts API
 
 local pc    = picocalc
@@ -155,7 +155,7 @@ local function fetch_json(url_path, callback)
     end)
 
     local headers = {
-        ["User-Agent"] = "PicOS-Wikipedia/1.0 (ClockworkPi PicoCalc)",
+        ["User-Agent"] = "PicoDeck-Wikipedia/1.0 (ClockworkPi PicoCalc)",
         ["Accept"] = "application/json",
     }
 
@@ -242,7 +242,7 @@ local function load_featured()
     loading_msg = "Loading Featured..."
     
     -- Wikipedia REST API for featured is usually HTTPS only.
-    -- We'll use Random articles as "Featured" for PicOS (HTTP compatibility)
+    -- We'll use Random articles as "Featured" for PicoDeck (HTTP compatibility)
     local path = "/w/api.php?action=query&list=random&rnnamespace=0&rnlimit=15&format=json&origin=*"
     fetch_json(path, function(json)
         featured_articles = json_extract_list(json, "random")

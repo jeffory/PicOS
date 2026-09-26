@@ -379,7 +379,7 @@ cleanup_ec:
 // --- File hashing ------------------------------------------------------------
 
 #include "../drivers/sdcard.h"
-#ifndef PICOS_SIMULATOR
+#ifndef PICODECK_SIMULATOR
 #include "hardware/watchdog.h"
 #endif
 
@@ -396,7 +396,7 @@ bool crypto_sha256_file(const char *path, uint8_t out_hash[32]) {
     int n;
     while ((n = sdcard_fread(f, buf, sizeof(buf))) > 0) {
         mbedtls_sha256_update(&ctx, buf, (size_t)n);
-#ifndef PICOS_SIMULATOR
+#ifndef PICODECK_SIMULATOR
         watchdog_update();
 #endif
     }

@@ -251,7 +251,7 @@ class TestConfigPersistence:
     def test_config_survives_app_restart(self, simulator):
         first = run_lua_app(simulator, "sys_test", timeout=15)
         first.assert_all_passed(SYS_CASES)
-        cfg_file = (Path(simulator.sd_card_path) / "data" / "com.picos.sys_test"
+        cfg_file = (Path(simulator.sd_card_path) / "data" / "net.picodeck.sys_test"
                     / "config.json")
         saved = json.loads(cfg_file.read_text())
         assert saved.get("e2e_runs") == "1", saved

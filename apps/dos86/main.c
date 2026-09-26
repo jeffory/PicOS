@@ -177,7 +177,7 @@ static int show_disk_selector(const PicoCalcAPI *api) {
 
 /* ---- Entry point ---- */
 
-void picos_main(const PicoCalcAPI *api,
+void picodeck_main(const PicoCalcAPI *api,
                 const char *app_dir,
                 const char *app_id,
                 const char *app_name)

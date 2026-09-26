@@ -10,7 +10,7 @@ These variables are automatically set when your app is launched:
 |----------|------|-------------|
 | `APP_DIR` | string | Absolute path to your app's directory (e.g., `"/apps/hello"`) |
 | `APP_NAME` | string | Name of your app as defined in `app.json` |
-| `APP_ID` | string | Reverse-DNS app identifier from `app.json` (e.g., `"com.picos.hello"`) |
+| `APP_ID` | string | Reverse-DNS app identifier from `app.json` (e.g., `"net.picodeck.hello"`) |
 | `APP_REQUIREMENTS` | table | Granted requirements as boolean fields (see [App Requirements](#app-requirements)) |
 
 These globals are **copies for your convenience**. The OS enforces the sandbox
@@ -39,7 +39,7 @@ Apps can request elevated requirements via the `requirements` array in `app.json
 | `audio` | App needs audio output |
 | `clipboard` | Reserved for future use |
 | `sysconfig` | `picocalc.sysconfig` (system-wide config) is registered; without it `picocalc.sysconfig` is nil. `get("wifi_pass")` always returns nil (write-only) |
-| `system-update` | `picocalc.sys.applyUpdate` is registered — only for OS apps (id `com.picos.updater` / `com.picos.store`, or an app under `/system/`) |
+| `system-update` | `picocalc.sys.applyUpdate` is registered — only for OS apps (id `net.picodeck.updater` / `net.picodeck.store`, or an app under `/system/`) |
 
 ### Checking Requirements in Lua
 

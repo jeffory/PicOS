@@ -1,4 +1,4 @@
--- ssh_input.lua — Map PicOS keyboard input to SSH/VT100 escape sequences
+-- ssh_input.lua — Map PicoDeck keyboard input to SSH/VT100 escape sequences
 
 local input_map = {}
 

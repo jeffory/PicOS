@@ -1,4 +1,4 @@
-// zip_util.c — shared hardened ZIP engine for PicOS.
+// zip_util.c — shared hardened ZIP engine for PicoDeck.
 // See zip_util.h for design notes. This is the single miniz consumer in the
 // OS; the Lua bridge (lua_bridge_zip.c) and the native ABI (main.c) are thin
 // wrappers over it.
@@ -29,13 +29,13 @@ static void zip_set_err(char err[ZIP_ERR_MAX], const char *fmt, ...) {
 // miniz m_pRead callback: stream the archive straight from the SD card.
 // ── Heap plumbing ────────────────────────────────────────────────────────────
 // miniz_common.h defines MZ_MALLOC unconditionally (no #ifndef guard), which
-// silently overrides the build's attempted umm redirect in miniz_picos.h —
+// silently overrides the build's attempted umm redirect in miniz_picodeck.h —
 // miniz's DEFAULT allocator is therefore newlib malloc on the ~28KB SRAM
 // heap, far too small for the ~11KB inflate state plus I/O buffers. Every
 // archive gets explicit allocators instead: umm_malloc (8MB PSRAM) on
 // firmware, plain malloc on the host/simulator.
 
-#ifndef PICOS_SIMULATOR
+#ifndef PICODECK_SIMULATOR
 #include "umm_malloc.h"
 #define ZIP_HEAP_ALLOC(n)      umm_malloc(n)
 #define ZIP_HEAP_FREE(p)       umm_free(p)
@@ -168,7 +168,7 @@ int zip_reader_locate(zip_reader_t *zr, const char *name) {
 // host stack hid it completely (stored entries worked, which is what made
 // the sim tests green). Everything below therefore uses the iterator API,
 // whose state — decompressor included — is heap-allocated through the
-// archive's allocator (umm_malloc/PSRAM on firmware via miniz_picos.h).
+// archive's allocator (umm_malloc/PSRAM on firmware via miniz_picodeck.h).
 
 // Decompress entry idx into dst (which must hold st.m_uncomp_size bytes).
 // Returns true only when the entry decompressed completely with a good CRC

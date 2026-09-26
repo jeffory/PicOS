@@ -19,7 +19,7 @@ from typing import Iterable, Optional, Union
 
 import pytest
 
-from picos_simulator import PicosSimulator
+from picodeck_simulator import PicodeckSimulator
 
 E2E_DIR = Path(__file__).resolve().parent
 PROJECT_ROOT = E2E_DIR.parent.parent
@@ -83,12 +83,12 @@ def build_sd_card(dest: Path, extra: Iterable[SdExtra] = (),
 # ── Simulator ───────────────────────────────────────────────────────────────
 
 
-def new_simulator(config, binary, sd_path, crash_log, **kwargs) -> PicosSimulator:
-    """A started PicosSimulator with the suite's defaults: headless unless
+def new_simulator(config, binary, sd_path, crash_log, **kwargs) -> PicodeckSimulator:
+    """A started PicodeckSimulator with the suite's defaults: headless unless
     --show-window, --test-mode (error screens return at once), no UNIX
     socket, crash log at `crash_log`."""
     kwargs.setdefault("test_mode", True)
-    sim = PicosSimulator(
+    sim = PicodeckSimulator(
         binary_path=str(binary),
         sd_card_path=str(sd_path),
         headless=not config.getoption("--show-window"),
@@ -100,7 +100,7 @@ def new_simulator(config, binary, sd_path, crash_log, **kwargs) -> PicosSimulato
     return sim
 
 
-def stop_and_check(sim: PicosSimulator):
+def stop_and_check(sim: PicodeckSimulator):
     """Stop `sim` and fail if it had crashed or a sanitizer reported."""
     sim.stop()
     problems = sim.health_problems()
@@ -127,7 +127,7 @@ def stage_lua_app(sd: Path, name: str, code: str, requirements=(),
         "name": name,
         "description": "E2E inline test app",
         "version": "1.0",
-        "author": "PicOS E2E",
+        "author": "PicoDeck E2E",
         "requirements": list(requirements),
     }
     (app_dir / "app.json").write_text(json.dumps(manifest, indent=2))
@@ -420,7 +420,7 @@ def write_mod(path: Path):
     pattern, no sample data."""
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
-    header = b"picos test".ljust(20, b"\x00")
+    header = b"picodeck test".ljust(20, b"\x00")
     # 31 sample headers: name, length (words), finetune, volume, loop
     # start, loop length (1 word = no loop).
     sample = b"\x00" * 22 + b"\x00\x00" + b"\x00" + b"\x40" + b"\x00\x00" + b"\x00\x01"

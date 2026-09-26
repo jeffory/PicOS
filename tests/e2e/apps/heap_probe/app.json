@@ -1,7 +1,7 @@
 {
-    "id": "com.picos.heap_probe",
+    "id": "net.picodeck.heap_probe",
     "name": "Heap Probe",
     "description": "E2E fixture: holds ~2 MB of Lua heap until 'q'",
     "version": "1.0",
-    "author": "PicOS E2E"
+    "author": "PicoDeck E2E"
 }

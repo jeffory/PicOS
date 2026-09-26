@@ -1,5 +1,5 @@
 // Float formatting for Lua that does not depend on the C library.
-// See lua_numfmt.h for why; cmake/picos_lua.cmake routes Lua's l_sprintf here.
+// See lua_numfmt.h for why; cmake/picodeck_lua.cmake routes Lua's l_sprintf here.
 //
 // Method: a float32 is m * 2^e with m < 2^24 and -149 <= e <= 104, so its
 // exact decimal value has at most 39 integer and 149 fraction digits. It is
@@ -10,14 +10,14 @@
 
 #include "lua_numfmt.h"
 
-// Lua's l_sprintf reaches picos_lua_sprintf only through the luaconf.h patch
-// (cmake/picos_lua.cmake).  If a build defines PICOS_LUA_SPRINTF but compiles
+// Lua's l_sprintf reaches picodeck_lua_sprintf only through the luaconf.h patch
+// (cmake/picodeck_lua.cmake).  If a build defines PICODECK_LUA_SPRINTF but compiles
 // against an unpatched luaconf.h, floats silently go through the C library
 // again (pico_printf on the firmware): fail the build instead.
-#if defined(PICOS_LUA_SPRINTF)
+#if defined(PICODECK_LUA_SPRINTF)
 #include "luaconf.h"
-#if !defined(PICOS_LUA_SPRINTF_PATCHED)
-#error "PICOS_LUA_SPRINTF is set but luaconf.h lacks the PicOS l_sprintf patch (run cmake: picos_patch_luaconf)"
+#if !defined(PICODECK_LUA_SPRINTF_PATCHED)
+#error "PICODECK_LUA_SPRINTF is set but luaconf.h lacks the PicoDeck l_sprintf patch (run cmake: picodeck_patch_luaconf)"
 #endif
 #endif
 
@@ -417,7 +417,7 @@ static bool is_float_conv(char c) {
   return c && strchr("aAeEfFgG", c) != NULL;
 }
 
-int picos_numfmt_float(char *buf, size_t size, const char *spec, float v) {
+int picodeck_numfmt_float(char *buf, size_t size, const char *spec, float v) {
   numfmt_spec_t sp;
   const char *end = parse_spec(spec, &sp);
   if (!end || *end || !is_float_conv(sp.conv))
@@ -437,7 +437,7 @@ static void out_literal(numfmt_out_t *o, const char *s, const char *end) {
   }
 }
 
-int picos_lua_sprintf(char *buf, size_t size, const char *fmt, ...) {
+int picodeck_lua_sprintf(char *buf, size_t size, const char *fmt, ...) {
   va_list ap;
   va_start(ap, fmt);
   const char *pct = NULL;

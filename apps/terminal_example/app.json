@@ -1,11 +1,11 @@
 {
-    "id": "com.picos.terminal_example",
+    "id": "net.picodeck.terminal_example",
     "name": "Terminal Example",
     "description": "Demonstrates the terminal emulator SDK with VT100 escape sequences",
     "version": "1.0",
-    "author": "PicOS",
+    "author": "PicoDeck",
     "requirements": ["sysconfig"],
     "category": "demos",
-    "repo": "jeffory/picos-apps",
+    "repo": "PicoDeck/picodeck",
     "min_firmware": "1.0.0"
 }

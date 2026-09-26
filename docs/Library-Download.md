@@ -47,7 +47,7 @@ end
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
 | `onProgress` | function | (none) | `function(received, total)` called as chunks arrive and once more on completion. `total` is `0` when unknown (no `Content-Length` header). Errors raised inside the callback are swallowed (`pcall`). |
-| `headers` | table | (none) | Extra request headers, merged over the default `User-Agent: PicOS-download/1.0`. |
+| `headers` | table | (none) | Extra request headers, merged over the default `User-Agent: PicoDeck-download/1.0`. |
 | `timeoutMs` | number | `120000` | Whole-transfer deadline in milliseconds, spanning all redirect hops. |
 | `maxRedirects` | number | `5` | How many 3xx redirects to follow before giving up. |
 

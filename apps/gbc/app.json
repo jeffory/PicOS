@@ -1,15 +1,15 @@
 {
-    "id": "com.picos.gbc",
+    "id": "net.picodeck.gbc",
     "name": "GBC Emulator",
     "description": "Game Boy Color emulator - play GB and GBC games",
     "version": "0.1",
-    "author": "PicOS",
+    "author": "PicoDeck",
     "system_clock_khz": 300000,
     "requirements": [
         "filesystem",
         "audio"
     ],
     "category": "emulators",
-    "repo": "jeffory/picos-apps",
+    "repo": "PicoDeck/picodeck",
     "min_firmware": "1.0.0"
 }

@@ -2,5 +2,5 @@
 # Any other skip fails the run: a skip hides a test that silently stopped running.
 # Tests marked @pytest.mark.hardware are always allowed.
 
-# Needs an external C-Dogs checkout (PICOS_CDOGS_DIR, jeffory/picos-cdogs).
+# Needs an external C-Dogs checkout (PICODECK_CDOGS_DIR, PicoDeck/cdogs).
 test_cdogs_memory.py::*

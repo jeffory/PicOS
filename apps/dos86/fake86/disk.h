@@ -1,5 +1,5 @@
 /*
-  DOS86 — BIOS INT 13h disk services for fake86 on PicOS.
+  DOS86 — BIOS INT 13h disk services for fake86 on PicoDeck.
   Geometry auto-detected from image size. Read/write via backend_disk_*.
 */
 

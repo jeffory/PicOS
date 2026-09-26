@@ -22,7 +22,7 @@
 #define WRITE_BUF_SIZE (512 * 1024)
 #define READ_BUF_INIT 4096
 #define READ_BUF_MAX (256 * 1024)  // 256KB max for large base64 payloads
-#define DEFAULT_UNIX_SOCK_PATH "./picos_control"
+#define DEFAULT_UNIX_SOCK_PATH "./picodeck_control"
 #define DEFAULT_TCP_PORT 7878
 
 typedef struct {
@@ -266,14 +266,14 @@ void sim_socket_init(int tcp_port, const char *instance_id, const char *unix_pat
     s_max_fd = -1;
 
     // UNIX socket path: explicit override, "none", or derived from the
-    // instance ID (default ./picos_control in the cwd).
+    // instance ID (default ./picodeck_control in the cwd).
     if (unix_path && strcmp(unix_path, "none") == 0) {
         s_unix_sock_path[0] = '\0';
     } else if (unix_path && unix_path[0]) {
         snprintf(s_unix_sock_path, sizeof(s_unix_sock_path), "%s", unix_path);
     } else if (instance_id && instance_id[0]) {
         snprintf(s_unix_sock_path, sizeof(s_unix_sock_path),
-                 "./picos_control_%s", instance_id);
+                 "./picodeck_control_%s", instance_id);
     } else {
         snprintf(s_unix_sock_path, sizeof(s_unix_sock_path), "%s",
                  DEFAULT_UNIX_SOCK_PATH);

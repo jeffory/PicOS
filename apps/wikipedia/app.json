@@ -1,13 +1,13 @@
 {
-    "id": "com.picos.wikipedia",
+    "id": "net.picodeck.wikipedia",
     "name": "Wikipedia",
-    "author": "PicOS",
-    "description": "Encyclopedia reader for PicOS",
+    "author": "PicoDeck",
+    "description": "Encyclopedia reader for PicoDeck",
     "version": "1.0.0",
     "requirements": [
         "http"
     ],
     "category": "network",
-    "repo": "jeffory/picos-apps",
+    "repo": "PicoDeck/picodeck",
     "min_firmware": "1.0.0"
 }

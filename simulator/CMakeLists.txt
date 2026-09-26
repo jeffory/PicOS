@@ -1,9 +1,9 @@
 cmake_minimum_required(VERSION 3.13)
 
-# PicOS PC Simulator
-# Build with: cmake -DPICOS_SIMULATOR=ON ..
+# PicoDeck PC Simulator
+# Build with: cmake -DPICODECK_SIMULATOR=ON ..
 
-project(picos_simulator C CXX)
+project(picodeck_simulator C CXX)
 set(CMAKE_C_STANDARD 11)
 set(CMAKE_CXX_STANDARD 17)
 
@@ -14,11 +14,11 @@ option(SIM_FIRMWARE_NET
        "Simulator runs the firmware network stack (wifi.c/http.c/tcp.c on Mongoose/POSIX)"
        OFF)
 if(SIM_FIRMWARE_NET)
-    add_compile_definitions(PICOS_SIM_FIRMWARE_NET=1)
+    add_compile_definitions(PICODECK_SIM_FIRMWARE_NET=1)
 endif()
 
-# Parent directory (PicOS root)
-set(PICOS_ROOT ${CMAKE_CURRENT_SOURCE_DIR}/..)
+# Parent directory (PicoDeck root)
+set(PICODECK_ROOT ${CMAKE_CURRENT_SOURCE_DIR}/..)
 
 # Find required packages
 if(EMSCRIPTEN)
@@ -43,20 +43,20 @@ endif()
 # Version from git (same as main project)
 execute_process(
     COMMAND git describe --tags --always
-    WORKING_DIRECTORY ${PICOS_ROOT}
+    WORKING_DIRECTORY ${PICODECK_ROOT}
     OUTPUT_VARIABLE GIT_VERSION
     OUTPUT_STRIP_TRAILING_WHITESPACE
     ERROR_QUIET
 )
 if(GIT_VERSION)
-    string(REGEX REPLACE "^v" "" PICOS_VERSION "${GIT_VERSION}")
+    string(REGEX REPLACE "^v" "" PICODECK_VERSION "${GIT_VERSION}")
 else()
-    set(PICOS_VERSION "0.0.0-sim")
+    set(PICODECK_VERSION "0.0.0-sim")
 endif()
-message(STATUS "PicOS Simulator version: ${PICOS_VERSION}")
+message(STATUS "PicoDeck Simulator version: ${PICODECK_VERSION}")
 
 # ── Lua 5.4 ─────────────────────────────────────────────────────────────────
-set(LUA_DIR ${PICOS_ROOT}/third_party/lua-5.4/src)
+set(LUA_DIR ${PICODECK_ROOT}/third_party/lua-5.4/src)
 
 set(LUA_SOURCES
     ${LUA_DIR}/lapi.c
@@ -91,13 +91,13 @@ set(LUA_SOURCES
 
 add_library(lua_sim STATIC ${LUA_SOURCES})
 target_include_directories(lua_sim PUBLIC ${LUA_DIR})
-# Same Lua config as the firmware (cmake/picos_lua.cmake) so the simulator VM
+# Same Lua config as the firmware (cmake/picodeck_lua.cmake) so the simulator VM
 # has identical numeric semantics and stack limit. PUBLIC so the bridge agrees.
-include(${PICOS_ROOT}/cmake/picos_lua.cmake)
-picos_patch_luaconf(${LUA_DIR})
-target_compile_definitions(lua_sim PUBLIC ${PICOS_LUA_DEFINITIONS})
-target_sources(lua_sim PRIVATE ${PICOS_LUA_SOURCES})  # picos_lua_sprintf (float formatting)
-target_compile_definitions(lua_sim PRIVATE PICOS_SIMULATOR=1)
+include(${PICODECK_ROOT}/cmake/picodeck_lua.cmake)
+picodeck_patch_luaconf(${LUA_DIR})
+target_compile_definitions(lua_sim PUBLIC ${PICODECK_LUA_DEFINITIONS})
+target_sources(lua_sim PRIVATE ${PICODECK_LUA_SOURCES})  # picodeck_lua_sprintf (float formatting)
+target_compile_definitions(lua_sim PRIVATE PICODECK_SIMULATOR=1)
 target_compile_options(lua_sim PRIVATE -O2 -Wall)
 # The string hash seed comes from sim_test_control.c (sim_lua_seed.h): fixed
 # under --test-mode so pairs() order over string keys repeats run to run
@@ -106,7 +106,7 @@ set_source_files_properties(${LUA_DIR}/lstate.c PROPERTIES
     COMPILE_OPTIONS "-include;${CMAKE_CURRENT_SOURCE_DIR}/sim_lua_seed.h")
 
 # ── libmad (MP3 decoder) ──────────────────────────────────────────────────
-set(LIBMAD_DIR ${PICOS_ROOT}/third_party/libmad)
+set(LIBMAD_DIR ${PICODECK_ROOT}/third_party/libmad)
 
 add_library(libmad_sim STATIC
     ${LIBMAD_DIR}/bit.c
@@ -134,30 +134,30 @@ target_compile_definitions(libmad_sim PRIVATE
 target_compile_options(libmad_sim PRIVATE -O2 -Wall -Wno-unused-parameter -Wno-unused-result)
 
 # ── Image Decoders (same as main) ───────────────────────────────────────────
-set(TGX_DIR ${PICOS_ROOT}/third_party/tgx)
-set(JPEGDEC_DIR ${PICOS_ROOT}/third_party/JPEGDEC)
-set(PNGDEC_DIR ${PICOS_ROOT}/third_party/PNGdec)
-set(GIF_DIR ${PICOS_ROOT}/third_party/AnimatedGIF)
+set(TGX_DIR ${PICODECK_ROOT}/third_party/tgx)
+set(JPEGDEC_DIR ${PICODECK_ROOT}/third_party/JPEGDEC)
+set(PNGDEC_DIR ${PICODECK_ROOT}/third_party/PNGdec)
+set(GIF_DIR ${PICODECK_ROOT}/third_party/AnimatedGIF)
 
 # PNGdec's zlib with its unaligned word copies made alignment-safe (patched
 # copies in the build tree; the submodule stays pristine). Shared with the
 # firmware build — see the module for why.
-include(${PICOS_ROOT}/cmake/picos_pngdec.cmake)
-picos_pngdec_sources(PICOS_PNGDEC_SOURCES ${PNGDEC_DIR}/src)
+include(${PICODECK_ROOT}/cmake/picodeck_pngdec.cmake)
+picodeck_pngdec_sources(PICODECK_PNGDEC_SOURCES ${PNGDEC_DIR}/src)
 
 add_library(image_decoders_sim STATIC
     ${TGX_DIR}/src/Color.cpp
     ${TGX_DIR}/src/Fonts.cpp
     ${TGX_DIR}/src/Renderer3D.cpp
     ${JPEGDEC_DIR}/src/JPEGDEC.cpp
-    ${PICOS_PNGDEC_SOURCES}
+    ${PICODECK_PNGDEC_SOURCES}
     ${GIF_DIR}/src/AnimatedGIF.cpp
 )
 
 # PNGdec bundles its own zlib, whose crc32() clashes with Unicorn's crc32c.c.
 # Rename it on every PNGdec source so the two never meet at link time.
 set_source_files_properties(
-    ${PICOS_PNGDEC_SOURCES}
+    ${PICODECK_PNGDEC_SOURCES}
     PROPERTIES COMPILE_DEFINITIONS "crc32=pngdec_crc32"
 )
 
@@ -167,7 +167,7 @@ target_include_directories(image_decoders_sim PUBLIC
     ${PNGDEC_DIR}/src
     ${GIF_DIR}/src
 )
-target_compile_definitions(image_decoders_sim PUBLIC __LINUX__=1 PICOS_SIMULATOR=1)
+target_compile_definitions(image_decoders_sim PUBLIC __LINUX__=1 PICODECK_SIMULATOR=1)
 target_compile_options(image_decoders_sim PRIVATE -O2)
 
 # ── Simulator HAL ───────────────────────────────────────────────────────────
@@ -191,11 +191,11 @@ target_include_directories(sim_hal PUBLIC
     ${CMAKE_CURRENT_SOURCE_DIR}
     ${CMAKE_CURRENT_SOURCE_DIR}/hal
     ${CMAKE_CURRENT_SOURCE_DIR}/stubs
-    ${PICOS_ROOT}/src
-    ${PICOS_ROOT}/src/os
-    ${PICOS_ROOT}/src/fonts
-    ${PICOS_ROOT}/src/drivers
-    ${PICOS_ROOT}/third_party/umm_malloc/src
+    ${PICODECK_ROOT}/src
+    ${PICODECK_ROOT}/src/os
+    ${PICODECK_ROOT}/src/fonts
+    ${PICODECK_ROOT}/src/drivers
+    ${PICODECK_ROOT}/third_party/umm_malloc/src
     ${LIBMAD_DIR}
 )
 
@@ -206,8 +206,8 @@ target_link_libraries(sim_hal PUBLIC
 )
 
 target_compile_definitions(sim_hal PUBLIC
-    PICOS_SIMULATOR=1
-    PICOS_VERSION="${PICOS_VERSION}"
+    PICODECK_SIMULATOR=1
+    PICODECK_VERSION="${PICODECK_VERSION}"
     DISPLAY_SCALE=3
     SIMULATOR_BUILD=1
 )
@@ -221,7 +221,7 @@ target_compile_definitions(sim_hal PUBLIC
 # built for the host (MG_ARCH_UNIX: BSD sockets, no built-in TCP/IP stack, no
 # TLS), with Core 0 = the main thread and Core 1 = the sim's core1_thread.
 # The host shims live in simulator/net/ (see sim_net_shim.c); the firmware
-# files carry only PICOS_SIM_FIRMWARE_NET guards. This is the build that can
+# files carry only PICODECK_SIM_FIRMWARE_NET guards. This is the build that can
 # reproduce the Core 0/Core 1 close races (specs/test-audit-2026-09-24.md
 # R13); tests/e2e/test_network_firmware.py runs only against it.
 if(EMSCRIPTEN)
@@ -230,10 +230,10 @@ if(EMSCRIPTEN)
     add_library(sim_network STATIC sim_wifi.c web/web_net_stubs.c)
 elseif(SIM_FIRMWARE_NET)
     add_library(sim_network STATIC
-        ${PICOS_ROOT}/src/drivers/wifi.c
-        ${PICOS_ROOT}/src/drivers/http.c
-        ${PICOS_ROOT}/src/drivers/tcp.c
-        ${PICOS_ROOT}/third_party/mongoose/mongoose.c
+        ${PICODECK_ROOT}/src/drivers/wifi.c
+        ${PICODECK_ROOT}/src/drivers/http.c
+        ${PICODECK_ROOT}/src/drivers/tcp.c
+        ${PICODECK_ROOT}/third_party/mongoose/mongoose.c
         net/sim_net_shim.c
     )
     # net/include first: its mongoose.h shadows the real one for the firmware
@@ -243,7 +243,7 @@ elseif(SIM_FIRMWARE_NET)
         ${CMAKE_CURRENT_SOURCE_DIR}/net
     )
     target_include_directories(sim_network PRIVATE
-        ${PICOS_ROOT}/third_party/mongoose
+        ${PICODECK_ROOT}/third_party/mongoose
     )
     # Mongoose as the firmware configures it, minus what a host build can't
     # have (third_party/mongoose/mongoose_config.h): mg_calloc/mg_free come
@@ -263,16 +263,16 @@ elseif(SIM_FIRMWARE_NET)
     )
     # -g: crash-log backtraces from Core 1 then name the firmware lines.
     target_compile_options(sim_network PRIVATE -Wall -Wextra -Wno-unused-parameter -g)
-    set_source_files_properties(${PICOS_ROOT}/third_party/mongoose/mongoose.c
+    set_source_files_properties(${PICODECK_ROOT}/third_party/mongoose/mongoose.c
         PROPERTIES COMPILE_OPTIONS "-w")
     # wifi.c prints an int64_t with %lld: right on the ARM target (long long),
     # a -Wformat warning on LP64 hosts (long). Firmware code stays untouched.
-    set_source_files_properties(${PICOS_ROOT}/src/drivers/wifi.c
+    set_source_files_properties(${PICODECK_ROOT}/src/drivers/wifi.c
         PROPERTIES COMPILE_OPTIONS "-Wno-format")
     # http.c includes mbedtls/platform.h (declarations only); wifi.c reaches
     # lua.h through os/system_menu.h and needs the project's Lua and its
     # config (lua_sim), never a host's /usr/include/lua.h.
-    target_link_libraries(sim_network PRIVATE picos_host_mbedtls lua_sim)
+    target_link_libraries(sim_network PRIVATE picodeck_host_mbedtls lua_sim)
 else()
     add_library(sim_network STATIC
         sim_wifi.c
@@ -283,15 +283,15 @@ endif()
 target_include_directories(sim_network PUBLIC
     ${CMAKE_CURRENT_SOURCE_DIR}
     ${CMAKE_CURRENT_SOURCE_DIR}/stubs
-    ${PICOS_ROOT}/src
-    ${PICOS_ROOT}/src/os
-    ${PICOS_ROOT}/src/drivers
-    ${PICOS_ROOT}/third_party/umm_malloc/src
+    ${PICODECK_ROOT}/src
+    ${PICODECK_ROOT}/src/os
+    ${PICODECK_ROOT}/src/drivers
+    ${PICODECK_ROOT}/third_party/umm_malloc/src
 )
 if(NOT EMSCRIPTEN)
     target_link_libraries(sim_network PUBLIC CURL::libcurl Threads::Threads)
 endif()
-target_compile_definitions(sim_network PUBLIC PICOS_SIMULATOR=1 WIFI_ENABLED=1)
+target_compile_definitions(sim_network PUBLIC PICODECK_SIMULATOR=1 WIFI_ENABLED=1)
 
 # ── Unicorn Engine (ARM emulation for native apps) ─────────────────────────
 if(NOT EMSCRIPTEN)
@@ -313,7 +313,7 @@ endif()
 # ── Generate miniz_export.h stub (miniz's own CMake does this, but we
 #    compile sources directly so we need to create it ourselves). Written to
 #    the build tree — never into third_party/miniz, which would dirty the
-#    submodule. The generated dir is on picos_simulator's include path. ──────
+#    submodule. The generated dir is on picodeck_simulator's include path. ──────
 if(NOT EXISTS "${CMAKE_BINARY_DIR}/generated/miniz/miniz_export.h")
     file(WRITE "${CMAKE_BINARY_DIR}/generated/miniz/miniz_export.h"
         "#ifndef MINIZ_EXPORT_H\n"
@@ -324,99 +324,99 @@ if(NOT EXISTS "${CMAKE_BINARY_DIR}/generated/miniz/miniz_export.h")
 endif()
 
 # ── Main Simulator Executable ───────────────────────────────────────────────
-set(PICOS_CORE_SOURCES
-    ${PICOS_ROOT}/src/os/launcher.c
-    ${PICOS_ROOT}/src/os/lua_runner.c
-    ${PICOS_ROOT}/src/os/app_stack.c
-    ${PICOS_ROOT}/src/os/native_loader.c
-    ${PICOS_ROOT}/src/os/elf_plan.c
-    ${PICOS_ROOT}/src/os/fs_path.c
-    ${PICOS_ROOT}/src/os/app_identity.c
-    ${PICOS_ROOT}/src/os/app_manifest.c
-    ${PICOS_ROOT}/src/os/lua_bridge.c
-    ${PICOS_ROOT}/src/os/lua_bridge_display.c
-    ${PICOS_ROOT}/src/os/lua_bridge_input.c
-    ${PICOS_ROOT}/src/os/lua_bridge_sys.c
-    ${PICOS_ROOT}/src/os/lua_bridge_fs.c
-    ${PICOS_ROOT}/src/os/lua_bridge_config.c
-    ${PICOS_ROOT}/src/os/appconfig.c
-    ${PICOS_ROOT}/src/os/lua_bridge_appconfig.c
-    ${PICOS_ROOT}/src/os/lua_bridge_perf.c
-    ${PICOS_ROOT}/src/os/perf.c
-    ${PICOS_ROOT}/src/os/lua_bridge_graphics.c
-    ${PICOS_ROOT}/src/os/lua_bridge_3d.c
-    ${PICOS_ROOT}/src/os/lua_bridge_ui.c
-    ${PICOS_ROOT}/src/os/toast.c
-    ${PICOS_ROOT}/src/os/lua_bridge_audio.c
-    ${PICOS_ROOT}/src/os/lua_bridge_sound.c
-    ${PICOS_ROOT}/src/os/lua_bridge_repl.c
-    ${PICOS_ROOT}/src/os/lua_bridge_network.c
-    ${PICOS_ROOT}/src/os/lua_bridge_tcp.c
-    ${PICOS_ROOT}/src/os/lua_bridge_video.c
-    ${PICOS_ROOT}/src/os/lua_bridge_game.c
-    ${PICOS_ROOT}/src/os/lua_bridge_game_camera.c
-    ${PICOS_ROOT}/src/os/lua_bridge_game_scene.c
-    ${PICOS_ROOT}/src/os/lua_bridge_game_save.c
-    ${PICOS_ROOT}/src/os/lua_psram_alloc.c
-    ${PICOS_ROOT}/src/os/small_alloc.c
-    ${PICOS_ROOT}/src/os/crashlog.c
-    ${PICOS_ROOT}/src/os/system_menu.c
-    ${PICOS_ROOT}/src/os/idle_dim.c
-    ${PICOS_ROOT}/src/os/screenshot.c
-    ${PICOS_ROOT}/src/os/terminal.c
-    ${PICOS_ROOT}/src/os/terminal_parser.c
-    ${PICOS_ROOT}/src/os/terminal_render.c
-    ${PICOS_ROOT}/src/os/lua_bridge_terminal.c
-    ${PICOS_ROOT}/src/os/lua_bridge_crypto.c
-    ${PICOS_ROOT}/src/os/lua_bridge_mod.c
-    ${PICOS_ROOT}/src/os/lua_bridge_zip.c
-    ${PICOS_ROOT}/src/os/zip_archive.c
-    ${PICOS_ROOT}/src/os/zip_util.c
-    ${PICOS_ROOT}/src/os/zip_name.c
-    ${PICOS_ROOT}/src/os/lua_bridge_json.c
-    ${PICOS_ROOT}/src/drivers/mod_player.c
-    ${PICOS_ROOT}/src/drivers/fileplayer.c
-    ${PICOS_ROOT}/src/drivers/wav.c
-    ${PICOS_ROOT}/third_party/miniz/miniz.c
-    ${PICOS_ROOT}/third_party/miniz/miniz_tinfl.c
-    ${PICOS_ROOT}/third_party/miniz/miniz_tdef.c
-    ${PICOS_ROOT}/third_party/miniz/miniz_zip.c
-    ${PICOS_ROOT}/src/os/text_input.c
-    ${PICOS_ROOT}/src/os/file_browser.c
-    ${PICOS_ROOT}/src/os/config.c
-    ${PICOS_ROOT}/src/os/clock.c
-    ${PICOS_ROOT}/src/os/tz_picker.c
-    ${PICOS_ROOT}/src/os/ui.c
-    ${PICOS_ROOT}/src/os/ui_widgets.c
-    ${PICOS_ROOT}/src/os/text_wrap.c
+set(PICODECK_CORE_SOURCES
+    ${PICODECK_ROOT}/src/os/launcher.c
+    ${PICODECK_ROOT}/src/os/lua_runner.c
+    ${PICODECK_ROOT}/src/os/app_stack.c
+    ${PICODECK_ROOT}/src/os/native_loader.c
+    ${PICODECK_ROOT}/src/os/elf_plan.c
+    ${PICODECK_ROOT}/src/os/fs_path.c
+    ${PICODECK_ROOT}/src/os/app_identity.c
+    ${PICODECK_ROOT}/src/os/app_manifest.c
+    ${PICODECK_ROOT}/src/os/lua_bridge.c
+    ${PICODECK_ROOT}/src/os/lua_bridge_display.c
+    ${PICODECK_ROOT}/src/os/lua_bridge_input.c
+    ${PICODECK_ROOT}/src/os/lua_bridge_sys.c
+    ${PICODECK_ROOT}/src/os/lua_bridge_fs.c
+    ${PICODECK_ROOT}/src/os/lua_bridge_config.c
+    ${PICODECK_ROOT}/src/os/appconfig.c
+    ${PICODECK_ROOT}/src/os/lua_bridge_appconfig.c
+    ${PICODECK_ROOT}/src/os/lua_bridge_perf.c
+    ${PICODECK_ROOT}/src/os/perf.c
+    ${PICODECK_ROOT}/src/os/lua_bridge_graphics.c
+    ${PICODECK_ROOT}/src/os/lua_bridge_3d.c
+    ${PICODECK_ROOT}/src/os/lua_bridge_ui.c
+    ${PICODECK_ROOT}/src/os/toast.c
+    ${PICODECK_ROOT}/src/os/lua_bridge_audio.c
+    ${PICODECK_ROOT}/src/os/lua_bridge_sound.c
+    ${PICODECK_ROOT}/src/os/lua_bridge_repl.c
+    ${PICODECK_ROOT}/src/os/lua_bridge_network.c
+    ${PICODECK_ROOT}/src/os/lua_bridge_tcp.c
+    ${PICODECK_ROOT}/src/os/lua_bridge_video.c
+    ${PICODECK_ROOT}/src/os/lua_bridge_game.c
+    ${PICODECK_ROOT}/src/os/lua_bridge_game_camera.c
+    ${PICODECK_ROOT}/src/os/lua_bridge_game_scene.c
+    ${PICODECK_ROOT}/src/os/lua_bridge_game_save.c
+    ${PICODECK_ROOT}/src/os/lua_psram_alloc.c
+    ${PICODECK_ROOT}/src/os/small_alloc.c
+    ${PICODECK_ROOT}/src/os/crashlog.c
+    ${PICODECK_ROOT}/src/os/system_menu.c
+    ${PICODECK_ROOT}/src/os/idle_dim.c
+    ${PICODECK_ROOT}/src/os/screenshot.c
+    ${PICODECK_ROOT}/src/os/terminal.c
+    ${PICODECK_ROOT}/src/os/terminal_parser.c
+    ${PICODECK_ROOT}/src/os/terminal_render.c
+    ${PICODECK_ROOT}/src/os/lua_bridge_terminal.c
+    ${PICODECK_ROOT}/src/os/lua_bridge_crypto.c
+    ${PICODECK_ROOT}/src/os/lua_bridge_mod.c
+    ${PICODECK_ROOT}/src/os/lua_bridge_zip.c
+    ${PICODECK_ROOT}/src/os/zip_archive.c
+    ${PICODECK_ROOT}/src/os/zip_util.c
+    ${PICODECK_ROOT}/src/os/zip_name.c
+    ${PICODECK_ROOT}/src/os/lua_bridge_json.c
+    ${PICODECK_ROOT}/src/drivers/mod_player.c
+    ${PICODECK_ROOT}/src/drivers/fileplayer.c
+    ${PICODECK_ROOT}/src/drivers/wav.c
+    ${PICODECK_ROOT}/third_party/miniz/miniz.c
+    ${PICODECK_ROOT}/third_party/miniz/miniz_tinfl.c
+    ${PICODECK_ROOT}/third_party/miniz/miniz_tdef.c
+    ${PICODECK_ROOT}/third_party/miniz/miniz_zip.c
+    ${PICODECK_ROOT}/src/os/text_input.c
+    ${PICODECK_ROOT}/src/os/file_browser.c
+    ${PICODECK_ROOT}/src/os/config.c
+    ${PICODECK_ROOT}/src/os/clock.c
+    ${PICODECK_ROOT}/src/os/tz_picker.c
+    ${PICODECK_ROOT}/src/os/ui.c
+    ${PICODECK_ROOT}/src/os/ui_widgets.c
+    ${PICODECK_ROOT}/src/os/text_wrap.c
     ${CMAKE_CURRENT_SOURCE_DIR}/stubs/dev_commands_stub.c
-    ${PICOS_ROOT}/src/dev_ops.c
-    ${PICOS_ROOT}/src/fonts/font.c
-    ${PICOS_ROOT}/src/fonts/font_registry.c
-    ${PICOS_ROOT}/src/fonts/font_6x8.c
-    ${PICOS_ROOT}/src/fonts/font_8x12.c
-    ${PICOS_ROOT}/src/fonts/font_scientifica.c
-    ${PICOS_ROOT}/src/os/image_decoders.cpp
-    ${PICOS_ROOT}/src/drivers/image_api.c
-    ${PICOS_ROOT}/src/os/text_wrap.c
-    ${PICOS_ROOT}/src/os/ui_widgets.c
+    ${PICODECK_ROOT}/src/dev_ops.c
+    ${PICODECK_ROOT}/src/fonts/font.c
+    ${PICODECK_ROOT}/src/fonts/font_registry.c
+    ${PICODECK_ROOT}/src/fonts/font_6x8.c
+    ${PICODECK_ROOT}/src/fonts/font_8x12.c
+    ${PICODECK_ROOT}/src/fonts/font_scientifica.c
+    ${PICODECK_ROOT}/src/os/image_decoders.cpp
+    ${PICODECK_ROOT}/src/drivers/image_api.c
+    ${PICODECK_ROOT}/src/os/text_wrap.c
+    ${PICODECK_ROOT}/src/os/ui_widgets.c
 )
 
 # Filter out crypto (not yet implemented in simulator)
 # Network and TCP are now provided by sim_network + real lua_bridge files
-list(REMOVE_ITEM PICOS_CORE_SOURCES
-    ${PICOS_ROOT}/src/os/lua_bridge_crypto.c
+list(REMOVE_ITEM PICODECK_CORE_SOURCES
+    ${PICODECK_ROOT}/src/os/lua_bridge_crypto.c
 )
 
 # OTA image checks (sys.applyUpdate): the firmware's own ota_verify.c against a
 # host mbedTLS and the TEST update key, so the simulator refuses exactly what
 # the device refuses (flashing itself stays firmware-only).
-include(${PICOS_ROOT}/cmake/picos_host_mbedtls.cmake)
-include(${PICOS_ROOT}/cmake/picos_update_key.cmake)
-picos_generate_update_pubkey(${CMAKE_BINARY_DIR}/generated/ota_pubkey.c
-                             ${PICOS_TEST_UPDATE_PUBKEY})
-list(APPEND PICOS_CORE_SOURCES
-    ${PICOS_ROOT}/src/os/ota_verify.c
+include(${PICODECK_ROOT}/cmake/picodeck_host_mbedtls.cmake)
+include(${PICODECK_ROOT}/cmake/picodeck_update_key.cmake)
+picodeck_generate_update_pubkey(${CMAKE_BINARY_DIR}/generated/ota_pubkey.c
+                             ${PICODECK_TEST_UPDATE_PUBKEY})
+list(APPEND PICODECK_CORE_SOURCES
+    ${PICODECK_ROOT}/src/os/ota_verify.c
     ${CMAKE_BINARY_DIR}/generated/ota_pubkey.c
 )
 
@@ -431,56 +431,56 @@ else()
     )
 endif()
 
-add_executable(picos_simulator
+add_executable(picodeck_simulator
     main.c
     sim_test_control.c
     ${SIM_PLATFORM_SOURCES}
-    ${PICOS_CORE_SOURCES}
+    ${PICODECK_CORE_SOURCES}
 )
 
-target_include_directories(picos_simulator PRIVATE
+target_include_directories(picodeck_simulator PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}
     ${CMAKE_CURRENT_SOURCE_DIR}/stubs
-    ${PICOS_ROOT}/src
-    ${PICOS_ROOT}/src/os
-    ${PICOS_ROOT}/src/fonts
-    ${PICOS_ROOT}/src/drivers
-    ${PICOS_ROOT}/src/usb
-    ${PICOS_ROOT}/third_party/umm_malloc/src
-    ${PICOS_ROOT}/third_party/miniz
+    ${PICODECK_ROOT}/src
+    ${PICODECK_ROOT}/src/os
+    ${PICODECK_ROOT}/src/fonts
+    ${PICODECK_ROOT}/src/drivers
+    ${PICODECK_ROOT}/src/usb
+    ${PICODECK_ROOT}/third_party/umm_malloc/src
+    ${PICODECK_ROOT}/third_party/miniz
     ${CMAKE_BINARY_DIR}/generated/miniz
-    ${PICOS_ROOT}/third_party/stb
-    ${PICOS_ROOT}/third_party/pocketmod
+    ${PICODECK_ROOT}/third_party/stb
+    ${PICODECK_ROOT}/third_party/pocketmod
     ${unicorn_SOURCE_DIR}/include
 )
 
-target_link_libraries(picos_simulator PRIVATE
+target_link_libraries(picodeck_simulator PRIVATE
     sim_hal
     sim_network
     lua_sim
     image_decoders_sim
     SDL2::SDL2
     Threads::Threads
-    picos_host_mbedtls
+    picodeck_host_mbedtls
 )
 if(NOT EMSCRIPTEN)
-    target_link_libraries(picos_simulator PRIVATE
+    target_link_libraries(picodeck_simulator PRIVATE
         unicorn
         SDL2_image::SDL2_image
         CURL::libcurl
     )
 endif()
 
-target_compile_definitions(picos_simulator PRIVATE
-    PICOS_SIMULATOR=1
-    PICOS_VERSION="${PICOS_VERSION}"
+target_compile_definitions(picodeck_simulator PRIVATE
+    PICODECK_SIMULATOR=1
+    PICODECK_VERSION="${PICODECK_VERSION}"
     DISPLAY_SCALE=3
     SIMULATOR_BUILD=1
     WIFI_ENABLED=1
-    PICOS_PROJECT_ROOT="${PICOS_ROOT}"
+    PICODECK_PROJECT_ROOT="${PICODECK_ROOT}"
 )
 
-target_compile_options(picos_simulator PRIVATE
+target_compile_options(picodeck_simulator PRIVATE
     -Wall -Wextra
     -Wno-unused-parameter
     -O2
@@ -489,10 +489,10 @@ target_compile_options(picos_simulator PRIVATE
 
 # miniz: decompression only, no stdio, use standard malloc on simulator (no umm_malloc)
 set_source_files_properties(
-    ${PICOS_ROOT}/third_party/miniz/miniz.c
-    ${PICOS_ROOT}/third_party/miniz/miniz_tinfl.c
-    ${PICOS_ROOT}/third_party/miniz/miniz_tdef.c
-    ${PICOS_ROOT}/third_party/miniz/miniz_zip.c
+    ${PICODECK_ROOT}/third_party/miniz/miniz.c
+    ${PICODECK_ROOT}/third_party/miniz/miniz_tinfl.c
+    ${PICODECK_ROOT}/third_party/miniz/miniz_tdef.c
+    ${PICODECK_ROOT}/third_party/miniz/miniz_zip.c
     PROPERTIES COMPILE_DEFINITIONS
     "MINIZ_NO_STDIO;MINIZ_NO_ARCHIVE_WRITING_APIS;MINIZ_NO_ZLIB_COMPATIBLE_NAMES"
 )
@@ -504,25 +504,25 @@ set_source_files_properties(
 # PNGdec's copy on its sources (the set_source_files_properties on the PNGdec sources).
 
 # ── Sanitizer builds (make simulator-asan / simulator-tsan) ─────────────────
-# PICOS_SIM_SANITIZE is a list of -fsanitize= kinds, e.g. "address;undefined"
+# PICODECK_SIM_SANITIZE is a list of -fsanitize= kinds, e.g. "address;undefined"
 # or "thread". It instruments the simulator and everything it compiles from
-# the PicOS tree (OS, bridge, Lua, decoders, HAL, network) but NOT Unicorn,
+# the PicoDeck tree (OS, bridge, Lua, decoders, HAL, network) but NOT Unicorn,
 # which is third-party JIT code and only slows the run down. Since the sim maps
 # umm_* and the Lua heap onto malloc, ASan sees every bridge allocation.
-set(PICOS_SIM_SANITIZE "" CACHE STRING
+set(PICODECK_SIM_SANITIZE "" CACHE STRING
     "Sanitizers for the simulator: '' (off), 'address;undefined' or 'thread'")
-set(_picos_san "")
-if(PICOS_SIM_SANITIZE)
-    string(REPLACE ";" "," _picos_san "${PICOS_SIM_SANITIZE}")
-    set(_picos_san_flags -fsanitize=${_picos_san} -fno-omit-frame-pointer -g)
-    if("undefined" IN_LIST PICOS_SIM_SANITIZE)
+set(_picodeck_san "")
+if(PICODECK_SIM_SANITIZE)
+    string(REPLACE ";" "," _picodeck_san "${PICODECK_SIM_SANITIZE}")
+    set(_picodeck_san_flags -fsanitize=${_picodeck_san} -fno-omit-frame-pointer -g)
+    if("undefined" IN_LIST PICODECK_SIM_SANITIZE)
         # Every UB report is fatal, so the harness sees it as a dead sim.
-        list(APPEND _picos_san_flags -fno-sanitize-recover=undefined)
+        list(APPEND _picodeck_san_flags -fno-sanitize-recover=undefined)
     endif()
-    foreach(_t picos_simulator sim_hal sim_network lua_sim libmad_sim image_decoders_sim)
-        target_compile_options(${_t} PRIVATE ${_picos_san_flags})
+    foreach(_t picodeck_simulator sim_hal sim_network lua_sim libmad_sim image_decoders_sim)
+        target_compile_options(${_t} PRIVATE ${_picodeck_san_flags})
     endforeach()
-    if("undefined" IN_LIST PICOS_SIM_SANITIZE)
+    if("undefined" IN_LIST PICODECK_SIM_SANITIZE)
         # libmad's polyphase synthesis reads a row of D[17][32] through a
         # pointer offset back from the row start (synth.c synth_full: ptr =
         # *Dptr - po; ptr[31 - n]): inside D, outside the row that
@@ -530,19 +530,19 @@ if(PICOS_SIM_SANITIZE)
         set_source_files_properties(${LIBMAD_DIR}/synth.c PROPERTIES
             COMPILE_OPTIONS -fno-sanitize=bounds)
     endif()
-    target_link_options(picos_simulator PRIVATE -fsanitize=${_picos_san})
-    message(STATUS "  - Sanitizers: ${_picos_san}")
+    target_link_options(picodeck_simulator PRIVATE -fsanitize=${_picodeck_san})
+    message(STATUS "  - Sanitizers: ${_picodeck_san}")
 endif()
-# Reported by `picos_simulator --build-info` so the E2E harness can tell a
+# Reported by `picodeck_simulator --build-info` so the E2E harness can tell a
 # sanitizer build from a release one (asan_only tests).
-target_compile_definitions(picos_simulator PRIVATE
-    PICOS_SIM_SANITIZE_STR="${_picos_san}")
+target_compile_definitions(picodeck_simulator PRIVATE
+    PICODECK_SIM_SANITIZE_STR="${_picodeck_san}")
 if(SIM_FIRMWARE_NET)
     message(STATUS "  - Network: firmware wifi.c/http.c/tcp.c on Mongoose/POSIX (SIM_FIRMWARE_NET)")
 endif()
 
 # ── Install / Run ───────────────────────────────────────────────────────────
-set_target_properties(picos_simulator PROPERTIES
+set_target_properties(picodeck_simulator PROPERTIES
     RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}
 )
 
@@ -550,21 +550,21 @@ set_target_properties(picos_simulator PROPERTIES
 if(EMSCRIPTEN)
     # Lua apps bundled into the demo's SD image: names of dirs under apps/, or
     # absolute paths to app dirs that live in their own repos.
-    set(PICOS_WEB_APPS "hello;snake;nonogram;calculator;editor;graphicstest;fonttest;3dtest"
+    set(PICODECK_WEB_APPS "hello;snake;nonogram;calculator;editor;graphicstest;fonttest;3dtest"
         CACHE STRING "Apps to bundle into the web demo SD image")
 
     set(WEB_SD_DIR ${CMAKE_BINARY_DIR}/web_sd)
     file(REMOVE_RECURSE ${WEB_SD_DIR})
     file(MAKE_DIRECTORY ${WEB_SD_DIR}/apps ${WEB_SD_DIR}/data)
-    file(COPY ${PICOS_ROOT}/system DESTINATION ${WEB_SD_DIR})
-    foreach(app ${PICOS_WEB_APPS})
+    file(COPY ${PICODECK_ROOT}/system DESTINATION ${WEB_SD_DIR})
+    foreach(app ${PICODECK_WEB_APPS})
         if(IS_ABSOLUTE ${app})
             set(app_src ${app})
         else()
-            set(app_src ${PICOS_ROOT}/apps/${app})
+            set(app_src ${PICODECK_ROOT}/apps/${app})
         endif()
         if(NOT IS_DIRECTORY ${app_src})
-            message(FATAL_ERROR "PICOS_WEB_APPS: ${app_src} is not a directory")
+            message(FATAL_ERROR "PICODECK_WEB_APPS: ${app_src} is not a directory")
         endif()
         file(COPY ${app_src} DESTINATION ${WEB_SD_DIR}/apps
              PATTERN ".git" EXCLUDE PATTERN ".github" EXCLUDE
@@ -572,10 +572,10 @@ if(EMSCRIPTEN)
              PATTERN "*.md" EXCLUDE)
     endforeach()
 
-    set_target_properties(picos_simulator PROPERTIES
+    set_target_properties(picodeck_simulator PROPERTIES
         SUFFIX ".html"
         LINK_DEPENDS ${CMAKE_CURRENT_SOURCE_DIR}/web/shell.html)
-    target_link_options(picos_simulator PRIVATE
+    target_link_options(picodeck_simulator PRIVATE
         -O2
         -sASYNCIFY
         -sASYNCIFY_STACK_SIZE=262144
@@ -592,10 +592,10 @@ endif()
 
 # Copy SDL2 DLL on Windows (if needed)
 if(WIN32)
-    add_custom_command(TARGET picos_simulator POST_BUILD
+    add_custom_command(TARGET picodeck_simulator POST_BUILD
         COMMAND ${CMAKE_COMMAND} -E copy_if_different
         $<TARGET_FILE:SDL2::SDL2>
-        $<TARGET_FILE_DIR:picos_simulator>
+        $<TARGET_FILE_DIR:picodeck_simulator>
     )
 endif()
 

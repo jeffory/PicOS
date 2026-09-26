@@ -1,7 +1,7 @@
 {
-    "id": "com.picos.harness_ticker",
+    "id": "net.picodeck.harness_ticker",
     "name": "Harness Ticker",
     "description": "Harness fixture: logs a tick every 20 ms for 8 s",
     "version": "1.0",
-    "author": "PicOS E2E"
+    "author": "PicoDeck E2E"
 }

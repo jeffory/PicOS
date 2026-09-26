@@ -2,7 +2,7 @@
 
 CMake passed LUA_32BITS=1 / LUAI_MAXSTACK=500 for years, but upstream
 luaconf.h hard-coded both, so the VM silently ran with 64-bit integers,
-double floats and a million-slot stack. cmake/picos_lua.cmake now patches
+double floats and a million-slot stack. cmake/picodeck_lua.cmake now patches
 luaconf.h to honour the shared config (LUAI_MAXSTACK raised to 1000 — 500
 overflowed the minesweeper flood fill); these tests pin the result down
 through the lua_runtime fixture app, which logs one "LR <NAME> <value>" line

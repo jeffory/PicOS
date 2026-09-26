@@ -19,7 +19,7 @@ typedef enum {
   SIM_APP_RESULT_LOAD_FAILED,    // never ran: refused, missing, parse error
 } sim_app_result_t;
 
-#ifdef PICOS_SIMULATOR
+#ifdef PICODECK_SIMULATOR
 
 // Launcher is about to run an app.
 void sim_app_outcome_begin(const char *name, const char *id);

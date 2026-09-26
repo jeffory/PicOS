@@ -1,8 +1,8 @@
 // simulator/net/sim_net.h — hooks the simulator calls in a SIM_FIRMWARE_NET
 // build (firmware src/drivers/wifi.c + http.c + tcp.c on Mongoose/POSIX).
 
-#ifndef PICOS_SIM_NET_H
-#define PICOS_SIM_NET_H
+#ifndef PICODECK_SIM_NET_H
+#define PICODECK_SIM_NET_H
 
 #include <stdint.h>
 
@@ -14,4 +14,4 @@ void sim_net_core1_init(void);
 // Doorbell rings so far (Core 0 → Core 1 IPC wake-ups; diagnostics).
 uint32_t sim_net_doorbell_count(void);
 
-#endif  // PICOS_SIM_NET_H
+#endif  // PICODECK_SIM_NET_H

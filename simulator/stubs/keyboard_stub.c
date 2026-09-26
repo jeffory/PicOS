@@ -1,5 +1,5 @@
 // Keyboard driver stub for simulator
-// Bridges SDL2 input to PicOS keyboard driver interface
+// Bridges SDL2 input to PicoDeck keyboard driver interface
 
 #include "../../src/drivers/keyboard.h"
 #include "../../src/drivers/kbd_event_queue.h"

@@ -1,4 +1,4 @@
-# PicOS Makefile
+# PicoDeck Makefile
 # Automated setup, build, and deployment for ClockworkPi PicoCalc
 
 .PHONY: help setup build clean flash flash-ota rebuild check-env test-lua test-unit test-numfmt-sweep fuzz fuzz-build simulator simulator-asan simulator-tsan simulator-net simulator-net-asan simulator-net-tsan simulator-run simulator-clean simulator-web simulator-web-serve
@@ -21,11 +21,11 @@ FATFS_DIR := third_party/fatfs
 # ── Default target ────────────────────────────────────────────────────────────
 
 help:
-	@echo "PicOS Build System"
+	@echo "PicoDeck Build System"
 	@echo ""
 	@echo "Hardware Targets:"
 	@echo "  make setup          - Download dependencies (Lua, FatFS) and check environment"
-	@echo "  make build          - Build the firmware (creates build/picocalc_os.uf2)"
+	@echo "  make build          - Build the firmware (creates build/picodeck.uf2)"
 	@echo "  make clean          - Remove build directory"
 	@echo "  make rebuild        - Clean and rebuild from scratch"
 	@echo "  make flash          - Show instructions for flashing the device (BOOTSEL)"
@@ -121,7 +121,7 @@ download-lua:
 	fi
 	@# luaconf.h hard-codes LUA_32BITS/LUAI_MAXSTACK; patch it to honour the
 	@# CMake config (idempotent — also fixes checkouts extracted before this).
-	@cmake -DLUA_SRC_DIR=$(LUA_DIR)/src -P cmake/picos_lua.cmake
+	@cmake -DLUA_SRC_DIR=$(LUA_DIR)/src -P cmake/picodeck_lua.cmake
 
 download-fatfs:
 	@if [ -d "$(FATFS_DIR)" ] && [ -f "$(FATFS_DIR)/ff.h" ]; then \
@@ -140,23 +140,23 @@ download-fatfs:
 # ── Build targets ─────────────────────────────────────────────────────────────
 
 build: check-env $(LUA_DIR) $(FATFS_DIR)
-	@echo "Building PicOS for $(PICO_BOARD)..."
+	@echo "Building PicoDeck for $(PICO_BOARD)..."
 	@mkdir -p $(BUILD_DIR)
 	@cd $(BUILD_DIR) && \
 		cmake .. -DPICO_BOARD=$(PICO_BOARD) && \
 		$(MAKE) -j$$(nproc 2>/dev/null || echo 4)
-	@test -f $(BUILD_DIR)/picocalc_os.uf2 || { \
-		echo "ERROR: build finished but $(BUILD_DIR)/picocalc_os.uf2 is missing"; \
+	@test -f $(BUILD_DIR)/picodeck.uf2 || { \
+		echo "ERROR: build finished but $(BUILD_DIR)/picodeck.uf2 is missing"; \
 		exit 1; \
 	}
 	@echo ""
 	@echo "✓ Build complete!"
-	@echo "  Firmware: $(BUILD_DIR)/picocalc_os.uf2"
+	@echo "  Firmware: $(BUILD_DIR)/picodeck.uf2"
 	@echo ""
 	@echo "To flash:"
 	@echo "  1. Hold BOOTSEL button on Pico"
 	@echo "  2. Connect USB cable"
-	@echo "  3. Drag $(BUILD_DIR)/picocalc_os.uf2 to mounted drive"
+	@echo "  3. Drag $(BUILD_DIR)/picodeck.uf2 to mounted drive"
 	@echo ""
 
 clean:
@@ -169,8 +169,8 @@ rebuild: clean build
 # ── Flash helper ──────────────────────────────────────────────────────────────
 
 flash:
-	@if [ ! -f "$(BUILD_DIR)/picocalc_os.uf2" ]; then \
-		echo "ERROR: $(BUILD_DIR)/picocalc_os.uf2 not found. Run 'make build' first."; \
+	@if [ ! -f "$(BUILD_DIR)/picodeck.uf2" ]; then \
+		echo "ERROR: $(BUILD_DIR)/picodeck.uf2 not found. Run 'make build' first."; \
 		exit 1; \
 	fi
 	@echo "Flashing instructions:"
@@ -181,7 +181,7 @@ flash:
 	@echo "  4. Release BOOTSEL — Pico mounts as USB drive (RPI-RP2)"
 	@echo "  5. Copy the firmware:"
 	@echo ""
-	@echo "     cp $(BUILD_DIR)/picocalc_os.uf2 /path/to/RPI-RP2/"
+	@echo "     cp $(BUILD_DIR)/picodeck.uf2 /path/to/RPI-RP2/"
 	@echo ""
 	@echo "     Or drag-and-drop in your file manager"
 	@echo ""
@@ -190,25 +190,25 @@ flash:
 	@# Attempt auto-detection (Linux only)
 	@if [ -d "/media/$$USER/RPI-RP2" ]; then \
 		echo "✓ Detected RPI-RP2 at /media/$$USER/RPI-RP2"; \
-		echo "  Run: cp $(BUILD_DIR)/picocalc_os.uf2 /media/$$USER/RPI-RP2/"; \
+		echo "  Run: cp $(BUILD_DIR)/picodeck.uf2 /media/$$USER/RPI-RP2/"; \
 		echo ""; \
 		read -p "Copy now? [y/N] " confirm && \
-		[ "$$confirm" = "y" ] && cp $(BUILD_DIR)/picocalc_os.uf2 /media/$$USER/RPI-RP2/ && \
+		[ "$$confirm" = "y" ] && cp $(BUILD_DIR)/picodeck.uf2 /media/$$USER/RPI-RP2/ && \
 		echo "✓ Firmware copied! Device will reboot."; \
 	fi
 
 # ── OTA flash ─────────────────────────────────────────────────────────────────
-# Builds, then pushes build/picocalc_os.bin to a USB-connected device over the
+# Builds, then pushes build/picodeck.bin to a USB-connected device over the
 # SD-staged OTA path (signs the image, uploads it with its .sha256/.sig and
 # reboots; the device checks the SHA-256 and ECDSA signature and reflashes
 # itself on boot). The device must be at the launcher.
 # Optional: FLASH_DEVICE=/dev/ttyACM0 to skip auto-detection;
 #           OTA_KEY=<private.pem> to sign with a key other than the TEST key
-#           (it must match the PICOS_UPDATE_PUBKEY_PEM the RUNNING firmware
+#           (it must match the PICODECK_UPDATE_PUBKEY_PEM the RUNNING firmware
 #           was built with).
 
 flash-ota: build
-	@python3 tools/ota_flash.py $(BUILD_DIR)/picocalc_os.bin \
+	@python3 tools/ota_flash.py $(BUILD_DIR)/picodeck.bin \
 		$(if $(FLASH_DEVICE),--device $(FLASH_DEVICE),) \
 		$(if $(OTA_KEY),--key $(OTA_KEY),)
 
@@ -226,7 +226,7 @@ test-lua:
 # ── PC Simulator Targets ─────────────────────────────────────────────────────
 
 SIM_BUILD_DIR := build_sim
-SIM_BINARY := $(SIM_BUILD_DIR)/picos_simulator
+SIM_BINARY := $(SIM_BUILD_DIR)/picodeck_simulator
 
 simulator-check:
 	@echo "Checking simulator build environment..."
@@ -249,7 +249,7 @@ simulator-check:
 	@echo "  ✓ SDL2: $$(pkg-config --modversion sdl2)"
 
 simulator: simulator-check download-lua
-	@echo "Building PicOS PC Simulator..."
+	@echo "Building PicoDeck PC Simulator..."
 	@mkdir -p $(SIM_BUILD_DIR)
 	@if [ -f $(SIM_BUILD_DIR)/CMakeCache.txt ] && \
 		! grep -q 'CMAKE_HOME_DIRECTORY.*simulator' $(SIM_BUILD_DIR)/CMakeCache.txt 2>/dev/null; then \
@@ -288,19 +288,19 @@ simulator-web: download-lua
 	}
 	@$(EMCMAKE) cmake -S simulator -B $(WEB_BUILD_DIR) -DCMAKE_BUILD_TYPE=Release
 	@cmake --build $(WEB_BUILD_DIR) -j$$(nproc 2>/dev/null || echo 4)
-	@test -f $(WEB_BUILD_DIR)/picos_simulator.wasm || { \
-		echo "ERROR: build finished but $(WEB_BUILD_DIR)/picos_simulator.wasm is missing"; \
+	@test -f $(WEB_BUILD_DIR)/picodeck_simulator.wasm || { \
+		echo "ERROR: build finished but $(WEB_BUILD_DIR)/picodeck_simulator.wasm is missing"; \
 		exit 1; \
 	}
 	@echo ""
-	@echo "✓ Web demo built: $(WEB_BUILD_DIR)/picos_simulator.{html,js,wasm,data}"
+	@echo "✓ Web demo built: $(WEB_BUILD_DIR)/picodeck_simulator.{html,js,wasm,data}"
 
 simulator-web-serve: simulator-web
-	@echo "Serving http://127.0.0.1:8765/picos_simulator.html"
+	@echo "Serving http://127.0.0.1:8765/picodeck_simulator.html"
 	@cd $(WEB_BUILD_DIR) && python3 -m http.server 8765 --bind 127.0.0.1
 
 simulator-debug: simulator-check download-lua
-	@echo "Building PicOS PC Simulator (Debug)..."
+	@echo "Building PicoDeck PC Simulator (Debug)..."
 	@mkdir -p $(SIM_BUILD_DIR)
 	@if [ -f $(SIM_BUILD_DIR)/CMakeCache.txt ] && \
 		! grep -q 'CMAKE_HOME_DIRECTORY.*simulator' $(SIM_BUILD_DIR)/CMakeCache.txt 2>/dev/null; then \
@@ -321,7 +321,7 @@ simulator-debug: simulator-check download-lua
 
 # Sanitizer builds of the simulator (own build dirs, so the release build stays
 # untouched). Run the E2E suite against one with
-#   PICOS_SIM_BINARY=build_sim_asan/picos_simulator pytest tests/e2e -n auto
+#   PICODECK_SIM_BINARY=build_sim_asan/picodeck_simulator pytest tests/e2e -n auto
 # Unicorn is not instrumented; its source is reused from build_sim if present.
 # Clang by default: its compiler-rt ships the ASan/UBSan/TSan runtimes, while
 # GCC's (libasan/libubsan/libtsan) are separate packages that are often absent.
@@ -329,19 +329,19 @@ SIM_SAN_CC ?= clang
 SIM_SAN_CXX ?= clang++
 SIM_UNICORN_SRC := $(CURDIR)/$(SIM_BUILD_DIR)/_deps/unicorn-src
 define sim_sanitize_build
-	@echo "Building PicOS PC Simulator ($(2) $(3))..."
+	@echo "Building PicoDeck PC Simulator ($(2) $(3))..."
 	@mkdir -p $(1)
 	@cd $(1) && \
 		cmake ../simulator -DCMAKE_BUILD_TYPE=RelWithDebInfo \
 			-DCMAKE_C_COMPILER=$(SIM_SAN_CC) -DCMAKE_CXX_COMPILER=$(SIM_SAN_CXX) \
-			-DPICOS_SIM_SANITIZE="$(2)" $(3) \
+			-DPICODECK_SIM_SANITIZE="$(2)" $(3) \
 			$$( [ -d $(SIM_UNICORN_SRC) ] && echo -DFETCHCONTENT_SOURCE_DIR_UNICORN=$(SIM_UNICORN_SRC) ) && \
 		$(MAKE) -j$$(nproc 2>/dev/null || echo 4)
-	@test -x $(1)/picos_simulator || { \
-		echo "ERROR: build finished but $(1)/picos_simulator is missing"; \
+	@test -x $(1)/picodeck_simulator || { \
+		echo "ERROR: build finished but $(1)/picodeck_simulator is missing"; \
 		exit 1; \
 	}
-	@echo "✓ $(1)/picos_simulator ($(2))"
+	@echo "✓ $(1)/picodeck_simulator ($(2))"
 endef
 
 simulator-asan: simulator-check download-lua
@@ -353,20 +353,20 @@ simulator-tsan: simulator-check download-lua
 # The firmware network stack in the simulator (SIM_FIRMWARE_NET: the real
 # src/drivers/wifi.c, http.c, tcp.c on Mongoose/POSIX, see simulator/net/).
 # Own build dirs; only tests/e2e/test_network_firmware.py needs them:
-#   PICOS_SIM_BINARY=build_sim_net/picos_simulator \
+#   PICODECK_SIM_BINARY=build_sim_net/picodeck_simulator \
 #       pytest tests/e2e/test_network_firmware.py -n auto
 simulator-net: simulator-check download-lua
-	@echo "Building PicOS PC Simulator (firmware network stack)..."
+	@echo "Building PicoDeck PC Simulator (firmware network stack)..."
 	@mkdir -p build_sim_net
 	@cd build_sim_net && \
 		cmake ../simulator -DCMAKE_BUILD_TYPE=Release -DSIM_FIRMWARE_NET=ON \
 			$$( [ -d $(SIM_UNICORN_SRC) ] && echo -DFETCHCONTENT_SOURCE_DIR_UNICORN=$(SIM_UNICORN_SRC) ) && \
 		$(MAKE) -j$$(nproc 2>/dev/null || echo 4)
-	@test -x build_sim_net/picos_simulator || { \
-		echo "ERROR: build finished but build_sim_net/picos_simulator is missing"; \
+	@test -x build_sim_net/picodeck_simulator || { \
+		echo "ERROR: build finished but build_sim_net/picodeck_simulator is missing"; \
 		exit 1; \
 	}
-	@echo "✓ build_sim_net/picos_simulator (firmware network stack)"
+	@echo "✓ build_sim_net/picodeck_simulator (firmware network stack)"
 
 simulator-net-asan: simulator-check download-lua
 	$(call sim_sanitize_build,build_sim_net_asan,address;undefined,-DSIM_FIRMWARE_NET=ON)
@@ -375,7 +375,7 @@ simulator-net-tsan: simulator-check download-lua
 	$(call sim_sanitize_build,build_sim_net_tsan,thread,-DSIM_FIRMWARE_NET=ON)
 
 simulator-run: simulator
-	@echo "Running PicOS Simulator..."
+	@echo "Running PicoDeck Simulator..."
 	@echo ""
 	@$(SIM_BINARY) --sd-card ./apps
 
@@ -416,7 +416,7 @@ FUZZ_TARGETS ?= elf_plan app_manifest wav
 
 fuzz-build:
 	@cmake -S tests/unit -B $(FUZZ_BUILD_DIR) -DCMAKE_C_COMPILER=clang \
-		-DCMAKE_BUILD_TYPE=Debug -DPICOS_FUZZ=ON >/dev/null
+		-DCMAKE_BUILD_TYPE=Debug -DPICODECK_FUZZ=ON >/dev/null
 	@cmake --build $(FUZZ_BUILD_DIR) -j$$(nproc 2>/dev/null || echo 4) \
 		$(foreach t,$(FUZZ_TARGETS),--target fuzz_$(t))
 	@for t in $(FUZZ_TARGETS); do test -x $(FUZZ_BUILD_DIR)/fuzz/fuzz_$$t || { \

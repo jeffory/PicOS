@@ -1,11 +1,11 @@
 /*
   DOS86 — Audio mixer.
 
-  Runs on Core 1 every 5ms via PicOS setAudioCallback(). Generates:
+  Runs on Core 1 every 5ms via PicoDeck setAudioCallback(). Generates:
     1. PC speaker square wave (from speaker.c)
     2. OPL2 FM synthesis (from opl.c)
   Mixes both mono sources into stereo interleaved int16_t and pushes
-  to PicOS via api->audio->pushSamples().
+  to PicoDeck via api->audio->pushSamples().
 
   Sample rate: 22050 Hz. At 5ms callback interval, we generate ~110 samples
   per callback. We use a fixed 128-sample buffer for simplicity.
@@ -64,7 +64,7 @@ static void audio_callback(void)
         s_mix_buf[i * 2 + 1] = (int16_t)right;
     }
 
-    /* Push to PicOS audio (stereo frames, count = number of stereo frames) */
+    /* Push to PicoDeck audio (stereo frames, count = number of stereo frames) */
     s_api->audio->pushSamples(s_mix_buf, MIX_BUF_SAMPLES);
 }
 

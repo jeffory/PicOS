@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Generate src/drivers/ca_bundle.{c,h}: the root CAs PicOS trusts for TLS.
+"""Generate src/drivers/ca_bundle.{c,h}: the root CAs PicoDeck trusts for TLS.
 
 The firmware verifies every HTTPS / tls:// server certificate against this
 bundle (src/drivers/wifi.c passes it to mg_tls_init as opts.ca).  It is kept

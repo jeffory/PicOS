@@ -2,7 +2,7 @@
 
 Comparison against the Casio fx-CG100 ClassWiz Color Graph calculator.
 Features are grouped by category and roughly ordered by implementation complexity.
-Only includes features feasible on PicOS (320x320 LCD, Lua 5.4, embedded constraints).
+Only includes features feasible on PicoDeck (320x320 LCD, Lua 5.4, embedded constraints).
 
 ---
 
@@ -289,10 +289,10 @@ Only includes features feasible on PicOS (320x320 LCD, Lua 5.4, embedded constra
 ## Notes
 
 ### What NOT to implement (hardware/platform limitations)
-- Python/MicroPython environment (PicOS already runs Lua apps natively)
+- Python/MicroPython environment (PicoDeck already runs Lua apps natively)
 - 3D graphing (too computationally expensive for 200MHz RP2350)
-- Spreadsheet (better as a separate PicOS app)
-- Geometry construction tool (better as a separate PicOS app)
+- Spreadsheet (better as a separate PicoDeck app)
+- Geometry construction tool (better as a separate PicoDeck app)
 - USB file transfer (handled at OS level)
 - QR code generation (not useful on this device)
 - Exam mode (not relevant)

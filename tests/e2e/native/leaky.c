@@ -27,7 +27,7 @@ static void cat(char *dst, unsigned cap, const char *a, const char *b) {
     dst[n] = '\0';
 }
 
-void picos_main(const PicoCalcAPI *api, const char *app_dir,
+void picodeck_main(const PicoCalcAPI *api, const char *app_dir,
                 const char *app_id, const char *app_name) {
     (void)app_id; (void)app_name;
     void (*log)(const char *, ...) = api->sys->log;

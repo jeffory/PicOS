@@ -1,12 +1,12 @@
-# PicOS
+# PicoDeck
 
 An app platform for the ClockworkPi PicoCalc, built around a resident Lua runtime. Apps live on the SD card as directories containing `main.lua` and `app.json`. The OS owns all hardware; apps access everything through the `picocalc` Lua API.
 
 > [!IMPORTANT]
 > **Target hardware:** [Pimoroni Pico Plus 2 W](https://shop.pimoroni.com/products/pimoroni-pico-plus-2-w) in the [PicoCalc](https://www.clockworkpi.com/picocalc) device.
-> PicOS relies heavily on the PSRAM being accessible via XIP, other hardware support is untested currently.
+> PicoDeck relies heavily on the PSRAM being accessible via XIP, other hardware support is untested currently.
 
-📖 **Documentation:** Full SDK reference and guides are available on the [PicOS Wiki](https://github.com/jeffory/PicOS/wiki).
+📖 **Documentation:** Full SDK reference and guides are available on the [PicoDeck Wiki](https://picodeck.net/docs/).
 
 ---
 
@@ -177,7 +177,7 @@ make setup
 make build
 ```
 
-Output: `build/picocalc_os.uf2` — drag-and-drop to Pico in BOOTSEL mode.
+Output: `build/picodeck.uf2` — drag-and-drop to Pico in BOOTSEL mode.
 
 **Available Make targets:**
 - `make setup` — Download Lua/FatFS, verify environment
@@ -205,7 +205,7 @@ The test tool (`tools/test_lua_apps.lua`) checks:
 
 Example output:
 ```
-=== PicOS Lua App Syntax Checker ===
+=== PicoDeck Lua App Syntax Checker ===
 
 [✓] apps/hello/main.lua
 [✓] apps/snake/main.lua
@@ -267,7 +267,7 @@ cmake .. -DPICO_BOARD=pimoroni_pico_plus2_w_rp2350
 make -j4
 ```
 
-This produces `build/picocalc_os.uf2`. Flash it by holding BOOTSEL on your Pico while plugging in USB, then drag the UF2 to the mounted drive.
+This produces `build/picodeck.uf2`. Flash it by holding BOOTSEL on your Pico while plugging in USB, then drag the UF2 to the mounted drive.
 
 Other board values: `pico2` (no PSRAM/WiFi), `pico_w`, `pico`.
 
@@ -334,7 +334,7 @@ end
 
 ### Full Lua API reference
 
-Moved to the [Wiki](https://github.com/jeffory/PicOS/wiki/Lua-SDK-Reference).
+Moved to the [Wiki](https://picodeck.net/docs/lua-sdk-reference/).
 
 **Example:**
 ```lua

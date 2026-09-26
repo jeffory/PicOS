@@ -52,7 +52,7 @@ def wait_for_app_running(simulator, timeout=5):
 
 
 class TestLauncher:
-    """Tests for PicOS launcher."""
+    """Tests for PicoDeck launcher."""
 
     def test_launcher_starts(self, simulator):
         """Test that launcher initializes and shows available apps."""

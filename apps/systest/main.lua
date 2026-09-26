@@ -1,4 +1,4 @@
--- System Test App for PicOS
+-- System Test App for PicoDeck
 -- Tests all exposed system functions
 
 local pc = picocalc
@@ -167,7 +167,7 @@ local function run_fs_write_test()
     -- Write a test file to our data directory
     local f = fs.open(test_file, "w")
     if f then
-        local written = fs.write(f, "PicOS Test: " .. sys.getTimeMs())
+        local written = fs.write(f, "PicoDeck Test: " .. sys.getTimeMs())
         fs.close(f)
         if written > 0 then
             tests.fs_write.status = "PASS"

@@ -14,7 +14,7 @@ A 2D camera with position, zoom, target following, world bounds, and screen shak
 Create a new camera, positioned at (0, 0) with zoom 1.0.
 
 - **Parameters:** None
-- **Returns:** (userdata) PicOSCamera object
+- **Returns:** (userdata) PicoDeckCamera object
 
 ```lua
 local camera = picocalc.game.camera.new()
@@ -241,7 +241,7 @@ A scene manager. Scenes are table-like objects with `update()`, `draw()`, `enter
 Create a new (empty) scene object.
 
 - **Parameters:** None
-- **Returns:** (userdata) PicOSScene object
+- **Returns:** (userdata) PicoDeckScene object
 
 ---
 
@@ -315,7 +315,7 @@ Pop the overlaid scene and return to the previous one.
 Get the currently active scene.
 
 - **Parameters:** None
-- **Returns:** (table or nil) Current PicOSScene, or `nil` if no scene is active
+- **Returns:** (table or nil) Current PicoDeckScene, or `nil` if no scene is active
 
 ---
 

@@ -350,7 +350,7 @@ static int list_app_idx(int list_idx) {
 
 static void draw_app_list(void) {
   display_clear(C_BG);
-  ui_draw_header("PicOS");
+  ui_draw_header("PicoDeck");
   draw_tab_bar();
 
   int count = list_count();
@@ -449,7 +449,7 @@ extern _Atomic bool g_core1_paused;
 // quad init fell back to serial mode, rescale CLKDIV to keep SCK ≤50 MHz as
 // before.
 #define PSRAM_QMI_SERIAL_MAX_SCK_KHZ 50000u
-#if defined(PICO_RP2350) && !defined(PICOS_SIMULATOR)
+#if defined(PICO_RP2350) && !defined(PICODECK_SIMULATOR)
 #include "hardware/structs/qmi.h"
 #include "hardware/sync.h"
 #include "drivers/qmi_psram.h"
@@ -599,7 +599,7 @@ static void launcher_refuse(const app_entry_t *app, const char *title,
   s_app_launch_time_ms = 0;
   crashlog_write("APP FAILED", app->name, reason, detail);
   sim_log_err("[LAUNCHER] %s: %s: %s", app->name, reason, detail);
-#ifdef PICOS_SIMULATOR
+#ifdef PICODECK_SIMULATOR
   {
     char outcome[160];
     snprintf(outcome, sizeof(outcome), "%s: %s", reason, detail);
@@ -889,7 +889,7 @@ void launcher_run(void) {
   build_category_indices();
 
   // Check for simulator auto-launch
-#ifdef PICOS_SIMULATOR
+#ifdef PICODECK_SIMULATOR
   extern const char* simulator_get_auto_launch_app(void);
   const char* auto_launch = simulator_get_auto_launch_app();
   if (auto_launch) {
@@ -916,7 +916,7 @@ void launcher_run(void) {
     dev_commands_poll();
     dev_commands_process();
 
-#ifdef PICOS_SIMULATOR
+#ifdef PICODECK_SIMULATOR
     extern bool sim_handler_check_launch(void);
     bool sim_launched = sim_handler_check_launch();
 #else
@@ -940,7 +940,7 @@ void launcher_run(void) {
       }
     }
 
-#ifdef PICOS_SIMULATOR
+#ifdef PICODECK_SIMULATOR
     {
       // Simulator shutdown (window close, SIGINT, the shutdown RPC) is the
       // only way out of the launcher. It used to ride the dev exit flag, so

@@ -1,7 +1,7 @@
 #pragma once
 
 // =============================================================================
-// HTTP/1.1 client over Mongoose for PicOS
+// HTTP/1.1 client over Mongoose for PicoDeck
 //
 // Non-blocking.  Core 0 (apps) owns the slot and queues work through the
 // wifi.c request ring; Core 1 owns the Mongoose connection and runs

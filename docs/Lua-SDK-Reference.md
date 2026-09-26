@@ -2,7 +2,7 @@
 title: "Lua SDK Reference"
 ---
 
-This document provides a complete reference for all Lua APIs available to PicOS apps.
+This document provides a complete reference for all Lua APIs available to PicoDeck apps.
 
 ## API Sections
 

@@ -1,4 +1,4 @@
--- PicOS download library — stream an HTTP(S) response straight to a file.
+-- PicoDeck download library — stream an HTTP(S) response straight to a file.
 -- Load with: local download = picocalc.sys.loadlib("download")
 --
 --   local ok, err = download.toFile(url, dest_path, {
@@ -181,7 +181,7 @@ local function fetch_leg(url, dest, opts, deadline)
         if not state.done then fail("connection closed") end
     end)
 
-    local headers = { ["User-Agent"] = "PicOS-download/1.0" }
+    local headers = { ["User-Agent"] = "PicoDeck-download/1.0" }
     if opts.headers then
         for k, v in pairs(opts.headers) do headers[k] = v end
     end

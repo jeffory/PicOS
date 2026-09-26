@@ -37,8 +37,8 @@ jobs:
           mkdir -p third_party/lua-5.4
           curl -fL https://www.lua.org/ftp/lua-5.4.7.tar.gz \
             | tar -xz --strip-components=1 -C third_party/lua-5.4/
-          # Make luaconf.h honour the CMake Lua config (see cmake/picos_lua.cmake)
-          cmake -DLUA_SRC_DIR=third_party/lua-5.4/src -P cmake/picos_lua.cmake
+          # Make luaconf.h honour the CMake Lua config (see cmake/picodeck_lua.cmake)
+          cmake -DLUA_SRC_DIR=third_party/lua-5.4/src -P cmake/picodeck_lua.cmake
 
           # FatFS R0.15 — extracts upstream sources only.
           # ffconf.h and port/diskio_spi.c are project-specific and already
@@ -74,8 +74,8 @@ jobs:
             -DPICO_SDK_PATH=$HOME/pico-sdk \
             -DPICO_BOARD=pimoroni_pico_plus2_w_rp2350 \
             -DCMAKE_BUILD_TYPE=Release \
-            -DPICOS_UPDATE_PUBKEY_PEM="$RUNNER_TEMP/update-public.pem" \
-            -DPICOS_REQUIRE_RELEASE_UPDATE_KEY=ON
+            -DPICODECK_UPDATE_PUBKEY_PEM="$RUNNER_TEMP/update-public.pem" \
+            -DPICODECK_REQUIRE_RELEASE_UPDATE_KEY=ON
 
       - name: Build
         run: cmake --build build --parallel
@@ -83,15 +83,15 @@ jobs:
       - name: Generate SHA-256 hash
         run: |
           cd build
-          sha256sum picocalc_os.bin | awk '{print $1}' > picocalc_os.sha256
+          sha256sum picodeck.bin | awk '{print $1}' > picodeck.sha256
 
       - name: Sign firmware (ECDSA P-256)
         if: env.HAVE_SIGNING_KEY == 'true'
         run: |
-          python3 tools/sign_update.py sign build/picocalc_os.bin \
-            --key "$RUNNER_TEMP/update-signing.pem" --out build/picocalc_os.sig
-          python3 tools/sign_update.py verify build/picocalc_os.bin \
-            --pub "$RUNNER_TEMP/update-public.pem" --sig build/picocalc_os.sig
+          python3 tools/sign_update.py sign build/picodeck.bin \
+            --key "$RUNNER_TEMP/update-signing.pem" --out build/picodeck.sig
+          python3 tools/sign_update.py verify build/picodeck.bin \
+            --pub "$RUNNER_TEMP/update-public.pem" --sig build/picodeck.sig
 
       - name: Remove the signing key
         if: always()
@@ -102,10 +102,10 @@ jobs:
         with:
           name: firmware
           path: |
-            build/picocalc_os.uf2
-            build/picocalc_os.bin
-            build/picocalc_os.sha256
-            build/picocalc_os.sig
+            build/picodeck.uf2
+            build/picodeck.bin
+            build/picodeck.sha256
+            build/picodeck.sig
 
   build-simulator:
     runs-on: ubuntu-latest
@@ -130,8 +130,8 @@ jobs:
           mkdir -p third_party/lua-5.4
           curl -fL https://www.lua.org/ftp/lua-5.4.7.tar.gz \
             | tar -xz --strip-components=1 -C third_party/lua-5.4/
-          # Make luaconf.h honour the CMake Lua config (see cmake/picos_lua.cmake)
-          cmake -DLUA_SRC_DIR=third_party/lua-5.4/src -P cmake/picos_lua.cmake
+          # Make luaconf.h honour the CMake Lua config (see cmake/picodeck_lua.cmake)
+          cmake -DLUA_SRC_DIR=third_party/lua-5.4/src -P cmake/picodeck_lua.cmake
 
       - name: Build simulator
         run: make simulator
@@ -140,7 +140,7 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: simulator
-          path: build_sim/picos_simulator
+          path: build_sim/picodeck_simulator
 
   release:
     needs: [build-firmware, build-simulator]
@@ -162,15 +162,15 @@ jobs:
 
       - name: Prepare simulator binary
         run: |
-          chmod +x simulator/picos_simulator
-          mv simulator/picos_simulator simulator/picos-simulator-linux
+          chmod +x simulator/picodeck_simulator
+          mv simulator/picodeck_simulator simulator/picodeck-simulator-linux
 
       - name: Upload artifacts to release
         uses: softprops/action-gh-release@v2
         with:
           files: |
-            firmware/picocalc_os.uf2
-            firmware/picocalc_os.bin
-            firmware/picocalc_os.sha256
-            firmware/picocalc_os.sig
-            simulator/picos-simulator-linux
+            firmware/picodeck.uf2
+            firmware/picodeck.bin
+            firmware/picodeck.sha256
+            firmware/picodeck.sig
+            simulator/picodeck-simulator-linux

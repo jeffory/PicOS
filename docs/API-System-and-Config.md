@@ -198,14 +198,14 @@ picocalc.sys.triggerFault()
 ---
 
 #### `picocalc.sys.getVersion()`
-Get the PicOS firmware version string.
+Get the PicoDeck firmware version string.
 
 - **Parameters:** None
 - **Returns:** (string) Version string (e.g. "1.2.0")
 
 ```lua
 local version = picocalc.sys.getVersion()
-picocalc.sys.log("PicOS version: " .. version)
+picocalc.sys.log("PicoDeck version: " .. version)
 ```
 
 ---
@@ -228,9 +228,9 @@ end
 ---
 
 #### `picocalc.sys.applyUpdate(path)`
-Flash a firmware image (`picocalc_os.bin`) from the SD card. **Only present**
+Flash a firmware image (`picodeck.bin`) from the SD card. **Only present**
 for apps that declare `"system-update"` AND are OS apps (id
-`com.picos.updater` / `com.picos.store`, or installed under `/system/`).
+`net.picodeck.updater` / `net.picodeck.store`, or installed under `/system/`).
 
 Before anything is flashed:
 - `/system/update.sha256` (exactly 64 hex digits + optional newline) must match
@@ -253,7 +253,7 @@ without an update request is renamed `update.bin.stale`.
 local ok, err = picocalc.sys.applyUpdate("/system/update.bin")
 ```
 
-(Release assets: `picocalc_os.bin`, `picocalc_os.sha256`, `picocalc_os.sig`.
+(Release assets: `picodeck.bin`, `picodeck.sha256`, `picodeck.sig`.
 Signing: `tools/sign_update.py`. Local builds embed a TEST key whose private
 half is in the repo; release builds use the `UPDATE_SIGNING_KEY` CI secret.)
 

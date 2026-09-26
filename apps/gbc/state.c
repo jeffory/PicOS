@@ -2,7 +2,7 @@
 #include "os.h"
 #include <string.h>
 
-#define STATE_DIR     "/data/com.picos.gbc/states/"
+#define STATE_DIR     "/data/net.picodeck.gbc/states/"
 #define STATE_VERSION 1u
 
 typedef struct {

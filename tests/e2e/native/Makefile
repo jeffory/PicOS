@@ -15,7 +15,7 @@ CC       = arm-none-eabi-gcc
 CFLAGS   = -mcpu=cortex-m33 -mthumb -fpie -fno-plt \
            -ffunction-sections -fdata-sections -Os \
            -Wall -Wextra -Werror -I$(SDK)
-LDFLAGS  = -T $(SDK)/linker.ld -Wl,--entry=picos_main -Wl,-pie \
+LDFLAGS  = -T $(SDK)/linker.ld -Wl,--entry=picodeck_main -Wl,-pie \
            -Wl,--gc-sections -Wl,--no-warn-rwx-segments \
            -nostartfiles -nodefaultlibs -Wl,--build-id=none
 

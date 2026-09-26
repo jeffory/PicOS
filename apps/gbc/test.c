@@ -2,7 +2,7 @@
 #include "os.h"
 #include "display.h"
 
-void picos_main(const PicoCalcAPI *api,
+void picodeck_main(const PicoCalcAPI *api,
                 const char *app_dir,
                 const char *app_id,
                 const char *app_name)

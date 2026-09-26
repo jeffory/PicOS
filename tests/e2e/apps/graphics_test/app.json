@@ -1,7 +1,7 @@
 {
-    "id": "com.picos.graphics_test",
+    "id": "net.picodeck.graphics_test",
     "name": "Graphics Test",
     "description": "picocalc.graphics tilemap/blinker checks for E2E testing",
     "version": "1.0",
-    "author": "PicOS E2E"
+    "author": "PicoDeck E2E"
 }

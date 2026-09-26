@@ -1,4 +1,4 @@
--- Snake for PicOS
+-- Snake for PicoDeck
 -- A fully playable snake game using the picocalc API
 
 local pc    = picocalc

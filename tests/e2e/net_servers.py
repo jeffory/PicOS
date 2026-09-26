@@ -6,7 +6,7 @@ threads, and records what it saw so a test can assert on the server side too
 (bodies received, connections still open).
 
 - HttpTestServer: HTTP/1.1 (keep-alive capable) with fixed endpoints:
-    /ok        200, "hello picos", Content-Length
+    /ok        200, "hello picodeck", Content-Length
     /big       200, 1 MiB of a known pattern (big_body()), Content-Length
     /chunked   200, Transfer-Encoding: chunked, body "alphabetagamma"
     /close     200, no Content-Length, body then close (close-delimited)
@@ -35,7 +35,7 @@ import threading
 import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
-OK_BODY = b"hello picos"
+OK_BODY = b"hello picodeck"
 CHUNKS = [b"alpha", b"beta", b"gamma"]
 BIG_SIZE = 1 << 20
 DRIP_SIZE = 400

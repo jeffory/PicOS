@@ -1,4 +1,4 @@
-# PicOS C64 Emulator Native App Build
+# PicoDeck C64 Emulator Native App Build
 #
 # Produces main.elf — a Position-Independent ELF32 ARM Thumb-2 binary.
 # Copy main.elf + app.json to /apps/c64/ on the SD card.
@@ -19,7 +19,7 @@ CFLAGS_NOLTO = -mcpu=cortex-m33 -mthumb -std=gnu99 \
           -O2 -Wall -Wextra -Wno-unused-parameter \
           -I. -I../../sdk/native
 LDFLAGS = -T linker.ld \
-          -Wl,--entry=picos_main \
+          -Wl,--entry=picodeck_main \
           -Wl,-pie \
           -Wl,--gc-sections \
           -Wl,--no-warn-rwx-segments \

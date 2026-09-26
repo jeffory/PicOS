@@ -239,11 +239,11 @@ static void enc_number(lua_State *L, json_enc_t *e, int idx) {
       luaL_error(L, "json.encode: cannot encode %s", isnan(v) ? "NaN" : "Infinity");
     // lua_Number is a float (LUA_32BITS). Emit the shortest form that decodes
     // back to the same value: 7 digits reads cleanly (0.1, not
-    // 0.100000001490116), 9 always round-trips a float. picos_numfmt_float,
+    // 0.100000001490116), 9 always round-trips a float. picodeck_numfmt_float,
     // not snprintf: the firmware's pico_printf %g keeps trailing zeros.
     static const char *const specs[] = {"%.7g", "%.8g", "%.9g"};
     for (int i = 0; i < 3; i++) {
-      picos_numfmt_float(tmp, sizeof(tmp), specs[i], v);
+      picodeck_numfmt_float(tmp, sizeof(tmp), specs[i], v);
       if ((lua_Number)strtod(tmp, NULL) == v)
         break;
     }
