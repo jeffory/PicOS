@@ -21,10 +21,24 @@ endif()
 set(PICOS_ROOT ${CMAKE_CURRENT_SOURCE_DIR}/..)
 
 # Find required packages
-find_package(SDL2 REQUIRED)
-find_package(SDL2_image REQUIRED)
-find_package(Threads REQUIRED)
-find_package(CURL REQUIRED)
+if(EMSCRIPTEN)
+    # Web demo build (emcmake cmake ..): SDL2 comes from Emscripten's ports,
+    # and there are no threads, libcurl or Unicorn in a browser. See web/.
+    add_library(SDL2::SDL2 INTERFACE IMPORTED)
+    set_target_properties(SDL2::SDL2 PROPERTIES
+        INTERFACE_COMPILE_OPTIONS "-sUSE_SDL=2"
+        INTERFACE_LINK_OPTIONS "-sUSE_SDL=2")
+    add_library(Threads::Threads INTERFACE IMPORTED)
+    # musl only exposes the glibc-style `uint` typedef the SDK stubs use here
+    add_compile_definitions(_GNU_SOURCE)
+    set(SIM_SIZEOF_LONG 4)
+else()
+    find_package(SDL2 REQUIRED)
+    find_package(SDL2_image REQUIRED)
+    find_package(Threads REQUIRED)
+    find_package(CURL REQUIRED)
+    set(SIM_SIZEOF_LONG 8)
+endif()
 
 # Version from git (same as main project)
 execute_process(
@@ -110,7 +124,7 @@ target_compile_definitions(libmad_sim PRIVATE
     FPM_64BIT
     HAVE_STDINT_H=1
     SIZEOF_INT=4
-    SIZEOF_LONG=8
+    SIZEOF_LONG=${SIM_SIZEOF_LONG}
     SIZEOF_LONG_LONG=8
     NDEBUG=1
     OPT_SPEED=1
@@ -210,7 +224,11 @@ target_compile_definitions(sim_hal PUBLIC
 # files carry only PICOS_SIM_FIRMWARE_NET guards. This is the build that can
 # reproduce the Core 0/Core 1 close races (specs/test-audit-2026-09-24.md
 # R13); tests/e2e/test_network_firmware.py runs only against it.
-if(SIM_FIRMWARE_NET)
+if(EMSCRIPTEN)
+    # Web demo (make simulator-web): no network in the browser;
+    # web/web_net_stubs.c returns NULL from every connection allocation.
+    add_library(sim_network STATIC sim_wifi.c web/web_net_stubs.c)
+elseif(SIM_FIRMWARE_NET)
     add_library(sim_network STATIC
         ${PICOS_ROOT}/src/drivers/wifi.c
         ${PICOS_ROOT}/src/drivers/http.c
@@ -270,10 +288,13 @@ target_include_directories(sim_network PUBLIC
     ${PICOS_ROOT}/src/drivers
     ${PICOS_ROOT}/third_party/umm_malloc/src
 )
-target_link_libraries(sim_network PUBLIC CURL::libcurl Threads::Threads)
+if(NOT EMSCRIPTEN)
+    target_link_libraries(sim_network PUBLIC CURL::libcurl Threads::Threads)
+endif()
 target_compile_definitions(sim_network PUBLIC PICOS_SIMULATOR=1 WIFI_ENABLED=1)
 
 # ── Unicorn Engine (ARM emulation for native apps) ─────────────────────────
+if(NOT EMSCRIPTEN)
 include(FetchContent)
 FetchContent_Declare(
     unicorn
@@ -287,6 +308,7 @@ set(UNICORN_ARCH "arm" CACHE STRING "" FORCE)
 set(UNICORN_INSTALL OFF CACHE BOOL "" FORCE)
 set(BUILD_SHARED_LIBS OFF CACHE BOOL "" FORCE)
 FetchContent_MakeAvailable(unicorn)
+endif()
 
 # ── Generate miniz_export.h stub (miniz's own CMake does this, but we
 #    compile sources directly so we need to create it ourselves). Written to
@@ -398,13 +420,21 @@ list(APPEND PICOS_CORE_SOURCES
     ${CMAKE_BINARY_DIR}/generated/ota_pubkey.c
 )
 
+if(EMSCRIPTEN)
+    set(SIM_PLATFORM_SOURCES web/web_platform.c)
+else()
+    set(SIM_PLATFORM_SOURCES
+        sim_socket.c
+        sim_socket_handler.c
+        unicorn_runner.c
+        unicorn_trampolines.c
+    )
+endif()
+
 add_executable(picos_simulator
     main.c
-    sim_socket.c
-    sim_socket_handler.c
     sim_test_control.c
-    unicorn_runner.c
-    unicorn_trampolines.c
+    ${SIM_PLATFORM_SOURCES}
     ${PICOS_CORE_SOURCES}
 )
 
@@ -429,13 +459,17 @@ target_link_libraries(picos_simulator PRIVATE
     sim_network
     lua_sim
     image_decoders_sim
-    unicorn
     SDL2::SDL2
-    SDL2_image::SDL2_image
     Threads::Threads
-    CURL::libcurl
     picos_host_mbedtls
 )
+if(NOT EMSCRIPTEN)
+    target_link_libraries(picos_simulator PRIVATE
+        unicorn
+        SDL2_image::SDL2_image
+        CURL::libcurl
+    )
+endif()
 
 target_compile_definitions(picos_simulator PRIVATE
     PICOS_SIMULATOR=1
@@ -450,7 +484,7 @@ target_compile_options(picos_simulator PRIVATE
     -Wall -Wextra
     -Wno-unused-parameter
     -O2
-    -g
+    $<$<NOT:$<BOOL:${EMSCRIPTEN}>>:-g>
 )
 
 # miniz: decompression only, no stdio, use standard malloc on simulator (no umm_malloc)
@@ -511,6 +545,50 @@ endif()
 set_target_properties(picos_simulator PROPERTIES
     RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}
 )
+
+# ── Web demo packaging ──────────────────────────────────────────────────────
+if(EMSCRIPTEN)
+    # Lua apps bundled into the demo's SD image: names of dirs under apps/, or
+    # absolute paths to app dirs that live in their own repos.
+    set(PICOS_WEB_APPS "hello;snake;nonogram;calculator;editor;graphicstest;fonttest;3dtest"
+        CACHE STRING "Apps to bundle into the web demo SD image")
+
+    set(WEB_SD_DIR ${CMAKE_BINARY_DIR}/web_sd)
+    file(REMOVE_RECURSE ${WEB_SD_DIR})
+    file(MAKE_DIRECTORY ${WEB_SD_DIR}/apps ${WEB_SD_DIR}/data)
+    file(COPY ${PICOS_ROOT}/system DESTINATION ${WEB_SD_DIR})
+    foreach(app ${PICOS_WEB_APPS})
+        if(IS_ABSOLUTE ${app})
+            set(app_src ${app})
+        else()
+            set(app_src ${PICOS_ROOT}/apps/${app})
+        endif()
+        if(NOT IS_DIRECTORY ${app_src})
+            message(FATAL_ERROR "PICOS_WEB_APPS: ${app_src} is not a directory")
+        endif()
+        file(COPY ${app_src} DESTINATION ${WEB_SD_DIR}/apps
+             PATTERN ".git" EXCLUDE PATTERN ".github" EXCLUDE
+             PATTERN "tests" EXCLUDE PATTERN "tools" EXCLUDE
+             PATTERN "*.md" EXCLUDE)
+    endforeach()
+
+    set_target_properties(picos_simulator PROPERTIES
+        SUFFIX ".html"
+        LINK_DEPENDS ${CMAKE_CURRENT_SOURCE_DIR}/web/shell.html)
+    target_link_options(picos_simulator PRIVATE
+        -O2
+        -sASYNCIFY
+        -sASYNCIFY_STACK_SIZE=262144
+        -sSTACK_SIZE=1048576
+        -sALLOW_MEMORY_GROWTH
+        -sINITIAL_MEMORY=64MB
+        -sEXIT_RUNTIME=0
+        -lidbfs.js
+        -sEXPORTED_RUNTIME_METHODS=FS
+        --preload-file ${WEB_SD_DIR}@/sd
+        --shell-file ${CMAKE_CURRENT_SOURCE_DIR}/web/shell.html
+    )
+endif()
 
 # Copy SDL2 DLL on Windows (if needed)
 if(WIN32)
