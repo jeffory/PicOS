@@ -1,5 +1,7 @@
 # PicoDeck
 
+**Website:** https://picodeck.net · **Try it in your browser:** https://picodeck.net/try/ · **Docs:** https://picodeck.net/docs/ · **App Store:** https://store.picodeck.net
+
 An app platform for the ClockworkPi PicoCalc, built around a resident Lua runtime. Apps live on the SD card as directories containing `main.lua` and `app.json`. The OS owns all hardware; apps access everything through the `picocalc` Lua API.
 
 > [!IMPORTANT]

@@ -8,7 +8,8 @@ PicoDeck is a bare-metal embedded OS for the [ClockworkPi PicoCalc v2.0](https:/
 - `src/drivers/CLAUDE.md` — display, WiFi/HTTP/TCP, TLS and randomness, audio, video, PIO PSRAM, keyboard
 - `src/os/CLAUDE.md` — app runners and exit teardown, Lua bridge internals (object types, number rules, count hook, sticky exit), sandbox, file handles, config stores, save slots, OTA policy, crash records, Lua heap
 - `simulator/CLAUDE.md` — simulator divergences, the test control channel, `--test-mode` and virtual time, allocators, sanitizer and firmware-net builds. Read it before writing an E2E test or trusting a simulator result.
-- `docs/` (wiki submodule) — the app-facing API reference. It lags the code; where it disagrees with the nested files, the nested files are right.
+- `docs/` — the app-facing API reference (Markdown in this repo), published at https://picodeck.net/docs/ from each release's `picodeck-docs.zip`. Change it in the same commit as the behaviour it documents; where it disagrees with the nested files, the nested files are right and the doc is a bug. `docs/_sidebar.json` is the site's sidebar.
+- The app store is `PicoDeck/store` (https://store.picodeck.net); the website is `PicoDeck/website` (https://picodeck.net), rebuilt from the latest release by a Pages deploy hook.
 
 This file keeps only what applies across the tree. Record subsystem behaviour in the nested file (or header comment) nearest the code.
 
@@ -184,9 +185,9 @@ Native apps receive `PicoCalcAPI *api` as their entry point argument. Call `api-
 
 ## Lua API Notes
 
-- API reference: `docs/API-*.md` (wiki submodule; see the caveat at the top).
+- API reference: `docs/API-*.md` (published at https://picodeck.net/docs/).
 - System libraries live in `/system/lib/` and load via `picocalc.sys.loadlib(name)`: `download.lua` provides `download.toFile(url, dest, opts)` (blocking HTTP(S)-to-SD streaming download). `picocalc.crypto.sha256File(path)` returns a file's SHA-256 as lowercase hex.
-- Names that differ from the wiki or other APIs: HTTP connections have no `conn:query`; the TCP socket's error getter is `tcp:error()` (native keeps `g_api.tcp->getError`); `picocalc.video` players have no `destroy()` (the collector frees them). There is no `graphics.cache` table; sprite `setImageDrawMode`, `setIgnoresDrawOffset`, stencils, sprite clip rects, `addDirtyRect` and `markDirty` are accepted but not applied.
+- Names that differ from other APIs: HTTP connections have no `conn:query`; the TCP socket's error getter is `tcp:error()` (native keeps `g_api.tcp->getError`); `picocalc.video` players have no `destroy()` (the collector frees them). There is no `graphics.cache` table; sprite `setImageDrawMode`, `setIgnoresDrawOffset`, stencils, sprite clip rects, `addDirtyRect` and `markDirty` are accepted but not applied.
 
 ## Simulator
 

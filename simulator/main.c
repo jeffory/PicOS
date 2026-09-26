@@ -127,9 +127,13 @@ static void crash_handler(int sig) {
             case SIGBUS:  sig_name = "SIGBUS"; break;
             case SIGFPE:  sig_name = "SIGFPE"; break;
         }
-        (void)!write(fd, "PicoDeck Simulator Crash\nSignal: ", 30);
+        // Lengths from sizeof, never hand-counted: renaming the product
+        // silently truncated a hard-coded count here once.
+        static const char header[] = "PicoDeck Simulator Crash\nSignal: ";
+        static const char bt_header[] = "\nBacktrace:\n";
+        (void)!write(fd, header, sizeof header - 1);
         (void)!write(fd, sig_name, strlen(sig_name));
-        (void)!write(fd, "\nBacktrace:\n", 12);
+        (void)!write(fd, bt_header, sizeof bt_header - 1);
 
 #ifndef __EMSCRIPTEN__
         void *frames[32];

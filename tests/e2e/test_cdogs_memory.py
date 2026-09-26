@@ -98,7 +98,7 @@ from helpers import build_sd_card, new_simulator, stop_and_check
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 # C-Dogs lives in its own repo (github.com/PicoDeck/cdogs) since 2026-09-16.
 # Point PICODECK_CDOGS_DIR at a checkout that has been built (`make`) to run this module.
-CDOGS_SRC = Path(os.environ.get("PICODECK_CDOGS_DIR", Path.home() / "Projects" / "picodeck-cdogs"))
+CDOGS_SRC = Path(os.environ.get("PICODECK_CDOGS_DIR", Path.home() / "Projects" / "PicoDeck" / "cdogs"))
 
 HEAPSTAT_RE = re.compile(
     r"HEAPSTAT (\S+) watermark=(\d+) true=(\d+) arena=(\d+) used=(\d+) peak=(\d+)"
@@ -275,7 +275,7 @@ def cdogs_simulator(simulator_binary, tmp_path_factory, request):
     if not (CDOGS_SRC / "main.elf").exists():
         pytest.skip(f"{CDOGS_SRC}/main.elf not built — clone PicoDeck/cdogs, run `make`, or set PICODECK_CDOGS_DIR")
     if not (CDOGS_SRC / "data" / "graphics").exists():
-        pytest.skip(f"{CDOGS_SRC}/data not prepared — run ./prepare_data.sh in the picodeck-cdogs checkout")
+        pytest.skip(f"{CDOGS_SRC}/data not prepared — run ./prepare_data.sh in the cdogs checkout")
 
     base = tmp_path_factory.mktemp("cdogs")
     sd_path = build_sd_card(
@@ -1287,7 +1287,7 @@ def test_sd_payload_excludes_non_runtime_sources():
     """
     data_dir = CDOGS_SRC / "data"
     if not data_dir.exists():
-        pytest.skip(f"{CDOGS_SRC}/data not prepared — run ./prepare_data.sh in the picodeck-cdogs checkout")
+        pytest.skip(f"{CDOGS_SRC}/data not prepared — run ./prepare_data.sh in the cdogs checkout")
 
     offenders = []
     for pattern in EXCLUDED_PATTERNS:
