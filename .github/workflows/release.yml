@@ -142,9 +142,43 @@ jobs:
           name: simulator
           path: build_sim/picodeck_simulator
 
-  release:
-    needs: [build-firmware, build-simulator]
+  build-docs:
     runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+      - name: Zip docs for picodeck.net
+        run: |
+          test -f docs/index.md && test -f docs/_sidebar.json
+          cd docs && zip -qr ../picodeck-docs.zip .
+      - name: Upload docs artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: docs
+          path: picodeck-docs.zip
+
+  build-web-sim:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+      - name: Build and package the web simulator
+        run: scripts/ci/build-web-sim.sh
+      - name: Upload web simulator artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: web-sim
+          path: picodeck-web-sim.zip
+
+  release:
+    needs: [build-firmware, build-simulator, build-docs, build-web-sim]
+    runs-on: ubuntu-latest
+    env:
+      # Rebuild picodeck.net once the assets are up (Cloudflare Pages deploy
+      # hook); only whether the secret is set is exposed, not its value.
+      HAVE_PAGES_HOOK: ${{ secrets.PAGES_DEPLOY_HOOK != '' }}
     permissions:
       contents: write
     steps:
@@ -165,6 +199,18 @@ jobs:
           chmod +x simulator/picodeck_simulator
           mv simulator/picodeck_simulator simulator/picodeck-simulator-linux
 
+      - name: Download docs artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: docs
+          path: site/
+
+      - name: Download web simulator artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: web-sim
+          path: site/
+
       - name: Upload artifacts to release
         uses: softprops/action-gh-release@v2
         with:
@@ -174,3 +220,11 @@ jobs:
             firmware/picodeck.sha256
             firmware/picodeck.sig
             simulator/picodeck-simulator-linux
+            site/picodeck-docs.zip
+            site/picodeck-web-sim.zip
+
+      - name: Rebuild picodeck.net
+        if: env.HAVE_PAGES_HOOK == 'true'
+        env:
+          PAGES_DEPLOY_HOOK: ${{ secrets.PAGES_DEPLOY_HOOK }}
+        run: curl -fsS -X POST "$PAGES_DEPLOY_HOOK" > /dev/null

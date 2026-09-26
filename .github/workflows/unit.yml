@@ -35,5 +35,8 @@ jobs:
       - name: Python unit tests
         run: .venv/bin/python -m pytest tests/unit -v
 
+      - name: Rename guard (tools/rename_picodeck.py --check)
+        run: python3 tools/rename_picodeck.py --check
+
       - name: Lua syntax check
         run: make test-lua
